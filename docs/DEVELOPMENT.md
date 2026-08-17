@@ -17,16 +17,16 @@ FFmpeg and FFprobe are external runtime tools. Bootstrap and early foundation ph
 
 ## Build
 
-For the current bootstrap:
-
-```powershell
-cargo check
-```
-
-Once the native application shell is introduced, the normal development build remains:
+Build the native application:
 
 ```powershell
 cargo build
+```
+
+For a faster compile-only validation when a runnable binary is not required:
+
+```powershell
+cargo check
 ```
 
 ## Test
