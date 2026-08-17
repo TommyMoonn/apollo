@@ -39,7 +39,7 @@ cargo test --all-targets
 
 For early bootstrap phases where no target-specific tests exist yet, `cargo test` is also sufficient for the phase-specific gate when the plan explicitly says so.
 
-PowerShell tooling tests will be run with the repository-owned runner after that tooling is introduced:
+Run the PowerShell tooling tests with the repository-owned runner:
 
 ```powershell
 pwsh -NoProfile -File .\tests\scripts\run.ps1
@@ -133,7 +133,7 @@ Public command conventions:
 - `-h` and `--help` on every public command
 - shared option meanings remain consistent across commands
 
-Do not duplicate argument parsing between individual scripts once `scripts/Cli.Common.ps1` is introduced.
+Do not duplicate argument parsing between individual scripts. `scripts/Cli.Common.ps1` is the single argument-parsing owner.
 
 ## Changed-Files Workflow
 
