@@ -1,0 +1,14 @@
+/target/
+
+/.planning/
+/.project/
+/.scratch/
+
+/.dev/chatgpt/bundles/
+
+*.log
+*.tmp
+*.zip
+
+.DS_Store
+Thumbs.db

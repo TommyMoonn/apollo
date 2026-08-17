@@ -1,0 +1,9 @@
+.git
+target
+.dev/chatgpt/bundles
+.scratch
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.zip
