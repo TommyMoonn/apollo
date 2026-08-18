@@ -1,7 +1,7 @@
 use std::{
     ffi::OsString,
     fmt, io,
-    io::{BufRead, BufReader, Read},
+    io::Read,
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
@@ -14,6 +14,8 @@ use std::{
 
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const OUTPUT_CHANNEL_CAPACITY: usize = 256;
+const STREAM_READ_CHUNK_BYTES: usize = 4 * 1024;
+const LIVE_OUTPUT_MESSAGE_LIMIT_BYTES: usize = 16 * 1024;
 pub const DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -220,6 +222,9 @@ struct ProcessLifecycle {
 struct ProcessLifecycleInner {
     state: MediaProcessState,
     cancel_requested: bool,
+    // Claimed as soon as the worker observes termination, before readers finish draining.
+    // Once claimed, cancellation is rejected and cannot rewrite the outcome.
+    terminal_claim: Option<MediaProcessState>,
 }
 
 impl ProcessLifecycle {
@@ -228,6 +233,7 @@ impl ProcessLifecycle {
             inner: Mutex::new(ProcessLifecycleInner {
                 state: MediaProcessState::Running,
                 cancel_requested: false,
+                terminal_claim: None,
             }),
             changed: Condvar::new(),
         }
@@ -239,7 +245,7 @@ impl ProcessLifecycle {
 
     fn request_cancel(&self) -> bool {
         let mut inner = lock_unpoisoned(&self.inner);
-        if inner.state.is_terminal() {
+        if inner.state.is_terminal() || inner.terminal_claim.is_some() || inner.cancel_requested {
             return false;
         }
 
@@ -248,25 +254,81 @@ impl ProcessLifecycle {
         true
     }
 
-    fn cancel_requested(&self) -> bool {
-        lock_unpoisoned(&self.inner).cancel_requested
+    fn poll_owned_child(&self, child: &mut Child) -> ChildPoll {
+        let mut inner = lock_unpoisoned(&self.inner);
+
+        if inner.terminal_claim.is_some() {
+            return ChildPoll::TerminalClaimed;
+        }
+
+        if inner.cancel_requested {
+            inner.terminal_claim = Some(MediaProcessState::Cancelled);
+            self.changed.notify_all();
+            return ChildPoll::CancelClaimed;
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                inner.terminal_claim = Some(if status.success() {
+                    MediaProcessState::Completed
+                } else {
+                    MediaProcessState::Failed(MediaProcessFailure::Exit(status.code()))
+                });
+                self.changed.notify_all();
+                ChildPoll::TerminalClaimed
+            }
+            Ok(None) => ChildPoll::Running,
+            Err(error) => {
+                inner.terminal_claim = Some(MediaProcessState::Failed(MediaProcessFailure::Io(
+                    error.kind(),
+                )));
+                self.changed.notify_all();
+                ChildPoll::IoFailureClaimed
+            }
+        }
     }
 
-    fn settle(&self, requested: MediaProcessState) -> bool {
+    #[cfg(test)]
+    fn claim_terminal(&self, requested: MediaProcessState) -> bool {
         debug_assert!(requested.is_terminal());
 
+        let mut inner = lock_unpoisoned(&self.inner);
+        if inner.state.is_terminal() || inner.terminal_claim.is_some() {
+            return false;
+        }
+
+        inner.terminal_claim = Some(if inner.cancel_requested {
+            MediaProcessState::Cancelled
+        } else {
+            requested
+        });
+        self.changed.notify_all();
+        true
+    }
+
+    fn publish_terminal_claim(&self) -> bool {
         let mut inner = lock_unpoisoned(&self.inner);
         if inner.state.is_terminal() {
             return false;
         }
 
-        inner.state = if inner.cancel_requested {
-            MediaProcessState::Cancelled
-        } else {
-            requested
+        let Some(claimed) = inner.terminal_claim.clone() else {
+            return false;
         };
+
+        inner.state = claimed;
         self.changed.notify_all();
         true
+    }
+
+    #[cfg(test)]
+    fn wait_for_terminal_claim(&self, timeout: Duration) -> Option<MediaProcessState> {
+        let inner = lock_unpoisoned(&self.inner);
+        let (inner, _) = self
+            .changed
+            .wait_timeout_while(inner, timeout, |inner| inner.terminal_claim.is_none())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.terminal_claim.clone()
     }
 
     #[cfg(test)]
@@ -278,6 +340,14 @@ impl ProcessLifecycle {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.state.clone()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildPoll {
+    Running,
+    CancelClaimed,
+    TerminalClaimed,
+    IoFailureClaimed,
 }
 
 #[derive(Debug)]
@@ -401,11 +471,11 @@ fn run_worker(
     }
     drop(startup_tx);
 
-    let terminal = run_owned_child(&mut child, &lifecycle);
+    run_owned_child(&mut child, &lifecycle);
 
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
-    lifecycle.settle(terminal);
+    lifecycle.publish_terminal_claim();
 }
 
 fn spawn_child(command: &MediaProcessCommand) -> io::Result<Child> {
@@ -417,23 +487,15 @@ fn spawn_child(command: &MediaProcessCommand) -> io::Result<Child> {
         .spawn()
 }
 
-fn run_owned_child(child: &mut Child, lifecycle: &ProcessLifecycle) -> MediaProcessState {
+fn run_owned_child(child: &mut Child, lifecycle: &ProcessLifecycle) {
     loop {
-        if lifecycle.cancel_requested() {
-            stop_owned_child(child);
-            return MediaProcessState::Cancelled;
-        }
-
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return MediaProcessState::Completed,
-            Ok(Some(status)) => {
-                return MediaProcessState::Failed(MediaProcessFailure::Exit(status.code()));
-            }
-            Ok(None) => thread::sleep(PROCESS_POLL_INTERVAL),
-            Err(error) => {
+        match lifecycle.poll_owned_child(child) {
+            ChildPoll::Running => thread::sleep(PROCESS_POLL_INTERVAL),
+            ChildPoll::CancelClaimed | ChildPoll::IoFailureClaimed => {
                 stop_owned_child(child);
-                return MediaProcessState::Failed(MediaProcessFailure::Io(error.kind()));
+                return;
             }
+            ChildPoll::TerminalClaimed => return,
         }
     }
 }
@@ -459,37 +521,116 @@ where
 }
 
 fn read_stream<R: Read>(
-    stream: R,
+    mut stream: R,
     output_tx: SyncSender<String>,
     progress_tx: Option<SyncSender<String>>,
     diagnostics: Option<Arc<Mutex<BoundedDiagnostic>>>,
 ) {
-    let mut reader = BufReader::new(stream);
-    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; STREAM_READ_CHUNK_BYTES];
+    let mut line = Vec::with_capacity(LIVE_OUTPUT_MESSAGE_LIMIT_BYTES.min(STREAM_READ_CHUNK_BYTES));
+    let mut fragmented = false;
 
     loop {
-        bytes.clear();
-        match reader.read_until(b'\n', &mut bytes) {
-            Ok(0) => break,
-            Ok(_) => {
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                emit_stream_eof(&mut line, &output_tx, progress_tx.as_ref());
+                break;
+            }
+            Ok(read) => {
+                let bytes = &chunk[..read];
                 if let Some(diagnostics) = diagnostics.as_ref() {
-                    lock_unpoisoned(diagnostics).push(&bytes);
+                    lock_unpoisoned(diagnostics).push(bytes);
                 }
 
-                let text = String::from_utf8_lossy(strip_line_ending(&bytes)).into_owned();
-                try_send_bounded(&output_tx, text.clone());
-                if let Some(progress_tx) = progress_tx.as_ref() {
-                    try_send_bounded(progress_tx, text);
-                }
+                consume_stream_bytes(
+                    bytes,
+                    &mut line,
+                    &mut fragmented,
+                    &output_tx,
+                    progress_tx.as_ref(),
+                );
             }
             Err(_) => break,
         }
     }
 }
 
-fn strip_line_ending(bytes: &[u8]) -> &[u8] {
-    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
-    bytes.strip_suffix(b"\r").unwrap_or(bytes)
+fn consume_stream_bytes(
+    mut bytes: &[u8],
+    line: &mut Vec<u8>,
+    fragmented: &mut bool,
+    output_tx: &SyncSender<String>,
+    progress_tx: Option<&SyncSender<String>>,
+) {
+    while let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
+        append_stream_fragment(&bytes[..newline], line, fragmented, output_tx, progress_tx);
+        emit_stream_line(line, fragmented, output_tx, progress_tx);
+        bytes = &bytes[newline + 1..];
+    }
+
+    append_stream_fragment(bytes, line, fragmented, output_tx, progress_tx);
+}
+
+fn append_stream_fragment(
+    mut bytes: &[u8],
+    line: &mut Vec<u8>,
+    fragmented: &mut bool,
+    output_tx: &SyncSender<String>,
+    progress_tx: Option<&SyncSender<String>>,
+) {
+    while !bytes.is_empty() {
+        if line.len() == LIVE_OUTPUT_MESSAGE_LIMIT_BYTES {
+            emit_stream_message(line, output_tx, progress_tx);
+            line.clear();
+            *fragmented = true;
+        }
+
+        let available = LIVE_OUTPUT_MESSAGE_LIMIT_BYTES - line.len();
+        let take = available.min(bytes.len());
+        line.extend_from_slice(&bytes[..take]);
+        bytes = &bytes[take..];
+    }
+}
+
+fn emit_stream_line(
+    line: &mut Vec<u8>,
+    fragmented: &mut bool,
+    output_tx: &SyncSender<String>,
+    progress_tx: Option<&SyncSender<String>>,
+) {
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+
+    if !line.is_empty() || !*fragmented {
+        emit_stream_message(line, output_tx, progress_tx);
+    }
+
+    line.clear();
+    *fragmented = false;
+}
+
+fn emit_stream_eof(
+    line: &mut Vec<u8>,
+    output_tx: &SyncSender<String>,
+    progress_tx: Option<&SyncSender<String>>,
+) {
+    if !line.is_empty() {
+        emit_stream_message(line, output_tx, progress_tx);
+        line.clear();
+    }
+}
+
+fn emit_stream_message(
+    bytes: &[u8],
+    output_tx: &SyncSender<String>,
+    progress_tx: Option<&SyncSender<String>>,
+) {
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    try_send_bounded(output_tx, text.clone());
+    if let Some(progress_tx) = progress_tx {
+        try_send_bounded(progress_tx, text);
+    }
 }
 
 fn try_send_bounded(sender: &SyncSender<String>, value: String) {
@@ -506,11 +647,20 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        io::{self, Read},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+            mpsc::sync_channel,
+        },
+        time::Duration,
+    };
 
     use super::{
-        MediaProcess, MediaProcessCommand, MediaProcessFailure, MediaProcessStartError,
-        MediaProcessState, ProcessLifecycle, ProcessProgressSource,
+        BoundedDiagnostic, LIVE_OUTPUT_MESSAGE_LIMIT_BYTES, MediaProcess, MediaProcessCommand,
+        MediaProcessFailure, MediaProcessStartError, MediaProcessState, ProcessLifecycle,
+        ProcessProgressSource, STREAM_READ_CHUNK_BYTES, lock_unpoisoned, read_stream,
     };
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -576,16 +726,59 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_stderr_keeps_only_the_bounded_tail() {
-        let process =
-            MediaProcess::start(shell_command(large_stderr_script()).diagnostic_stderr_limit(64))
-                .expect("helper process should start");
+    fn newline_free_stderr_uses_bounded_messages_and_diagnostic_tail() {
+        let process = MediaProcess::start(
+            shell_command(large_stderr_script())
+                .progress_source(ProcessProgressSource::Stderr)
+                .diagnostic_stderr_limit(64),
+        )
+        .expect("helper process should start");
 
         assert_eq!(wait_for_process(&process), MediaProcessState::Completed);
+
+        let live_messages = drain(process.stderr_channel());
+        assert!(!live_messages.is_empty());
+        assert!(
+            live_messages
+                .iter()
+                .all(|message| message.len() <= LIVE_OUTPUT_MESSAGE_LIMIT_BYTES)
+        );
+        let progress_messages = drain(process.progress_channel());
+        assert!(!progress_messages.is_empty());
+        assert!(
+            progress_messages
+                .iter()
+                .all(|message| message.len() <= LIVE_OUTPUT_MESSAGE_LIMIT_BYTES)
+        );
+
         let diagnostic = process.diagnostic_stderr();
         assert!(diagnostic.len() <= 64);
-        assert!(diagnostic.contains("TAIL-MARKER"));
-        assert!(!diagnostic.contains("line-00"));
+        assert!(diagnostic.ends_with("TAIL-MARKER"));
+    }
+
+    #[test]
+    fn stream_reader_never_requests_or_emits_unbounded_newline_free_buffers() {
+        const PAYLOAD_BYTES: usize = LIVE_OUTPUT_MESSAGE_LIMIT_BYTES * 32;
+
+        let max_read_request = Arc::new(AtomicUsize::new(0));
+        let diagnostics = Arc::new(Mutex::new(BoundedDiagnostic::new(64)));
+        let reader = TrackingRead::new(PAYLOAD_BYTES, Arc::clone(&max_read_request));
+        let (stderr_tx, stderr_rx) = sync_channel(OUTPUT_CHANNEL_CAPACITY_FOR_TEST);
+
+        read_stream(reader, stderr_tx, None, Some(Arc::clone(&diagnostics)));
+
+        assert!(max_read_request.load(Ordering::Relaxed) <= STREAM_READ_CHUNK_BYTES);
+        let messages = drain(&stderr_rx);
+        assert!(!messages.is_empty());
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.len() <= LIVE_OUTPUT_MESSAGE_LIMIT_BYTES)
+        );
+
+        let diagnostic = lock_unpoisoned(&diagnostics).as_lossy_string();
+        assert_eq!(diagnostic.len(), 64);
+        assert!(diagnostic.ends_with("TAIL-MARKER"));
     }
 
     #[test]
@@ -607,26 +800,133 @@ mod tests {
     }
 
     #[test]
+    fn successful_terminal_claim_rejects_later_cancellation() {
+        let lifecycle = ProcessLifecycle::new();
+
+        assert!(lifecycle.claim_terminal(MediaProcessState::Completed));
+        assert!(!lifecycle.request_cancel());
+        assert_eq!(lifecycle.state(), MediaProcessState::Running);
+        assert!(lifecycle.publish_terminal_claim());
+        assert_eq!(lifecycle.state(), MediaProcessState::Completed);
+    }
+
+    #[test]
+    fn failed_terminal_claim_rejects_later_cancellation() {
+        let lifecycle = ProcessLifecycle::new();
+        let failure = MediaProcessState::Failed(MediaProcessFailure::Exit(Some(9)));
+
+        assert!(lifecycle.claim_terminal(failure.clone()));
+        assert!(!lifecycle.request_cancel());
+        assert!(lifecycle.publish_terminal_claim());
+        assert_eq!(lifecycle.state(), failure);
+    }
+
+    #[test]
     fn duplicate_terminal_settlement_is_rejected() {
         let lifecycle = ProcessLifecycle::new();
 
-        assert!(lifecycle.settle(MediaProcessState::Completed));
+        assert!(lifecycle.claim_terminal(MediaProcessState::Completed));
         assert!(
-            !lifecycle.settle(MediaProcessState::Failed(MediaProcessFailure::Exit(Some(
+            !lifecycle.claim_terminal(MediaProcessState::Failed(MediaProcessFailure::Exit(Some(
                 9
             ))))
         );
+        assert!(lifecycle.publish_terminal_claim());
+        assert!(!lifecycle.publish_terminal_claim());
         assert_eq!(lifecycle.state(), MediaProcessState::Completed);
     }
 
     #[test]
     fn accepted_cancellation_wins_the_single_terminal_settlement() {
-        let lifecycle = Arc::new(ProcessLifecycle::new());
+        let lifecycle = ProcessLifecycle::new();
 
         assert!(lifecycle.request_cancel());
-        assert!(lifecycle.settle(MediaProcessState::Completed));
+        assert!(lifecycle.claim_terminal(MediaProcessState::Completed));
+        assert!(!lifecycle.request_cancel());
+        assert!(lifecycle.publish_terminal_claim());
         assert_eq!(lifecycle.state(), MediaProcessState::Cancelled);
-        assert!(!lifecycle.settle(MediaProcessState::Completed));
+        assert!(!lifecycle.publish_terminal_claim());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn successful_child_exit_claim_during_reader_drain_rejects_cancellation() {
+        let process = MediaProcess::start(shell_command(exit_with_delayed_stderr_close_script(0)))
+            .expect("helper process should start");
+
+        assert_eq!(
+            process.lifecycle.wait_for_terminal_claim(TEST_TIMEOUT),
+            Some(MediaProcessState::Completed)
+        );
+        assert_eq!(process.state(), MediaProcessState::Running);
+        assert!(!process.cancel());
+        assert_eq!(wait_for_process(&process), MediaProcessState::Completed);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn failed_child_exit_claim_during_reader_drain_rejects_cancellation() {
+        let process = MediaProcess::start(shell_command(exit_with_delayed_stderr_close_script(7)))
+            .expect("helper process should start");
+        let failure = MediaProcessState::Failed(MediaProcessFailure::Exit(Some(7)));
+
+        assert_eq!(
+            process.lifecycle.wait_for_terminal_claim(TEST_TIMEOUT),
+            Some(failure.clone())
+        );
+        assert_eq!(process.state(), MediaProcessState::Running);
+        assert!(!process.cancel());
+        assert_eq!(wait_for_process(&process), failure);
+    }
+
+    const OUTPUT_CHANNEL_CAPACITY_FOR_TEST: usize = 64;
+
+    struct TrackingRead {
+        remaining_x: usize,
+        tail: &'static [u8],
+        tail_offset: usize,
+        max_read_request: Arc<AtomicUsize>,
+    }
+
+    impl TrackingRead {
+        fn new(total_bytes: usize, max_read_request: Arc<AtomicUsize>) -> Self {
+            let tail = b"TAIL-MARKER";
+            assert!(total_bytes > tail.len());
+            Self {
+                remaining_x: total_bytes - tail.len(),
+                tail,
+                tail_offset: 0,
+                max_read_request,
+            }
+        }
+    }
+
+    impl Read for TrackingRead {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.max_read_request
+                .fetch_max(buffer.len(), Ordering::Relaxed);
+
+            if buffer.is_empty() {
+                return Ok(0);
+            }
+
+            if self.remaining_x > 0 {
+                let count = self.remaining_x.min(buffer.len());
+                buffer[..count].fill(b'x');
+                self.remaining_x -= count;
+                return Ok(count);
+            }
+
+            if self.tail_offset < self.tail.len() {
+                let remaining = &self.tail[self.tail_offset..];
+                let count = remaining.len().min(buffer.len());
+                buffer[..count].copy_from_slice(&remaining[..count]);
+                self.tail_offset += count;
+                return Ok(count);
+            }
+
+            Ok(0)
+        }
     }
 
     fn wait_for_process(process: &MediaProcess) -> MediaProcessState {
@@ -693,22 +993,19 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
+    fn exit_with_delayed_stderr_close_script(exit_code: i32) -> String {
+        format!("(sleep 1; printf 'reader-drained\\n' >&2) & exit {exit_code}")
+    }
+
     fn large_stderr_script() -> String {
         #[cfg(windows)]
         {
-            let mut commands = (0..20)
-                .map(|index| format!("echo line-{index:02}-xxxxxxxx 1^>^&2"))
-                .collect::<Vec<_>>();
-            commands.push("echo TAIL-MARKER 1^>^&2".to_owned());
-            commands.join(" & ")
+            r#"for /L %i in (1,1,16384) do @<nul set /p "=xxxxxxxxxxxxxxxx" 1>&2 & <nul set /p "=TAIL-MARKER" 1>&2"#.to_owned()
         }
         #[cfg(not(windows))]
         {
-            let mut commands = (0..20)
-                .map(|index| format!("printf 'line-{index:02}-xxxxxxxx\\n' >&2"))
-                .collect::<Vec<_>>();
-            commands.push("printf 'TAIL-MARKER\\n' >&2".to_owned());
-            commands.join("; ")
+            r#"i=0; while [ "$i" -lt 16384 ]; do printf 'xxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done; printf 'TAIL-MARKER' >&2"#.to_owned()
         }
     }
 }
