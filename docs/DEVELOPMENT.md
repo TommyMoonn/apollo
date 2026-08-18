@@ -101,9 +101,12 @@ FFmpeg discovery, probing, command construction, process lifecycle, progress par
 
 ## Repository Scripts
 
-Apollo uses PowerShell 7 repository tooling modeled after the established project workflow.
+Apollo uses PowerShell 7 repository tooling with two shared owners:
 
-Canonical command names planned for the tooling phases are:
+- `scripts/Cli.Common.ps1` parses public CLI arguments.
+- `scripts/Repository.Common.ps1` owns shared repository slug derivation, safe project-relative path resolution, Git process invocation, and ChatGPT import backup location.
+
+Canonical commands:
 
 ```text
 apply-changes.ps1
@@ -114,15 +117,13 @@ clean-generated.ps1
 zip-project.ps1
 ```
 
-Compatibility entry points planned for familiar legacy names are:
+Compatibility entry points remain logic-free wrappers:
 
 ```text
 apply-chatgpt-zip.ps1
 package-changed-files.ps1
 restore-chatgpt-import.ps1
 ```
-
-The compatibility entry points must remain logic-free wrappers around the canonical commands.
 
 Public command conventions:
 
@@ -131,46 +132,85 @@ Public command conventions:
 - `$ErrorActionPreference = "Stop"`
 - lowercase `--kebab-case` long options
 - `-h` and `--help` on every public command
-- shared option meanings remain consistent across commands
+- consistent shared option names
+- no duplicated script-local argument parsing
 
-Do not duplicate argument parsing between individual scripts. `scripts/Cli.Common.ps1` is the single argument-parsing owner.
+### Review and changed-files workflow
 
-## Changed-Files Workflow
+Review first:
 
-The changed-files workflow is introduced in later tooling phases. Its intended flow is:
+```powershell
+.\scripts\review-changes.ps1 --files
+```
 
-1. Review the working tree.
-2. Package only the task- or phase-owned changed files.
-3. Preserve project-relative paths.
-4. Represent tracked deletions and relevant renames through `.chatgpt-delete-manifest.txt` when required.
-5. Apply the package through the safe import script.
-6. Restore from the import backup if necessary.
+Then package the current tracked changes and intended non-ignored untracked files:
 
-Planned canonical package naming:
+```powershell
+.\scripts\package-changes.ps1 --name <task-or-phase>
+```
+
+Use `--tracked-only` when untracked files must be excluded. Packages preserve project-relative paths. Tracked deletions and rename sources are represented by `.chatgpt-delete-manifest.txt` only when required.
+
+Default package naming is:
 
 ```text
 apollo-<task-or-phase>-changed-files.zip
 ```
 
-Do not manually invent deletion manifests when no tracked deletion exists.
+Apply a package explicitly:
 
-## Full-Project ZIP Workflow
+```powershell
+.\scripts\apply-changes.ps1 --zip <path>
+```
 
-The full-project snapshot command is introduced in a later tooling phase as:
+Or omit `--zip` to select the newest `<project-slug>-*-changed-files.zip` from Downloads. The importer rejects absolute/traversal paths and `.git`, refuses tracked dirty state by default, skips identical files, supports dry run, requires explicit opt-in for directory deletion, and backs up overwritten/deleted paths by default under:
+
+```text
+%LOCALAPPDATA%\ChatGPTImports\<project-slug>\<timestamp>\
+```
+
+Restore the newest backup with:
+
+```powershell
+.\scripts\restore-changes.ps1
+```
+
+A backup records overwritten and deleted paths. It does not record files that were newly created by the import, so restoration does not automatically remove those new files.
+
+### Full-project ZIP workflow
+
+Create a full-project snapshot with:
 
 ```powershell
 .\scripts\zip-project.ps1
 ```
 
-The script will derive the repository slug and produce a timestamped archive beside the project directory:
+The script derives the repository slug and creates a timestamped archive beside the project directory:
 
 ```text
 apollo(yyMMddHHmm).zip
 ```
 
-`.zipignore` controls snapshot exclusions. In particular, generated build output, Git internals, ChatGPT bundle output, scratch data, logs, temporary files, and existing ZIPs are excluded.
+`.zipignore` controls exclusions. `.planning/` and `.project/` remain eligible for full-project snapshots even though Git ignores them.
 
-`.planning/` and `.project/` are intentionally Git-ignored but are not excluded from full-project snapshots by default. They may carry useful local plans and project records into a ChatGPT project snapshot.
+### Generated-output cleanup
+
+Preview or remove only recognized generated roots:
+
+```powershell
+.\scripts\clean-generated.ps1 --rust --dry-run
+.\scripts\clean-generated.ps1 --chatgpt-bundles --dry-run
+.\scripts\clean-generated.ps1 --all
+```
+
+Initial targets are only:
+
+```text
+target/
+.dev/chatgpt/bundles/
+```
+
+The cleanup command refuses paths outside the repository, never touches `.git`, and protects tracked files unless `--force` is explicitly used.
 
 ## Local Workspace Roots
 
