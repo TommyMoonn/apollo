@@ -2,7 +2,7 @@ use egui::{Button, CentralPanel, RichText, Ui};
 
 use apollo::{
     media::tools::{MediaTools, MediaToolsError, discover_media_tools},
-    ui::{fonts, theme},
+    ui::{fonts, layout, theme},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,16 +46,15 @@ impl ApolloApp {
     }
 
     fn show_home(&mut self, ui: &mut Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(18.0);
+        layout::centered_content(ui, |ui| {
             ui.label(RichText::new("apollo").text_style(fonts::wordmark_text_style()));
-            ui.add_space(18.0);
+            ui.add_space(theme::SPACING.section);
 
             if tool_button(ui, "Audio Mix", "Mix selected audio tracks").clicked() {
                 self.state.select_tool(Tool::AudioMix);
             }
 
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACING.compact);
 
             if tool_button(ui, "Video Upscale", "Resize video to a larger output").clicked() {
                 self.state.select_tool(Tool::VideoUpscale);
@@ -71,12 +70,11 @@ impl ApolloApp {
             .map(MediaToolsError::user_message)
             .unwrap_or("FFmpeg and FFprobe could not be validated.");
 
-        ui.vertical_centered(|ui| {
-            ui.add_space(32.0);
+        layout::centered_content(ui, |ui| {
             ui.heading("FFmpeg is required");
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACING.compact);
             ui.label(message);
-            ui.add_space(18.0);
+            ui.add_space(theme::SPACING.section);
 
             if ui.button("Retry").clicked() {
                 self.media_tools = discover_media_tools();
@@ -85,15 +83,14 @@ impl ApolloApp {
     }
 
     fn show_tool(&mut self, ui: &mut Ui, tool: Tool) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(18.0);
+        layout::centered_content(ui, |ui| {
             ui.heading(match tool {
                 Tool::AudioMix => "Audio Mix",
                 Tool::VideoUpscale => "Video Upscale",
             });
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACING.compact);
             ui.label("Tool controls are added in a later phase.");
-            ui.add_space(18.0);
+            ui.add_space(theme::SPACING.section);
 
             if ui.button("Back").clicked() {
                 self.state.show_home();
@@ -104,25 +101,24 @@ impl ApolloApp {
 
 impl eframe::App for ApolloApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        CentralPanel::default().show(ui, |ui| {
-            if self.media_tools.is_err() {
-                self.show_media_tools_unavailable(ui);
-                return;
-            }
+        CentralPanel::default()
+            .frame(layout::content_frame(ui.style()))
+            .show(ui, |ui| {
+                if self.media_tools.is_err() {
+                    self.show_media_tools_unavailable(ui);
+                    return;
+                }
 
-            match self.state.current_tool {
-                Some(tool) => self.show_tool(ui, tool),
-                None => self.show_home(ui),
-            }
-        });
+                match self.state.current_tool {
+                    Some(tool) => self.show_tool(ui, tool),
+                    None => self.show_home(ui),
+                }
+            });
     }
 }
 
 fn tool_button(ui: &mut Ui, title: &str, description: &str) -> egui::Response {
-    ui.add_sized(
-        [360.0, 72.0],
-        Button::new(RichText::new(format!("{title}\n{description}"))).wrap(),
-    )
+    ui.add(Button::new(RichText::new(format!("{title}\n{description}"))).wrap())
 }
 
 #[cfg(test)]

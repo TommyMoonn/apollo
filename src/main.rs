@@ -1,11 +1,12 @@
 mod app;
+use apollo::ui::layout;
 use app::ApolloApp;
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([620.0, 410.0])
-            .with_min_inner_size([400.0, 260.0]),
+            .with_inner_size(layout::REFERENCE_CONTENT_SIZE)
+            .with_min_inner_size(layout::MINIMUM_CONTENT_SIZE),
         centered: true,
         ..Default::default()
     };

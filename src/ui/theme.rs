@@ -19,8 +19,8 @@ pub const CONTROL_RADIUS: u8 = 2;
 pub const CONTAINER_RADIUS: u8 = 2;
 pub const PROGRESS_RADIUS: u8 = 0;
 pub const SEPARATOR_WIDTH: f32 = 1.0;
-pub const PRIMARY_CONTROL_HEIGHT: f32 = 32.0;
-pub const COMPACT_CONTROL_HEIGHT: f32 = 28.0;
+pub const PRIMARY_CONTROL_HEIGHT: f32 = 31.0;
+pub const COMPACT_CONTROL_HEIGHT: f32 = 30.0;
 
 const _: () = assert!(CONTROL_RADIUS <= 2);
 const _: () = assert!(CONTAINER_RADIUS <= 2);
@@ -37,10 +37,10 @@ pub struct SpacingScale {
 
 pub const SPACING: SpacingScale = SpacingScale {
     tight: 4.0,
-    compact: 8.0,
-    related: 12.0,
-    section: 16.0,
-    spacious: 24.0,
+    compact: 7.0,
+    related: 11.0,
+    section: 24.0,
+    spacious: 40.0,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,7 +149,7 @@ pub fn install(context: &Context) {
 
 fn apply_to_style(style: &mut Style) {
     style.visuals = monochrome_visuals();
-    style.spacing.item_spacing = Vec2::new(SPACING.compact, SPACING.tight);
+    style.spacing.item_spacing = Vec2::splat(SPACING.related);
     style.spacing.button_padding = Vec2::new(SPACING.related, SPACING.compact);
     style.spacing.interact_size = Vec2::splat(PRIMARY_CONTROL_HEIGHT);
 }
@@ -350,8 +350,8 @@ mod tests {
         assert!(visuals.menu_corner_radius.average() <= 2.0);
         assert_eq!(std::hint::black_box(PROGRESS_RADIUS), 0);
         assert_eq!(std::hint::black_box(SEPARATOR_WIDTH), 1.0);
-        assert_eq!(std::hint::black_box(PRIMARY_CONTROL_HEIGHT), 32.0);
-        assert_eq!(std::hint::black_box(COMPACT_CONTROL_HEIGHT), 28.0);
+        assert_eq!(std::hint::black_box(PRIMARY_CONTROL_HEIGHT), 31.0);
+        assert_eq!(std::hint::black_box(COMPACT_CONTROL_HEIGHT), 30.0);
     }
 
     #[test]
@@ -402,8 +402,10 @@ mod tests {
         let mut style = Style::default();
         apply_to_style(&mut style);
 
-        assert_eq!(style.spacing.item_spacing.x, SPACING.compact);
-        assert_eq!(style.spacing.item_spacing.y, SPACING.tight);
+        assert_eq!(
+            style.spacing.item_spacing,
+            egui::Vec2::splat(SPACING.related)
+        );
         assert_eq!(style.spacing.button_padding.x, SPACING.related);
         assert_eq!(style.spacing.button_padding.y, SPACING.compact);
         assert_eq!(style.spacing.interact_size.y, PRIMARY_CONTROL_HEIGHT);
