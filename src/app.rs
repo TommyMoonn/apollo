@@ -2,7 +2,7 @@ use egui::{Button, CentralPanel, RichText, Ui};
 
 use apollo::{
     media::tools::{MediaTools, MediaToolsError, discover_media_tools},
-    ui::{fonts, layout, theme},
+    ui::{fonts, layout, theme, widgets},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +76,7 @@ impl ApolloApp {
             ui.label(message);
             ui.add_space(theme::SPACING.section);
 
-            if ui.button("Retry").clicked() {
+            if widgets::secondary_button(ui, "Retry").clicked() {
                 self.media_tools = discover_media_tools();
             }
         });
@@ -92,7 +92,7 @@ impl ApolloApp {
             ui.label("Tool controls are added in a later phase.");
             ui.add_space(theme::SPACING.section);
 
-            if ui.button("Back").clicked() {
+            if widgets::secondary_button(ui, "Back").clicked() {
                 self.state.show_home();
             }
         });

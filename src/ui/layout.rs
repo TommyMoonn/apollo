@@ -118,6 +118,13 @@ pub fn bounded_content_width(available_width: f32) -> f32 {
     safe_dimension(available_width).min(MAX_CONTENT_WIDTH)
 }
 
+/// Width left for a flexible row element after a fixed-width sibling and their shared gap.
+///
+/// Composite controls use this rather than owning their own responsive-width policy.
+pub fn flexible_row_width(available_width: f32, fixed_width: f32, gap: f32) -> f32 {
+    (safe_dimension(available_width) - safe_dimension(fixed_width) - safe_dimension(gap)).max(0.0)
+}
+
 /// Reserve flow space after a potentially long list and request scrolling only when needed.
 pub fn list_viewport(
     content_height: f32,
@@ -162,7 +169,7 @@ mod tests {
         ActionLayout, CONTENT_PADDING, ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE,
         PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
         TextOverflowPolicy, WINDOW_CHROME_HEIGHT, action_layout, bounded_content_width,
-        content_frame, list_viewport,
+        content_frame, flexible_row_width, list_viewport,
     };
     use crate::ui::theme;
 
@@ -210,6 +217,13 @@ mod tests {
     fn bounded_content_width_never_exceeds_available_or_maximum() {
         assert_eq!(bounded_content_width(320.0), 320.0);
         assert_eq!(bounded_content_width(900.0), MAX_CONTENT_WIDTH);
+    }
+
+    #[test]
+    fn flexible_row_width_reserves_fixed_controls_without_going_negative() {
+        assert_eq!(flexible_row_width(320.0, 72.0, 7.0), 241.0);
+        assert_eq!(flexible_row_width(40.0, 72.0, 7.0), 0.0);
+        assert_eq!(flexible_row_width(f32::NAN, 72.0, 7.0), 0.0);
     }
 
     #[test]

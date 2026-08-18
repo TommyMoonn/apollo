@@ -6,7 +6,9 @@ use egui::{Color32, Context, CornerRadius, Shadow, Stroke, Style, Vec2, Visuals}
 pub const BACKGROUND: Color32 = Color32::BLACK;
 pub const FOREGROUND: Color32 = Color32::WHITE;
 pub const SECONDARY: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 168);
+pub const SECONDARY_FAINT: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 122);
 pub const SEPARATOR: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 46);
+pub const BORDER_STRONG: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 77);
 pub const HOVER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 14);
 pub const PRESSED: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 28);
 pub const DISABLED: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 87);
@@ -15,12 +17,24 @@ pub const FOCUS: Color32 = FOREGROUND;
 pub const PROGRESS: Color32 = FOREGROUND;
 pub const DANGER_INTERACTIVE: Color32 = Color32::from_rgb(0x7E, 0x30, 0x30);
 
+// Primary-button hover/press are white-alpha interaction treatments, not neutral-gray roles.
+pub const PRIMARY_HOVER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 224);
+pub const PRIMARY_PRESSED: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 194);
+
 pub const CONTROL_RADIUS: u8 = 2;
 pub const CONTAINER_RADIUS: u8 = 2;
 pub const PROGRESS_RADIUS: u8 = 0;
 pub const SEPARATOR_WIDTH: f32 = 1.0;
+pub const FOCUS_STROKE_WIDTH: f32 = 2.0;
+pub const FOCUS_OFFSET: f32 = 2.0;
 pub const PRIMARY_CONTROL_HEIGHT: f32 = 31.0;
 pub const COMPACT_CONTROL_HEIGHT: f32 = 30.0;
+pub const SELECTABLE_ROW_MIN_HEIGHT: f32 = 34.0;
+pub const SELECTION_INDICATOR_SIZE: f32 = 12.0;
+pub const SELECTABLE_ROW_HORIZONTAL_PADDING: f32 = 5.0;
+pub const SELECTABLE_ROW_INDICATOR_COLUMN: f32 = 18.0;
+pub const SELECTABLE_ROW_CONTENT_GAP: f32 = 8.0;
+pub const PATH_FIELD_HORIZONTAL_PADDING: f32 = 8.0;
 
 const _: () = assert!(CONTROL_RADIUS <= 2);
 const _: () = assert!(CONTAINER_RADIUS <= 2);
@@ -92,6 +106,7 @@ impl ThemeRole {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlTone {
+    Primary,
     Standard,
     Destructive,
 }
@@ -118,28 +133,51 @@ pub const fn control_colors(tone: ControlTone, state: InteractionState) -> Contr
             foreground: DISABLED,
             border: DISABLED,
         },
+        (ControlTone::Primary, InteractionState::Idle) => ControlColors {
+            background: FOREGROUND,
+            foreground: BACKGROUND,
+            border: FOREGROUND,
+        },
+        (ControlTone::Primary, InteractionState::Hovered) => ControlColors {
+            background: PRIMARY_HOVER,
+            foreground: BACKGROUND,
+            border: PRIMARY_HOVER,
+        },
+        (ControlTone::Primary, InteractionState::Pressed) => ControlColors {
+            background: PRIMARY_PRESSED,
+            foreground: BACKGROUND,
+            border: PRIMARY_PRESSED,
+        },
         (ControlTone::Destructive, InteractionState::Hovered | InteractionState::Pressed) => {
             ControlColors {
-                background: DANGER_INTERACTIVE,
-                foreground: FOREGROUND,
+                background: BACKGROUND,
+                foreground: DANGER_INTERACTIVE,
                 border: DANGER_INTERACTIVE,
             }
         }
         (_, InteractionState::Idle) => ControlColors {
             background: BACKGROUND,
             foreground: FOREGROUND,
-            border: SEPARATOR,
+            border: BORDER_STRONG,
         },
         (_, InteractionState::Hovered) => ControlColors {
             background: HOVER,
             foreground: FOREGROUND,
-            border: FOCUS,
+            border: BORDER_STRONG,
         },
         (_, InteractionState::Pressed) => ControlColors {
             background: PRESSED,
             foreground: FOREGROUND,
-            border: FOCUS,
+            border: BORDER_STRONG,
         },
+    }
+}
+
+pub const fn selectable_colors(state: InteractionState, selected: bool) -> ControlColors {
+    if selected && !matches!(state, InteractionState::Disabled) {
+        control_colors(ControlTone::Primary, state)
+    } else {
+        control_colors(ControlTone::Standard, state)
     }
 }
 
@@ -201,7 +239,7 @@ fn monochrome_visuals() -> Visuals {
 fn monochrome_widgets() -> Widgets {
     let radius = CornerRadius::same(CONTROL_RADIUS);
     let border = Stroke::new(SEPARATOR_WIDTH, SEPARATOR);
-    let focus_border = Stroke::new(SEPARATOR_WIDTH, FOCUS);
+    let interaction_border = Stroke::new(SEPARATOR_WIDTH, BORDER_STRONG);
     let foreground = Stroke::new(SEPARATOR_WIDTH, FOREGROUND);
 
     Widgets {
@@ -224,7 +262,7 @@ fn monochrome_widgets() -> Widgets {
         hovered: WidgetVisuals {
             bg_fill: HOVER,
             weak_bg_fill: HOVER,
-            bg_stroke: focus_border,
+            bg_stroke: interaction_border,
             corner_radius: radius,
             fg_stroke: foreground,
             expansion: 0.0,
@@ -232,7 +270,7 @@ fn monochrome_widgets() -> Widgets {
         active: WidgetVisuals {
             bg_fill: PRESSED,
             weak_bg_fill: PRESSED,
-            bg_stroke: focus_border,
+            bg_stroke: interaction_border,
             corner_radius: radius,
             fg_stroke: foreground,
             expansion: 0.0,
@@ -240,7 +278,7 @@ fn monochrome_widgets() -> Widgets {
         open: WidgetVisuals {
             bg_fill: PRESSED,
             weak_bg_fill: PRESSED,
-            bg_stroke: focus_border,
+            bg_stroke: interaction_border,
             corner_radius: radius,
             fg_stroke: foreground,
             expansion: 0.0,
@@ -253,10 +291,14 @@ mod tests {
     use egui::{Color32, Style};
 
     use super::{
-        BACKGROUND, COMPACT_CONTROL_HEIGHT, ControlTone, DANGER_INTERACTIVE, DISABLED, FOCUS,
-        FOREGROUND, HOVER, InteractionState, PRESSED, PRIMARY_CONTROL_HEIGHT, PROGRESS,
-        PROGRESS_RADIUS, SECONDARY, SELECTION, SEPARATOR, SEPARATOR_WIDTH, SPACING, ThemeRole,
-        apply_to_style, control_colors, monochrome_visuals,
+        BACKGROUND, BORDER_STRONG, COMPACT_CONTROL_HEIGHT, ControlTone, DANGER_INTERACTIVE,
+        DISABLED, FOCUS, FOCUS_OFFSET, FOCUS_STROKE_WIDTH, FOREGROUND, HOVER, InteractionState,
+        PATH_FIELD_HORIZONTAL_PADDING, PRESSED, PRIMARY_CONTROL_HEIGHT, PRIMARY_HOVER,
+        PRIMARY_PRESSED, PROGRESS, PROGRESS_RADIUS, SECONDARY, SECONDARY_FAINT,
+        SELECTABLE_ROW_CONTENT_GAP, SELECTABLE_ROW_HORIZONTAL_PADDING,
+        SELECTABLE_ROW_INDICATOR_COLUMN, SELECTABLE_ROW_MIN_HEIGHT, SELECTION,
+        SELECTION_INDICATOR_SIZE, SEPARATOR, SEPARATOR_WIDTH, SPACING, ThemeRole, apply_to_style,
+        control_colors, monochrome_visuals, selectable_colors,
     };
 
     #[test]
@@ -264,11 +306,21 @@ mod tests {
         assert_eq!(BACKGROUND, Color32::from_rgb(0x00, 0x00, 0x00));
         assert_eq!(FOREGROUND, Color32::from_rgb(0xFF, 0xFF, 0xFF));
         assert_eq!(SECONDARY.to_srgba_unmultiplied(), [255, 255, 255, 168]);
+        assert_eq!(
+            SECONDARY_FAINT.to_srgba_unmultiplied(),
+            [255, 255, 255, 122]
+        );
         assert_eq!(SEPARATOR.to_srgba_unmultiplied(), [255, 255, 255, 46]);
+        assert_eq!(BORDER_STRONG.to_srgba_unmultiplied(), [255, 255, 255, 77]);
         assert_eq!(HOVER.to_srgba_unmultiplied(), [255, 255, 255, 14]);
         assert_eq!(PRESSED.to_srgba_unmultiplied(), [255, 255, 255, 28]);
         assert_eq!(DISABLED.to_srgba_unmultiplied(), [255, 255, 255, 87]);
         assert_eq!(DANGER_INTERACTIVE, Color32::from_rgb(0x7E, 0x30, 0x30));
+        assert_eq!(PRIMARY_HOVER.to_srgba_unmultiplied(), [255, 255, 255, 224]);
+        assert_eq!(
+            PRIMARY_PRESSED.to_srgba_unmultiplied(),
+            [255, 255, 255, 194]
+        );
     }
 
     #[test]
@@ -302,6 +354,30 @@ mod tests {
     }
 
     #[test]
+    fn quiet_secondary_idle_uses_strong_border() {
+        let secondary = control_colors(ControlTone::Standard, InteractionState::Idle);
+
+        assert_eq!(secondary.background, BACKGROUND);
+        assert_eq!(secondary.foreground, FOREGROUND);
+        assert_eq!(secondary.border, BORDER_STRONG);
+    }
+
+    #[test]
+    fn disabled_controls_use_disabled_border() {
+        for tone in [
+            ControlTone::Primary,
+            ControlTone::Standard,
+            ControlTone::Destructive,
+        ] {
+            let disabled = control_colors(tone, InteractionState::Disabled);
+
+            assert_eq!(disabled.background, BACKGROUND);
+            assert_eq!(disabled.foreground, DISABLED);
+            assert_eq!(disabled.border, DISABLED);
+        }
+    }
+
+    #[test]
     fn destructive_idle_is_monochrome() {
         let standard = control_colors(ControlTone::Standard, InteractionState::Idle);
         let destructive = control_colors(ControlTone::Destructive, InteractionState::Idle);
@@ -316,8 +392,8 @@ mod tests {
         for state in [InteractionState::Hovered, InteractionState::Pressed] {
             let colors = control_colors(ControlTone::Destructive, state);
 
-            assert_eq!(colors.background, DANGER_INTERACTIVE);
-            assert_eq!(colors.foreground, FOREGROUND);
+            assert_eq!(colors.background, BACKGROUND);
+            assert_eq!(colors.foreground, DANGER_INTERACTIVE);
             assert_eq!(colors.border, DANGER_INTERACTIVE);
         }
     }
@@ -331,6 +407,22 @@ mod tests {
         assert_eq!(destructive.foreground, DISABLED);
         assert_ne!(destructive.background, DANGER_INTERACTIVE);
         assert_ne!(destructive.border, DANGER_INTERACTIVE);
+    }
+
+    #[test]
+    fn primary_and_selected_controls_use_monochrome_inversion() {
+        let primary = control_colors(ControlTone::Primary, InteractionState::Idle);
+        let selected = selectable_colors(InteractionState::Idle, true);
+
+        assert_eq!(primary.background, FOREGROUND);
+        assert_eq!(primary.foreground, BACKGROUND);
+        assert_eq!(primary.border, FOREGROUND);
+        assert_eq!(selected, primary);
+
+        let disabled_selected = selectable_colors(InteractionState::Disabled, true);
+        assert_eq!(disabled_selected.background, BACKGROUND);
+        assert_eq!(disabled_selected.foreground, DISABLED);
+        assert_eq!(disabled_selected.border, DISABLED);
     }
 
     #[test]
@@ -350,8 +442,16 @@ mod tests {
         assert!(visuals.menu_corner_radius.average() <= 2.0);
         assert_eq!(std::hint::black_box(PROGRESS_RADIUS), 0);
         assert_eq!(std::hint::black_box(SEPARATOR_WIDTH), 1.0);
+        assert_eq!(std::hint::black_box(FOCUS_STROKE_WIDTH), 2.0);
+        assert_eq!(std::hint::black_box(FOCUS_OFFSET), 2.0);
         assert_eq!(std::hint::black_box(PRIMARY_CONTROL_HEIGHT), 31.0);
         assert_eq!(std::hint::black_box(COMPACT_CONTROL_HEIGHT), 30.0);
+        assert_eq!(std::hint::black_box(SELECTABLE_ROW_MIN_HEIGHT), 34.0);
+        assert_eq!(std::hint::black_box(SELECTION_INDICATOR_SIZE), 12.0);
+        assert_eq!(std::hint::black_box(SELECTABLE_ROW_HORIZONTAL_PADDING), 5.0);
+        assert_eq!(std::hint::black_box(SELECTABLE_ROW_INDICATOR_COLUMN), 18.0);
+        assert_eq!(std::hint::black_box(SELECTABLE_ROW_CONTENT_GAP), 8.0);
+        assert_eq!(std::hint::black_box(PATH_FIELD_HORIZONTAL_PADDING), 8.0);
     }
 
     #[test]
