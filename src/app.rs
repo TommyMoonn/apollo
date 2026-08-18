@@ -1,6 +1,6 @@
 use egui::{Button, CentralPanel, RichText, Ui};
 
-use crate::media::tools::{MediaTools, MediaToolsError, discover_media_tools};
+use apollo::media::tools::{MediaTools, MediaToolsError, discover_media_tools};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {

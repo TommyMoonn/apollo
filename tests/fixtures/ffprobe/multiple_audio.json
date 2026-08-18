@@ -1,0 +1,9 @@
+{
+  "streams": [
+    { "index": 0, "codec_name": "hevc", "codec_type": "video", "width": 3840, "height": 2160, "avg_frame_rate": "60/1" },
+    { "index": 1, "codec_name": "aac", "codec_type": "audio", "channels": 2, "channel_layout": "stereo", "tags": { "title": "Desktop", "language": "eng" } },
+    { "index": 3, "codec_name": "opus", "codec_type": "audio", "channels": 1, "channel_layout": "mono", "tags": { "title": "Microphone", "language": "und" } },
+    { "index": 7, "codec_name": "aac", "codec_type": "audio", "channels": 2, "channel_layout": "stereo", "tags": { "title": "Discord", "language": "eng" } }
+  ],
+  "format": { "duration": "75.125" }
+}

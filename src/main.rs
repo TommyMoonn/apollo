@@ -1,6 +1,4 @@
 mod app;
-mod media;
-
 use app::ApolloApp;
 
 fn main() -> eframe::Result {

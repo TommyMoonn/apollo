@@ -1,0 +1,6 @@
+{
+  "streams": [
+    { "index": 0, "codec_name": "vp9", "codec_type": "video", "width": 1280, "height": 720, "avg_frame_rate": "24/1" }
+  ],
+  "format": { "duration": "9.75" }
+}

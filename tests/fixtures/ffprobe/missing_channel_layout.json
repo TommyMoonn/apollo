@@ -1,0 +1,6 @@
+{
+  "streams": [
+    { "index": 8, "codec_name": "aac", "codec_type": "audio", "channels": 6, "tags": { "title": "Surround", "language": "eng" } }
+  ],
+  "format": { "duration": "6.0" }
+}

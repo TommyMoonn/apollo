@@ -10,13 +10,13 @@ const VERSION_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_QUERY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MediaTools {
-    pub(crate) ffmpeg: PathBuf,
-    pub(crate) ffprobe: PathBuf,
+pub struct MediaTools {
+    pub ffmpeg: PathBuf,
+    pub ffprobe: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum MediaToolKind {
+pub enum MediaToolKind {
     Ffmpeg,
     Ffprobe,
 }
@@ -38,7 +38,7 @@ impl MediaToolKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MediaToolsError {
+pub enum MediaToolsError {
     MissingFfmpeg,
     MissingFfprobe,
     MissingBoth,
@@ -50,7 +50,7 @@ pub(crate) enum MediaToolsError {
 }
 
 impl MediaToolsError {
-    pub(crate) fn user_message(&self) -> &'static str {
+    pub fn user_message(&self) -> &'static str {
         match self {
             Self::MissingFfmpeg => "FFmpeg could not be found.",
             Self::MissingFfprobe => "FFprobe could not be found.",
@@ -86,7 +86,7 @@ impl fmt::Display for MediaToolsError {
 impl std::error::Error for MediaToolsError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MediaToolValidationError {
+pub enum MediaToolValidationError {
     LaunchFailed(io::ErrorKind),
     TimedOut,
     NonZeroExit(Option<i32>),
@@ -178,7 +178,7 @@ impl VersionValidator for SystemVersionValidator {
     }
 }
 
-pub(crate) fn discover_media_tools() -> Result<MediaTools, MediaToolsError> {
+pub fn discover_media_tools() -> Result<MediaTools, MediaToolsError> {
     discover_with(
         &SystemExecutableResolver,
         &SystemVersionValidator::default(),

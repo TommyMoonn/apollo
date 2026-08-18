@@ -1,0 +1,21 @@
+{
+  "streams": [
+    {
+      "index": 0,
+      "codec_name": "h264",
+      "codec_type": "video",
+      "width": 1920,
+      "height": 1080,
+      "avg_frame_rate": "30000/1001"
+    },
+    {
+      "index": 2,
+      "codec_name": "aac",
+      "codec_type": "audio",
+      "channels": 2,
+      "channel_layout": "stereo",
+      "tags": { "title": "Main Mix", "language": "eng" }
+    }
+  ],
+  "format": { "duration": "12.500000" }
+}

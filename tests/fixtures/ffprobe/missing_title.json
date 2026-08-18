@@ -1,0 +1,6 @@
+{
+  "streams": [
+    { "index": 4, "codec_name": "aac", "codec_type": "audio", "channels": 2, "channel_layout": "stereo", "tags": { "language": "eng" } }
+  ],
+  "format": { "duration": "3.0" }
+}
