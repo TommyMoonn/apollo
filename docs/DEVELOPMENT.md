@@ -97,7 +97,7 @@ Repository rules for media execution:
 - cancellation must terminate only the owned child process
 - failed or cancelled jobs must not publish misleading partial outputs
 
-`src/media/tools.rs` owns FFmpeg/FFprobe discovery and bounded version validation. `src/media/probe.rs` owns FFprobe invocation, JSON deserialization, and normalization into the shared types in `src/media/model.rs`. `src/media/process.rs` owns long-running child-process spawning, cancellation, lifecycle settlement, bounded diagnostic stderr capture, and nonblocking output/progress channels. Command construction, progress parsing, and output publication receive their own shared owners in later phases.
+`src/media/tools.rs` owns FFmpeg/FFprobe discovery and bounded version validation. `src/media/probe.rs` owns FFprobe invocation, JSON deserialization, and normalization into the shared types in `src/media/model.rs`. `src/media/process.rs` owns long-running child-process spawning, cancellation, lifecycle settlement, bounded diagnostic stderr capture, and nonblocking output/progress channels. `src/media/output.rs` owns validation, operation-owned temporary paths, success-only publication, and failed/cancelled cleanup. Command construction and progress parsing receive their own shared owners in later phases.
 
 ## Repository Scripts
 
