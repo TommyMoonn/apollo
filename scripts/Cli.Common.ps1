@@ -32,6 +32,67 @@ function ConvertTo-CliBoolean {
     }
 }
 
+function ConvertTo-CliInt {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Value,
+
+        [Parameter(Mandatory)]
+        [string]$OptionName,
+
+        [int]$Minimum = [int]::MinValue,
+
+        [int]$Maximum = [int]::MaxValue
+    )
+
+    if ($Minimum -gt $Maximum) {
+        throw "Minimum cannot be greater than maximum for option '$OptionName'."
+    }
+
+    $text = ([string]$Value).Trim()
+    [int]$parsed = 0
+    $parsedSuccessfully = [int]::TryParse(
+        $text,
+        [System.Globalization.NumberStyles]::Integer,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$parsed
+    )
+
+    if (-not $parsedSuccessfully) {
+        throw "Option '$OptionName' expects an integer value."
+    }
+
+    if ($parsed -lt $Minimum -or $parsed -gt $Maximum) {
+        throw "Option '$OptionName' must be between $Minimum and $Maximum."
+    }
+
+    return $parsed
+}
+
+function Resolve-CliChoice {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Value,
+
+        [Parameter(Mandatory)]
+        [string]$OptionName,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$AllowedValues
+    )
+
+    $text = ([string]$Value).Trim()
+    foreach ($allowedValue in $AllowedValues) {
+        if ($text.Equals($allowedValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $allowedValue
+        }
+    }
+
+    $displayValues = $AllowedValues -join ', '
+    throw "Option '$OptionName' expects one of: $displayValues."
+}
+
 function ConvertFrom-CliArguments {
     param(
         [Parameter(Mandatory)]
