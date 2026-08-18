@@ -13,6 +13,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "apollo",
         native_options,
-        Box::new(|creation_context| Ok(Box::new(ApolloApp::new(creation_context)))),
+        Box::new(|creation_context| {
+            let app = ApolloApp::new(creation_context)?;
+            Ok(Box::new(app))
+        }),
     )
 }

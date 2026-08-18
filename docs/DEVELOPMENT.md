@@ -83,6 +83,18 @@ cargo test --all-targets
 
 Report checks truthfully. If a required tool or dependency is unavailable, record the check as not run rather than inferring success.
 
+## Typography
+
+Apollo does not depend on machine-installed fonts for application typography. The repository font assets live under:
+
+```text
+assets/fonts/
+```
+
+`src/ui/fonts.rs` is the single owner for loading those assets, stable font-family names, the typography scale, and egui text-style mapping. IBM Plex Sans is the primary UI family; Fira Code is reserved for the Apollo wordmark and compact technical metadata. Individual screens should request the shared text styles rather than configuring fonts locally.
+
+Missing or invalid required font assets are startup configuration errors. Apollo must not silently fall back to whatever fonts happen to be installed on the development machine.
+
 ## FFmpeg Expectations
 
 Apollo uses FFmpeg and FFprobe as external media engines instead of reimplementing codecs or linking libav during v0.1.0.

@@ -1,6 +1,9 @@
 use egui::{Button, CentralPanel, RichText, Ui};
 
-use apollo::media::tools::{MediaTools, MediaToolsError, discover_media_tools};
+use apollo::{
+    media::tools::{MediaTools, MediaToolsError, discover_media_tools},
+    ui::fonts,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {
@@ -30,17 +33,21 @@ pub(crate) struct ApolloApp {
 }
 
 impl ApolloApp {
-    pub(crate) fn new(_creation_context: &eframe::CreationContext<'_>) -> Self {
-        Self {
+    pub(crate) fn new(
+        creation_context: &eframe::CreationContext<'_>,
+    ) -> Result<Self, fonts::FontSetupError> {
+        fonts::install(&creation_context.egui_ctx)?;
+
+        Ok(Self {
             state: AppState::default(),
             media_tools: discover_media_tools(),
-        }
+        })
     }
 
     fn show_home(&mut self, ui: &mut Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(18.0);
-            ui.heading("Apollo");
+            ui.label(RichText::new("apollo").text_style(fonts::wordmark_text_style()));
             ui.add_space(18.0);
 
             if tool_button(ui, "Audio Mix", "Mix selected audio tracks").clicked() {

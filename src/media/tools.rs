@@ -253,11 +253,10 @@ fn executable_extensions() -> Vec<String> {
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_owned());
 
-        return raw
-            .split(';')
+        raw.split(';')
             .filter(|extension| !extension.is_empty())
             .map(|extension| extension.to_ascii_lowercase())
-            .collect();
+            .collect()
     }
 
     #[cfg(not(windows))]

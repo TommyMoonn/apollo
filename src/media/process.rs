@@ -321,7 +321,7 @@ impl ProcessLifecycle {
         true
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     fn wait_for_terminal_claim(&self, timeout: Duration) -> Option<MediaProcessState> {
         let inner = lock_unpoisoned(&self.inner);
         let (inner, _) = self
@@ -963,7 +963,7 @@ mod tests {
     fn failure_script() -> String {
         #[cfg(windows)]
         {
-            "echo failure-detail 1>&2 & exit /b 7".to_owned()
+            "1>&2 echo failure-detail& exit /b 7".to_owned()
         }
         #[cfg(not(windows))]
         {
@@ -974,7 +974,7 @@ mod tests {
     fn stderr_success_script() -> String {
         #[cfg(windows)]
         {
-            "echo diagnostic-one 1>&2".to_owned()
+            "1>&2 echo diagnostic-one".to_owned()
         }
         #[cfg(not(windows))]
         {
@@ -1001,7 +1001,7 @@ mod tests {
     fn large_stderr_script() -> String {
         #[cfg(windows)]
         {
-            r#"for /L %i in (1,1,16384) do @<nul set /p "=xxxxxxxxxxxxxxxx" 1>&2 & <nul set /p "=TAIL-MARKER" 1>&2"#.to_owned()
+            r#"for /L %i in (1,1,16384) do @<nul 1>&2 set /p "=xxxxxxxxxxxxxxxx"& <nul 1>&2 set /p "=TAIL-MARKER"& exit /b 0"#.to_owned()
         }
         #[cfg(not(windows))]
         {
