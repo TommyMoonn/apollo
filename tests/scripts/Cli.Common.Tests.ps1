@@ -13,6 +13,38 @@ $optionSpecs = @{
     'dry-run' = @{ Kind = 'Switch'; Aliases = @('-n', '-DryRun') }
 }
 
+Invoke-TestCase "converts integer CLI values" {
+    $value = ConvertTo-CliInt -Value '400' -OptionName '--part-size-mib' -Minimum 64 -Maximum 440
+    Assert-Equal 400 $value "Integer conversion mismatch."
+}
+
+Invoke-TestCase "rejects non-integer CLI values" {
+    Assert-Throws {
+        ConvertTo-CliInt -Value '400.5' -OptionName '--part-size-mib' -Minimum 64 -Maximum 440
+    } "*expects an integer value*"
+}
+
+Invoke-TestCase "rejects CLI integers outside the allowed range" {
+    Assert-Throws {
+        ConvertTo-CliInt -Value '63' -OptionName '--part-size-mib' -Minimum 64 -Maximum 440
+    } "*must be between 64 and 440*"
+
+    Assert-Throws {
+        ConvertTo-CliInt -Value '441' -OptionName '--part-size-mib' -Minimum 64 -Maximum 440
+    } "*must be between 64 and 440*"
+}
+
+Invoke-TestCase "resolves CLI choices case-insensitively" {
+    $value = Resolve-CliChoice -Value 'AUTO' -OptionName '--runtime' -AllowedValues @('Auto', 'Docker', 'WSL')
+    Assert-Equal 'Auto' $value "Choice resolution should return the configured canonical value."
+}
+
+Invoke-TestCase "rejects unsupported CLI choices" {
+    Assert-Throws {
+        Resolve-CliChoice -Value 'Podman' -OptionName '--runtime' -AllowedValues @('Auto', 'Docker', 'WSL')
+    } "*expects one of: Auto, Docker, WSL*"
+}
+
 Invoke-TestCase "parses canonical long option" {
     $cli = ConvertFrom-CliArguments -Arguments @('--project', 'C:\repo') -OptionSpecs $optionSpecs
     Assert-Equal 'C:\repo' $cli['project'] "Long option value mismatch."

@@ -8,9 +8,9 @@ Apollo is a lightweight native desktop media utility written in Rust.
 - Repository slug: `apollo`
 - Release line: `0.1.0`
 
-## Foundation scope
+## Current scope
 
-The repository currently contains the project bootstrap and development rules from Phases `0.1.0.1` and `0.1.0.2`. Media behavior and the native `egui`/`eframe` application shell are intentionally deferred to later phases.
+Apollo currently has its native `egui`/`eframe` application shell, repository workflow tooling, and shared FFmpeg/FFprobe discovery. FFmpeg and FFprobe are resolved from `PATH` and validated before the media tools are made available. Media probing and processing remain deferred to later phases.
 
 ## Toolchain
 

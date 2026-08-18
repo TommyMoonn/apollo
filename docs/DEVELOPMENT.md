@@ -97,7 +97,7 @@ Repository rules for media execution:
 - cancellation must terminate only the owned child process
 - failed or cancelled jobs must not publish misleading partial outputs
 
-FFmpeg discovery, probing, command construction, process lifecycle, progress parsing, and output publication each receive an explicit shared owner in later phases.
+`src/media/tools.rs` owns FFmpeg/FFprobe discovery and bounded version validation. Probing, command construction, process lifecycle, progress parsing, and output publication receive their own shared owners in later phases.
 
 ## Repository Scripts
 
