@@ -2,7 +2,7 @@ use egui::{Button, CentralPanel, RichText, Ui};
 
 use apollo::{
     media::tools::{MediaTools, MediaToolsError, discover_media_tools},
-    ui::fonts,
+    ui::{fonts, theme},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +37,7 @@ impl ApolloApp {
         creation_context: &eframe::CreationContext<'_>,
     ) -> Result<Self, fonts::FontSetupError> {
         fonts::install(&creation_context.egui_ctx)?;
+        theme::install(&creation_context.egui_ctx);
 
         Ok(Self {
             state: AppState::default(),
