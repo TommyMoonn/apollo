@@ -726,52 +726,36 @@ mod tests {
     }
 
     #[test]
-    fn newline_free_stderr_uses_bounded_messages_and_diagnostic_tail() {
-        let process = MediaProcess::start(
-            shell_command(large_stderr_script())
-                .progress_source(ProcessProgressSource::Stderr)
-                .diagnostic_stderr_limit(64),
-        )
-        .expect("helper process should start");
-
-        assert_eq!(wait_for_process(&process), MediaProcessState::Completed);
-
-        let live_messages = drain(process.stderr_channel());
-        assert!(!live_messages.is_empty());
-        assert!(
-            live_messages
-                .iter()
-                .all(|message| message.len() <= LIVE_OUTPUT_MESSAGE_LIMIT_BYTES)
-        );
-        let progress_messages = drain(process.progress_channel());
-        assert!(!progress_messages.is_empty());
-        assert!(
-            progress_messages
-                .iter()
-                .all(|message| message.len() <= LIVE_OUTPUT_MESSAGE_LIMIT_BYTES)
-        );
-
-        let diagnostic = process.diagnostic_stderr();
-        assert!(diagnostic.len() <= 64);
-        assert!(diagnostic.ends_with("TAIL-MARKER"));
-    }
-
-    #[test]
-    fn stream_reader_never_requests_or_emits_unbounded_newline_free_buffers() {
+    fn stream_reader_bounds_newline_free_stderr_and_progress_without_shell() {
         const PAYLOAD_BYTES: usize = LIVE_OUTPUT_MESSAGE_LIMIT_BYTES * 32;
 
         let max_read_request = Arc::new(AtomicUsize::new(0));
         let diagnostics = Arc::new(Mutex::new(BoundedDiagnostic::new(64)));
         let reader = TrackingRead::new(PAYLOAD_BYTES, Arc::clone(&max_read_request));
         let (stderr_tx, stderr_rx) = sync_channel(OUTPUT_CHANNEL_CAPACITY_FOR_TEST);
+        let (progress_tx, progress_rx) = sync_channel(OUTPUT_CHANNEL_CAPACITY_FOR_TEST);
 
-        read_stream(reader, stderr_tx, None, Some(Arc::clone(&diagnostics)));
+        read_stream(
+            reader,
+            stderr_tx,
+            Some(progress_tx),
+            Some(Arc::clone(&diagnostics)),
+        );
 
         assert!(max_read_request.load(Ordering::Relaxed) <= STREAM_READ_CHUNK_BYTES);
-        let messages = drain(&stderr_rx);
-        assert!(!messages.is_empty());
+
+        let stderr_messages = drain(&stderr_rx);
+        assert!(!stderr_messages.is_empty());
         assert!(
-            messages
+            stderr_messages
+                .iter()
+                .all(|message| message.len() <= LIVE_OUTPUT_MESSAGE_LIMIT_BYTES)
+        );
+
+        let progress_messages = drain(&progress_rx);
+        assert!(!progress_messages.is_empty());
+        assert!(
+            progress_messages
                 .iter()
                 .all(|message| message.len() <= LIVE_OUTPUT_MESSAGE_LIMIT_BYTES)
         );
@@ -996,16 +980,5 @@ mod tests {
     #[cfg(not(windows))]
     fn exit_with_delayed_stderr_close_script(exit_code: i32) -> String {
         format!("(sleep 1; printf 'reader-drained\\n' >&2) & exit {exit_code}")
-    }
-
-    fn large_stderr_script() -> String {
-        #[cfg(windows)]
-        {
-            r#"for /L %i in (1,1,16384) do @<nul 1>&2 set /p "=xxxxxxxxxxxxxxxx"& <nul 1>&2 set /p "=TAIL-MARKER"& exit /b 0"#.to_owned()
-        }
-        #[cfg(not(windows))]
-        {
-            r#"i=0; while [ "$i" -lt 16384 ]; do printf 'xxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done; printf 'TAIL-MARKER' >&2"#.to_owned()
-        }
     }
 }
