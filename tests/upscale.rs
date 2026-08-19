@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     process,
@@ -6,8 +7,9 @@ use std::{
 };
 
 use apollo::{
-    media::model::{MediaFile, VideoStream},
+    media::model::{AudioStream, MediaFile, VideoStream},
     upscale::{
+        command::{UpscaleCommandError, build_upscale_invocation},
         model::{UpscaleRequest, UpscaleTarget, VideoCodec},
         sizing::{
             OutputDimensions, UpscaleSizingError, calculate_output_dimensions,
@@ -18,6 +20,317 @@ use apollo::{
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn supported_targets_build_the_planned_scale_filters() {
+    let temp = TestDirectory::new();
+    let media = media_with_audio_codecs(
+        temp.path().join("input.mp4"),
+        Some(1280),
+        Some(720),
+        &[Some("aac")],
+    );
+
+    for (target, expected_filter) in [
+        (UpscaleTarget::Qhd1440, "scale=2560:1440:flags=lanczos"),
+        (UpscaleTarget::Uhd4k, "scale=3840:2160:flags=lanczos"),
+        (UpscaleTarget::Uhd8k, "scale=7680:4320:flags=lanczos"),
+    ] {
+        let request = request(&temp, target);
+        let dimensions = calculate_output_dimensions(1280, 720, target)
+            .expect("fixture should have a valid upscale");
+        let args = invocation_args(&request, &media, dimensions);
+
+        assert_eq!(option_values(&args, "-vf"), vec![expected_filter]);
+    }
+}
+
+#[test]
+fn h264_uses_libx264_crf_18_and_slow_preset() {
+    let temp = TestDirectory::new();
+    let request = request(&temp, UpscaleTarget::Uhd4k);
+    let media = media_with_audio_codecs(
+        request.input.clone(),
+        Some(1920),
+        Some(1080),
+        &[Some("aac")],
+    );
+    let args = invocation_args(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    );
+
+    assert_eq!(option_values(&args, "-c:v"), vec!["libx264"]);
+    assert_eq!(option_values(&args, "-crf"), vec!["18"]);
+    assert_eq!(option_values(&args, "-preset"), vec!["slow"]);
+}
+
+#[test]
+fn h265_uses_libx265_crf_20_and_slow_preset() {
+    let temp = TestDirectory::new();
+    let mut request = request(&temp, UpscaleTarget::Uhd4k);
+    request.codec = VideoCodec::H265;
+    let media = media_with_audio_codecs(
+        request.input.clone(),
+        Some(1920),
+        Some(1080),
+        &[Some("aac")],
+    );
+    let args = invocation_args(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    );
+
+    assert_eq!(option_values(&args, "-c:v"), vec!["libx265"]);
+    assert_eq!(option_values(&args, "-crf"), vec!["20"]);
+    assert_eq!(option_values(&args, "-preset"), vec!["slow"]);
+}
+
+#[test]
+fn calculated_ultrawide_output_is_used_without_padding_or_crop() {
+    let temp = TestDirectory::new();
+    let request = request(&temp, UpscaleTarget::Uhd4k);
+    let media =
+        media_with_audio_codecs(request.input.clone(), Some(1920), Some(800), &[Some("aac")]);
+    let dimensions = calculate_output_dimensions(1920, 800, request.target)
+        .expect("ultrawide fixture should have a valid upscale");
+    let args = invocation_args(&request, &media, dimensions);
+    let filters = option_values(&args, "-vf");
+
+    assert_eq!(filters, vec!["scale=3840:1600:flags=lanczos"]);
+    assert!(!filters[0].contains("pad="));
+    assert!(!filters[0].contains("crop="));
+}
+
+#[test]
+fn video_is_reencoded_and_mp4_output_is_explicit() {
+    let temp = TestDirectory::new();
+    let request = request(&temp, UpscaleTarget::Uhd4k);
+    let media = media_with_audio_codecs(
+        request.input.clone(),
+        Some(1920),
+        Some(1080),
+        &[Some("aac")],
+    );
+    let args = invocation_args(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    );
+
+    assert_eq!(option_values(&args, "-c:v"), vec!["libx264"]);
+    assert_ne!(option_values(&args, "-c:v"), vec!["copy"]);
+    assert_eq!(option_values(&args, "-f"), vec!["mp4"]);
+}
+
+#[test]
+fn primary_video_and_optional_audio_are_mapped_explicitly() {
+    let temp = TestDirectory::new();
+    let request = request(&temp, UpscaleTarget::Uhd4k);
+    let mut media = media_with_audio_codecs(
+        request.input.clone(),
+        Some(1920),
+        Some(1080),
+        &[Some("aac")],
+    );
+    media.video_streams[0].stream_index = 5;
+    let args = invocation_args(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    );
+
+    assert_eq!(option_values(&args, "-map"), vec!["0:5", "0:a?"]);
+}
+
+#[test]
+fn mp4_compatible_audio_codecs_are_stream_copied() {
+    let temp = TestDirectory::new();
+    let request = request(&temp, UpscaleTarget::Uhd4k);
+
+    for codec in [
+        "aac",
+        "alac",
+        "ac3",
+        "eac3",
+        "mp3",
+        "opus",
+        "flac",
+        "vorbis",
+        "dts",
+        "pcm_s16le",
+        "pcm_s16be",
+        "pcm_s24le",
+        "pcm_s24be",
+        "pcm_s32le",
+        "pcm_s32be",
+    ] {
+        let media = media_with_audio_codecs(
+            request.input.clone(),
+            Some(1920),
+            Some(1080),
+            &[Some(codec)],
+        );
+        let args = invocation_args(
+            &request,
+            &media,
+            OutputDimensions {
+                width: 3840,
+                height: 2160,
+            },
+        );
+
+        assert_eq!(option_values(&args, "-c:a"), vec!["copy"], "codec {codec}");
+    }
+}
+
+#[test]
+fn incompatible_or_unknown_audio_falls_back_to_aac() {
+    let temp = TestDirectory::new();
+    let request = request(&temp, UpscaleTarget::Uhd4k);
+
+    for codec in [Some("wmav2"), Some("not-a-real-codec"), None] {
+        let media =
+            media_with_audio_codecs(request.input.clone(), Some(1920), Some(1080), &[codec]);
+        let args = invocation_args(
+            &request,
+            &media,
+            OutputDimensions {
+                width: 3840,
+                height: 2160,
+            },
+        );
+
+        assert_eq!(option_values(&args, "-c:a"), vec!["aac"]);
+    }
+}
+
+#[test]
+fn any_incompatible_audio_stream_forces_safe_aac_fallback() {
+    let temp = TestDirectory::new();
+    let request = request(&temp, UpscaleTarget::Uhd4k);
+    let media = media_with_audio_codecs(
+        request.input.clone(),
+        Some(1920),
+        Some(1080),
+        &[Some("aac"), Some("wmav2")],
+    );
+    let args = invocation_args(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    );
+
+    assert_eq!(option_values(&args, "-c:a"), vec!["aac"]);
+}
+
+#[test]
+fn no_audio_keeps_optional_mapping_without_audio_codec_option() {
+    let temp = TestDirectory::new();
+    let request = request(&temp, UpscaleTarget::Uhd4k);
+    let media = media(request.input.clone(), Some(1920), Some(1080));
+    let args = invocation_args(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    );
+
+    assert_eq!(option_values(&args, "-map"), vec!["0:0", "0:a?"]);
+    assert!(option_values(&args, "-c:a").is_empty());
+}
+
+#[test]
+fn unusual_input_and_output_paths_remain_single_arguments() {
+    let temp = TestDirectory::new();
+    let request = UpscaleRequest {
+        input: temp.path().join("source [$weird]; name 'one'.mkv"),
+        output: temp.path().join("output [$weird]; name 'two'.mp4"),
+        target: UpscaleTarget::Uhd4k,
+        codec: VideoCodec::H264,
+    };
+    let media = media_with_audio_codecs(
+        request.input.clone(),
+        Some(1920),
+        Some(1080),
+        &[Some("aac")],
+    );
+    let invocation = build_upscale_invocation(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    )
+    .expect("valid request should build an FFmpeg invocation");
+
+    assert_eq!(invocation.args[0], "-i");
+    assert_eq!(invocation.args[1], request.input.as_os_str());
+    assert_eq!(
+        invocation.args.last().map(OsString::as_os_str),
+        Some(request.output.as_os_str())
+    );
+    assert_eq!(
+        invocation
+            .args
+            .iter()
+            .filter(|arg| arg.as_os_str() == request.input.as_os_str())
+            .count(),
+        1
+    );
+    assert_eq!(
+        invocation
+            .args
+            .iter()
+            .filter(|arg| arg.as_os_str() == request.output.as_os_str())
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn command_builder_rejects_missing_primary_video_stream() {
+    let temp = TestDirectory::new();
+    let request = request(&temp, UpscaleTarget::Uhd4k);
+    let media = MediaFile {
+        path: request.input.clone(),
+        duration: None,
+        video_streams: Vec::new(),
+        audio_streams: Vec::new(),
+    };
+
+    assert_eq!(
+        build_upscale_invocation(
+            &request,
+            &media,
+            OutputDimensions {
+                width: 3840,
+                height: 2160,
+            },
+        ),
+        Err(UpscaleCommandError::MissingVideoStream)
+    );
+}
 
 #[test]
 fn supported_targets_expose_the_planned_boundaries() {
@@ -457,6 +770,25 @@ fn assert_close_to_maximal_boundary_fit(
     }
 }
 
+fn invocation_args(
+    request: &UpscaleRequest,
+    media: &MediaFile,
+    dimensions: OutputDimensions,
+) -> Vec<String> {
+    build_upscale_invocation(request, media, dimensions)
+        .expect("valid request should build an FFmpeg invocation")
+        .args
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn option_values<'a>(args: &'a [String], option: &str) -> Vec<&'a str> {
+    args.windows(2)
+        .filter_map(|pair| (pair[0] == option).then_some(pair[1].as_str()))
+        .collect()
+}
+
 fn request(temp: &TestDirectory, target: UpscaleTarget) -> UpscaleRequest {
     UpscaleRequest {
         input: temp.path().join("input.mp4"),
@@ -464,6 +796,28 @@ fn request(temp: &TestDirectory, target: UpscaleTarget) -> UpscaleRequest {
         target,
         codec: VideoCodec::H264,
     }
+}
+
+fn media_with_audio_codecs(
+    path: PathBuf,
+    width: Option<u32>,
+    height: Option<u32>,
+    codecs: &[Option<&str>],
+) -> MediaFile {
+    let mut media = media(path, width, height);
+    media.audio_streams = codecs
+        .iter()
+        .enumerate()
+        .map(|(offset, codec)| AudioStream {
+            stream_index: u32::try_from(offset + 1).expect("test stream index should fit u32"),
+            codec: codec.map(str::to_owned),
+            channels: Some(2),
+            channel_layout: Some("stereo".to_owned()),
+            title: None,
+            language: None,
+        })
+        .collect();
+    media
 }
 
 fn media(path: PathBuf, width: Option<u32>, height: Option<u32>) -> MediaFile {
