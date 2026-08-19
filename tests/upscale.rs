@@ -9,6 +9,10 @@ use apollo::{
     media::model::{MediaFile, VideoStream},
     upscale::{
         model::{UpscaleRequest, UpscaleTarget, VideoCodec},
+        sizing::{
+            OutputDimensions, UpscaleSizingError, calculate_output_dimensions,
+            oriented_target_boundary,
+        },
         validation::{UpscaleValidationError, validate_upscale_request},
     },
 };
@@ -20,6 +24,224 @@ fn supported_targets_expose_the_planned_boundaries() {
     assert_eq!(UpscaleTarget::Qhd1440.boundary(), (2560, 1440));
     assert_eq!(UpscaleTarget::Uhd4k.boundary(), (3840, 2160));
     assert_eq!(UpscaleTarget::Uhd8k.boundary(), (7680, 4320));
+}
+
+#[test]
+fn sixteen_by_nine_fills_the_4k_boundary() {
+    assert_eq!(
+        calculate_output_dimensions(1920, 1080, UpscaleTarget::Uhd4k),
+        Ok(OutputDimensions {
+            width: 3840,
+            height: 2160,
+        })
+    );
+}
+
+#[test]
+fn ultrawide_fills_the_long_edge_without_padding_or_crop() {
+    assert_eq!(
+        calculate_output_dimensions(1920, 800, UpscaleTarget::Uhd4k),
+        Ok(OutputDimensions {
+            width: 3840,
+            height: 1600,
+        })
+    );
+}
+
+#[test]
+fn four_by_three_fills_the_short_edge_without_stretching() {
+    assert_eq!(
+        calculate_output_dimensions(1024, 768, UpscaleTarget::Uhd4k),
+        Ok(OutputDimensions {
+            width: 2880,
+            height: 2160,
+        })
+    );
+}
+
+#[test]
+fn portrait_uses_the_corresponding_portrait_boundary() {
+    assert_eq!(
+        oriented_target_boundary(UpscaleTarget::Uhd4k, 1080, 1920),
+        OutputDimensions {
+            width: 2160,
+            height: 3840,
+        }
+    );
+    assert_eq!(
+        calculate_output_dimensions(1080, 1920, UpscaleTarget::Uhd4k),
+        Ok(OutputDimensions {
+            width: 2160,
+            height: 3840,
+        })
+    );
+}
+
+#[test]
+fn square_uses_the_landscape_box_and_is_limited_by_its_short_edge() {
+    assert_eq!(
+        oriented_target_boundary(UpscaleTarget::Uhd4k, 1000, 1000),
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        }
+    );
+    assert_eq!(
+        calculate_output_dimensions(1000, 1000, UpscaleTarget::Uhd4k),
+        Ok(OutputDimensions {
+            width: 2160,
+            height: 2160,
+        })
+    );
+}
+
+#[test]
+fn odd_source_dimensions_preserve_exact_ratio_when_even_multiple_fits() {
+    let output = calculate_output_dimensions(1503, 1002, UpscaleTarget::Uhd4k)
+        .expect("odd-sized source should have a valid even output");
+
+    assert_eq!(
+        output,
+        OutputDimensions {
+            width: 3240,
+            height: 2160,
+        }
+    );
+    assert_eq!(
+        u64::from(output.width) * 1002,
+        u64::from(output.height) * 1503
+    );
+    assert!(output.width.is_multiple_of(2));
+    assert!(output.height.is_multiple_of(2));
+}
+
+#[test]
+fn nonstandard_854_by_480_uses_the_maximal_4k_fit() {
+    let output = calculate_output_dimensions(854, 480, UpscaleTarget::Uhd4k)
+        .expect("non-standard source should have a valid 4K fit");
+
+    assert_eq!(
+        output,
+        OutputDimensions {
+            width: 3840,
+            height: 2158,
+        }
+    );
+    assert_close_to_maximal_boundary_fit(854, 480, UpscaleTarget::Uhd4k, output);
+}
+
+#[test]
+fn nonstandard_1001_by_333_uses_the_maximal_4k_fit() {
+    let output = calculate_output_dimensions(1001, 333, UpscaleTarget::Uhd4k)
+        .expect("non-standard source should have a valid 4K fit");
+
+    assert_eq!(
+        output,
+        OutputDimensions {
+            width: 3840,
+            height: 1278,
+        }
+    );
+    assert_close_to_maximal_boundary_fit(1001, 333, UpscaleTarget::Uhd4k, output);
+}
+
+#[test]
+fn portrait_nonstandard_ratio_uses_the_maximal_portrait_4k_fit() {
+    let output = calculate_output_dimensions(480, 854, UpscaleTarget::Uhd4k)
+        .expect("portrait source should have a valid 4K fit");
+
+    assert_eq!(
+        output,
+        OutputDimensions {
+            width: 2158,
+            height: 3840,
+        }
+    );
+    assert_close_to_maximal_boundary_fit(480, 854, UpscaleTarget::Uhd4k, output);
+}
+
+#[test]
+fn even_rounding_never_exceeds_the_selected_boundary() {
+    for (width, height) in [(1919, 1079), (2001, 2000), (1079, 1919), (1001, 333)] {
+        let boundary = oriented_target_boundary(UpscaleTarget::Uhd4k, width, height);
+        let output = calculate_output_dimensions(width, height, UpscaleTarget::Uhd4k)
+            .expect("fixture should produce a valid upscale");
+
+        assert!(output.width <= boundary.width);
+        assert!(output.height <= boundary.height);
+        assert!(output.width.is_multiple_of(2));
+        assert!(output.height.is_multiple_of(2));
+    }
+}
+
+#[test]
+fn source_at_target_boundary_is_rejected_by_sizing() {
+    assert_eq!(
+        calculate_output_dimensions(3840, 2160, UpscaleTarget::Uhd4k),
+        Err(UpscaleSizingError::TargetNotLarger {
+            target: UpscaleTarget::Uhd4k,
+            source_width: 3840,
+            source_height: 2160,
+            boundary_width: 3840,
+            boundary_height: 2160,
+        })
+    );
+}
+
+#[test]
+fn sizing_rejects_zero_source_dimensions() {
+    assert_eq!(
+        calculate_output_dimensions(0, 1080, UpscaleTarget::Uhd4k),
+        Err(UpscaleSizingError::InvalidSourceDimensions {
+            width: 0,
+            height: 1080,
+        })
+    );
+}
+
+#[test]
+fn even_quantization_never_downscales_a_source_edge() {
+    for (width, height) in [(3839, 2159), (3000, 1), (2159, 3839), (2001, 2000)] {
+        let output = calculate_output_dimensions(width, height, UpscaleTarget::Uhd4k)
+            .expect("fixture should produce a valid upscale");
+
+        assert!(output.width >= width);
+        assert!(output.height >= height);
+    }
+}
+
+#[test]
+fn near_boundary_source_uses_minimal_even_fallback_when_exact_upscale_cannot_fit() {
+    assert_eq!(
+        calculate_output_dimensions(3839, 2159, UpscaleTarget::Uhd4k),
+        Ok(OutputDimensions {
+            width: 3840,
+            height: 2160,
+        })
+    );
+}
+
+#[test]
+fn aspect_ratio_error_is_limited_to_even_pixel_quantization() {
+    for (width, height) in [
+        (1920, 1080),
+        (1920, 800),
+        (1024, 768),
+        (1080, 1920),
+        (1000, 1000),
+        (1919, 1079),
+        (3839, 2159),
+        (2001, 2000),
+        (1079, 1919),
+        (854, 480),
+        (1001, 333),
+        (480, 854),
+    ] {
+        let output = calculate_output_dimensions(width, height, UpscaleTarget::Uhd4k)
+            .expect("fixture should produce a valid upscale");
+
+        assert_close_to_maximal_boundary_fit(width, height, UpscaleTarget::Uhd4k, output);
+    }
 }
 
 #[test]
@@ -195,6 +417,44 @@ fn valid_request_preserves_selected_codec_in_domain_model() {
 
     assert_eq!(validate_upscale_request(&request, &media), Ok(()));
     assert_eq!(request.codec, VideoCodec::H265);
+}
+
+fn assert_close_to_maximal_boundary_fit(
+    source_width: u32,
+    source_height: u32,
+    target: UpscaleTarget,
+    output: OutputDimensions,
+) {
+    let boundary = oriented_target_boundary(target, source_width, source_height);
+    let width_limited = u64::from(boundary.width) * u64::from(source_height)
+        <= u64::from(boundary.height) * u64::from(source_width);
+
+    assert!(output.width >= source_width);
+    assert!(output.height >= source_height);
+    assert!(output.width <= boundary.width);
+    assert!(output.height <= boundary.height);
+    assert!(output.width.is_multiple_of(2));
+    assert!(output.height.is_multiple_of(2));
+
+    if width_limited {
+        let ideal_height =
+            f64::from(source_height) * f64::from(boundary.width) / f64::from(source_width);
+        assert_eq!(output.width, boundary.width);
+        assert!(
+            (f64::from(output.height) - ideal_height).abs() <= 1.0,
+            "height {} should be within one pixel of maximal ideal {ideal_height}",
+            output.height
+        );
+    } else {
+        let ideal_width =
+            f64::from(source_width) * f64::from(boundary.height) / f64::from(source_height);
+        assert_eq!(output.height, boundary.height);
+        assert!(
+            (f64::from(output.width) - ideal_width).abs() <= 1.0,
+            "width {} should be within one pixel of maximal ideal {ideal_width}",
+            output.width
+        );
+    }
 }
 
 fn request(temp: &TestDirectory, target: UpscaleTarget) -> UpscaleRequest {

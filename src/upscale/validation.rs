@@ -5,7 +5,10 @@ use std::{
 
 use crate::media::model::MediaFile;
 
-use super::model::{UpscaleRequest, UpscaleTarget};
+use super::{
+    model::{UpscaleRequest, UpscaleTarget},
+    sizing::oriented_target_boundary,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpscaleValidationError {
@@ -118,11 +121,9 @@ fn validate_target_is_larger(
     source_width: u32,
     source_height: u32,
 ) -> Result<(), UpscaleValidationError> {
-    let (target_width, target_height) = target.boundary();
-    let (source_long, source_short) = ordered_edges(source_width, source_height);
-    let (target_long, target_short) = ordered_edges(target_width, target_height);
+    let boundary = oriented_target_boundary(target, source_width, source_height);
 
-    if source_long < target_long && source_short < target_short {
+    if source_width < boundary.width && source_height < boundary.height {
         return Ok(());
     }
 
@@ -130,17 +131,9 @@ fn validate_target_is_larger(
         target,
         source_width,
         source_height,
-        target_width,
-        target_height,
+        target_width: boundary.width,
+        target_height: boundary.height,
     })
-}
-
-const fn ordered_edges(width: u32, height: u32) -> (u32, u32) {
-    if width >= height {
-        (width, height)
-    } else {
-        (height, width)
-    }
 }
 
 fn same_requested_path(input: &Path, output: &Path) -> bool {
