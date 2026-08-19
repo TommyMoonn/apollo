@@ -1,4 +1,6 @@
-use egui::{Align, Frame, InnerResponse, Layout, Margin, ScrollArea, Style, Ui, Vec2, vec2};
+use egui::{
+    Align, Frame, InnerResponse, Layout, Margin, Rect, ScrollArea, Style, Ui, UiBuilder, Vec2, vec2,
+};
 
 use super::theme;
 
@@ -28,6 +30,15 @@ pub const TASK_CONTENT_MAX_WIDTH: f32 = 520.0;
 
 /// Selected Quiet Focus maximum for the Audio Mix track viewport before scrolling.
 pub const AUDIO_TRACK_LIST_MAX_HEIGHT: f32 = 108.0;
+
+/// Narrow focal width used by Audio Mix running and terminal surfaces.
+pub const FOCUS_CONTENT_MAX_WIDTH: f32 = 470.0;
+
+/// Reference minimum focal-region height from the selected Quiet Focus surface recipe.
+pub const FOCUS_CONTENT_MIN_HEIGHT: f32 = 230.0;
+
+/// Failure diagnostics remain subordinate and bounded inside terminal surfaces.
+pub const DIAGNOSTIC_MAX_HEIGHT: f32 = 80.0;
 
 /// Progress tracks are deliberately thin and rectangular.
 pub const PROGRESS_TRACK_HEIGHT: f32 = 4.0;
@@ -111,6 +122,81 @@ pub fn task_content<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> 
         )
     })
     .inner
+}
+
+/// Result of laying out a narrow running/result focal composition.
+///
+/// [`content_size`](Self::content_size) is measured from the current rendered composition before
+/// placement, while [`viewport_size`](Self::viewport_size) is the visible focal region. This keeps
+/// overflow decisions content-aware without turning the Quiet Focus reference minimum into a
+/// global threshold.
+pub struct FocusContentResponse<R> {
+    pub inner: R,
+    pub content_size: Vec2,
+    pub viewport_size: Vec2,
+}
+
+impl<R> FocusContentResponse<R> {
+    /// Whether the current composition exceeds the visible focal viewport.
+    pub fn is_scrollable(&self) -> bool {
+        self.content_size.y > self.viewport_size.y + f32::EPSILON
+    }
+}
+
+/// Center a narrow running/result surface as one sparse focal composition.
+///
+/// A sizing pass measures the current composition at the same bounded width, including wrapped
+/// copy and expanded bounded diagnostics. If that measured height fits, the real surface keeps
+/// vertically centered top-down flow with no outer scroll area. If it does not fit, the real
+/// surface uses a vertical [`ScrollArea`] so terminal actions remain reachable.
+///
+/// `FOCUS_CONTENT_MIN_HEIGHT` remains the selected Quiet Focus reference minimum. Actual rendered
+/// content, not that metric, is authoritative for overflow.
+pub fn focus_content<R>(
+    ui: &mut Ui,
+    mut add_contents: impl FnMut(&mut Ui) -> R,
+) -> FocusContentResponse<R> {
+    let available = safe_available_size(ui.available_size());
+    let content_width = bounded_content_width(available.x).min(FOCUS_CONTENT_MAX_WIDTH);
+    let measure_rect = Rect::from_min_size(ui.cursor().min, vec2(content_width, available.y));
+    let mut measure_ui = ui.new_child(
+        UiBuilder::new()
+            .id_salt("focus_content_measure")
+            .max_rect(measure_rect)
+            .layout(Layout::top_down(Align::LEFT))
+            .sizing_pass()
+            .invisible(),
+    );
+    let _ = add_contents(&mut measure_ui);
+    let measured_size = safe_available_size(measure_ui.min_rect().size());
+    let overflow = measured_size.y > available.y + f32::EPSILON;
+
+    let rendered = ui
+        .with_layout(Layout::top_down(Align::Center), |ui| {
+            ui.allocate_ui_with_layout(
+                vec2(content_width, available.y),
+                Layout::top_down(Align::LEFT),
+                |ui| {
+                    if overflow {
+                        ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, &mut add_contents)
+                            .inner
+                    } else {
+                        let top_space = ((available.y - measured_size.y) * 0.5).max(0.0);
+                        ui.add_space(top_space);
+                        add_contents(ui)
+                    }
+                },
+            )
+        })
+        .inner;
+
+    FocusContentResponse {
+        inner: rendered.inner,
+        content_size: measured_size,
+        viewport_size: vec2(content_width, available.y),
+    }
 }
 
 /// Render a bounded task column with vertical overflow only when its layout plan requires it.
@@ -330,12 +416,13 @@ mod tests {
     use egui::{Style, Vec2};
 
     use super::{
-        AUDIO_TRACK_LIST_MAX_HEIGHT, ActionLayout, CONTENT_PADDING, ListBehavior,
-        MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT,
-        REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE, TASK_CONTENT_MAX_WIDTH, TaskOverflow,
-        TextOverflowPolicy, WINDOW_CHROME_HEIGHT, action_group_size, action_layout,
-        bounded_content_width, bounded_task_content_width, centered_action_group, content_frame,
-        flexible_row_width, list_viewport, task_surface_plan,
+        AUDIO_TRACK_LIST_MAX_HEIGHT, ActionLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT,
+        FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, ListBehavior, MAX_CONTENT_WIDTH,
+        MINIMUM_CONTENT_SIZE, PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE,
+        REFERENCE_WINDOW_SIZE, TASK_CONTENT_MAX_WIDTH, TaskOverflow, TextOverflowPolicy,
+        WINDOW_CHROME_HEIGHT, action_group_size, action_layout, bounded_content_width,
+        bounded_task_content_width, centered_action_group, content_frame, flexible_row_width,
+        focus_content, list_viewport, task_surface_plan,
     };
     use crate::ui::theme;
 
@@ -349,6 +436,9 @@ mod tests {
         assert_eq!(MAX_CONTENT_WIDTH, 564.0);
         assert_eq!(TASK_CONTENT_MAX_WIDTH, 520.0);
         assert_eq!(AUDIO_TRACK_LIST_MAX_HEIGHT, 108.0);
+        assert_eq!(FOCUS_CONTENT_MAX_WIDTH, 470.0);
+        assert_eq!(FOCUS_CONTENT_MIN_HEIGHT, 230.0);
+        assert_eq!(DIAGNOSTIC_MAX_HEIGHT, 80.0);
         assert_eq!(theme::PRIMARY_CONTROL_HEIGHT, 31.0);
         assert_eq!(theme::COMPACT_CONTROL_HEIGHT, 30.0);
         assert_eq!(theme::SPACING.compact, 7.0);
@@ -480,6 +570,183 @@ mod tests {
                 action_bounds.height(),
                 theme::PRIMARY_CONTROL_HEIGHT * 2.0 + theme::SPACING.compact
             );
+        });
+    }
+
+    #[test]
+    fn focal_measurement_pass_is_invisible() {
+        use std::cell::Cell;
+
+        egui::__run_test_ui(|ui| {
+            let sizing_pass_seen = Cell::new(false);
+            let available = Vec2::new(470.0, 260.0);
+            let (parent_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+
+            let _ = ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(parent_rect)
+                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                |ui| {
+                    focus_content(ui, |ui| {
+                        if ui.is_sizing_pass() {
+                            sizing_pass_seen.set(true);
+                            assert!(!ui.is_visible());
+                        }
+                        ui.allocate_exact_size(Vec2::new(220.0, 195.0), egui::Sense::hover())
+                            .0
+                    })
+                },
+            );
+
+            assert!(sizing_pass_seen.get());
+        });
+    }
+
+    #[test]
+    fn reference_height_running_focus_remains_centered_without_scrolling() {
+        egui::__run_test_ui(|ui| {
+            let available = Vec2::new(470.0, 323.0);
+            let content_height = 168.0;
+            let (parent_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+
+            let response = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(parent_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    |ui| {
+                        focus_content(ui, |ui| {
+                            ui.allocate_exact_size(
+                                Vec2::new(220.0, content_height),
+                                egui::Sense::hover(),
+                            )
+                            .0
+                        })
+                    },
+                )
+                .inner;
+
+            assert!(!response.is_scrollable());
+            assert_eq!(response.viewport_size.y, available.y);
+            assert!((response.inner.center().y - parent_rect.center().y).abs() < 0.5);
+        });
+    }
+
+    #[test]
+    fn reference_height_terminal_focus_remains_centered_without_scrolling() {
+        egui::__run_test_ui(|ui| {
+            let available = Vec2::new(470.0, 323.0);
+            let content_height = 196.0;
+            let (parent_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+
+            let response = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(parent_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    |ui| {
+                        focus_content(ui, |ui| {
+                            ui.allocate_exact_size(
+                                Vec2::new(220.0, content_height),
+                                egui::Sense::hover(),
+                            )
+                            .0
+                        })
+                    },
+                )
+                .inner;
+
+            assert!(!response.is_scrollable());
+            assert_eq!(response.viewport_size.y, available.y);
+            assert!((response.inner.center().y - parent_rect.center().y).abs() < 0.5);
+        });
+    }
+
+    #[test]
+    fn constrained_focus_content_scrolls_when_current_composition_exceeds_viewport() {
+        egui::__run_test_ui(|ui| {
+            let available = Vec2::new(470.0, 200.0);
+            let (parent_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+
+            let response = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(parent_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    |ui| {
+                        focus_content(ui, |ui| {
+                            ui.allocate_exact_size(
+                                Vec2::new(220.0, FOCUS_CONTENT_MIN_HEIGHT),
+                                egui::Sense::hover(),
+                            )
+                            .0
+                        })
+                    },
+                )
+                .inner;
+
+            assert!(response.is_scrollable());
+            assert!(response.content_size.y > response.viewport_size.y);
+        });
+    }
+
+    #[test]
+    fn focal_overflow_uses_rendered_height_not_230_px_reference_threshold() {
+        egui::__run_test_ui(|ui| {
+            let available = Vec2::new(470.0, 260.0);
+            let expanded_height = 300.0;
+            let (parent_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+
+            let response = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(parent_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    |ui| {
+                        focus_content(ui, |ui| {
+                            ui.allocate_exact_size(
+                                Vec2::new(220.0, expanded_height),
+                                egui::Sense::hover(),
+                            )
+                            .0
+                        })
+                    },
+                )
+                .inner;
+
+            assert!(available.y > FOCUS_CONTENT_MIN_HEIGHT);
+            assert!(response.is_scrollable());
+            assert!(response.content_size.y >= expanded_height);
+        });
+    }
+
+    #[test]
+    fn collapsing_focal_content_restores_centered_non_overflow_flow() {
+        egui::__run_test_ui(|ui| {
+            let available = Vec2::new(470.0, 260.0);
+            let compact_height = 180.0;
+            let (parent_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+
+            let response = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(parent_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    |ui| {
+                        focus_content(ui, |ui| {
+                            ui.allocate_exact_size(
+                                Vec2::new(220.0, compact_height),
+                                egui::Sense::hover(),
+                            )
+                            .0
+                        })
+                    },
+                )
+                .inner;
+
+            assert!(available.y > FOCUS_CONTENT_MIN_HEIGHT);
+            assert!(!response.is_scrollable());
+            assert!((response.inner.center().y - parent_rect.center().y).abs() < 0.5);
         });
     }
 

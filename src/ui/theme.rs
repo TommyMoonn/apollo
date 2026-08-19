@@ -38,6 +38,13 @@ pub const PATH_FIELD_HORIZONTAL_PADDING: f32 = 8.0;
 pub const MODE_BUTTON_HORIZONTAL_PADDING: f32 = 13.0;
 pub const SOURCE_HEADER_GAP: f32 = 14.0;
 pub const INLINE_ACTION_GAP: f32 = 10.0;
+pub const STATUS_COPY_GAP: f32 = 6.0;
+pub const FOOTER_ACTION_GAP: f32 = 8.0;
+pub const RUNNING_FOOTER_GAP: f32 = 44.0;
+pub const RESULT_FOOTER_GAP: f32 = 42.0;
+pub const DIAGNOSTIC_TOP_GAP: f32 = 14.0;
+pub const DETAILS_TOP_GAP: f32 = 10.0;
+pub const DETAILS_SEPARATOR_GAP: f32 = 9.0;
 
 const _: () = assert!(CONTROL_RADIUS <= 2);
 const _: () = assert!(CONTAINER_RADIUS <= 2);
@@ -297,13 +304,15 @@ mod tests {
 
     use super::{
         BACKGROUND, BORDER_STRONG, COMPACT_CONTROL_HEIGHT, ControlTone, DANGER_INTERACTIVE,
-        DISABLED, FOCUS, FOCUS_OFFSET, FOCUS_STROKE_WIDTH, FOREGROUND, HOVER, InteractionState,
+        DETAILS_SEPARATOR_GAP, DETAILS_TOP_GAP, DIAGNOSTIC_TOP_GAP, DISABLED, FOCUS, FOCUS_OFFSET,
+        FOCUS_STROKE_WIDTH, FOOTER_ACTION_GAP, FOREGROUND, HOVER, InteractionState,
         MODE_BUTTON_HORIZONTAL_PADDING, PATH_FIELD_HORIZONTAL_PADDING, PRESSED,
         PRIMARY_CONTROL_HEIGHT, PRIMARY_HOVER, PRIMARY_PRESSED, PROGRESS, PROGRESS_RADIUS,
-        SECONDARY, SECONDARY_FAINT, SELECTABLE_ROW_CONTENT_GAP, SELECTABLE_ROW_HORIZONTAL_PADDING,
+        RESULT_FOOTER_GAP, RUNNING_FOOTER_GAP, SECONDARY, SECONDARY_FAINT,
+        SELECTABLE_ROW_CONTENT_GAP, SELECTABLE_ROW_HORIZONTAL_PADDING,
         SELECTABLE_ROW_INDICATOR_COLUMN, SELECTABLE_ROW_MIN_HEIGHT, SELECTION,
-        SELECTION_INDICATOR_SIZE, SEPARATOR, SEPARATOR_WIDTH, SPACING, ThemeRole, apply_to_style,
-        control_colors, monochrome_visuals, selectable_colors,
+        SELECTION_INDICATOR_SIZE, SEPARATOR, SEPARATOR_WIDTH, SPACING, STATUS_COPY_GAP, ThemeRole,
+        apply_to_style, control_colors, monochrome_visuals, selectable_colors,
     };
 
     #[test]
@@ -457,6 +466,13 @@ mod tests {
         assert_eq!(std::hint::black_box(SELECTABLE_ROW_INDICATOR_COLUMN), 18.0);
         assert_eq!(std::hint::black_box(SELECTABLE_ROW_CONTENT_GAP), 8.0);
         assert_eq!(std::hint::black_box(PATH_FIELD_HORIZONTAL_PADDING), 8.0);
+        assert_eq!(std::hint::black_box(STATUS_COPY_GAP), 6.0);
+        assert_eq!(std::hint::black_box(FOOTER_ACTION_GAP), 8.0);
+        assert_eq!(std::hint::black_box(RUNNING_FOOTER_GAP), 44.0);
+        assert_eq!(std::hint::black_box(RESULT_FOOTER_GAP), 42.0);
+        assert_eq!(std::hint::black_box(DIAGNOSTIC_TOP_GAP), 14.0);
+        assert_eq!(std::hint::black_box(DETAILS_TOP_GAP), 10.0);
+        assert_eq!(std::hint::black_box(DETAILS_SEPARATOR_GAP), 9.0);
     }
 
     #[test]

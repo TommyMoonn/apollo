@@ -23,7 +23,7 @@ const CLEAR_LABEL: &str = "Clear";
 const BROWSE_LABEL: &str = "Browse";
 const MIX_LABEL: &str = "Mix selected tracks";
 
-/// Pre-execution Audio Mix state. Process lifecycle remains owned by later phases.
+/// Pre-execution Audio Mix state. Process lifecycle remains owned by `AudioMixExecutor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioMixSelectionState {
     selected_streams: BTreeSet<u32>,
@@ -162,8 +162,8 @@ impl AudioMixSelectionState {
 
 /// Render the complete pre-execution Audio Mix configuration surface.
 ///
-/// The caller owns source acquisition and later execution. This surface only mutates selection,
-/// container, and output-path state and emits user intent for those external responsibilities.
+/// The caller owns source acquisition and execution orchestration. This surface only mutates
+/// selection, container, and output-path state and emits user intent for those responsibilities.
 pub fn show(
     ui: &mut Ui,
     media: &MediaFile,

@@ -404,6 +404,19 @@ fn mixed_audio_is_encoded_to_aac_for_both_containers() {
 }
 
 #[test]
+fn command_enables_machine_readable_progress_on_stdout() {
+    let temp = TestDirectory::new();
+    let request = valid_request(&temp);
+    let media = media(request.input.clone());
+    let args = invocation_args(&request, &media);
+    let output = request.output.to_string_lossy().into_owned();
+
+    assert_eq!(option_values(&args, "-progress"), vec!["pipe:1"]);
+    assert!(args.iter().any(|arg| arg == "-nostats"));
+    assert_eq!(args.last(), Some(&output));
+}
+
+#[test]
 fn original_audio_streams_are_never_mapped_as_output_audio() {
     let temp = TestDirectory::new();
     let request = valid_request(&temp);

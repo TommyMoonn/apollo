@@ -5,8 +5,9 @@ use crate::media::{
     output::{MediaOutput, MediaOutputDisposition, MediaOutputError},
     process::{
         MediaProcess, MediaProcessCommand, MediaProcessFailure, MediaProcessStartError,
-        MediaProcessState,
+        MediaProcessState, ProcessProgressSource,
     },
+    progress::{MediaProgress, MediaProgressParser},
     tools::MediaTools,
 };
 
@@ -100,6 +101,23 @@ impl AudioMixExecutor {
         self.operation.is_some()
     }
 
+    pub fn progress(&self) -> Option<&MediaProgress> {
+        self.operation
+            .as_ref()
+            .and_then(|operation| operation.progress.as_ref())
+    }
+
+    /// Return a settled operation to its idle state so the existing configuration can be used
+    /// again. Running work must be cancelled and settled before it can be reset.
+    pub fn reset(&mut self) -> bool {
+        if self.operation.is_some() {
+            return false;
+        }
+
+        self.state = AudioMixExecutionState::Idle;
+        true
+    }
+
     pub fn start(
         &mut self,
         tools: &MediaTools,
@@ -121,6 +139,10 @@ impl AudioMixExecutor {
     /// removed only after its temporary output has either been published or discarded, which also
     /// prevents a second Audio Mix operation from starting during settlement.
     pub fn poll(&mut self) -> &AudioMixExecutionState {
+        if let Some(operation) = self.operation.as_mut() {
+            operation.refresh_progress();
+        }
+
         let Some(process_state) = self
             .operation
             .as_ref()
@@ -174,12 +196,16 @@ impl AudioMixExecutor {
         staged_request.output = output.temporary_path().to_path_buf();
         let invocation = build_audio_mix_invocation(&staged_request, media)
             .map_err(AudioMixStartError::Command)?;
-        let command = MediaProcessCommand::new(&tools.ffmpeg).args(invocation.args);
+        let command = MediaProcessCommand::new(&tools.ffmpeg)
+            .args(invocation.args)
+            .progress_source(ProcessProgressSource::Stdout);
         let process = launcher(command).map_err(AudioMixStartError::Process)?;
 
         self.operation = Some(RunningAudioMix {
             process: Box::new(process),
             output,
+            progress_parser: MediaProgressParser::new(media.duration),
+            progress: None,
         });
         self.state = AudioMixExecutionState::Running;
         Ok(())
@@ -215,12 +241,25 @@ fn terminal_state(
 struct RunningAudioMix {
     process: Box<dyn ProcessControl>,
     output: MediaOutput,
+    progress_parser: MediaProgressParser,
+    progress: Option<MediaProgress>,
+}
+
+impl RunningAudioMix {
+    fn refresh_progress(&mut self) {
+        for line in self.process.drain_progress() {
+            if let Some(progress) = self.progress_parser.push_line(&line) {
+                self.progress = Some(progress);
+            }
+        }
+    }
 }
 
 trait ProcessControl {
     fn state(&self) -> MediaProcessState;
     fn cancel(&self) -> bool;
     fn diagnostic_stderr(&self) -> String;
+    fn drain_progress(&self) -> Vec<String>;
 }
 
 impl ProcessControl for MediaProcess {
@@ -234,6 +273,10 @@ impl ProcessControl for MediaProcess {
 
     fn diagnostic_stderr(&self) -> String {
         MediaProcess::diagnostic_stderr(self)
+    }
+
+    fn drain_progress(&self) -> Vec<String> {
+        self.progress_channel().try_iter().collect()
     }
 }
 
@@ -445,6 +488,83 @@ mod tests {
         assert_eq!(fs::read(&request.output).unwrap(), b"complete media");
     }
 
+    #[test]
+    fn running_progress_is_parsed_from_shared_process_progress_lines() {
+        let directory = TestDirectory::new("progress-lines");
+        let (request, mut media) = valid_request_and_media(&directory);
+        media.duration = Some(std::time::Duration::from_secs(10));
+        let tools = fake_tools(&directory);
+        let process = FakeProcessControl::running();
+        let progress_handle = process.clone();
+        let mut executor = AudioMixExecutor::new();
+
+        executor
+            .start_with_launcher(&tools, &media, &request, |_| Ok(process))
+            .unwrap();
+        progress_handle.push_progress(["frame=240", "out_time_us=2500000", "progress=continue"]);
+
+        assert_eq!(executor.poll(), &AudioMixExecutionState::Running);
+        let progress = executor.progress().expect("progress snapshot");
+        assert_eq!(
+            progress.processed,
+            Some(std::time::Duration::from_millis(2_500))
+        );
+        assert_eq!(progress.total, media.duration);
+        assert_eq!(progress.fraction, Some(0.25));
+        assert_eq!(progress.frame, Some(240));
+    }
+
+    #[test]
+    fn unknown_duration_progress_does_not_invent_fraction() {
+        let directory = TestDirectory::new("unknown-progress");
+        let (request, mut media) = valid_request_and_media(&directory);
+        media.duration = None;
+        let tools = fake_tools(&directory);
+        let process = FakeProcessControl::running();
+        let progress_handle = process.clone();
+        let mut executor = AudioMixExecutor::new();
+
+        executor
+            .start_with_launcher(&tools, &media, &request, |_| Ok(process))
+            .unwrap();
+        progress_handle.push_progress(["out_time_us=2500000", "progress=continue"]);
+        executor.poll();
+
+        let progress = executor.progress().expect("progress snapshot");
+        assert_eq!(
+            progress.processed,
+            Some(std::time::Duration::from_millis(2_500))
+        );
+        assert_eq!(progress.total, None);
+        assert_eq!(progress.fraction, None);
+    }
+
+    #[test]
+    fn settled_executor_can_reset_to_idle_but_running_executor_cannot() {
+        let directory = TestDirectory::new("reset");
+        let (request, media) = valid_request_and_media(&directory);
+        let tools = fake_tools(&directory);
+        let process = FakeProcessControl::running();
+        let state_handle = process.clone();
+        let mut executor = AudioMixExecutor::new();
+
+        executor
+            .start_with_launcher(&tools, &media, &request, |_| Ok(process))
+            .unwrap();
+        assert!(!executor.reset());
+
+        write_temporary_output(&executor, b"mixed");
+        state_handle.set_state(MediaProcessState::Completed);
+        executor.poll();
+        assert!(matches!(
+            executor.state(),
+            AudioMixExecutionState::Completed { .. }
+        ));
+
+        assert!(executor.reset());
+        assert_eq!(executor.state(), &AudioMixExecutionState::Idle);
+    }
+
     fn valid_request_and_media(directory: &TestDirectory) -> (AudioMixRequest, MediaFile) {
         let input = directory.path().join("source.mkv");
         fs::write(&input, b"source").unwrap();
@@ -511,6 +631,7 @@ mod tests {
     struct FakeProcessControl {
         state: Arc<Mutex<MediaProcessState>>,
         diagnostic: Arc<String>,
+        progress: Arc<Mutex<Vec<String>>>,
     }
 
     impl FakeProcessControl {
@@ -522,7 +643,15 @@ mod tests {
             Self {
                 state: Arc::new(Mutex::new(MediaProcessState::Running)),
                 diagnostic: Arc::new(diagnostic.to_owned()),
+                progress: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        fn push_progress(&self, lines: impl IntoIterator<Item = impl Into<String>>) {
+            self.progress
+                .lock()
+                .unwrap()
+                .extend(lines.into_iter().map(Into::into));
         }
 
         fn set_state(&self, state: MediaProcessState) {
@@ -546,6 +675,10 @@ mod tests {
 
         fn diagnostic_stderr(&self) -> String {
             self.diagnostic.as_str().to_owned()
+        }
+
+        fn drain_progress(&self) -> Vec<String> {
+            std::mem::take(&mut *self.progress.lock().unwrap())
         }
     }
 
