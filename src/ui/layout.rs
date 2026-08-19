@@ -31,6 +31,12 @@ pub const TASK_CONTENT_MAX_WIDTH: f32 = 520.0;
 /// Selected Quiet Focus maximum for the Audio Mix track viewport before scrolling.
 pub const AUDIO_TRACK_LIST_MAX_HEIGHT: f32 = 108.0;
 
+/// Selected Quiet Focus maximum for the Upscale target viewport before scrolling.
+pub const UPSCALE_TARGET_LIST_MAX_HEIGHT: f32 = 72.0;
+
+/// Minimum comfortable width for each field in a responsive two-field row.
+pub const FIELD_PAIR_MIN_COLUMN_WIDTH: f32 = 180.0;
+
 /// Narrow focal width used by Audio Mix running and terminal surfaces.
 pub const FOCUS_CONTENT_MAX_WIDTH: f32 = 470.0;
 
@@ -49,6 +55,12 @@ pub const PATH_TEXT_OVERFLOW: TextOverflowPolicy = TextOverflowPolicy::Ellipsis;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionLayout {
     Horizontal,
+    Stacked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldPairLayout {
+    Columns,
     Stacked,
 }
 
@@ -248,6 +260,18 @@ pub fn action_layout(available_width: f32, action_widths: &[f32]) -> ActionLayou
     }
 }
 
+/// Keep paired task fields in columns only while both retain a comfortable readable width.
+pub fn field_pair_layout(available_width: f32) -> FieldPairLayout {
+    let available_width = safe_dimension(available_width);
+    let required_width = FIELD_PAIR_MIN_COLUMN_WIDTH * 2.0 + theme::SPACING.related;
+
+    if available_width >= required_width {
+        FieldPairLayout::Columns
+    } else {
+        FieldPairLayout::Stacked
+    }
+}
+
 /// Intrinsic bounds of an action group for the selected responsive arrangement.
 ///
 /// The group size is derived only from intrinsic action sizes and the supplied shared gap. It does
@@ -417,12 +441,13 @@ mod tests {
 
     use super::{
         AUDIO_TRACK_LIST_MAX_HEIGHT, ActionLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT,
-        FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, ListBehavior, MAX_CONTENT_WIDTH,
-        MINIMUM_CONTENT_SIZE, PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE,
-        REFERENCE_WINDOW_SIZE, TASK_CONTENT_MAX_WIDTH, TaskOverflow, TextOverflowPolicy,
+        FIELD_PAIR_MIN_COLUMN_WIDTH, FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT,
+        FieldPairLayout, ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, PATH_TEXT_OVERFLOW,
+        PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
+        TASK_CONTENT_MAX_WIDTH, TaskOverflow, TextOverflowPolicy, UPSCALE_TARGET_LIST_MAX_HEIGHT,
         WINDOW_CHROME_HEIGHT, action_group_size, action_layout, bounded_content_width,
-        bounded_task_content_width, centered_action_group, content_frame, flexible_row_width,
-        focus_content, list_viewport, task_surface_plan,
+        bounded_task_content_width, centered_action_group, content_frame, field_pair_layout,
+        flexible_row_width, focus_content, list_viewport, task_surface_plan,
     };
     use crate::ui::theme;
 
@@ -436,11 +461,14 @@ mod tests {
         assert_eq!(MAX_CONTENT_WIDTH, 564.0);
         assert_eq!(TASK_CONTENT_MAX_WIDTH, 520.0);
         assert_eq!(AUDIO_TRACK_LIST_MAX_HEIGHT, 108.0);
+        assert_eq!(UPSCALE_TARGET_LIST_MAX_HEIGHT, 72.0);
+        assert_eq!(FIELD_PAIR_MIN_COLUMN_WIDTH, 180.0);
         assert_eq!(FOCUS_CONTENT_MAX_WIDTH, 470.0);
         assert_eq!(FOCUS_CONTENT_MIN_HEIGHT, 230.0);
         assert_eq!(DIAGNOSTIC_MAX_HEIGHT, 80.0);
         assert_eq!(theme::PRIMARY_CONTROL_HEIGHT, 31.0);
         assert_eq!(theme::COMPACT_CONTROL_HEIGHT, 30.0);
+        assert_eq!(theme::UPSCALE_TARGET_ROW_MIN_HEIGHT, 37.0);
         assert_eq!(theme::SPACING.compact, 7.0);
         assert_eq!(theme::SPACING.related, 11.0);
         assert_eq!(theme::SPACING.section, 24.0);
@@ -471,6 +499,22 @@ mod tests {
             action_layout(191.0, &[96.0, 84.0]),
             ActionLayout::Horizontal
         );
+    }
+
+    #[test]
+    fn reference_task_width_keeps_field_pair_in_columns() {
+        assert_eq!(
+            field_pair_layout(TASK_CONTENT_MAX_WIDTH),
+            FieldPairLayout::Columns
+        );
+    }
+
+    #[test]
+    fn narrow_task_width_stacks_field_pair() {
+        let narrow_width = MINIMUM_CONTENT_SIZE.x - f32::from(CONTENT_PADDING) * 2.0;
+
+        assert_eq!(narrow_width, 344.0);
+        assert_eq!(field_pair_layout(narrow_width), FieldPairLayout::Stacked);
     }
 
     #[test]

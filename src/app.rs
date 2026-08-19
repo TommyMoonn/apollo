@@ -1,8 +1,15 @@
 use egui::{CentralPanel, RichText, TextStyle, Ui};
 
 use apollo::{
-    media::tools::{MediaTools, MediaToolsError, discover_media_tools},
-    ui::{fonts, layout, theme, widgets},
+    media::{
+        model::MediaFile,
+        tools::{MediaTools, MediaToolsError, discover_media_tools},
+    },
+    ui::{
+        fonts, layout, theme, upscale as upscale_ui,
+        upscale::{UpscaleSelectionAction, UpscaleSelectionState},
+        widgets,
+    },
 };
 
 const HOME_WORDMARK: &str = "apollo";
@@ -20,9 +27,16 @@ enum Tool {
     VideoUpscale,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UpscaleToolState {
+    media: MediaFile,
+    selection: UpscaleSelectionState,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct AppState {
     current_tool: Option<Tool>,
+    upscale: Option<UpscaleToolState>,
 }
 
 impl AppState {
@@ -30,8 +44,17 @@ impl AppState {
         self.current_tool = Some(tool);
     }
 
+    fn open_upscale(&mut self) {
+        self.select_tool(Tool::VideoUpscale);
+    }
+
     fn show_home(&mut self) {
         self.current_tool = None;
+    }
+
+    fn change_upscale_source(&mut self) {
+        self.upscale = None;
+        self.show_home();
     }
 }
 
@@ -97,7 +120,7 @@ impl ApolloApp {
         }
 
         if widgets::mode_button(ui, UPSCALE_LABEL, false).clicked() {
-            self.state.select_tool(Tool::VideoUpscale);
+            self.state.open_upscale();
         }
     }
 
@@ -122,11 +145,15 @@ impl ApolloApp {
     }
 
     fn show_tool(&mut self, ui: &mut Ui, tool: Tool) {
+        match tool {
+            Tool::AudioMix => self.show_tool_placeholder(ui, "Audio Mix"),
+            Tool::VideoUpscale => self.show_upscale_tool(ui),
+        }
+    }
+
+    fn show_tool_placeholder(&mut self, ui: &mut Ui, heading: &str) {
         layout::centered_content(ui, |ui| {
-            ui.heading(match tool {
-                Tool::AudioMix => "Audio Mix",
-                Tool::VideoUpscale => "Video Upscale",
-            });
+            ui.heading(heading);
             ui.add_space(theme::SPACING.compact);
             ui.label("Tool controls are added in a later phase.");
             ui.add_space(theme::SPACING.section);
@@ -135,6 +162,25 @@ impl ApolloApp {
                 self.state.show_home();
             }
         });
+    }
+
+    fn show_upscale_tool(&mut self, ui: &mut Ui) {
+        let Some(upscale) = self.state.upscale.as_mut() else {
+            self.show_tool_placeholder(ui, "Video Upscale");
+            return;
+        };
+
+        let action = upscale_ui::show(ui, &upscale.media, &mut upscale.selection);
+        self.handle_upscale_action(action);
+    }
+
+    fn handle_upscale_action(&mut self, action: UpscaleSelectionAction) {
+        match action {
+            UpscaleSelectionAction::ChangeSource => self.state.change_upscale_source(),
+            UpscaleSelectionAction::None
+            | UpscaleSelectionAction::BrowseOutput
+            | UpscaleSelectionAction::UpscaleRequested => {}
+        }
     }
 }
 
@@ -158,14 +204,77 @@ impl eframe::App for ApolloApp {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{
-        AUDIO_MIX_LABEL, AppState, HOME_PROMPT, HOME_WORDMARK, Tool, UPSCALE_LABEL,
-        home_action_layout,
+        AUDIO_MIX_LABEL, ApolloApp, AppState, HOME_PROMPT, HOME_WORDMARK, Tool, UPSCALE_LABEL,
+        UpscaleToolState, home_action_layout,
     };
-    use apollo::ui::{
-        layout::{self, ActionLayout},
-        theme, widgets,
+    use apollo::{
+        media::{
+            model::{FrameRate, MediaFile, VideoStream},
+            tools::MediaTools,
+        },
+        ui::{
+            fonts,
+            layout::{self, ActionLayout},
+            theme,
+            upscale::UpscaleSelectionAction,
+            widgets,
+        },
+        upscale::model::{UpscaleTarget, VideoCodec},
     };
+
+    fn media() -> MediaFile {
+        MediaFile {
+            path: PathBuf::from("recording.mkv"),
+            duration: None,
+            video_streams: vec![VideoStream {
+                stream_index: 0,
+                codec: Some("h264".to_owned()),
+                width: Some(1920),
+                height: Some(1080),
+                frame_rate: FrameRate::new(60, 1),
+            }],
+            audio_streams: Vec::new(),
+        }
+    }
+
+    fn app() -> ApolloApp {
+        ApolloApp {
+            state: AppState::default(),
+            media_tools: Ok(MediaTools {
+                ffmpeg: PathBuf::from("ffmpeg"),
+                ffprobe: PathBuf::from("ffprobe"),
+            }),
+        }
+    }
+
+    fn open_ready_upscale(app: &mut ApolloApp) {
+        let media = media();
+        app.state.upscale = Some(UpscaleToolState {
+            selection: apollo::ui::upscale::UpscaleSelectionState::new(&media),
+            media,
+        });
+        app.state.open_upscale();
+    }
+
+    fn shape_contains_text(shape: &egui::Shape, needle: &str) -> bool {
+        match shape {
+            egui::Shape::Text(text) => text.galley.job.text.contains(needle),
+            egui::Shape::Vec(shapes) => shapes
+                .iter()
+                .any(|shape| shape_contains_text(shape, needle)),
+            _ => false,
+        }
+    }
+
+    fn output_contains_text(output: &egui::FullOutput, needle: &str) -> bool {
+        output
+            .shapes
+            .iter()
+            .any(|clipped| shape_contains_text(&clipped.shape, needle))
+    }
 
     #[test]
     fn default_application_state_is_tool_chooser() {
@@ -184,8 +293,78 @@ mod tests {
         state.show_home();
         assert!(state.current_tool.is_none());
 
-        state.select_tool(Tool::VideoUpscale);
+        state.open_upscale();
         assert_eq!(state.current_tool, Some(Tool::VideoUpscale));
+    }
+
+    #[test]
+    fn opening_upscale_source_routes_to_phase_32_ready_surface() {
+        let mut app = app();
+        open_ready_upscale(&mut app);
+        let context = egui::Context::default();
+        fonts::install(&context).expect("test typography should install");
+        theme::install(&context);
+
+        let mut output = context.run_ui(Default::default(), |ui| {
+            app.show_tool(ui, Tool::VideoUpscale);
+        });
+
+        assert_eq!(app.state.current_tool, Some(Tool::VideoUpscale));
+        assert!(app.state.upscale.is_some());
+        assert!(output_contains_text(&output, "Upscale to"));
+        assert!(output_contains_text(&output, "Video codec"));
+        assert!(output_contains_text(&output, "Actual output"));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn upscale_ready_selection_survives_home_and_tool_navigation() {
+        let mut app = app();
+        open_ready_upscale(&mut app);
+        let ready = app
+            .state
+            .upscale
+            .as_mut()
+            .expect("upscale source should exist");
+        ready
+            .selection
+            .set_target(&ready.media, UpscaleTarget::Uhd8k);
+        ready.selection.set_codec(VideoCodec::H265);
+
+        app.state.show_home();
+        app.state.select_tool(Tool::VideoUpscale);
+
+        let ready = app
+            .state
+            .upscale
+            .as_ref()
+            .expect("upscale source should persist");
+        assert_eq!(ready.selection.target(), UpscaleTarget::Uhd8k);
+        assert_eq!(ready.selection.codec(), VideoCodec::H265);
+    }
+
+    #[test]
+    fn change_source_returns_to_existing_home_boundary_and_clears_ready_state() {
+        let mut app = app();
+        open_ready_upscale(&mut app);
+
+        app.handle_upscale_action(UpscaleSelectionAction::ChangeSource);
+
+        assert!(app.state.current_tool.is_none());
+        assert!(app.state.upscale.is_none());
+    }
+
+    #[test]
+    fn browse_and_upscale_intents_do_not_start_or_replace_phase_32_state() {
+        let mut app = app();
+        open_ready_upscale(&mut app);
+        let before = app.state.clone();
+
+        app.handle_upscale_action(UpscaleSelectionAction::BrowseOutput);
+        assert_eq!(app.state, before);
+
+        app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested);
+        assert_eq!(app.state, before);
     }
 
     #[test]
