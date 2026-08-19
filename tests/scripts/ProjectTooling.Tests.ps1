@@ -235,19 +235,28 @@ Invoke-TestCase 'apply-changes handles explicit ZIP, unchanged files, changes, a
     }
 }
 
-Invoke-TestCase 'apply-changes automatic discovery chooses newest matching ZIP' {
+Invoke-TestCase 'apply-changes automatic discovery chooses newest matching ZIP including Windows duplicate names' {
     $repo = New-TestGitRepository
     $downloads = New-TestDirectory
     try {
         $slug = Get-RepositorySlug -ProjectRoot $repo
-        $oldZip = Join-Path $downloads "$slug-old-changed-files.zip"
-        $newZip = Join-Path $downloads "$slug-new-changed-files.zip"
-        New-TestZip -Path $oldZip -Entries @{ 'selected.txt' = 'old' } | Out-Null
-        Start-Sleep -Milliseconds 25
-        New-TestZip -Path $newZip -Entries @{ 'selected.txt' = 'new' } | Out-Null
-        (Get-Item $oldZip).LastWriteTime = (Get-Date).AddMinutes(-1)
+        $originalZip = Join-Path $downloads "$slug-task-changed-files.zip"
+        $firstDuplicateZip = Join-Path $downloads "$slug-task-changed-files (1).zip"
+        $secondDuplicateZip = Join-Path $downloads "$slug-task-changed-files (2).zip"
+        $repeatedDuplicateZip = Join-Path $downloads "$slug-task-changed-files(1)(1).zip"
+        $unrelatedZip = Join-Path $downloads 'other-project-task-changed-files.zip'
+        New-TestZip -Path $originalZip -Entries @{ 'selected.txt' = 'original' } | Out-Null
+        New-TestZip -Path $firstDuplicateZip -Entries @{ 'selected.txt' = 'copy-1' } | Out-Null
+        New-TestZip -Path $secondDuplicateZip -Entries @{ 'selected.txt' = 'copy-2' } | Out-Null
+        New-TestZip -Path $repeatedDuplicateZip -Entries @{ 'selected.txt' = 'copy-1-1' } | Out-Null
+        New-TestZip -Path $unrelatedZip -Entries @{ 'selected.txt' = 'unrelated' } | Out-Null
+        (Get-Item $originalZip).LastWriteTime = (Get-Date).AddMinutes(-4)
+        (Get-Item $firstDuplicateZip).LastWriteTime = (Get-Date).AddMinutes(-3)
+        (Get-Item $secondDuplicateZip).LastWriteTime = (Get-Date).AddMinutes(-2)
+        (Get-Item $repeatedDuplicateZip).LastWriteTime = (Get-Date).AddMinutes(-1)
+        (Get-Item $unrelatedZip).LastWriteTime = Get-Date
         Invoke-ScriptCapture -ScriptPath $applyScript -Arguments @('--project', $repo, '--downloads', $downloads) | Out-Null
-        Assert-Equal 'new' (Get-Content -LiteralPath (Join-Path $repo 'selected.txt') -Raw) 'Newest ZIP should be selected.'
+        Assert-Equal 'copy-1-1' (Get-Content -LiteralPath (Join-Path $repo 'selected.txt') -Raw) 'Newest matching Windows duplicate ZIP, including repeated suffixes without spaces, should be selected.'
     }
     finally {
         Remove-Item -LiteralPath $downloads -Recurse -Force

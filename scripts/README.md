@@ -56,7 +56,7 @@ Compatibility entry point:
 .\scripts\apply-changes.ps1 --zip C:\path\to\apollo-task-changed-files.zip
 ```
 
-Without `--zip`, the command searches Downloads for the newest `<project-slug>-*-changed-files.zip`. It rejects unsafe archive paths and `.git`, skips identical files, refuses tracked dirty state by default, supports dry runs, applies the deletion manifest, and backs up overwritten/deleted paths unless `--no-backup` is used.
+Without `--zip`, the command searches Downloads for the newest `<project-slug>-*-changed-files.zip`, including Windows duplicate-download names such as `...-changed-files (1).zip`, `(2).zip`, and repeated/no-space suffixes such as `...-changed-files(1)(1).zip`. It rejects unsafe archive paths and `.git`, skips identical files, refuses tracked dirty state by default, supports dry runs, applies the deletion manifest, and backs up overwritten/deleted paths unless `--no-backup` is used.
 
 Compatibility entry point:
 
