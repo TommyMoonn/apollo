@@ -33,6 +33,9 @@ pub const TYPOGRAPHY_SCALE: TypographyScale = TypographyScale {
     secondary: 12.0,
 };
 
+/// Quiet Focus wordmark tracking: -0.075 em at the 26 px display size.
+pub const WORDMARK_LETTER_SPACING: f32 = TYPOGRAPHY_SCALE.wordmark * -0.075;
+
 #[derive(Debug)]
 pub enum FontSetupError {
     MissingAsset {
@@ -274,8 +277,8 @@ mod tests {
     use super::{
         DISPLAY_FAMILY_NAME, DISPLAY_FONT_DATA_NAME, FontAssets, FontSetupError,
         PRIMARY_FONT_DATA_NAME, PRIMARY_UI_FAMILY_NAME, TYPOGRAPHY_SCALE, TypographyConfiguration,
-        configuration_from_directory, display_family, primary_ui_family, repository_font_directory,
-        technical_text_style, wordmark_text_style,
+        WORDMARK_LETTER_SPACING, configuration_from_directory, display_family, primary_ui_family,
+        repository_font_directory, technical_text_style, wordmark_text_style,
     };
 
     static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -347,6 +350,11 @@ mod tests {
             configuration.font_definitions.families[&FontFamily::Monospace][0],
             DISPLAY_FONT_DATA_NAME
         );
+    }
+
+    #[test]
+    fn quiet_focus_wordmark_tracking_is_centralized() {
+        assert_eq!(WORDMARK_LETTER_SPACING, -1.95);
     }
 
     #[test]

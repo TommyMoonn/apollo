@@ -91,7 +91,7 @@ pub fn destructive_button(ui: &mut Ui, label: &str) -> Response {
 /// stacked; this primitive owns only intrinsic control sizing and selected-state painting.
 #[must_use]
 pub fn mode_button(ui: &mut Ui, label: &str, selected: bool) -> Response {
-    button(
+    button_with_horizontal_padding(
         ui,
         label,
         true,
@@ -100,7 +100,14 @@ pub fn mode_button(ui: &mut Ui, label: &str, selected: bool) -> Response {
             selected,
             compact: false,
         },
+        theme::MODE_BUTTON_HORIZONTAL_PADDING,
     )
+}
+
+/// Intrinsic size of a standard-height mode/tool control. Parent layouts use this to choose
+/// responsive horizontal versus stacked composition without duplicating control metrics.
+pub fn mode_button_intrinsic_size(ui: &Ui, label: &str) -> Vec2 {
+    button_intrinsic_size(ui, label, false, theme::MODE_BUTTON_HORIZONTAL_PADDING)
 }
 
 /// Compact selector trigger used by simple container/codec dropdowns.
@@ -320,7 +327,7 @@ pub fn path_field(ui: &mut Ui, text: &str, width: f32) -> Response {
 /// shared primitives.
 #[must_use]
 pub fn output_path_row(ui: &mut Ui, path: &str, browse_label: &str) -> OutputPathRowResponse {
-    let browse_width = button_intrinsic_size(ui, browse_label, true).x;
+    let browse_width = button_intrinsic_size(ui, browse_label, true, BUTTON_HORIZONTAL_PADDING).x;
     let path_width =
         layout::flexible_row_width(ui.available_width(), browse_width, theme::SPACING.compact);
 
@@ -396,6 +403,16 @@ pub fn separator(ui: &mut Ui) {
 }
 
 fn button(ui: &mut Ui, label: &str, enabled: bool, kind: ButtonKind) -> Response {
+    button_with_horizontal_padding(ui, label, enabled, kind, BUTTON_HORIZONTAL_PADDING)
+}
+
+fn button_with_horizontal_padding(
+    ui: &mut Ui,
+    label: &str,
+    enabled: bool,
+    kind: ButtonKind,
+    horizontal_padding: f32,
+) -> Response {
     let effective_enabled = enabled && ui.is_enabled();
     ui.add_enabled_ui(effective_enabled, |ui| {
         let height = if kind.compact {
@@ -403,7 +420,7 @@ fn button(ui: &mut Ui, label: &str, enabled: bool, kind: ButtonKind) -> Response
         } else {
             theme::PRIMARY_CONTROL_HEIGHT
         };
-        let desired_size = button_intrinsic_size(ui, label, kind.compact);
+        let desired_size = button_intrinsic_size(ui, label, kind.compact, horizontal_padding);
         debug_assert_eq!(desired_size.y, height);
         let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
         let state = interaction_state(&response);
@@ -445,7 +462,7 @@ fn button(ui: &mut Ui, label: &str, enabled: bool, kind: ButtonKind) -> Response
     .inner
 }
 
-fn button_intrinsic_size(ui: &Ui, label: &str, compact: bool) -> Vec2 {
+fn button_intrinsic_size(ui: &Ui, label: &str, compact: bool, horizontal_padding: f32) -> Vec2 {
     let height = if compact {
         theme::COMPACT_CONTROL_HEIGHT
     } else {
@@ -456,7 +473,7 @@ fn button_intrinsic_size(ui: &Ui, label: &str, compact: bool) -> Vec2 {
         .painter()
         .layout_no_wrap(label.to_owned(), font_id, theme::FOREGROUND);
 
-    vec2(galley.size().x + BUTTON_HORIZONTAL_PADDING * 2.0, height)
+    vec2(galley.size().x + horizontal_padding * 2.0, height)
 }
 
 fn button_text_style() -> TextStyle {
@@ -583,8 +600,9 @@ mod tests {
 
     use super::{
         InlineStatusKind, SelectionIndicator, button_text_style, displayed_progress_fraction,
-        inline_status_color, mode_button, plain_button_text_style, primary_button_enabled,
-        progress_bar, progress_rail_color, selectable_row, selectable_row_visuals,
+        inline_status_color, mode_button, mode_button_intrinsic_size, plain_button_text_style,
+        primary_button_enabled, progress_bar, progress_rail_color, selectable_row,
+        selectable_row_visuals,
     };
     use crate::ui::{fonts, layout, theme};
 
@@ -629,6 +647,24 @@ mod tests {
 
             assert_eq!(button.sense, Sense::click());
             assert_eq!(row.sense, Sense::click());
+        });
+    }
+
+    #[test]
+    fn mode_controls_use_quiet_focus_intrinsic_padding() {
+        egui::__run_test_ui(|ui| {
+            let size = mode_button_intrinsic_size(ui, "Audio Mix");
+            let galley = ui.painter().layout_no_wrap(
+                "Audio Mix".to_owned(),
+                button_text_style().resolve(ui.style()),
+                theme::FOREGROUND,
+            );
+
+            assert_eq!(size.y, theme::PRIMARY_CONTROL_HEIGHT);
+            assert_eq!(
+                size.x,
+                galley.size().x + theme::MODE_BUTTON_HORIZONTAL_PADDING * 2.0
+            );
         });
     }
 

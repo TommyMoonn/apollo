@@ -35,6 +35,7 @@ pub const SELECTABLE_ROW_HORIZONTAL_PADDING: f32 = 5.0;
 pub const SELECTABLE_ROW_INDICATOR_COLUMN: f32 = 18.0;
 pub const SELECTABLE_ROW_CONTENT_GAP: f32 = 8.0;
 pub const PATH_FIELD_HORIZONTAL_PADDING: f32 = 8.0;
+pub const MODE_BUTTON_HORIZONTAL_PADDING: f32 = 13.0;
 
 const _: () = assert!(CONTROL_RADIUS <= 2);
 const _: () = assert!(CONTAINER_RADIUS <= 2);
@@ -45,6 +46,7 @@ pub struct SpacingScale {
     pub tight: f32,
     pub compact: f32,
     pub related: f32,
+    pub focal: f32,
     pub section: f32,
     pub spacious: f32,
 }
@@ -53,6 +55,7 @@ pub const SPACING: SpacingScale = SpacingScale {
     tight: 4.0,
     compact: 7.0,
     related: 11.0,
+    focal: 18.0,
     section: 24.0,
     spacious: 40.0,
 };
@@ -293,9 +296,9 @@ mod tests {
     use super::{
         BACKGROUND, BORDER_STRONG, COMPACT_CONTROL_HEIGHT, ControlTone, DANGER_INTERACTIVE,
         DISABLED, FOCUS, FOCUS_OFFSET, FOCUS_STROKE_WIDTH, FOREGROUND, HOVER, InteractionState,
-        PATH_FIELD_HORIZONTAL_PADDING, PRESSED, PRIMARY_CONTROL_HEIGHT, PRIMARY_HOVER,
-        PRIMARY_PRESSED, PROGRESS, PROGRESS_RADIUS, SECONDARY, SECONDARY_FAINT,
-        SELECTABLE_ROW_CONTENT_GAP, SELECTABLE_ROW_HORIZONTAL_PADDING,
+        MODE_BUTTON_HORIZONTAL_PADDING, PATH_FIELD_HORIZONTAL_PADDING, PRESSED,
+        PRIMARY_CONTROL_HEIGHT, PRIMARY_HOVER, PRIMARY_PRESSED, PROGRESS, PROGRESS_RADIUS,
+        SECONDARY, SECONDARY_FAINT, SELECTABLE_ROW_CONTENT_GAP, SELECTABLE_ROW_HORIZONTAL_PADDING,
         SELECTABLE_ROW_INDICATOR_COLUMN, SELECTABLE_ROW_MIN_HEIGHT, SELECTION,
         SELECTION_INDICATOR_SIZE, SEPARATOR, SEPARATOR_WIDTH, SPACING, ThemeRole, apply_to_style,
         control_colors, monochrome_visuals, selectable_colors,
@@ -509,6 +512,8 @@ mod tests {
         assert_eq!(style.spacing.button_padding.x, SPACING.related);
         assert_eq!(style.spacing.button_padding.y, SPACING.compact);
         assert_eq!(style.spacing.interact_size.y, PRIMARY_CONTROL_HEIGHT);
+        assert_eq!(SPACING.focal, 18.0);
+        assert_eq!(MODE_BUTTON_HORIZONTAL_PADDING, 13.0);
     }
 
     fn is_black_or_white_alpha(color: Color32) -> bool {

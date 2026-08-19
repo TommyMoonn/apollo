@@ -113,6 +113,71 @@ pub fn action_layout(available_width: f32, action_widths: &[f32]) -> ActionLayou
     }
 }
 
+/// Intrinsic bounds of an action group for the selected responsive arrangement.
+///
+/// The group size is derived only from intrinsic action sizes and the supplied shared gap. It does
+/// not depend on viewport coordinates.
+pub fn action_group_size(action_sizes: &[Vec2], arrangement: ActionLayout, gap: f32) -> Vec2 {
+    let gap = safe_dimension(gap);
+    let gap_count = action_sizes.len().saturating_sub(1) as f32;
+
+    match arrangement {
+        ActionLayout::Horizontal => vec2(
+            action_sizes
+                .iter()
+                .map(|size| safe_dimension(size.x))
+                .sum::<f32>()
+                + gap_count * gap,
+            action_sizes
+                .iter()
+                .map(|size| safe_dimension(size.y))
+                .fold(0.0, f32::max),
+        ),
+        ActionLayout::Stacked => vec2(
+            action_sizes
+                .iter()
+                .map(|size| safe_dimension(size.x))
+                .fold(0.0, f32::max),
+            action_sizes
+                .iter()
+                .map(|size| safe_dimension(size.y))
+                .sum::<f32>()
+                + gap_count * gap,
+        ),
+    }
+}
+
+/// Center an intrinsic action group inside the current content width without consuming remaining
+/// vertical space.
+///
+/// Horizontal rows are centered as intrinsic child groups. Stacked groups center each action on
+/// the horizontal cross axis. In both cases the allocated region is exactly the intrinsic group
+/// height, so following content stays in normal top-down flow.
+pub fn centered_action_group<R>(
+    ui: &mut Ui,
+    action_sizes: &[Vec2],
+    arrangement: ActionLayout,
+    gap: f32,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> InnerResponse<R> {
+    let group_size = action_group_size(action_sizes, arrangement, gap);
+    let flow = match arrangement {
+        ActionLayout::Horizontal => Layout::left_to_right(Align::Center),
+        ActionLayout::Stacked => Layout::top_down(Align::Center),
+    };
+
+    ui.vertical_centered(|ui| {
+        ui.allocate_ui_with_layout(group_size, flow, |ui| {
+            match arrangement {
+                ActionLayout::Horizontal => ui.spacing_mut().item_spacing.x = safe_dimension(gap),
+                ActionLayout::Stacked => ui.spacing_mut().item_spacing.y = safe_dimension(gap),
+            }
+            add_contents(ui)
+        })
+        .inner
+    })
+}
+
 /// Bound readable task content to the Quiet Focus reference width without returning invalid sizes.
 pub fn bounded_content_width(available_width: f32) -> f32 {
     safe_dimension(available_width).min(MAX_CONTENT_WIDTH)
@@ -168,8 +233,9 @@ mod tests {
     use super::{
         ActionLayout, CONTENT_PADDING, ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE,
         PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
-        TextOverflowPolicy, WINDOW_CHROME_HEIGHT, action_layout, bounded_content_width,
-        content_frame, flexible_row_width, list_viewport,
+        TextOverflowPolicy, WINDOW_CHROME_HEIGHT, action_group_size, action_layout,
+        bounded_content_width, centered_action_group, content_frame, flexible_row_width,
+        list_viewport,
     };
     use crate::ui::theme;
 
@@ -211,6 +277,106 @@ mod tests {
             action_layout(191.0, &[96.0, 84.0]),
             ActionLayout::Horizontal
         );
+    }
+
+    #[test]
+    fn horizontal_action_group_uses_intrinsic_width_gap_and_height() {
+        let action_sizes = [Vec2::new(80.0, 31.0), Vec2::new(70.0, 31.0)];
+
+        assert_eq!(
+            action_group_size(
+                &action_sizes,
+                ActionLayout::Horizontal,
+                theme::SPACING.compact,
+            ),
+            Vec2::new(157.0, 31.0)
+        );
+    }
+
+    #[test]
+    fn horizontal_action_group_is_centered_without_consuming_remaining_height() {
+        egui::__run_test_ui(|ui| {
+            let action_sizes = [Vec2::new(80.0, 31.0), Vec2::new(70.0, 31.0)];
+            let parent_width = 320.0;
+            let (parent_rect, _) =
+                ui.allocate_exact_size(Vec2::new(parent_width, 140.0), egui::Sense::hover());
+
+            let response = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(parent_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    |ui| {
+                        centered_action_group(
+                            ui,
+                            &action_sizes,
+                            ActionLayout::Horizontal,
+                            theme::SPACING.compact,
+                            |ui| {
+                                let first =
+                                    ui.allocate_exact_size(action_sizes[0], egui::Sense::hover());
+                                let second =
+                                    ui.allocate_exact_size(action_sizes[1], egui::Sense::hover());
+                                (first.0, second.0)
+                            },
+                        )
+                    },
+                )
+                .inner;
+
+            let action_bounds = response.response.rect;
+            let (first, second) = response.inner;
+            let left_space = first.left() - parent_rect.left();
+            let right_space = parent_rect.right() - second.right();
+            assert!((left_space - right_space).abs() < 0.01);
+            assert_eq!(second.left() - first.right(), theme::SPACING.compact);
+            assert_eq!(action_bounds.height(), theme::PRIMARY_CONTROL_HEIGHT);
+            assert_eq!(action_bounds.width(), 157.0);
+        });
+    }
+
+    #[test]
+    fn stacked_action_group_centers_each_action_and_keeps_intrinsic_height() {
+        egui::__run_test_ui(|ui| {
+            let action_sizes = [Vec2::new(80.0, 31.0), Vec2::new(70.0, 31.0)];
+            let parent_width = 150.0;
+            let (parent_rect, _) =
+                ui.allocate_exact_size(Vec2::new(parent_width, 140.0), egui::Sense::hover());
+
+            let response = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(parent_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    |ui| {
+                        centered_action_group(
+                            ui,
+                            &action_sizes,
+                            ActionLayout::Stacked,
+                            theme::SPACING.compact,
+                            |ui| {
+                                let first =
+                                    ui.allocate_exact_size(action_sizes[0], egui::Sense::hover());
+                                let second =
+                                    ui.allocate_exact_size(action_sizes[1], egui::Sense::hover());
+                                (first.0, second.0)
+                            },
+                        )
+                    },
+                )
+                .inner;
+
+            let action_bounds = response.response.rect;
+            let (first, second) = response.inner;
+
+            assert!((first.center().x - parent_rect.center().x).abs() < 0.01);
+            assert!((second.center().x - parent_rect.center().x).abs() < 0.01);
+            assert_eq!(second.top() - first.bottom(), theme::SPACING.compact);
+            assert_eq!(
+                action_bounds.height(),
+                theme::PRIMARY_CONTROL_HEIGHT * 2.0 + theme::SPACING.compact
+            );
+        });
     }
 
     #[test]
