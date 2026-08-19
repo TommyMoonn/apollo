@@ -1,4 +1,4 @@
-use egui::{Align, Frame, InnerResponse, Layout, Margin, Style, Ui, Vec2, vec2};
+use egui::{Align, Frame, InnerResponse, Layout, Margin, ScrollArea, Style, Ui, Vec2, vec2};
 
 use super::theme;
 
@@ -23,6 +23,12 @@ pub const CONTENT_PADDING: i8 = 28;
 /// Maximum readable task width at the reference window size after content insets.
 pub const MAX_CONTENT_WIDTH: f32 = REFERENCE_WINDOW_SIZE.x - 2.0 * CONTENT_PADDING as f32;
 
+/// Quiet Focus task columns stay narrower than the full padded surface.
+pub const TASK_CONTENT_MAX_WIDTH: f32 = 520.0;
+
+/// Selected Quiet Focus maximum for the Audio Mix track viewport before scrolling.
+pub const AUDIO_TRACK_LIST_MAX_HEIGHT: f32 = 108.0;
+
 /// Progress tracks are deliberately thin and rectangular.
 pub const PROGRESS_TRACK_HEIGHT: f32 = 4.0;
 
@@ -45,6 +51,18 @@ pub enum ListBehavior {
 pub struct ListViewport {
     pub behavior: ListBehavior,
     pub max_height: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskOverflow {
+    Flow,
+    Scroll,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TaskSurfacePlan {
+    pub overflow: TaskOverflow,
+    pub list: ListViewport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,13 +101,44 @@ pub fn centered_content<R>(
 /// Audio Mix and Upscale screens can share this policy without owning fixed viewport positions.
 pub fn task_content<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
     let available = safe_available_size(ui.available_size());
-    let content_width = bounded_content_width(available.x);
+    let content_width = bounded_task_content_width(available.x);
 
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
         ui.allocate_ui_with_layout(
             vec2(content_width, available.y),
             Layout::top_down(Align::LEFT),
             add_contents,
+        )
+    })
+    .inner
+}
+
+/// Render a bounded task column with vertical overflow only when its layout plan requires it.
+///
+/// Normal task surfaces retain ordinary top-down flow. Constrained surfaces use an egui
+/// [`ScrollArea`] so required terminal actions remain reachable without changing control metrics
+/// or the application's minimum window size.
+pub fn task_surface<R>(
+    ui: &mut Ui,
+    overflow: TaskOverflow,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> InnerResponse<R> {
+    let available = safe_available_size(ui.available_size());
+    let content_width = bounded_task_content_width(available.x);
+
+    ui.with_layout(Layout::top_down(Align::Center), |ui| {
+        ui.allocate_ui_with_layout(
+            vec2(content_width, available.y),
+            Layout::top_down(Align::LEFT),
+            |ui| match overflow {
+                TaskOverflow::Flow => add_contents(ui),
+                TaskOverflow::Scroll => {
+                    ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, add_contents)
+                        .inner
+                }
+            },
         )
     })
     .inner
@@ -183,6 +232,11 @@ pub fn bounded_content_width(available_width: f32) -> f32 {
     safe_dimension(available_width).min(MAX_CONTENT_WIDTH)
 }
 
+/// Bound a feature task column to the selected Quiet Focus task width.
+pub fn bounded_task_content_width(available_width: f32) -> f32 {
+    bounded_content_width(available_width).min(TASK_CONTENT_MAX_WIDTH)
+}
+
 /// Width left for a flexible row element after a fixed-width sibling and their shared gap.
 ///
 /// Composite controls use this rather than owning their own responsive-width policy.
@@ -212,6 +266,51 @@ pub fn list_viewport(
     }
 }
 
+/// Plan nested list and task-surface overflow without sacrificing control hit targets.
+///
+/// The nested list is the first region allowed to shrink. Once it would become shorter than its
+/// usable minimum, the task surface becomes vertically scrollable while the list retains that
+/// minimum viewport. This keeps the primary action reachable at constrained heights and keeps
+/// normal/reference-height surfaces in ordinary flow.
+pub fn task_surface_plan(
+    available_height: f32,
+    fixed_flow_height: f32,
+    list_content_height: f32,
+    list_max_height: f32,
+    list_min_height: f32,
+) -> TaskSurfacePlan {
+    let available_height = safe_dimension(available_height);
+    let fixed_flow_height = safe_dimension(fixed_flow_height);
+    let list_content_height = safe_dimension(list_content_height);
+    let list_max_height = safe_dimension(list_max_height);
+    let desired_list_height = list_content_height.min(list_max_height);
+    let minimum_list_height = safe_dimension(list_min_height).min(desired_list_height);
+    let available_list_height = (available_height - fixed_flow_height).max(0.0);
+
+    let overflow = if fixed_flow_height + minimum_list_height > available_height {
+        TaskOverflow::Scroll
+    } else {
+        TaskOverflow::Flow
+    };
+    let list_height = match overflow {
+        TaskOverflow::Flow => desired_list_height.min(available_list_height),
+        TaskOverflow::Scroll => minimum_list_height,
+    };
+    let behavior = if list_content_height > list_height {
+        ListBehavior::Scroll
+    } else {
+        ListBehavior::Flow
+    };
+
+    TaskSurfacePlan {
+        overflow,
+        list: ListViewport {
+            behavior,
+            max_height: list_height,
+        },
+    }
+}
+
 fn safe_available_size(size: Vec2) -> Vec2 {
     vec2(safe_dimension(size.x), safe_dimension(size.y))
 }
@@ -231,11 +330,12 @@ mod tests {
     use egui::{Style, Vec2};
 
     use super::{
-        ActionLayout, CONTENT_PADDING, ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE,
-        PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
+        AUDIO_TRACK_LIST_MAX_HEIGHT, ActionLayout, CONTENT_PADDING, ListBehavior,
+        MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT,
+        REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE, TASK_CONTENT_MAX_WIDTH, TaskOverflow,
         TextOverflowPolicy, WINDOW_CHROME_HEIGHT, action_group_size, action_layout,
-        bounded_content_width, centered_action_group, content_frame, flexible_row_width,
-        list_viewport,
+        bounded_content_width, bounded_task_content_width, centered_action_group, content_frame,
+        flexible_row_width, list_viewport, task_surface_plan,
     };
     use crate::ui::theme;
 
@@ -247,12 +347,16 @@ mod tests {
         assert_eq!(MINIMUM_CONTENT_SIZE, Vec2::new(400.0, 260.0));
         assert_eq!(CONTENT_PADDING, 28);
         assert_eq!(MAX_CONTENT_WIDTH, 564.0);
+        assert_eq!(TASK_CONTENT_MAX_WIDTH, 520.0);
+        assert_eq!(AUDIO_TRACK_LIST_MAX_HEIGHT, 108.0);
         assert_eq!(theme::PRIMARY_CONTROL_HEIGHT, 31.0);
         assert_eq!(theme::COMPACT_CONTROL_HEIGHT, 30.0);
         assert_eq!(theme::SPACING.compact, 7.0);
         assert_eq!(theme::SPACING.related, 11.0);
         assert_eq!(theme::SPACING.section, 24.0);
         assert_eq!(theme::SPACING.spacious, 40.0);
+        assert_eq!(theme::SOURCE_HEADER_GAP, 14.0);
+        assert_eq!(theme::INLINE_ACTION_GAP, 10.0);
         assert_eq!(PROGRESS_TRACK_HEIGHT, 4.0);
     }
 
@@ -409,6 +513,44 @@ mod tests {
     }
 
     #[test]
+    fn minimum_drawable_height_leaves_204_px_after_quiet_focus_padding() {
+        let usable_height = MINIMUM_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
+
+        assert_eq!(MINIMUM_CONTENT_SIZE.y, 260.0);
+        assert_eq!(f32::from(CONTENT_PADDING), 28.0);
+        assert_eq!(usable_height, 204.0);
+    }
+
+    #[test]
+    fn task_list_shrinks_before_outer_overflow_is_needed() {
+        let plan = task_surface_plan(280.0, 200.0, 108.0, 108.0, 34.0);
+
+        assert_eq!(plan.overflow, TaskOverflow::Flow);
+        assert_eq!(plan.list.behavior, ListBehavior::Scroll);
+        assert_eq!(plan.list.max_height, 80.0);
+    }
+
+    #[test]
+    fn constrained_task_surface_scrolls_before_list_becomes_unusable() {
+        let plan = task_surface_plan(204.0, 205.0, 108.0, 108.0, 34.0);
+
+        assert_eq!(plan.overflow, TaskOverflow::Scroll);
+        assert_eq!(plan.list.behavior, ListBehavior::Scroll);
+        assert_eq!(plan.list.max_height, 34.0);
+    }
+
+    #[test]
+    fn reference_height_keeps_task_surface_in_ordinary_flow() {
+        let usable_reference_height = REFERENCE_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
+        let plan = task_surface_plan(usable_reference_height, 205.0, 500.0, 108.0, 34.0);
+
+        assert_eq!(usable_reference_height, 323.0);
+        assert_eq!(plan.overflow, TaskOverflow::Flow);
+        assert_eq!(plan.list.behavior, ListBehavior::Scroll);
+        assert_eq!(plan.list.max_height, 108.0);
+    }
+
+    #[test]
     fn layout_helpers_never_return_negative_or_non_finite_sizes() {
         for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -10.0] {
             let width = bounded_content_width(value);
@@ -419,6 +561,13 @@ mod tests {
             assert!(viewport.max_height.is_finite());
             assert!(viewport.max_height >= 0.0);
         }
+    }
+
+    #[test]
+    fn task_content_width_is_bounded_by_quiet_focus_task_column() {
+        assert_eq!(bounded_task_content_width(700.0), TASK_CONTENT_MAX_WIDTH);
+        assert_eq!(bounded_task_content_width(320.0), 320.0);
+        assert_eq!(bounded_task_content_width(-1.0), 0.0);
     }
 
     #[test]

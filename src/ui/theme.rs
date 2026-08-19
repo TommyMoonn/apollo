@@ -36,6 +36,8 @@ pub const SELECTABLE_ROW_INDICATOR_COLUMN: f32 = 18.0;
 pub const SELECTABLE_ROW_CONTENT_GAP: f32 = 8.0;
 pub const PATH_FIELD_HORIZONTAL_PADDING: f32 = 8.0;
 pub const MODE_BUTTON_HORIZONTAL_PADDING: f32 = 13.0;
+pub const SOURCE_HEADER_GAP: f32 = 14.0;
+pub const INLINE_ACTION_GAP: f32 = 10.0;
 
 const _: () = assert!(CONTROL_RADIUS <= 2);
 const _: () = assert!(CONTAINER_RADIUS <= 2);

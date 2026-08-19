@@ -1,3 +1,4 @@
+pub mod audio_mix;
 pub mod fonts;
 pub mod layout;
 pub mod theme;
