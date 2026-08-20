@@ -1,3 +1,4 @@
+pub mod error;
 pub mod execution;
 pub mod intake;
 pub mod model;
