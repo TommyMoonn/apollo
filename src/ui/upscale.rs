@@ -133,8 +133,6 @@ pub fn show(
         ui.available_height(),
         upscale_fixed_flow_height(ui, media),
         list_content_height,
-        layout::UPSCALE_TARGET_LIST_MAX_HEIGHT,
-        theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
     );
 
     layout::task_surface(ui, plan.overflow, |ui| {
@@ -670,8 +668,6 @@ mod tests {
                 usable_height,
                 fixed_height,
                 3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-                layout::UPSCALE_TARGET_LIST_MAX_HEIGHT,
-                theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
             );
 
             assert_eq!(usable_height, 204.0);
@@ -702,8 +698,6 @@ mod tests {
                 child.available_height(),
                 fixed_height,
                 3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-                layout::UPSCALE_TARGET_LIST_MAX_HEIGHT,
-                theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
             );
 
             assert_eq!(
@@ -730,15 +724,38 @@ mod tests {
                 usable_height,
                 fixed_height,
                 3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-                layout::UPSCALE_TARGET_LIST_MAX_HEIGHT,
-                theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
             );
 
             assert_eq!(usable_height, 323.0);
             assert_eq!(plan.overflow, layout::TaskOverflow::Flow);
             assert_eq!(plan.list.behavior, layout::ListBehavior::Scroll);
-            assert!(plan.list.max_height <= layout::UPSCALE_TARGET_LIST_MAX_HEIGHT);
+            assert_eq!(
+                plan.list.max_height,
+                (usable_height - fixed_height).max(0.0)
+            );
             assert!(plan.list.max_height >= theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn all_three_targets_are_visible_when_height_can_fit_them() {
+        let context = egui::Context::default();
+        super::fonts::install(&context).expect("test typography should install");
+
+        let output = context.run_ui(Default::default(), |ui| {
+            let media = media(Some(1920), Some(1080));
+            let fixed_height = upscale_fixed_flow_height(ui, &media);
+            let content_height = 3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT;
+            let plan = layout::task_surface_plan(
+                fixed_height + content_height,
+                fixed_height,
+                content_height,
+            );
+
+            assert_eq!(plan.overflow, layout::TaskOverflow::Flow);
+            assert_eq!(plan.list.behavior, layout::ListBehavior::Flow);
+            assert_eq!(plan.list.max_height, content_height);
         });
         output.drop_without_applying_deltas();
     }

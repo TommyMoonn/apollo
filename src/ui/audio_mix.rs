@@ -176,8 +176,6 @@ pub fn show(
         ui.available_height(),
         audio_mix_fixed_flow_height(ui, media, tracks.is_empty()),
         list_content_height,
-        layout::AUDIO_TRACK_LIST_MAX_HEIGHT,
-        theme::SELECTABLE_ROW_MIN_HEIGHT,
     );
 
     layout::task_surface(ui, plan.overflow, |ui| {
@@ -913,14 +911,12 @@ mod tests {
                 usable_height,
                 fixed_height,
                 12.0 * theme::SELECTABLE_ROW_MIN_HEIGHT,
-                layout::AUDIO_TRACK_LIST_MAX_HEIGHT,
-                theme::SELECTABLE_ROW_MIN_HEIGHT,
             );
 
             assert_eq!(usable_height, 204.0);
             assert!(fixed_height > usable_height);
             assert_eq!(plan.overflow, layout::TaskOverflow::Scroll);
-            assert_eq!(plan.list.max_height, theme::SELECTABLE_ROW_MIN_HEIGHT);
+            assert!(plan.list.max_height >= theme::SELECTABLE_ROW_MIN_HEIGHT);
         });
         output.drop_without_applying_deltas();
     }
@@ -939,15 +935,36 @@ mod tests {
                 usable_height,
                 fixed_height,
                 12.0 * theme::SELECTABLE_ROW_MIN_HEIGHT,
-                layout::AUDIO_TRACK_LIST_MAX_HEIGHT,
-                theme::SELECTABLE_ROW_MIN_HEIGHT,
             );
 
             assert_eq!(usable_height, 323.0);
             assert_eq!(plan.overflow, layout::TaskOverflow::Flow);
             assert_eq!(plan.list.behavior, layout::ListBehavior::Scroll);
-            assert!(plan.list.max_height <= layout::AUDIO_TRACK_LIST_MAX_HEIGHT);
+            assert_eq!(
+                plan.list.max_height,
+                (usable_height - fixed_height).max(0.0)
+            );
             assert!(plan.list.max_height >= theme::SELECTABLE_ROW_MIN_HEIGHT);
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn taller_height_exposes_more_audio_tracks_before_scrolling() {
+        let context = egui::Context::default();
+        super::fonts::install(&context).expect("test typography should install");
+
+        let output = context.run_ui(Default::default(), |ui| {
+            let media = media();
+            let fixed_height = audio_mix_fixed_flow_height(ui, &media, false);
+            let content_height = 20.0 * theme::SELECTABLE_ROW_MIN_HEIGHT;
+            let reference = layout::task_surface_plan(323.0, fixed_height, content_height);
+            let tall = layout::task_surface_plan(700.0, fixed_height, content_height);
+
+            assert_eq!(reference.list.behavior, layout::ListBehavior::Scroll);
+            assert_eq!(tall.list.behavior, layout::ListBehavior::Scroll);
+            assert!(tall.list.max_height > reference.list.max_height);
+            assert_eq!(tall.overflow, layout::TaskOverflow::Flow);
         });
         output.drop_without_applying_deltas();
     }

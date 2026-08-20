@@ -27,12 +27,6 @@ pub const CONTENT_PADDING: i8 = 28;
 /// File intake keeps this reference-width bound. Ready/configuration surfaces intentionally do not.
 pub const MAX_CONTENT_WIDTH: f32 = REFERENCE_WINDOW_SIZE.x - 2.0 * CONTENT_PADDING as f32;
 
-/// Selected Quiet Focus maximum for the Audio Mix track viewport before scrolling.
-pub const AUDIO_TRACK_LIST_MAX_HEIGHT: f32 = 108.0;
-
-/// Selected Quiet Focus maximum for the Upscale target viewport before scrolling.
-pub const UPSCALE_TARGET_LIST_MAX_HEIGHT: f32 = 72.0;
-
 /// Minimum comfortable width for each field in a responsive two-field row.
 pub const FIELD_PAIR_MIN_COLUMN_WIDTH: f32 = 180.0;
 
@@ -466,8 +460,9 @@ pub fn list_viewport(
     let content_height = safe_dimension(content_height);
     let available_height = safe_dimension(available_height);
     let reserved_flow_height = safe_dimension(reserved_flow_height);
-    let max_height = (available_height - reserved_flow_height).max(0.0);
-    let behavior = if content_height > max_height {
+    let remaining_height = (available_height - reserved_flow_height).max(0.0);
+    let max_height = content_height.min(remaining_height);
+    let behavior = if content_height > remaining_height {
         ListBehavior::Scroll
     } else {
         ListBehavior::Flow
@@ -481,46 +476,42 @@ pub fn list_viewport(
 
 /// Plan nested list and task-surface overflow without sacrificing control hit targets.
 ///
-/// The nested list is the first region allowed to shrink. Once it would become shorter than its
-/// usable minimum, the task surface becomes vertically scrollable while the list retains that
-/// minimum viewport. This keeps the primary action reachable at constrained heights and keeps
-/// normal/reference-height surfaces in ordinary flow.
+/// Lists may consume all vertical space left after the fixed controls. Nested scrolling is used
+/// only when list content exceeds that remainder. If even one usable option row would no longer
+/// fit, the task surface becomes vertically scrollable and the nested list retains a one-row
+/// viewport so the primary action stays reachable through outer scrolling.
 pub fn task_surface_plan(
     available_height: f32,
     fixed_flow_height: f32,
     list_content_height: f32,
-    list_max_height: f32,
-    list_min_height: f32,
 ) -> TaskSurfacePlan {
     let available_height = safe_dimension(available_height);
     let fixed_flow_height = safe_dimension(fixed_flow_height);
     let list_content_height = safe_dimension(list_content_height);
-    let list_max_height = safe_dimension(list_max_height);
-    let desired_list_height = list_content_height.min(list_max_height);
-    let minimum_list_height = safe_dimension(list_min_height).min(desired_list_height);
-    let available_list_height = (available_height - fixed_flow_height).max(0.0);
+    let minimum_list_height = theme::SELECTABLE_ROW_MIN_HEIGHT
+        .max(theme::UPSCALE_TARGET_ROW_MIN_HEIGHT)
+        .min(list_content_height);
+    let list = list_viewport(list_content_height, available_height, fixed_flow_height);
 
-    let overflow = if fixed_flow_height + minimum_list_height > available_height {
-        TaskOverflow::Scroll
+    if fixed_flow_height > available_height
+        || (list_content_height > 0.0 && list.max_height < minimum_list_height)
+    {
+        TaskSurfacePlan {
+            overflow: TaskOverflow::Scroll,
+            list: ListViewport {
+                behavior: if list_content_height > minimum_list_height {
+                    ListBehavior::Scroll
+                } else {
+                    ListBehavior::Flow
+                },
+                max_height: minimum_list_height,
+            },
+        }
     } else {
-        TaskOverflow::Flow
-    };
-    let list_height = match overflow {
-        TaskOverflow::Flow => desired_list_height.min(available_list_height),
-        TaskOverflow::Scroll => minimum_list_height,
-    };
-    let behavior = if list_content_height > list_height {
-        ListBehavior::Scroll
-    } else {
-        ListBehavior::Flow
-    };
-
-    TaskSurfacePlan {
-        overflow,
-        list: ListViewport {
-            behavior,
-            max_height: list_height,
-        },
+        TaskSurfacePlan {
+            overflow: TaskOverflow::Flow,
+            list,
+        }
     }
 }
 
@@ -543,14 +534,14 @@ mod tests {
     use egui::{Style, Vec2};
 
     use super::{
-        AUDIO_TRACK_LIST_MAX_HEIGHT, ActionLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT,
-        FIELD_PAIR_MIN_COLUMN_WIDTH, FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT,
-        FieldPairLayout, IntakeLayout, ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE,
-        PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
-        TaskOverflow, TextOverflowPolicy, UPSCALE_TARGET_LIST_MAX_HEIGHT, WINDOW_CHROME_HEIGHT,
-        action_group_size, action_layout, bounded_content_width, centered_action_group,
-        content_frame, field_pair_layout, flexible_row_width, focus_content, intake_content,
-        intake_layout_plan, list_viewport, task_surface, task_surface_plan,
+        ActionLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT, FIELD_PAIR_MIN_COLUMN_WIDTH,
+        FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, FieldPairLayout, IntakeLayout,
+        ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, PATH_TEXT_OVERFLOW,
+        PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE, TaskOverflow,
+        TextOverflowPolicy, WINDOW_CHROME_HEIGHT, action_group_size, action_layout,
+        bounded_content_width, centered_action_group, content_frame, field_pair_layout,
+        flexible_row_width, focus_content, intake_content, intake_layout_plan, list_viewport,
+        task_surface, task_surface_plan,
     };
     use crate::ui::theme;
 
@@ -562,8 +553,6 @@ mod tests {
         assert_eq!(MINIMUM_CONTENT_SIZE, Vec2::new(400.0, 260.0));
         assert_eq!(CONTENT_PADDING, 28);
         assert_eq!(MAX_CONTENT_WIDTH, 564.0);
-        assert_eq!(AUDIO_TRACK_LIST_MAX_HEIGHT, 108.0);
-        assert_eq!(UPSCALE_TARGET_LIST_MAX_HEIGHT, 72.0);
         assert_eq!(FIELD_PAIR_MIN_COLUMN_WIDTH, 180.0);
         assert_eq!(FOCUS_CONTENT_MAX_WIDTH, 470.0);
         assert_eq!(FOCUS_CONTENT_MIN_HEIGHT, 230.0);
@@ -1115,7 +1104,7 @@ mod tests {
         let viewport = list_viewport(180.0, 320.0, 80.0);
 
         assert_eq!(viewport.behavior, ListBehavior::Flow);
-        assert_eq!(viewport.max_height, 240.0);
+        assert_eq!(viewport.max_height, 180.0);
     }
 
     #[test]
@@ -1128,8 +1117,8 @@ mod tests {
     }
 
     #[test]
-    fn task_list_shrinks_before_outer_overflow_is_needed() {
-        let plan = task_surface_plan(280.0, 200.0, 108.0, 108.0, 34.0);
+    fn task_list_uses_all_remaining_height_before_outer_overflow_is_needed() {
+        let plan = task_surface_plan(280.0, 200.0, 108.0);
 
         assert_eq!(plan.overflow, TaskOverflow::Flow);
         assert_eq!(plan.list.behavior, ListBehavior::Scroll);
@@ -1137,23 +1126,72 @@ mod tests {
     }
 
     #[test]
-    fn constrained_task_surface_scrolls_before_list_becomes_unusable() {
-        let plan = task_surface_plan(204.0, 205.0, 108.0, 108.0, 34.0);
+    fn fixed_controls_still_use_outer_scroll_when_the_option_list_is_empty() {
+        let plan = task_surface_plan(204.0, 220.0, 0.0);
 
         assert_eq!(plan.overflow, TaskOverflow::Scroll);
-        assert_eq!(plan.list.behavior, ListBehavior::Scroll);
-        assert_eq!(plan.list.max_height, 34.0);
+        assert_eq!(plan.list.behavior, ListBehavior::Flow);
+        assert_eq!(plan.list.max_height, 0.0);
     }
 
     #[test]
-    fn reference_height_keeps_task_surface_in_ordinary_flow() {
+    fn constrained_task_surface_scrolls_before_list_becomes_unusable() {
+        let plan = task_surface_plan(204.0, 205.0, 108.0);
+
+        assert_eq!(plan.overflow, TaskOverflow::Scroll);
+        assert_eq!(plan.list.behavior, ListBehavior::Scroll);
+        assert_eq!(plan.list.max_height, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
+    }
+
+    #[test]
+    fn reference_height_uses_all_space_left_for_a_long_list() {
         let usable_reference_height = REFERENCE_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
-        let plan = task_surface_plan(usable_reference_height, 205.0, 500.0, 108.0, 34.0);
+        let plan = task_surface_plan(usable_reference_height, 205.0, 500.0);
 
         assert_eq!(usable_reference_height, 323.0);
         assert_eq!(plan.overflow, TaskOverflow::Flow);
         assert_eq!(plan.list.behavior, ListBehavior::Scroll);
-        assert_eq!(plan.list.max_height, 108.0);
+        assert_eq!(plan.list.max_height, 118.0);
+    }
+
+    #[test]
+    fn taller_task_surface_increases_list_viewport_until_content_fits() {
+        let reference = task_surface_plan(323.0, 205.0, 500.0);
+        let tall = task_surface_plan(600.0, 205.0, 500.0);
+        let taller_than_content = task_surface_plan(800.0, 205.0, 500.0);
+
+        assert_eq!(reference.list.max_height, 118.0);
+        assert_eq!(tall.list.max_height, 395.0);
+        assert!(tall.list.max_height > reference.list.max_height);
+        assert_eq!(tall.list.behavior, ListBehavior::Scroll);
+        assert_eq!(taller_than_content.list.max_height, 500.0);
+        assert_eq!(taller_than_content.list.behavior, ListBehavior::Flow);
+    }
+
+    #[test]
+    fn three_upscale_targets_flow_at_reference_height_when_fixed_controls_leave_room() {
+        let usable_reference_height = REFERENCE_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
+        let content_height = theme::UPSCALE_TARGET_ROW_MIN_HEIGHT * 3.0;
+        let fixed_flow_height = usable_reference_height - content_height;
+
+        let plan = task_surface_plan(usable_reference_height, fixed_flow_height, content_height);
+
+        assert_eq!(plan.overflow, TaskOverflow::Flow);
+        assert_eq!(plan.list.behavior, ListBehavior::Flow);
+        assert_eq!(plan.list.max_height, content_height);
+    }
+
+    #[test]
+    fn tall_audio_surface_shows_more_tracks_before_nested_scrolling() {
+        let content_height = theme::SELECTABLE_ROW_MIN_HEIGHT * 20.0;
+        let reference = task_surface_plan(323.0, 205.0, content_height);
+        let tall = task_surface_plan(700.0, 205.0, content_height);
+
+        assert_eq!(reference.list.behavior, ListBehavior::Scroll);
+        assert_eq!(tall.list.behavior, ListBehavior::Scroll);
+        assert!(tall.list.max_height > reference.list.max_height);
+        assert_eq!(reference.overflow, TaskOverflow::Flow);
+        assert_eq!(tall.overflow, TaskOverflow::Flow);
     }
 
     #[test]
