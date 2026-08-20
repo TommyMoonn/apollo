@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::media::{
+    error::MediaError,
     execution::{
         MediaExecution, MediaExecutionFailure, MediaExecutionStartError, MediaExecutionState,
         ProcessControl,
@@ -43,6 +44,34 @@ impl fmt::Display for UpscaleStartError {
 }
 
 impl std::error::Error for UpscaleStartError {}
+
+impl UpscaleStartError {
+    pub fn user_error(&self) -> MediaError {
+        match self {
+            Self::Validation(error) => match error {
+                UpscaleValidationError::MissingVideoStream => {
+                    MediaError::missing_stream(error.to_string())
+                }
+                UpscaleValidationError::OutputParentUnavailable { .. }
+                | UpscaleValidationError::OutputParentNotDirectory(_) => {
+                    MediaError::output_not_writable(error.to_string())
+                }
+                UpscaleValidationError::MissingSourceDimensions { .. }
+                | UpscaleValidationError::InvalidSourceDimensions { .. }
+                | UpscaleValidationError::SameInputAndOutput(_)
+                | UpscaleValidationError::TargetNotLarger { .. }
+                | UpscaleValidationError::InvalidOutputPath(_) => {
+                    MediaError::invalid_request(error.to_string())
+                }
+            },
+            Self::Sizing(error) => MediaError::invalid_request(error.to_string()),
+            Self::Output(error) => MediaError::from_output_error(error),
+            Self::Command(error) => MediaError::missing_stream(error.to_string()),
+            Self::Process(error) => MediaError::from_process_start_error(error),
+            Self::AlreadyRunning => MediaError::invalid_request(self.to_string()),
+        }
+    }
+}
 
 pub type UpscaleExecutionFailure = MediaExecutionFailure;
 pub type UpscaleExecutionState = MediaExecutionState;
@@ -180,12 +209,16 @@ mod tests {
 
     use crate::{
         media::{
+            error::MediaErrorKind,
             execution::ProcessControl,
             model::{AudioStream, MediaFile, VideoStream},
             process::{MediaProcessFailure, MediaProcessState},
             tools::MediaTools,
         },
-        upscale::model::{UpscaleRequest, UpscaleTarget, VideoCodec},
+        upscale::{
+            model::{UpscaleRequest, UpscaleTarget, VideoCodec},
+            validation::UpscaleValidationError,
+        },
     };
 
     use super::{
@@ -193,6 +226,20 @@ mod tests {
     };
 
     static NEXT_TEST_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn prelaunch_validation_maps_to_shared_user_error_categories() {
+        let missing_stream =
+            UpscaleStartError::Validation(UpscaleValidationError::MissingVideoStream).user_error();
+        assert_eq!(missing_stream.kind(), MediaErrorKind::MissingStream);
+
+        let invalid_request =
+            UpscaleStartError::Validation(UpscaleValidationError::MissingSourceDimensions {
+                stream_index: 0,
+            })
+            .user_error();
+        assert_eq!(invalid_request.kind(), MediaErrorKind::InvalidRequest);
+    }
 
     #[test]
     fn valid_request_starts_against_calculated_staged_output() {

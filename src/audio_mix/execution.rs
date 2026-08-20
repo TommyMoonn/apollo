@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::media::{
+    error::MediaError,
     execution::{
         MediaExecution, MediaExecutionFailure, MediaExecutionStartError, MediaExecutionState,
         ProcessControl,
@@ -40,6 +41,33 @@ impl fmt::Display for AudioMixStartError {
 }
 
 impl std::error::Error for AudioMixStartError {}
+
+impl AudioMixStartError {
+    pub fn user_error(&self) -> MediaError {
+        match self {
+            Self::Validation(error) => match error {
+                AudioMixValidationError::MissingVideoStream
+                | AudioMixValidationError::NoAudioStreamsSelected
+                | AudioMixValidationError::UnknownAudioStream(_) => {
+                    MediaError::missing_stream(error.to_string())
+                }
+                AudioMixValidationError::OutputParentUnavailable { .. }
+                | AudioMixValidationError::OutputParentNotDirectory(_) => {
+                    MediaError::output_not_writable(error.to_string())
+                }
+                AudioMixValidationError::DuplicateSelectedStream(_)
+                | AudioMixValidationError::SameInputAndOutput(_)
+                | AudioMixValidationError::OutputExtensionMismatch { .. } => {
+                    MediaError::invalid_request(error.to_string())
+                }
+            },
+            Self::Output(error) => MediaError::from_output_error(error),
+            Self::Command(error) => MediaError::missing_stream(error.to_string()),
+            Self::Process(error) => MediaError::from_process_start_error(error),
+            Self::AlreadyRunning => MediaError::invalid_request(self.to_string()),
+        }
+    }
+}
 
 pub type AudioMixExecutionFailure = MediaExecutionFailure;
 pub type AudioMixExecutionState = MediaExecutionState;
@@ -155,6 +183,7 @@ mod tests {
     };
 
     use crate::media::{
+        error::MediaErrorKind,
         model::{AudioStream, MediaFile, VideoStream},
         process::{MediaProcessCommand, MediaProcessFailure, MediaProcessState},
         tools::MediaTools,
@@ -163,10 +192,32 @@ mod tests {
     use super::{
         AudioMixExecutionFailure, AudioMixExecutionState, AudioMixExecutor, AudioMixStartError,
     };
-    use crate::audio_mix::model::{AudioMixRequest, OutputContainer};
+    use crate::audio_mix::{
+        model::{AudioMixRequest, OutputContainer},
+        validation::AudioMixValidationError,
+    };
     use crate::media::execution::ProcessControl;
 
     static NEXT_TEST_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn prelaunch_validation_maps_to_shared_user_error_categories() {
+        let missing_stream =
+            AudioMixStartError::Validation(AudioMixValidationError::NoAudioStreamsSelected)
+                .user_error();
+        assert_eq!(missing_stream.kind(), MediaErrorKind::MissingStream);
+
+        let output_not_writable =
+            AudioMixStartError::Validation(AudioMixValidationError::OutputParentUnavailable {
+                path: PathBuf::from("missing-parent"),
+                kind: std::io::ErrorKind::NotFound,
+            })
+            .user_error();
+        assert_eq!(
+            output_not_writable.kind(),
+            MediaErrorKind::OutputNotWritable
+        );
+    }
 
     #[test]
     fn valid_request_starts_against_staged_output() {
