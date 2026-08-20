@@ -737,7 +737,7 @@ mod tests {
         assert_eq!(theme::COMPACT_CONTROL_HEIGHT, 30.0);
         assert_eq!(theme::SELECTABLE_ROW_MIN_HEIGHT, 34.0);
         assert_eq!(theme::SELECTION_INDICATOR_SIZE, 12.0);
-        assert!(f32::from(theme::CONTROL_RADIUS) <= 2.0);
+        assert_eq!(theme::CONTROL_RADIUS, theme::CONTAINER_RADIUS);
         assert!(f32::from(theme::CONTROL_RADIUS) * 2.0 < theme::PRIMARY_CONTROL_HEIGHT);
     }
 

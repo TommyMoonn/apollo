@@ -21,8 +21,8 @@ pub const DANGER_INTERACTIVE: Color32 = Color32::from_rgb(0x7E, 0x30, 0x30);
 pub const PRIMARY_HOVER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 224);
 pub const PRIMARY_PRESSED: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 194);
 
-pub const CONTROL_RADIUS: u8 = 2;
-pub const CONTAINER_RADIUS: u8 = 2;
+pub const CONTROL_RADIUS: u8 = 4;
+pub const CONTAINER_RADIUS: u8 = 4;
 pub const PROGRESS_RADIUS: u8 = 0;
 pub const SEPARATOR_WIDTH: f32 = 1.0;
 pub const FOCUS_STROKE_WIDTH: f32 = 2.0;
@@ -47,8 +47,8 @@ pub const DIAGNOSTIC_TOP_GAP: f32 = 14.0;
 pub const DETAILS_TOP_GAP: f32 = 10.0;
 pub const DETAILS_SEPARATOR_GAP: f32 = 9.0;
 
-const _: () = assert!(CONTROL_RADIUS <= 2);
-const _: () = assert!(CONTAINER_RADIUS <= 2);
+const _: () = assert!(CONTROL_RADIUS == 4);
+const _: () = assert!(CONTAINER_RADIUS == 4);
 const _: () = assert!(PROGRESS_RADIUS == 0);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -304,13 +304,13 @@ mod tests {
     use egui::{Color32, Style};
 
     use super::{
-        BACKGROUND, BORDER_STRONG, COMPACT_CONTROL_HEIGHT, ControlTone, DANGER_INTERACTIVE,
-        DETAILS_SEPARATOR_GAP, DETAILS_TOP_GAP, DIAGNOSTIC_TOP_GAP, DISABLED, FOCUS, FOCUS_OFFSET,
-        FOCUS_STROKE_WIDTH, FOOTER_ACTION_GAP, FOREGROUND, HOVER, InteractionState,
-        MODE_BUTTON_HORIZONTAL_PADDING, PATH_FIELD_HORIZONTAL_PADDING, PRESSED,
-        PRIMARY_CONTROL_HEIGHT, PRIMARY_HOVER, PRIMARY_PRESSED, PROGRESS, PROGRESS_RADIUS,
-        RESULT_FOOTER_GAP, RUNNING_FOOTER_GAP, SECONDARY, SECONDARY_FAINT,
-        SELECTABLE_ROW_CONTENT_GAP, SELECTABLE_ROW_HORIZONTAL_PADDING,
+        BACKGROUND, BORDER_STRONG, COMPACT_CONTROL_HEIGHT, CONTAINER_RADIUS, CONTROL_RADIUS,
+        ControlTone, DANGER_INTERACTIVE, DETAILS_SEPARATOR_GAP, DETAILS_TOP_GAP,
+        DIAGNOSTIC_TOP_GAP, DISABLED, FOCUS, FOCUS_OFFSET, FOCUS_STROKE_WIDTH, FOOTER_ACTION_GAP,
+        FOREGROUND, HOVER, InteractionState, MODE_BUTTON_HORIZONTAL_PADDING,
+        PATH_FIELD_HORIZONTAL_PADDING, PRESSED, PRIMARY_CONTROL_HEIGHT, PRIMARY_HOVER,
+        PRIMARY_PRESSED, PROGRESS, PROGRESS_RADIUS, RESULT_FOOTER_GAP, RUNNING_FOOTER_GAP,
+        SECONDARY, SECONDARY_FAINT, SELECTABLE_ROW_CONTENT_GAP, SELECTABLE_ROW_HORIZONTAL_PADDING,
         SELECTABLE_ROW_INDICATOR_COLUMN, SELECTABLE_ROW_MIN_HEIGHT, SELECTION,
         SELECTION_INDICATOR_SIZE, SEPARATOR, SEPARATOR_WIDTH, SPACING, STATUS_COPY_GAP, ThemeRole,
         apply_to_style, control_colors, monochrome_visuals, selectable_colors,
@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn geometry_remains_minimal_and_progress_is_square() {
+    fn shared_geometry_uses_four_px_radius_and_progress_stays_square() {
         let visuals = monochrome_visuals();
 
         for widget in [
@@ -451,10 +451,24 @@ mod tests {
             visuals.widgets.active,
             visuals.widgets.open,
         ] {
-            assert!(widget.corner_radius.average() <= 2.0);
+            assert_eq!(widget.corner_radius.average(), f32::from(CONTROL_RADIUS));
         }
-        assert!(visuals.window_corner_radius.average() <= 2.0);
-        assert!(visuals.menu_corner_radius.average() <= 2.0);
+        assert_eq!(
+            visuals.window_corner_radius.average(),
+            f32::from(CONTAINER_RADIUS)
+        );
+        assert_eq!(
+            visuals.menu_corner_radius.average(),
+            f32::from(CONTAINER_RADIUS)
+        );
+        assert_eq!(CONTROL_RADIUS, CONTAINER_RADIUS);
+        assert!(f32::from(CONTROL_RADIUS) < COMPACT_CONTROL_HEIGHT * 0.5);
+
+        for scale in [1.0_f32, 1.25, 1.5] {
+            let physical_radius = f32::from(CONTROL_RADIUS) * scale;
+            assert_eq!(physical_radius.fract(), 0.0);
+        }
+
         assert_eq!(std::hint::black_box(PROGRESS_RADIUS), 0);
         assert_eq!(std::hint::black_box(SEPARATOR_WIDTH), 1.0);
         assert_eq!(std::hint::black_box(FOCUS_STROKE_WIDTH), 2.0);
