@@ -1,6 +1,6 @@
 use std::{io, path::Path, process::Command, time::Duration};
 
-use egui::{CentralPanel, Context, RichText, TextStyle, Ui};
+use egui::{CentralPanel, Context, Ui};
 
 use apollo::{
     audio_mix::execution::{AudioMixExecutionState, AudioMixExecutor, AudioMixStartError},
@@ -24,24 +24,14 @@ use apollo::{
     upscale::execution::{UpscaleExecutionState, UpscaleExecutor, UpscaleStartError},
 };
 
-const HOME_WORDMARK: &str = "apollo";
-const HOME_PROMPT: &str = "Choose a media operation";
-const AUDIO_MIX_LABEL: &str = "Audio Mix";
-const UPSCALE_LABEL: &str = "Upscale";
 const EXECUTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
-fn home_action_layout(available_width: f32, action_widths: [f32; 2]) -> layout::ActionLayout {
-    layout::action_layout(available_width, &action_widths)
-}
-
 fn file_intake_enabled(
-    current_tool: Option<Tool>,
     audio_state: &AudioMixExecutionState,
     upscale_state: &UpscaleExecutionState,
 ) -> bool {
     // Done/Back owns terminal settlement. Intake resumes only after both executors return to Idle.
-    current_tool.is_some()
-        && matches!(audio_state, AudioMixExecutionState::Idle)
+    matches!(audio_state, AudioMixExecutionState::Idle)
         && matches!(upscale_state, UpscaleExecutionState::Idle)
 }
 
@@ -85,9 +75,9 @@ struct UpscaleToolState {
     start_error_details_open: bool,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AppState {
-    current_tool: Option<Tool>,
+    current_tool: Tool,
     intake_active: bool,
     intake_error: Option<MediaError>,
     intake_error_details_open: bool,
@@ -96,13 +86,27 @@ struct AppState {
     upscale: Option<UpscaleToolState>,
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            current_tool: Tool::AudioMix,
+            intake_active: true,
+            intake_error: None,
+            intake_error_details_open: false,
+            media_intake: MediaIntake::default(),
+            audio_mix: None,
+            upscale: None,
+        }
+    }
+}
+
 impl AppState {
     fn select_tool(&mut self, tool: Tool) {
-        self.current_tool = Some(tool);
+        self.current_tool = tool;
     }
 
     fn begin_source_change(&mut self, tool: Tool) {
-        self.current_tool = Some(tool);
+        self.current_tool = tool;
         self.intake_active = true;
         self.intake_error = None;
         self.intake_error_details_open = false;
@@ -144,52 +148,9 @@ impl ApolloApp {
 
     fn file_intake_enabled(&self) -> bool {
         file_intake_enabled(
-            self.state.current_tool,
             self.audio_mix_executor.state(),
             self.upscale_executor.state(),
         )
-    }
-
-    fn show_home(&mut self, ui: &mut Ui) {
-        layout::centered_content(ui, |ui| {
-            ui.label(
-                RichText::new(HOME_WORDMARK)
-                    .text_style(fonts::wordmark_text_style())
-                    .extra_letter_spacing(fonts::WORDMARK_LETTER_SPACING),
-            );
-            ui.add_space(theme::SPACING.focal);
-            ui.label(
-                RichText::new(HOME_PROMPT)
-                    .text_style(TextStyle::Small)
-                    .color(theme::SECONDARY),
-            );
-            ui.add_space(theme::SPACING.focal);
-            self.show_home_actions(ui);
-        });
-    }
-
-    fn show_home_actions(&mut self, ui: &mut Ui) {
-        let action_sizes = [
-            widgets::mode_button_intrinsic_size(ui, AUDIO_MIX_LABEL),
-            widgets::mode_button_intrinsic_size(ui, UPSCALE_LABEL),
-        ];
-        let action_widths = action_sizes.map(|size| size.x);
-        let arrangement = home_action_layout(ui.available_width(), action_widths);
-
-        layout::centered_action_group(
-            ui,
-            &action_sizes,
-            arrangement,
-            theme::SPACING.compact,
-            |ui| {
-                if widgets::mode_button(ui, AUDIO_MIX_LABEL, false).clicked() {
-                    self.select_tool(Tool::AudioMix);
-                }
-                if widgets::mode_button(ui, UPSCALE_LABEL, false).clicked() {
-                    self.select_tool(Tool::VideoUpscale);
-                }
-            },
-        );
     }
 
     fn select_tool(&mut self, tool: Tool) {
@@ -323,11 +284,7 @@ impl ApolloApp {
         self.state.intake_error_details_open = false;
         match self.state.media_intake.load_with_probe(path, probe) {
             Ok(MediaLoadDisposition::Probed | MediaLoadDisposition::Reused) => {
-                let tool = self
-                    .state
-                    .current_tool
-                    .expect("selected tool exists while accepting media");
-                let _ = self.activate_cached_source(tool);
+                let _ = self.activate_cached_source(self.state.current_tool);
             }
             Err(error) => {
                 self.state.intake_error = Some(MediaError::from_intake_error(&error));
@@ -631,10 +588,7 @@ impl eframe::App for ApolloApp {
                     file_intake::show_drag_hover(ui);
                 }
 
-                match self.state.current_tool {
-                    Some(tool) => self.show_tool(ui, tool),
-                    None => self.show_home(ui),
-                }
+                self.show_tool(ui, self.state.current_tool);
             });
     }
 }
@@ -648,8 +602,7 @@ mod tests {
     };
 
     use super::{
-        AUDIO_MIX_LABEL, ApolloApp, AppState, HOME_PROMPT, HOME_WORDMARK, Tool, UPSCALE_LABEL,
-        file_intake_enabled, home_action_layout, shows_audio_mix_lifecycle,
+        ApolloApp, AppState, Tool, file_intake_enabled, shows_audio_mix_lifecycle,
         shows_upscale_lifecycle,
     };
     use apollo::{
@@ -660,13 +613,7 @@ mod tests {
             process::MediaProcessFailure,
             tools::MediaTools,
         },
-        ui::{
-            fonts,
-            layout::{self, ActionLayout},
-            theme,
-            upscale::UpscaleSelectionAction,
-            widgets,
-        },
+        ui::{fonts, theme, upscale::UpscaleSelectionAction},
         upscale::{
             execution::UpscaleExecutionState,
             model::{UpscaleTarget, VideoCodec},
@@ -753,62 +700,64 @@ mod tests {
     }
 
     #[test]
-    fn default_application_state_is_tool_chooser() {
-        assert!(AppState::default().current_tool.is_none());
+    fn fresh_application_state_starts_on_audio_mix_file_intake() {
+        let state = AppState::default();
+
+        assert_eq!(state.current_tool, Tool::AudioMix);
+        assert!(state.intake_active);
+        assert!(state.audio_mix.is_none());
+        assert!(state.upscale.is_none());
     }
 
     #[test]
-    fn initial_state_is_deterministic() {
-        assert_eq!(AppState::default(), AppState::default());
-    }
-
-    #[test]
-    fn initialization_does_not_select_or_start_a_media_tool() {
+    fn initialization_selects_audio_mix_without_starting_an_executor() {
         let app = app();
-        assert!(app.state.current_tool.is_none());
+
+        assert_eq!(app.state.current_tool, Tool::AudioMix);
+        assert!(app.state.intake_active);
         assert!(!app.audio_mix_executor.is_running());
         assert!(!app.upscale_executor.is_running());
     }
 
     #[test]
-    fn home_uses_quiet_focus_copy_without_card_descriptions() {
-        assert_eq!(HOME_WORDMARK, "apollo");
-        assert_eq!(HOME_PROMPT, "Choose a media operation");
-        assert_eq!(AUDIO_MIX_LABEL, "Audio Mix");
-        assert_eq!(UPSCALE_LABEL, "Upscale");
-    }
-
-    #[test]
-    fn home_horizontal_group_uses_intrinsic_mode_sizes_and_shared_gap() {
-        egui::__run_test_ui(|ui| {
-            let action_sizes = [
-                widgets::mode_button_intrinsic_size(ui, AUDIO_MIX_LABEL),
-                widgets::mode_button_intrinsic_size(ui, UPSCALE_LABEL),
-            ];
-            let group_size = layout::action_group_size(
-                &action_sizes,
-                ActionLayout::Horizontal,
-                theme::SPACING.compact,
-            );
-
-            assert_eq!(
-                group_size.x,
-                action_sizes[0].x + theme::SPACING.compact + action_sizes[1].x
-            );
-            assert_eq!(group_size.y, theme::PRIMARY_CONTROL_HEIGHT);
-        });
-    }
-
-    #[test]
-    fn selecting_each_tool_enters_unified_intake_without_a_source() {
+    fn fresh_application_state_renders_unified_file_intake() {
         let mut app = app();
-        app.select_tool(Tool::AudioMix);
-        assert_eq!(app.state.current_tool, Some(Tool::AudioMix));
-        assert!(app.state.intake_active);
-        app.state.current_tool = None;
+        let context = egui::Context::default();
+        fonts::install(&context).expect("test typography should install");
+        theme::install(&context);
+
+        let tool = app.state.current_tool;
+        let mut output = context.run_ui(Default::default(), |ui| {
+            app.show_tool(ui, tool);
+        });
+
+        assert!(output_contains_text(&output, "Open file"));
+        assert!(output_contains_text(&output, "Audio Mix"));
+        assert!(output_contains_text(&output, "Upscale"));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn switching_mode_on_intake_routes_next_source_to_selected_tool() {
+        let (directory, path) = temp_file("mode-switch");
+        let mut app = app();
+
         app.select_tool(Tool::VideoUpscale);
-        assert_eq!(app.state.current_tool, Some(Tool::VideoUpscale));
+        assert_eq!(app.state.current_tool, Tool::VideoUpscale);
         assert!(app.state.intake_active);
+
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+
+        assert!(!app.state.intake_active);
+        assert!(app.state.audio_mix.is_none());
+        assert_eq!(
+            app.state
+                .upscale
+                .as_ref()
+                .map(|session| &session.media.path),
+            Some(&path)
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -833,7 +782,6 @@ mod tests {
         app.select_tool(Tool::VideoUpscale);
 
         assert!(file_intake_enabled(
-            app.state.current_tool,
             app.audio_mix_executor.state(),
             app.upscale_executor.state(),
         ));
@@ -904,7 +852,6 @@ mod tests {
             .set_target(&ready.media, UpscaleTarget::Uhd8k);
         ready.selection.set_codec(VideoCodec::H265);
 
-        app.state.current_tool = None;
         app.select_tool(Tool::VideoUpscale);
 
         let ready = app
@@ -1061,46 +1008,30 @@ mod tests {
     #[test]
     fn file_drop_policy_disables_replacement_while_either_operation_runs() {
         assert!(file_intake_enabled(
-            Some(Tool::AudioMix),
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Idle,
         ));
         assert!(!file_intake_enabled(
-            Some(Tool::AudioMix),
             &AudioMixExecutionState::Running,
             &UpscaleExecutionState::Idle,
         ));
         assert!(!file_intake_enabled(
-            Some(Tool::VideoUpscale),
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Running,
-        ));
-        assert!(!file_intake_enabled(
-            None,
-            &AudioMixExecutionState::Idle,
-            &UpscaleExecutionState::Idle,
         ));
     }
 
     #[test]
     fn audio_mix_terminal_states_reject_source_replacement() {
         for state in terminal_execution_states() {
-            assert!(!file_intake_enabled(
-                Some(Tool::AudioMix),
-                &state,
-                &UpscaleExecutionState::Idle,
-            ));
+            assert!(!file_intake_enabled(&state, &UpscaleExecutionState::Idle,));
         }
     }
 
     #[test]
     fn upscale_terminal_states_reject_source_replacement() {
         for state in terminal_execution_states() {
-            assert!(!file_intake_enabled(
-                Some(Tool::VideoUpscale),
-                &AudioMixExecutionState::Idle,
-                &state,
-            ));
+            assert!(!file_intake_enabled(&AudioMixExecutionState::Idle, &state,));
         }
     }
 
@@ -1110,31 +1041,13 @@ mod tests {
             output: PathBuf::from("finished.mp4"),
         };
         assert!(!file_intake_enabled(
-            Some(Tool::AudioMix),
             &completed,
             &UpscaleExecutionState::Idle,
         ));
 
         assert!(file_intake_enabled(
-            Some(Tool::AudioMix),
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Idle,
         ));
-    }
-
-    #[test]
-    fn narrow_home_layout_stacks_tool_actions() {
-        assert_eq!(
-            home_action_layout(150.0, [80.0, 70.0]),
-            ActionLayout::Stacked
-        );
-    }
-
-    #[test]
-    fn wider_home_layout_keeps_tool_actions_horizontal() {
-        assert_eq!(
-            home_action_layout(161.0, [80.0, 70.0]),
-            ActionLayout::Horizontal
-        );
     }
 }
