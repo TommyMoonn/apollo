@@ -7,15 +7,18 @@ use crate::{
         execution::{AudioMixExecutionFailure, AudioMixExecutionState, AudioMixExecutor},
         model::{AudioMixRequest, OutputContainer},
     },
-    media::{model::MediaFile, progress::MediaProgress},
+    media::{
+        error::{MediaError, MediaOutputContainer},
+        model::MediaFile,
+        progress::MediaProgress,
+    },
 };
 
 use super::{
-    layout,
+    layout, media_error,
     media_lifecycle::{
-        diagnostic_viewport, failure_diagnostic, failure_summary, file_name, heading,
-        output_parent, progress_presentation, right_aligned_actions, secondary_copy, show_progress,
-        source_to_output as source_to_output_paths, technical_faint,
+        file_name, heading, output_parent, progress_presentation, right_aligned_actions,
+        secondary_copy, show_progress, source_to_output as source_to_output_paths, technical_faint,
     },
     theme, widgets,
 };
@@ -26,10 +29,6 @@ const COMPLETE_TITLE: &str = "Audio mix complete";
 const OPEN_FOLDER_LABEL: &str = "Open folder";
 const DONE_LABEL: &str = "Done";
 const FAILED_TITLE: &str = "Audio mix failed";
-const FAILURE_COPY: &str =
-    "The selected audio streams could not be combined into the requested output.";
-const SHOW_DETAILS_LABEL: &str = "Show details";
-const HIDE_DETAILS_LABEL: &str = "Hide details";
 const BACK_LABEL: &str = "Back";
 const CANCELLED_TITLE: &str = "Audio mix cancelled";
 const CANCELLED_COPY: &str = "No final output was published.";
@@ -81,7 +80,9 @@ pub fn show(
         AudioMixExecutionState::Completed { output } => {
             show_completed(ui, media, request, &output, executor, ui_state)
         }
-        AudioMixExecutionState::Failed(failure) => show_failed(ui, &failure, executor, ui_state),
+        AudioMixExecutionState::Failed(failure) => {
+            show_failed(ui, request, &failure, executor, ui_state)
+        }
         AudioMixExecutionState::Cancelled => show_cancelled(ui, executor, ui_state),
     }
 }
@@ -165,11 +166,14 @@ struct FailureContentResponse {
 
 fn show_failed(
     ui: &mut Ui,
+    request: &AudioMixRequest,
     failure: &AudioMixExecutionFailure,
     executor: &mut AudioMixExecutor,
     ui_state: &mut AudioMixLifecycleUiState,
 ) -> AudioMixLifecycleAction {
-    let response = layout::focus_content(ui, |ui| failure_content(ui, failure, ui_state));
+    let response = layout::focus_content(ui, |ui| {
+        failure_content(ui, request.container, failure, ui_state)
+    });
 
     if response.inner.back.clicked() {
         let reset = executor.reset();
@@ -183,41 +187,27 @@ fn show_failed(
 
 fn failure_content(
     ui: &mut Ui,
+    container: OutputContainer,
     failure: &AudioMixExecutionFailure,
     ui_state: &mut AudioMixLifecycleUiState,
 ) -> FailureContentResponse {
-    let diagnostic = failure_diagnostic(failure);
-
-    ui.spacing_mut().item_spacing.y = 0.0;
-    heading(ui, FAILED_TITLE);
-    ui.add_space(theme::STATUS_COPY_GAP);
-    secondary_copy(ui, FAILURE_COPY);
-
-    ui.add_space(theme::DIAGNOSTIC_TOP_GAP);
-    widgets::separator(ui);
-    ui.add_space(theme::DETAILS_SEPARATOR_GAP);
-    technical_faint(ui, &failure_summary(failure));
-
-    ui.add_space(theme::DETAILS_TOP_GAP);
-    let details_label = if ui_state.details_open {
-        HIDE_DETAILS_LABEL
-    } else {
-        SHOW_DETAILS_LABEL
-    };
-    if widgets::plain_button(ui, details_label).clicked() {
-        ui_state.details_open = !ui_state.details_open;
-    }
-    if ui_state.details_open {
-        ui.add_space(theme::DETAILS_TOP_GAP);
-        widgets::separator(ui);
-        ui.add_space(theme::DETAILS_SEPARATOR_GAP);
-        diagnostic_viewport(ui, diagnostic);
-    }
-
-    ui.add_space(theme::RESULT_FOOTER_GAP);
-    let back = right_aligned_actions(ui, |ui| widgets::secondary_button(ui, BACK_LABEL));
-
+    let error = failure_error(failure, container);
+    let back = media_error::show_failure_content(
+        ui,
+        FAILED_TITLE,
+        &error,
+        &mut ui_state.details_open,
+        BACK_LABEL,
+    );
     FailureContentResponse { back }
+}
+
+fn failure_error(failure: &AudioMixExecutionFailure, container: OutputContainer) -> MediaError {
+    let output_container = match container {
+        OutputContainer::Mp4 => MediaOutputContainer::Mp4,
+        OutputContainer::Mkv => MediaOutputContainer::Mkv,
+    };
+    MediaError::from_execution_failure(failure, output_container)
 }
 
 fn show_cancelled(
@@ -289,7 +279,7 @@ mod tests {
 
     use super::{
         AudioMixLifecycleUiState, CANCELLED_TITLE, COMPLETE_TITLE, FAILED_TITLE, RUNNING_TITLE,
-        failure_content, failure_diagnostic, mixed_audio_summary, progress_presentation,
+        failure_content, failure_error, mixed_audio_summary, progress_presentation,
         source_to_output, video_copy_summary,
     };
     use crate::ui::media_lifecycle::{format_duration, format_integer};
@@ -360,7 +350,7 @@ mod tests {
                         .layout(egui::Layout::top_down(egui::Align::LEFT)),
                     |ui| {
                         crate::ui::layout::focus_content(ui, |ui| {
-                            failure_content(ui, &failure, &mut state)
+                            failure_content(ui, OutputContainer::Mp4, &failure, &mut state)
                         })
                     },
                 )
@@ -387,7 +377,7 @@ mod tests {
                         .layout(egui::Layout::top_down(egui::Align::LEFT)),
                     |ui| {
                         crate::ui::layout::focus_content(ui, |ui| {
-                            failure_content(ui, &failure, &mut expanded_state)
+                            failure_content(ui, OutputContainer::Mp4, &failure, &mut expanded_state)
                         })
                     },
                 )
@@ -402,7 +392,7 @@ mod tests {
                         .layout(egui::Layout::top_down(egui::Align::LEFT)),
                     |ui| {
                         crate::ui::layout::focus_content(ui, |ui| {
-                            failure_content(ui, &failure, &mut compact_state)
+                            failure_content(ui, OutputContainer::Mp4, &failure, &mut compact_state)
                         })
                     },
                 )
@@ -429,7 +419,7 @@ mod tests {
                         .layout(egui::Layout::top_down(egui::Align::LEFT)),
                     |ui| {
                         crate::ui::layout::focus_content(ui, |ui| {
-                            failure_content(ui, &failure, &mut state)
+                            failure_content(ui, OutputContainer::Mp4, &failure, &mut state)
                         })
                     },
                 )
@@ -477,6 +467,31 @@ mod tests {
     }
 
     #[test]
+    fn terminal_failure_classification_uses_selected_output_container() {
+        let failure = process_failure(
+            "Could not find tag for codec pcm_s16le, codec not currently supported in container"
+                .to_owned(),
+        );
+
+        let mp4 = failure_error(&failure, OutputContainer::Mp4);
+        assert_eq!(
+            mp4.kind(),
+            crate::media::error::MediaErrorKind::Mp4Incompatibility
+        );
+
+        let mkv = failure_error(&failure, OutputContainer::Mkv);
+        assert_eq!(
+            mkv.kind(),
+            crate::media::error::MediaErrorKind::UnknownFfmpegFailure
+        );
+        assert!(!mkv.message().contains("MP4"));
+        assert!(
+            !mkv.guidance()
+                .is_some_and(|guidance| guidance.contains("Use MKV"))
+        );
+    }
+
+    #[test]
     fn diagnostic_details_are_retained_verbatim() {
         let failure = AudioMixExecutionFailure::Process {
             reason: MediaProcessFailure::Exit(Some(1)),
@@ -484,8 +499,8 @@ mod tests {
         };
 
         assert_eq!(
-            failure_diagnostic(&failure),
-            "stderr tail\nConversion failed!"
+            failure_error(&failure, OutputContainer::Mp4).diagnostic(),
+            Some("stderr tail\nConversion failed!")
         );
     }
 
@@ -497,7 +512,7 @@ mod tests {
         };
 
         assert_eq!(
-            failure_diagnostic(&failure),
+            failure_error(&failure, OutputContainer::Mp4).diagnostic_or_fallback(),
             "No diagnostic details were reported."
         );
     }

@@ -2,15 +2,11 @@ use std::{path::PathBuf, time::Duration};
 
 use egui::{Align, Label, Layout, RichText, ScrollArea, Sides, TextStyle, Ui};
 
-use crate::media::{
-    execution::MediaExecutionFailure, process::MediaProcessFailure, progress::MediaProgress,
-};
+use crate::media::progress::MediaProgress;
 
 use super::{fonts, layout, theme, widgets};
 
 const PROCESSING_LABEL: &str = "Processing";
-const NO_DIAGNOSTIC: &str = "No diagnostic details were reported.";
-
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ProgressPresentation {
     pub fraction: f32,
@@ -128,30 +124,6 @@ pub(super) fn source_to_output(input: &std::path::Path, output: &std::path::Path
         file_display_name(input),
         file_display_name(output)
     )
-}
-
-pub(super) fn failure_summary(failure: &MediaExecutionFailure) -> String {
-    match failure {
-        MediaExecutionFailure::Process { reason, .. } => match reason {
-            MediaProcessFailure::Exit(Some(code)) => format!("FFmpeg exited with code {code}."),
-            MediaProcessFailure::Exit(None) => "FFmpeg exited unsuccessfully.".to_owned(),
-            MediaProcessFailure::Io(kind) => format!("FFmpeg process failed: {kind:?}."),
-        },
-        MediaExecutionFailure::Output { reason, .. } => reason.to_string(),
-    }
-}
-
-pub(super) fn failure_diagnostic(failure: &MediaExecutionFailure) -> &str {
-    let diagnostic = match failure {
-        MediaExecutionFailure::Process { diagnostic, .. }
-        | MediaExecutionFailure::Output { diagnostic, .. } => diagnostic.as_str(),
-    };
-
-    if diagnostic.trim().is_empty() {
-        NO_DIAGNOSTIC
-    } else {
-        diagnostic
-    }
 }
 
 pub(super) fn output_parent(output: &std::path::Path) -> PathBuf {

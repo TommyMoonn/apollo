@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use egui::{Response, Ui};
 
 use crate::{
-    media::{model::MediaFile, progress::MediaProgress},
+    media::{
+        error::{MediaError, MediaOutputContainer},
+        model::MediaFile,
+        progress::MediaProgress,
+    },
     upscale::{
         execution::{UpscaleExecutionFailure, UpscaleExecutionState, UpscaleExecutor},
         model::UpscaleRequest,
@@ -12,11 +16,10 @@ use crate::{
 };
 
 use super::{
-    layout,
+    layout, media_error,
     media_lifecycle::{
-        diagnostic_viewport, failure_diagnostic, failure_summary, file_name, heading,
-        output_parent, progress_presentation, right_aligned_actions, secondary_copy, show_progress,
-        source_to_output, technical_faint,
+        file_name, heading, output_parent, progress_presentation, right_aligned_actions,
+        secondary_copy, show_progress, source_to_output, technical_faint,
     },
     theme,
     upscale::{codec_label, target_label},
@@ -28,9 +31,6 @@ const COMPLETE_TITLE: &str = "Upscale complete";
 const OPEN_FOLDER_LABEL: &str = "Open folder";
 const DONE_LABEL: &str = "Done";
 const FAILED_TITLE: &str = "Upscale failed";
-const FAILURE_COPY: &str = "The video could not be encoded at the selected target.";
-const SHOW_DETAILS_LABEL: &str = "Show details";
-const HIDE_DETAILS_LABEL: &str = "Hide details";
 const BACK_LABEL: &str = "Back";
 const CANCELLED_TITLE: &str = "Upscale cancelled";
 const CANCELLED_COPY: &str = "No final output was published.";
@@ -182,38 +182,19 @@ fn failure_content(
     failure: &UpscaleExecutionFailure,
     ui_state: &mut UpscaleLifecycleUiState,
 ) -> FailureContentResponse {
-    let diagnostic = failure_diagnostic(failure);
-
-    ui.spacing_mut().item_spacing.y = 0.0;
-    heading(ui, FAILED_TITLE);
-    ui.add_space(theme::STATUS_COPY_GAP);
-    secondary_copy(ui, FAILURE_COPY);
-
-    ui.add_space(theme::DIAGNOSTIC_TOP_GAP);
-    widgets::separator(ui);
-    ui.add_space(theme::DETAILS_SEPARATOR_GAP);
-    technical_faint(ui, &failure_summary(failure));
-
-    ui.add_space(theme::DETAILS_TOP_GAP);
-    let details_label = if ui_state.details_open {
-        HIDE_DETAILS_LABEL
-    } else {
-        SHOW_DETAILS_LABEL
-    };
-    if widgets::plain_button(ui, details_label).clicked() {
-        ui_state.details_open = !ui_state.details_open;
-    }
-    if ui_state.details_open {
-        ui.add_space(theme::DETAILS_TOP_GAP);
-        widgets::separator(ui);
-        ui.add_space(theme::DETAILS_SEPARATOR_GAP);
-        diagnostic_viewport(ui, diagnostic);
-    }
-
-    ui.add_space(theme::RESULT_FOOTER_GAP);
-    let back = right_aligned_actions(ui, |ui| widgets::secondary_button(ui, BACK_LABEL));
-
+    let error = failure_error(failure);
+    let back = media_error::show_failure_content(
+        ui,
+        FAILED_TITLE,
+        &error,
+        &mut ui_state.details_open,
+        BACK_LABEL,
+    );
     FailureContentResponse { back }
+}
+
+fn failure_error(failure: &UpscaleExecutionFailure) -> MediaError {
+    MediaError::from_execution_failure(failure, MediaOutputContainer::Mp4)
 }
 
 fn show_cancelled(
@@ -284,10 +265,10 @@ mod tests {
 
     use super::{
         CANCELLED_CLEANUP, CANCELLED_COPY, CANCELLED_TITLE, COMPLETE_TITLE, FAILED_TITLE,
-        FAILURE_COPY, UpscaleLifecycleUiState, completion_dimensions, failure_content,
+        UpscaleLifecycleUiState, completion_dimensions, failure_content, failure_error,
         reset_terminal, running_title, show_cancelled, show_completed, show_running,
     };
-    use crate::ui::media_lifecycle::{failure_diagnostic, failure_summary, progress_presentation};
+    use crate::{media::error::MediaErrorKind, ui::media_lifecycle::progress_presentation};
 
     #[test]
     fn lifecycle_copy_matches_quiet_focus_upscale_surfaces() {
@@ -296,10 +277,6 @@ mod tests {
         assert_eq!(running_title(&request), "Upscaling to 4K");
         assert_eq!(COMPLETE_TITLE, "Upscale complete");
         assert_eq!(FAILED_TITLE, "Upscale failed");
-        assert_eq!(
-            FAILURE_COPY,
-            "The video could not be encoded at the selected target."
-        );
         assert_eq!(CANCELLED_TITLE, "Upscale cancelled");
         assert_eq!(CANCELLED_COPY, "No final output was published.");
         assert_eq!(CANCELLED_CLEANUP, "temporary output cleaned");
@@ -410,16 +387,31 @@ mod tests {
     }
 
     #[test]
+    fn terminal_failure_classification_keeps_upscale_mp4_context() {
+        let failure = UpscaleExecutionFailure::Process {
+            reason: MediaProcessFailure::Exit(Some(1)),
+            diagnostic:
+                "Could not find tag for codec pcm_s16le, codec not currently supported in container"
+                    .to_owned(),
+        };
+
+        let error = failure_error(&failure);
+        assert_eq!(error.kind(), MediaErrorKind::Mp4Incompatibility);
+        assert!(error.message().contains("MP4"));
+    }
+
+    #[test]
     fn failure_details_retain_process_reason_and_diagnostic() {
         let failure = UpscaleExecutionFailure::Process {
             reason: MediaProcessFailure::Exit(Some(1)),
             diagnostic: "Error initializing output stream\nConversion failed!".to_owned(),
         };
 
-        assert_eq!(failure_summary(&failure), "FFmpeg exited with code 1.");
+        let error = failure_error(&failure);
+        assert_eq!(error.kind(), MediaErrorKind::UnknownFfmpegFailure);
         assert_eq!(
-            failure_diagnostic(&failure),
-            "Error initializing output stream\nConversion failed!"
+            error.diagnostic(),
+            Some("Error initializing output stream\nConversion failed!")
         );
     }
 
