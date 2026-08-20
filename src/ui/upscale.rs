@@ -276,12 +276,12 @@ fn show_codec_field(ui: &mut Ui, codec: VideoCodec) -> Option<VideoCodec> {
     ui.add_space(theme::SPACING.compact);
 
     let mut requested_codec = None;
-    widgets::select_menu(ui, codec_label(codec), |ui| {
-        if widgets::plain_button(ui, "H.264").clicked() {
+    widgets::select_menu(ui, codec_label(codec), &["H.264", "H.265"], |ui| {
+        if widgets::select_menu_option(ui, "H.264", codec == VideoCodec::H264).clicked() {
             requested_codec = Some(VideoCodec::H264);
             ui.close();
         }
-        if widgets::plain_button(ui, "H.265").clicked() {
+        if widgets::select_menu_option(ui, "H.265", codec == VideoCodec::H265).clicked() {
             requested_codec = Some(VideoCodec::H265);
             ui.close();
         }

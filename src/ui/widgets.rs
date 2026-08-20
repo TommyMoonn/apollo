@@ -1,7 +1,7 @@
 use egui::{
-    Align, Align2, Color32, CornerRadius, InnerResponse, Label, Layout, Popup, Rect, Response,
-    RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
-    pos2, vec2,
+    Align, Align2, Color32, CornerRadius, Frame, InnerResponse, Label, Layout, Popup, Rect,
+    Response, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, UiBuilder, Vec2, WidgetInfo,
+    WidgetType, pos2, vec2,
 };
 
 use super::{fonts, layout, theme};
@@ -173,20 +173,82 @@ pub fn plain_button(ui: &mut Ui, label: &str) -> Response {
     response
 }
 
-/// Simple dropdown shell built from the shared compact selector primitive and egui's popup owner.
-/// The caller owns the option domain/state and supplies the menu contents.
+/// Shared selector popup built from the compact selector trigger and egui's popup owner.
+///
+/// The popup keeps the trigger as its minimum outer width, while longer option labels may enlarge
+/// it. Options should be rendered with [`select_menu_option`] so their hit regions fill the popup's
+/// usable width and keep the trigger's centered text alignment and horizontal padding.
 pub fn select_menu<R>(
     ui: &mut Ui,
     selected_text: &str,
+    option_labels: &[&str],
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> InnerResponse<Option<R>> {
     let response = select_button(ui, selected_text);
-    let inner = Popup::menu(&response)
-        .width(response.rect.width())
-        .show(add_contents)
-        .map(|inner_response| inner_response.inner);
+    let inner = show_selector_popup(ui, &response, option_labels, add_contents);
 
     InnerResponse { inner, response }
+}
+
+fn show_selector_popup<R>(
+    ui: &mut Ui,
+    response: &Response,
+    option_labels: &[&str],
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let frame = Frame::popup(ui.style());
+    let popup_width = selector_popup_width(ui, response.rect.width(), option_labels, &frame);
+    let content_width = (popup_width - frame.total_margin().sum().x).max(0.0);
+
+    Popup::menu(response)
+        .width(popup_width)
+        .frame(frame)
+        .show(|ui| {
+            ui.set_min_width(content_width);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add_contents(ui)
+        })
+        .map(|inner_response| inner_response.inner)
+}
+
+/// Full-width option row for [`select_menu`].
+#[must_use]
+pub fn select_menu_option(ui: &mut Ui, label: &str, selected: bool) -> Response {
+    let desired_width = ui
+        .available_width()
+        .max(selector_option_intrinsic_width(ui, label));
+    let desired_size = vec2(desired_width, theme::COMPACT_CONTROL_HEIGHT);
+    let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
+    let state = interaction_state(&response);
+    let colors = theme::selectable_colors(state, selected);
+
+    ui.painter().rect_filled(rect, 0.0, colors.background);
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        button_text_style().resolve(ui.style()),
+        colors.foreground,
+    );
+    paint_keyboard_focus(ui, &response, rect);
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::Button, response.enabled(), selected, label)
+    });
+    response
+}
+
+fn selector_popup_width(ui: &Ui, trigger_width: f32, option_labels: &[&str], frame: &Frame) -> f32 {
+    let widest_option = option_labels
+        .iter()
+        .map(|label| selector_option_intrinsic_width(ui, label))
+        .fold(0.0_f32, f32::max);
+    let option_outer_width = widest_option + frame.total_margin().sum().x;
+
+    trigger_width.max(option_outer_width)
+}
+
+fn selector_option_intrinsic_width(ui: &Ui, label: &str) -> f32 {
+    button_intrinsic_size(ui, label, true, BUTTON_HORIZONTAL_PADDING).x
 }
 
 /// Flat selectable row for track and target choices.
@@ -599,12 +661,110 @@ mod tests {
     use egui::{FontFamily, FontId, Sense, TextStyle};
 
     use super::{
-        InlineStatusKind, SelectionIndicator, button_text_style, displayed_progress_fraction,
-        inline_status_color, mode_button, mode_button_intrinsic_size, plain_button_text_style,
-        primary_button_enabled, progress_bar, progress_rail_color, selectable_row,
-        selectable_row_visuals,
+        BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
+        button_text_style, displayed_progress_fraction, inline_status_color, mode_button,
+        mode_button_intrinsic_size, plain_button_text_style, primary_button_enabled, progress_bar,
+        progress_rail_color, select_button, select_menu_option, selectable_row,
+        selectable_row_visuals, selector_popup_width, show_selector_popup,
     };
     use crate::ui::{fonts, layout, theme};
+
+    #[test]
+    fn selector_popups_match_triggers_and_long_labels_can_expand_them() {
+        let context = egui::Context::default();
+        let output = context.run_ui(Default::default(), |ui| {
+            let frame = egui::Frame::popup(ui.style());
+            let mp4_trigger =
+                button_intrinsic_size(ui, "MP4  ⌄", true, BUTTON_HORIZONTAL_PADDING).x;
+            let codec_trigger =
+                button_intrinsic_size(ui, "H.264  ⌄", true, BUTTON_HORIZONTAL_PADDING).x;
+
+            let mp4_popup = selector_popup_width(ui, mp4_trigger, &["MP4", "MKV"], &frame);
+            let codec_popup = selector_popup_width(ui, codec_trigger, &["H.264", "H.265"], &frame);
+            let compact = selector_popup_width(ui, 0.0, &["MP4", "MKV"], &frame);
+            let long = selector_popup_width(
+                ui,
+                0.0,
+                &["MP4", "A deliberately longer container label"],
+                &frame,
+            );
+
+            assert!(mp4_popup >= mp4_trigger);
+            assert!(codec_popup >= codec_trigger);
+            assert!(long > compact);
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn selector_options_fill_the_popup_usable_width() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(180.0);
+            let option = select_menu_option(ui, "H.264", false);
+
+            assert_eq!(option.rect.width(), 180.0);
+            assert_eq!(option.rect.height(), theme::COMPACT_CONTROL_HEIGHT);
+            assert_eq!(option.sense, Sense::click());
+        });
+    }
+
+    #[test]
+    fn opening_selector_popup_does_not_reflow_adjacent_layout() {
+        let context = egui::Context::default();
+        let output = context.run_ui(Default::default(), |ui| {
+            ui.horizontal(|ui| {
+                let spacing = ui.spacing().item_spacing.x;
+                let trigger = select_button(ui, "MP4");
+                let expected_adjacent_left = trigger.rect.right() + spacing;
+
+                egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&trigger));
+                let popup = show_selector_popup(
+                    ui,
+                    &trigger,
+                    &["MP4", "A deliberately longer container label"],
+                    |ui| select_menu_option(ui, "MP4", true),
+                );
+                assert!(popup.is_some());
+
+                let adjacent = ui.label("Output");
+                assert!((adjacent.rect.left() - expected_adjacent_left).abs() < 0.01);
+            });
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn selector_popup_frame_uses_shared_theme_roles() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let output = context.run_ui(Default::default(), |ui| {
+            let frame = egui::Frame::popup(ui.style());
+
+            assert_eq!(frame.fill, theme::BACKGROUND);
+            assert_eq!(frame.stroke.color, theme::SEPARATOR);
+            assert_eq!(frame.stroke.width, theme::SEPARATOR_WIDTH);
+            assert_eq!(
+                frame.corner_radius,
+                egui::CornerRadius::same(theme::CONTAINER_RADIUS),
+            );
+            assert_eq!(frame.shadow, egui::Shadow::NONE);
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn selector_option_states_stay_on_shared_monochrome_roles() {
+        let idle = theme::selectable_colors(theme::InteractionState::Idle, false);
+        let hovered = theme::selectable_colors(theme::InteractionState::Hovered, false);
+        let pressed = theme::selectable_colors(theme::InteractionState::Pressed, false);
+        let selected = theme::selectable_colors(theme::InteractionState::Idle, true);
+
+        assert_eq!(idle.background, theme::BACKGROUND);
+        assert_eq!(hovered.background, theme::HOVER);
+        assert_eq!(pressed.background, theme::PRESSED);
+        assert_eq!(selected.background, theme::SELECTION);
+        assert_eq!(selected.foreground, theme::BACKGROUND);
+    }
 
     #[test]
     fn selected_and_unselected_rows_keep_selection_separate_from_interaction() {

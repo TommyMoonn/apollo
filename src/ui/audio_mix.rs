@@ -364,16 +364,25 @@ fn show_output_row(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = theme::SPACING.compact;
 
-        widgets::select_menu(ui, container_label(state.container()), |ui| {
-            if widgets::plain_button(ui, "MP4").clicked() {
-                requested_container = Some(OutputContainer::Mp4);
-                ui.close();
-            }
-            if widgets::plain_button(ui, "MKV").clicked() {
-                requested_container = Some(OutputContainer::Mkv);
-                ui.close();
-            }
-        });
+        widgets::select_menu(
+            ui,
+            container_label(state.container()),
+            &["MP4", "MKV"],
+            |ui| {
+                if widgets::select_menu_option(ui, "MP4", state.container() == OutputContainer::Mp4)
+                    .clicked()
+                {
+                    requested_container = Some(OutputContainer::Mp4);
+                    ui.close();
+                }
+                if widgets::select_menu_option(ui, "MKV", state.container() == OutputContainer::Mkv)
+                    .clicked()
+                {
+                    requested_container = Some(OutputContainer::Mkv);
+                    ui.close();
+                }
+            },
+        );
 
         let row = widgets::output_path_row(ui, &output_text, BROWSE_LABEL);
         browse_clicked = row.browse.clicked();
