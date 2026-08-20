@@ -477,7 +477,8 @@ impl ApolloApp {
                     OutputContainer::Mp4 => OutputPickerFormat::Mp4,
                     OutputContainer::Mkv => OutputPickerFormat::Mkv,
                 };
-                let request = OutputPickerRequest::new(session.selection.output_path(), format);
+                let output = session.selection.output_path();
+                let request = OutputPickerRequest::new(&output, format);
 
                 match choose_output_destination(&request, picker) {
                     Ok(Some(path)) => {
@@ -620,10 +621,8 @@ impl ApolloApp {
                 let Some(session) = self.state.upscale.as_ref() else {
                     return Ok(());
                 };
-                let request = OutputPickerRequest::new(
-                    session.selection.output_path(),
-                    OutputPickerFormat::Mp4,
-                );
+                let output = session.selection.output_path();
+                let request = OutputPickerRequest::new(&output, OutputPickerFormat::Mp4);
 
                 match choose_output_destination(&request, picker) {
                     Ok(Some(path)) => {

@@ -1,7 +1,7 @@
 use egui::{
     Align, Align2, Color32, CornerRadius, Frame, InnerResponse, Label, Layout, Popup, Rect,
-    Response, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, UiBuilder, Vec2, WidgetInfo,
-    WidgetType, pos2, vec2,
+    Response, RichText, Sense, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder, Vec2,
+    WidgetInfo, WidgetType, pos2, vec2,
 };
 
 use super::{fonts, layout, theme};
@@ -22,6 +22,11 @@ pub enum InlineStatusKind {
 
 pub struct OutputPathRowResponse {
     pub path: Response,
+    pub browse: Response,
+}
+
+pub struct OutputFilenameRowResponse {
+    pub filename: Response,
     pub browse: Response,
 }
 
@@ -402,6 +407,45 @@ pub fn output_path_row(ui: &mut Ui, path: &str, browse_label: &str) -> OutputPat
     .inner
 }
 
+/// Editable output filename stem with an authoritative, non-editable extension suffix.
+///
+/// The caller owns path state. This widget edits only the filename stem and keeps long text clipped
+/// to the available single-line field, allowing egui to scroll the edit cursor horizontally.
+#[must_use]
+pub fn filename_field(ui: &mut Ui, stem: &mut String, extension: &str, width: f32) -> Response {
+    let suffix = format!(".{extension}");
+    ui.add_sized(
+        [finite_nonnegative(width), theme::COMPACT_CONTROL_HEIGHT],
+        TextEdit::singleline(stem)
+            .suffix(suffix)
+            .font(fonts::technical_text_style())
+            .vertical_align(Align::Center)
+            .text_color(theme::FOREGROUND)
+            .clip_text(true),
+    )
+}
+
+/// Responsive editable filename + Browse composite. Phase 46 owns any later row recomposition.
+#[must_use]
+pub fn output_filename_row(
+    ui: &mut Ui,
+    stem: &mut String,
+    extension: &str,
+    browse_label: &str,
+) -> OutputFilenameRowResponse {
+    let browse_width = button_intrinsic_size(ui, browse_label, true, BUTTON_HORIZONTAL_PADDING).x;
+    let filename_width =
+        layout::flexible_row_width(ui.available_width(), browse_width, theme::SPACING.compact);
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = theme::SPACING.compact;
+        let filename = filename_field(ui, stem, extension, filename_width);
+        let browse = compact_secondary_button(ui, browse_label);
+        OutputFilenameRowResponse { filename, browse }
+    })
+    .inner
+}
+
 /// Thin rectangular progress rail. The fraction is display-only and deliberately carries no
 /// completion semantics; authoritative process state remains outside this primitive.
 #[must_use]
@@ -662,12 +706,62 @@ mod tests {
 
     use super::{
         BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
-        button_text_style, displayed_progress_fraction, inline_status_color, mode_button,
-        mode_button_intrinsic_size, plain_button_text_style, primary_button_enabled, progress_bar,
-        progress_rail_color, select_button, select_menu_option, selectable_row,
+        button_text_style, displayed_progress_fraction, filename_field, inline_status_color,
+        mode_button, mode_button_intrinsic_size, plain_button_text_style, primary_button_enabled,
+        progress_bar, progress_rail_color, select_button, select_menu_option, selectable_row,
         selectable_row_visuals, selector_popup_width, show_selector_popup,
     };
     use crate::ui::{fonts, layout, theme};
+
+    #[test]
+    fn editable_filename_field_stays_bounded_with_long_text() {
+        let context = egui::Context::default();
+        super::fonts::install(&context).expect("test typography should install");
+        let original = "very long output filename ".repeat(12);
+        let mut stem = original.clone();
+
+        let output = context.run_ui(Default::default(), |ui| {
+            let response = filename_field(ui, &mut stem, "mp4", 120.0);
+
+            assert_eq!(response.rect.width(), 120.0);
+            assert_eq!(response.rect.height(), theme::COMPACT_CONTROL_HEIGHT);
+        });
+        output.drop_without_applying_deltas();
+
+        assert_eq!(stem, original);
+    }
+
+    #[test]
+    fn editable_filename_text_is_vertically_centered() {
+        let context = egui::Context::default();
+        super::fonts::install(&context).expect("test typography should install");
+        let mut stem = String::from("base");
+        let mut field_rect = egui::Rect::NOTHING;
+
+        let output = context.run_ui(Default::default(), |ui| {
+            field_rect = filename_field(ui, &mut stem, "mp4", 160.0).rect;
+        });
+
+        let text_center_y = output
+            .shapes
+            .iter()
+            .find_map(|clipped| text_shape_center_y(&clipped.shape, "base"))
+            .expect("filename text should be painted");
+        assert!((text_center_y - field_rect.center().y).abs() <= 0.5);
+        output.drop_without_applying_deltas();
+    }
+
+    fn text_shape_center_y(shape: &egui::Shape, needle: &str) -> Option<f32> {
+        match shape {
+            egui::Shape::Text(text) if text.galley.job.text.contains(needle) => {
+                Some(text.pos.y + text.galley.size().y * 0.5)
+            }
+            egui::Shape::Vec(shapes) => shapes
+                .iter()
+                .find_map(|shape| text_shape_center_y(shape, needle)),
+            _ => None,
+        }
+    }
 
     #[test]
     fn selector_popups_match_triggers_and_long_labels_can_expand_them() {

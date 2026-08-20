@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-use super::{fonts, layout, theme, widgets};
+use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
 
 const TARGETS: [UpscaleTarget; 3] = [
     UpscaleTarget::Qhd1440,
@@ -37,8 +37,7 @@ const UNAVAILABLE_OUTPUT: &str = "Unavailable";
 pub struct UpscaleSelectionState {
     target: UpscaleTarget,
     codec: VideoCodec,
-    output: PathBuf,
-    output_customized: bool,
+    output_name: OutputNameState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -57,8 +56,10 @@ impl UpscaleSelectionState {
         Self {
             target,
             codec: VideoCodec::H264,
-            output: default_output_path(&media.path, target),
-            output_customized: false,
+            output_name: OutputNameState::new(
+                &media.path,
+                default_output_stem(&media.path, target),
+            ),
         }
     }
 
@@ -70,12 +71,16 @@ impl UpscaleSelectionState {
         self.codec
     }
 
-    pub fn output_path(&self) -> &Path {
-        &self.output
+    pub fn output_path(&self) -> PathBuf {
+        self.output_name.path("mp4")
+    }
+
+    pub fn output_filename_stem(&self) -> &OsStr {
+        self.output_name.stem()
     }
 
     pub fn output_is_customized(&self) -> bool {
-        self.output_customized
+        self.output_name.is_customized()
     }
 
     pub fn set_target(&mut self, media: &MediaFile, target: UpscaleTarget) {
@@ -84,18 +89,20 @@ impl UpscaleSelectionState {
         }
 
         self.target = target;
-        if !self.output_customized {
-            self.output = default_output_path(&media.path, target);
-        }
+        self.output_name
+            .set_generated_stem(default_output_stem(&media.path, target));
     }
 
     pub fn set_codec(&mut self, codec: VideoCodec) {
         self.codec = codec;
     }
 
+    pub fn set_output_filename_stem(&mut self, stem: OsString) {
+        self.output_name.set_stem(stem);
+    }
+
     pub fn set_custom_output_path(&mut self, output: PathBuf) {
-        self.output = output;
-        self.output_customized = true;
+        self.output_name.set_custom_path(output);
     }
 
     pub fn output_dimensions(&self, media: &MediaFile) -> Option<OutputDimensions> {
@@ -104,14 +111,15 @@ impl UpscaleSelectionState {
     }
 
     pub fn can_upscale(&self, media: &MediaFile) -> bool {
-        validate_upscale_request(&self.request(media), media).is_ok()
+        self.output_name.is_usable()
+            && validate_upscale_request(&self.request(media), media).is_ok()
     }
 
     /// Build the Phase 29 request without starting work.
     pub fn request(&self, media: &MediaFile) -> UpscaleRequest {
         UpscaleRequest {
             input: media.path.clone(),
-            output: self.output.clone(),
+            output: self.output_path(),
             target: self.target,
             codec: self.codec,
         }
@@ -153,8 +161,11 @@ pub fn show(
 
         let _ = widgets::section_label(ui, OUTPUT_LABEL);
         ui.add_space(theme::SPACING.compact);
-        let output = output_display_text(media, state.output_path());
-        let row = widgets::output_path_row(ui, &output, BROWSE_LABEL);
+        let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
+        let row = widgets::output_filename_row(ui, &mut output_stem, "mp4", BROWSE_LABEL);
+        if row.filename.changed() {
+            state.set_output_filename_stem(OsString::from(output_stem));
+        }
         if row.browse.clicked() {
             action = UpscaleSelectionAction::BrowseOutput;
         }
@@ -411,31 +422,16 @@ fn nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-fn default_output_path(input: &Path, target: UpscaleTarget) -> PathBuf {
+fn default_output_stem(input: &Path, target: UpscaleTarget) -> OsString {
     let stem = input
         .file_stem()
         .filter(|stem| !stem.is_empty())
         .unwrap_or_else(|| OsStr::new("output"));
 
-    let mut file_name = OsString::from(stem);
-    file_name.push("-");
-    file_name.push(target_suffix(target));
-    file_name.push(".mp4");
-
-    match input.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(file_name),
-        _ => PathBuf::from(file_name),
-    }
-}
-
-fn output_display_text(media: &MediaFile, output: &Path) -> String {
-    if output.parent() == media.path.parent()
-        && let Some(file_name) = output.file_name()
-    {
-        return file_name.to_string_lossy().into_owned();
-    }
-
-    output.to_string_lossy().into_owned()
+    let mut output_stem = OsString::from(stem);
+    output_stem.push("-");
+    output_stem.push(target_suffix(target));
+    output_stem
 }
 
 pub(super) fn target_label(target: UpscaleTarget) -> &'static str {
@@ -468,7 +464,10 @@ pub(super) fn codec_label(codec: VideoCodec) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
 
     use crate::{
         media::model::{FrameRate, MediaFile, VideoStream},
@@ -477,8 +476,7 @@ mod tests {
     };
 
     use super::{
-        UpscaleSelectionState, actual_output_text, default_output_path, output_display_text,
-        source_metadata, upscale_fixed_flow_height,
+        UpscaleSelectionState, actual_output_text, source_metadata, upscale_fixed_flow_height,
     };
 
     fn media(width: Option<u32>, height: Option<u32>) -> MediaFile {
@@ -577,23 +575,92 @@ mod tests {
 
     #[test]
     fn generated_default_filename_uses_selected_target_suffix() {
+        let media = media(Some(1920), Some(1080));
+        let state = UpscaleSelectionState::new(&media);
+
         assert_eq!(
-            default_output_path(Path::new("captures/recording.mkv"), UpscaleTarget::Uhd4k),
+            state.output_path(),
             PathBuf::from("captures/recording-4k.mp4")
+        );
+        assert!(!state.output_is_customized());
+    }
+
+    #[test]
+    fn customized_output_stem_is_preserved_across_target_changes() {
+        let media = media(Some(1920), Some(1080));
+        let mut state = UpscaleSelectionState::new(&media);
+        state.set_custom_output_path(PathBuf::from("exports/final-video.mkv"));
+
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("exports/final-video.mp4")
+        );
+        state.set_output_filename_stem(OsString::from("renamed upscale"));
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("exports/renamed upscale.mp4")
+        );
+
+        state.set_target(&media, UpscaleTarget::Uhd8k);
+
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("exports/renamed upscale.mp4")
+        );
+        assert_eq!(
+            state.output_filename_stem(),
+            OsString::from("renamed upscale")
+        );
+        assert!(state.output_is_customized());
+    }
+
+    #[test]
+    fn edited_filename_stem_preserves_unicode_spaces_and_mp4_extension() {
+        let media = media(Some(1920), Some(1080));
+        let mut state = UpscaleSelectionState::new(&media);
+
+        state.set_output_filename_stem(OsString::from("final upscale 日本語"));
+
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("captures/final upscale 日本語.mp4")
+        );
+        assert_eq!(
+            state.request(&media).output,
+            PathBuf::from("captures/final upscale 日本語.mp4")
+        );
+
+        state.set_target(&media, UpscaleTarget::Uhd8k);
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("captures/final upscale 日本語.mp4")
         );
     }
 
     #[test]
-    fn customized_output_is_preserved_across_target_changes() {
+    fn empty_or_unusable_filename_stem_disables_upscale_and_invalidates_request_output() {
         let media = media(Some(1920), Some(1080));
         let mut state = UpscaleSelectionState::new(&media);
-        let custom = PathBuf::from("exports/final-video.mp4");
-        state.set_custom_output_path(custom.clone());
 
-        state.set_target(&media, UpscaleTarget::Uhd8k);
+        for stem in ["", "   ", "../escape", "bad\\name"] {
+            state.set_output_filename_stem(OsString::from(stem));
+            assert!(
+                !state.can_upscale(&media),
+                "{stem:?} should not be runnable"
+            );
+            assert!(state.request(&media).output.as_os_str().is_empty());
+        }
+    }
 
-        assert_eq!(state.output_path(), custom);
-        assert!(state.output_is_customized());
+    #[test]
+    fn windows_reserved_device_stem_disables_upscale() {
+        let media = media(Some(1920), Some(1080));
+        let mut state = UpscaleSelectionState::new(&media);
+
+        state.set_output_filename_stem(OsString::from("NuL"));
+
+        assert!(!state.can_upscale(&media));
+        assert!(state.request(&media).output.as_os_str().is_empty());
     }
 
     #[test]
@@ -640,17 +707,6 @@ mod tests {
         assert_eq!(
             source_metadata(&media).as_deref(),
             Some("1920×1080 · H.264 · 59.94 FPS")
-        );
-    }
-
-    #[test]
-    fn default_output_displays_filename_when_it_shares_source_directory() {
-        let media = media(Some(1920), Some(1080));
-        let state = UpscaleSelectionState::new(&media);
-
-        assert_eq!(
-            output_display_text(&media, state.output_path()),
-            "recording-4k.mp4"
         );
     }
 

@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -12,7 +12,7 @@ use crate::{
     media::model::{AudioStream, MediaFile},
 };
 
-use super::{fonts, layout, theme, widgets};
+use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
 
 const UNTITLED_AUDIO: &str = "Untitled audio";
 const AUDIO_TRACKS_LABEL: &str = "Audio tracks";
@@ -28,8 +28,7 @@ const MIX_LABEL: &str = "Mix selected tracks";
 pub struct AudioMixSelectionState {
     selected_streams: BTreeSet<u32>,
     container: OutputContainer,
-    output: PathBuf,
-    output_customized: bool,
+    output_name: OutputNameState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -67,8 +66,7 @@ impl AudioMixSelectionState {
                 .map(|stream| stream.stream_index)
                 .collect(),
             container: OutputContainer::Mp4,
-            output: default_output_path(&media.path, OutputContainer::Mp4),
-            output_customized: false,
+            output_name: OutputNameState::new(&media.path, default_output_stem(&media.path)),
         }
     }
 
@@ -76,12 +74,16 @@ impl AudioMixSelectionState {
         self.container
     }
 
-    pub fn output_path(&self) -> &Path {
-        &self.output
+    pub fn output_path(&self) -> PathBuf {
+        self.output_name.path(self.container.extension())
+    }
+
+    pub fn output_filename_stem(&self) -> &OsStr {
+        self.output_name.stem()
     }
 
     pub fn output_is_customized(&self) -> bool {
-        self.output_customized
+        self.output_name.is_customized()
     }
 
     pub fn selected_count(&self) -> usize {
@@ -93,7 +95,7 @@ impl AudioMixSelectionState {
     }
 
     pub fn can_mix(&self) -> bool {
-        !self.selected_streams.is_empty()
+        !self.selected_streams.is_empty() && self.output_name.is_usable()
     }
 
     /// Toggle only a stream that belongs to the current probed media.
@@ -131,21 +133,23 @@ impl AudioMixSelectionState {
         }
 
         self.container = container;
-        if !self.output_customized {
-            self.output = default_output_path(&media.path, container);
-        }
+        self.output_name
+            .set_generated_stem(default_output_stem(&media.path));
+    }
+
+    pub fn set_output_filename_stem(&mut self, stem: OsString) {
+        self.output_name.set_stem(stem);
     }
 
     pub fn set_custom_output_path(&mut self, output: PathBuf) {
-        self.output = output;
-        self.output_customized = true;
+        self.output_name.set_custom_path(output);
     }
 
     /// Build the Phase 24 request without starting work. Stream order follows probe/source order.
     pub fn request(&self, media: &MediaFile) -> AudioMixRequest {
         AudioMixRequest {
             input: media.path.clone(),
-            output: self.output.clone(),
+            output: self.output_path(),
             selected_streams: media
                 .audio_streams
                 .iter()
@@ -359,7 +363,7 @@ fn show_output_row(
 ) -> AudioMixSelectionAction {
     let mut requested_container = None;
     let mut browse_clicked = false;
-    let output_text = output_display_text(media, state.output_path());
+    let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = theme::SPACING.compact;
@@ -384,7 +388,15 @@ fn show_output_row(
             },
         );
 
-        let row = widgets::output_path_row(ui, &output_text, BROWSE_LABEL);
+        let row = widgets::output_filename_row(
+            ui,
+            &mut output_stem,
+            state.container().extension(),
+            BROWSE_LABEL,
+        );
+        if row.filename.changed() {
+            state.set_output_filename_stem(OsString::from(output_stem));
+        }
         browse_clicked = row.browse.clicked();
     });
 
@@ -580,30 +592,15 @@ fn nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-fn default_output_path(input: &Path, container: OutputContainer) -> PathBuf {
+fn default_output_stem(input: &Path) -> OsString {
     let stem = input
         .file_stem()
         .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| std::ffi::OsStr::new("output"));
+        .unwrap_or_else(|| OsStr::new("output"));
 
-    let mut file_name = OsString::from(stem);
-    file_name.push("-mixed.");
-    file_name.push(container.extension());
-
-    match input.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(file_name),
-        _ => PathBuf::from(file_name),
-    }
-}
-
-fn output_display_text(media: &MediaFile, output: &Path) -> String {
-    if output.parent() == media.path.parent()
-        && let Some(file_name) = output.file_name()
-    {
-        return file_name.to_string_lossy().into_owned();
-    }
-
-    output.to_string_lossy().into_owned()
+    let mut output_stem = OsString::from(stem);
+    output_stem.push("-mixed");
+    output_stem
 }
 
 fn container_label(container: OutputContainer) -> &'static str {
@@ -616,6 +613,7 @@ fn container_label(container: OutputContainer) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::{
+        ffi::OsString,
         path::{Path, PathBuf},
         time::Duration,
     };
@@ -623,8 +621,8 @@ mod tests {
     use crate::media::model::{AudioStream, MediaFile, VideoStream};
 
     use super::{
-        AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height, default_output_path,
-        output_display_text, source_metadata, track_presentations,
+        AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height, source_metadata,
+        track_presentations,
     };
     use crate::audio_mix::model::OutputContainer;
     use crate::ui::{layout, theme};
@@ -754,23 +752,87 @@ mod tests {
 
     #[test]
     fn generated_default_filename_uses_mixed_suffix() {
+        let media = media();
+        let state = AudioMixSelectionState::new(&media);
+
         assert_eq!(
-            default_output_path(Path::new("captures/recording.mkv"), OutputContainer::Mp4),
+            state.output_path(),
             PathBuf::from("captures/recording-mixed.mp4")
+        );
+        assert!(!state.output_is_customized());
+    }
+
+    #[test]
+    fn custom_output_stem_is_preserved_across_container_changes() {
+        let media = media();
+        let mut state = AudioMixSelectionState::new(&media);
+        state.set_custom_output_path(PathBuf::from("exports/final-audio.mkv"));
+
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("exports/final-audio.mp4")
+        );
+        state.set_output_filename_stem(OsString::from("renamed mix"));
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("exports/renamed mix.mp4")
+        );
+
+        state.set_container(&media, OutputContainer::Mkv);
+
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("exports/renamed mix.mkv")
+        );
+        assert_eq!(state.output_filename_stem(), OsString::from("renamed mix"));
+        assert!(state.output_is_customized());
+    }
+
+    #[test]
+    fn edited_filename_stem_preserves_unicode_spaces_and_authoritative_extension() {
+        let media = media();
+        let mut state = AudioMixSelectionState::new(&media);
+
+        state.set_output_filename_stem(OsString::from("final mix 日本語"));
+
+        assert!(state.output_is_customized());
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("captures/final mix 日本語.mp4")
+        );
+        assert_eq!(
+            state.request(&media).output,
+            PathBuf::from("captures/final mix 日本語.mp4")
+        );
+
+        state.set_container(&media, OutputContainer::Mkv);
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("captures/final mix 日本語.mkv")
         );
     }
 
     #[test]
-    fn explicit_custom_output_is_preserved_across_container_changes() {
+    fn empty_or_unusable_filename_stem_disables_mix_and_invalidates_request_output() {
         let media = media();
         let mut state = AudioMixSelectionState::new(&media);
-        let custom = PathBuf::from("exports/final-audio.mp4");
-        state.set_custom_output_path(custom.clone());
 
-        state.set_container(&media, OutputContainer::Mkv);
+        for stem in ["", "   ", "../escape", "bad\\name"] {
+            state.set_output_filename_stem(OsString::from(stem));
+            assert!(!state.can_mix(), "{stem:?} should not be runnable");
+            assert!(state.request(&media).output.as_os_str().is_empty());
+        }
+    }
 
-        assert_eq!(state.output_path(), custom);
-        assert!(state.output_is_customized());
+    #[test]
+    fn windows_reserved_device_stem_disables_mix() {
+        let media = media();
+        let mut state = AudioMixSelectionState::new(&media);
+
+        state.set_output_filename_stem(OsString::from("cOn"));
+
+        assert!(!state.can_mix());
+        assert!(state.request(&media).output.as_os_str().is_empty());
     }
 
     #[test]
@@ -892,17 +954,6 @@ mod tests {
         assert_eq!(
             source_metadata(&media()).as_deref(),
             Some("3840×2160 · 01:42:16")
-        );
-    }
-
-    #[test]
-    fn default_output_displays_filename_when_it_shares_source_directory() {
-        let media = media();
-        let state = AudioMixSelectionState::new(&media);
-
-        assert_eq!(
-            output_display_text(&media, state.output_path()),
-            "recording-mixed.mp4"
         );
     }
 
