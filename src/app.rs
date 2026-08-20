@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{io, path::Path, process::Command, time::Duration};
 
 use egui::{CentralPanel, RichText, TextStyle, Ui};
 
@@ -10,9 +10,10 @@ use apollo::{
     ui::{
         fonts, layout, theme, upscale as upscale_ui,
         upscale::{UpscaleSelectionAction, UpscaleSelectionState},
+        upscale_progress::{self, UpscaleLifecycleAction, UpscaleLifecycleUiState},
         widgets,
     },
-    upscale::execution::{UpscaleExecutor, UpscaleStartError},
+    upscale::execution::{UpscaleExecutionState, UpscaleExecutor, UpscaleStartError},
 };
 
 const HOME_WORDMARK: &str = "apollo";
@@ -35,6 +36,7 @@ enum Tool {
 struct UpscaleToolState {
     media: MediaFile,
     selection: UpscaleSelectionState,
+    lifecycle_ui: UpscaleLifecycleUiState,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -171,23 +173,43 @@ impl ApolloApp {
     }
 
     fn show_upscale_tool(&mut self, ui: &mut Ui) {
-        self.poll_upscale_execution(ui);
-
-        let Some(upscale) = self.state.upscale.as_mut() else {
+        if self.state.upscale.is_none() {
             self.show_tool_placeholder(ui, "Video Upscale");
             return;
-        };
+        }
 
+        if shows_upscale_lifecycle(self.upscale_executor.state()) {
+            let action = {
+                let upscale = self
+                    .state
+                    .upscale
+                    .as_mut()
+                    .expect("upscale source exists while lifecycle surface is shown");
+                let request = upscale.selection.request(&upscale.media);
+                upscale_progress::show(
+                    ui,
+                    &upscale.media,
+                    &request,
+                    &mut self.upscale_executor,
+                    &mut upscale.lifecycle_ui,
+                )
+            };
+
+            if self.upscale_executor.is_running() {
+                ui.ctx().request_repaint_after(EXECUTION_REPAINT_INTERVAL);
+            }
+            self.handle_upscale_lifecycle_action(action);
+            return;
+        }
+
+        let upscale = self
+            .state
+            .upscale
+            .as_mut()
+            .expect("upscale source exists while ready surface is shown");
         let action = upscale_ui::show(ui, &upscale.media, &mut upscale.selection);
         if let Err(error) = self.handle_upscale_action(action) {
             eprintln!("Upscale could not start: {error}");
-        }
-    }
-
-    fn poll_upscale_execution(&mut self, ui: &Ui) {
-        self.upscale_executor.poll();
-        if self.upscale_executor.is_running() {
-            ui.ctx().request_repaint_after(EXECUTION_REPAINT_INTERVAL);
         }
     }
 
@@ -217,6 +239,41 @@ impl ApolloApp {
 
         Ok(())
     }
+
+    fn handle_upscale_lifecycle_action(&self, action: UpscaleLifecycleAction) {
+        if let UpscaleLifecycleAction::OpenFolder(path) = action
+            && let Err(error) = open_folder(&path)
+        {
+            eprintln!("Upscale output folder could not be opened: {error}");
+        }
+    }
+}
+
+fn shows_upscale_lifecycle(state: &UpscaleExecutionState) -> bool {
+    !matches!(state, UpscaleExecutionState::Idle)
+}
+
+fn open_folder(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+
+    #[cfg(any(target_os = "windows", target_os = "macos", unix))]
+    {
+        command.arg(path).spawn().map(|_| ())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "opening folders is not supported on this platform",
+        ))
+    }
 }
 
 impl eframe::App for ApolloApp {
@@ -243,7 +300,7 @@ mod tests {
 
     use super::{
         AUDIO_MIX_LABEL, ApolloApp, AppState, HOME_PROMPT, HOME_WORDMARK, Tool, UPSCALE_LABEL,
-        UpscaleToolState, home_action_layout,
+        UpscaleToolState, home_action_layout, shows_upscale_lifecycle,
     };
     use apollo::{
         media::{
@@ -290,6 +347,7 @@ mod tests {
         let media = media();
         app.state.upscale = Some(UpscaleToolState {
             selection: apollo::ui::upscale::UpscaleSelectionState::new(&media),
+            lifecycle_ui: apollo::ui::upscale_progress::UpscaleLifecycleUiState::default(),
             media,
         });
         app.state.open_upscale();
@@ -428,6 +486,27 @@ mod tests {
             app.upscale_executor.state(),
             &apollo::upscale::execution::UpscaleExecutionState::Idle
         );
+    }
+
+    #[test]
+    fn upscale_execution_state_routes_running_and_terminal_surfaces_to_lifecycle_ui() {
+        use apollo::{
+            media::{execution::MediaExecutionFailure, process::MediaProcessFailure},
+            upscale::execution::UpscaleExecutionState,
+        };
+
+        assert!(!shows_upscale_lifecycle(&UpscaleExecutionState::Idle));
+        assert!(shows_upscale_lifecycle(&UpscaleExecutionState::Running));
+        assert!(shows_upscale_lifecycle(&UpscaleExecutionState::Completed {
+            output: PathBuf::from("recording-4k.mp4"),
+        }));
+        assert!(shows_upscale_lifecycle(&UpscaleExecutionState::Failed(
+            MediaExecutionFailure::Process {
+                reason: MediaProcessFailure::Exit(Some(1)),
+                diagnostic: String::new(),
+            }
+        )));
+        assert!(shows_upscale_lifecycle(&UpscaleExecutionState::Cancelled));
     }
 
     #[test]

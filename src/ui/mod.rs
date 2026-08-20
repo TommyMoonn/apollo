@@ -2,6 +2,8 @@ pub mod audio_mix;
 pub mod audio_mix_progress;
 pub mod fonts;
 pub mod layout;
+mod media_lifecycle;
 pub mod theme;
 pub mod upscale;
+pub mod upscale_progress;
 pub mod widgets;

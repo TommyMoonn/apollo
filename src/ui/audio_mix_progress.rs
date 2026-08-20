@@ -1,19 +1,26 @@
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
 
-use egui::{Align, Label, Layout, Response, RichText, ScrollArea, Sides, TextStyle, Ui};
+use egui::{Response, Ui};
 
 use crate::{
     audio_mix::{
         execution::{AudioMixExecutionFailure, AudioMixExecutionState, AudioMixExecutor},
         model::{AudioMixRequest, OutputContainer},
     },
-    media::{model::MediaFile, process::MediaProcessFailure, progress::MediaProgress},
+    media::{model::MediaFile, progress::MediaProgress},
 };
 
-use super::{fonts, layout, theme, widgets};
+use super::{
+    layout,
+    media_lifecycle::{
+        diagnostic_viewport, failure_diagnostic, failure_summary, file_name, heading,
+        output_parent, progress_presentation, right_aligned_actions, secondary_copy, show_progress,
+        source_to_output as source_to_output_paths, technical_faint,
+    },
+    theme, widgets,
+};
 
 const RUNNING_TITLE: &str = "Mixing audio";
-const PROCESSING_LABEL: &str = "Processing";
 const CANCEL_LABEL: &str = "Cancel";
 const COMPLETE_TITLE: &str = "Audio mix complete";
 const OPEN_FOLDER_LABEL: &str = "Open folder";
@@ -27,7 +34,6 @@ const BACK_LABEL: &str = "Back";
 const CANCELLED_TITLE: &str = "Audio mix cancelled";
 const CANCELLED_COPY: &str = "No final output was published.";
 const CANCELLED_CLEANUP: &str = "temporary output cleaned";
-const NO_DIAGNOSTIC: &str = "No diagnostic details were reported.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AudioMixLifecycleUiState {
@@ -52,14 +58,6 @@ pub enum AudioMixLifecycleAction {
     OpenFolder(PathBuf),
     Done,
     Back,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct ProgressPresentation {
-    fraction: f32,
-    percent: Option<String>,
-    time: Option<String>,
-    frame: Option<String>,
 }
 
 /// Render the running or terminal Audio Mix surface for the current executor state.
@@ -104,11 +102,7 @@ fn show_running(
         secondary_copy(ui, &source_to_output(request));
 
         ui.add_space(theme::SPACING.spacious);
-        progress_header(ui, &presentation);
-        ui.add_space(theme::SPACING.compact);
-        let _ = widgets::progress_bar(ui, presentation.fraction);
-        ui.add_space(theme::SPACING.compact);
-        progress_metadata(ui, &presentation);
+        show_progress(ui, &presentation);
 
         ui.add_space(theme::RUNNING_FOOTER_GAP);
         let response =
@@ -254,191 +248,8 @@ fn show_cancelled(
     action
 }
 
-fn heading(ui: &mut Ui, text: &str) {
-    ui.add(
-        Label::new(RichText::new(text).text_style(TextStyle::Heading))
-            .selectable(false)
-            .wrap(),
-    );
-}
-
-fn secondary_copy(ui: &mut Ui, text: &str) {
-    ui.add(
-        Label::new(
-            RichText::new(text)
-                .text_style(TextStyle::Small)
-                .color(theme::SECONDARY),
-        )
-        .selectable(false)
-        .wrap(),
-    );
-}
-
-fn technical_faint(ui: &mut Ui, text: &str) {
-    ui.add(
-        Label::new(
-            RichText::new(text)
-                .text_style(fonts::technical_text_style())
-                .color(theme::SECONDARY_FAINT),
-        )
-        .selectable(false)
-        .wrap(),
-    );
-}
-
-fn diagnostic_viewport(ui: &mut Ui, text: &str) {
-    ScrollArea::vertical()
-        .max_height(layout::DIAGNOSTIC_MAX_HEIGHT)
-        .min_scrolled_height(layout::DIAGNOSTIC_MAX_HEIGHT)
-        .auto_shrink([false, false])
-        .show(ui, |ui| diagnostic_text(ui, text));
-}
-
-fn diagnostic_text(ui: &mut Ui, text: &str) {
-    ui.add(
-        Label::new(
-            RichText::new(text)
-                .text_style(fonts::technical_text_style())
-                .color(theme::SECONDARY_FAINT),
-        )
-        .selectable(true)
-        .wrap(),
-    );
-}
-
-fn file_name(ui: &mut Ui, output: &std::path::Path) {
-    let name = output
-        .file_name()
-        .unwrap_or(output.as_os_str())
-        .to_string_lossy();
-    ui.add(
-        Label::new(RichText::new(name).text_style(TextStyle::Body))
-            .truncate()
-            .selectable(false),
-    );
-}
-
-fn progress_header(ui: &mut Ui, presentation: &ProgressPresentation) {
-    Sides::new()
-        .spacing(theme::INLINE_ACTION_GAP)
-        .truncate()
-        .show(
-            ui,
-            |ui| secondary_copy(ui, PROCESSING_LABEL),
-            |ui| {
-                if let Some(percent) = &presentation.percent {
-                    technical_faint(ui, percent);
-                }
-            },
-        );
-}
-
-fn progress_metadata(ui: &mut Ui, presentation: &ProgressPresentation) {
-    Sides::new()
-        .spacing(theme::INLINE_ACTION_GAP)
-        .truncate()
-        .show(
-            ui,
-            |ui| {
-                if let Some(time) = &presentation.time {
-                    technical_faint(ui, time);
-                }
-            },
-            |ui| {
-                if let Some(frame) = &presentation.frame {
-                    technical_faint(ui, frame);
-                }
-            },
-        );
-}
-
-fn right_aligned_actions<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), theme::PRIMARY_CONTROL_HEIGHT),
-        Layout::right_to_left(Align::Center),
-        add_contents,
-    )
-    .inner
-}
-
-fn progress_presentation(progress: Option<&MediaProgress>) -> ProgressPresentation {
-    let fraction = progress
-        .and_then(|progress| progress.fraction)
-        .filter(|fraction| fraction.is_finite())
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-    let percent = progress
-        .and_then(|progress| progress.fraction)
-        .filter(|fraction| fraction.is_finite())
-        .map(|fraction| format!("{:.0}%", fraction.clamp(0.0, 1.0) * 100.0));
-
-    let time = progress.and_then(|progress| match (progress.processed, progress.total) {
-        (Some(processed), Some(total)) => Some(format!(
-            "{} / {}",
-            format_duration(processed),
-            format_duration(total)
-        )),
-        (Some(processed), None) => Some(format!("{} elapsed", format_duration(processed))),
-        (None, Some(total)) => Some(format!("-- / {}", format_duration(total))),
-        (None, None) => None,
-    });
-
-    let frame = progress
-        .and_then(|progress| progress.frame)
-        .map(|frame| format!("Frame {}", format_integer(frame)));
-
-    ProgressPresentation {
-        fraction,
-        percent,
-        time,
-        frame,
-    }
-}
-
-fn format_duration(duration: Duration) -> String {
-    let total_seconds = duration.as_secs();
-    let hours = total_seconds / 3_600;
-    let minutes = (total_seconds % 3_600) / 60;
-    let seconds = total_seconds % 60;
-
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes:02}:{seconds:02}")
-    }
-}
-
-fn format_integer(value: u64) -> String {
-    let digits = value.to_string();
-    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
-    let first_group = digits.len() % 3;
-
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0
-            && (index == first_group
-                || (index > first_group && (index - first_group).is_multiple_of(3)))
-        {
-            formatted.push(',');
-        }
-        formatted.push(character);
-    }
-
-    formatted
-}
-
 fn source_to_output(request: &AudioMixRequest) -> String {
-    format!(
-        "{} → {}",
-        file_display_name(&request.input),
-        file_display_name(&request.output)
-    )
-}
-
-fn file_display_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned()
+    source_to_output_paths(&request.input, &request.output)
 }
 
 fn video_copy_summary(media: &MediaFile) -> Option<String> {
@@ -460,38 +271,6 @@ fn container_label(container: OutputContainer) -> &'static str {
     }
 }
 
-fn failure_summary(failure: &AudioMixExecutionFailure) -> String {
-    match failure {
-        AudioMixExecutionFailure::Process { reason, .. } => match reason {
-            MediaProcessFailure::Exit(Some(code)) => format!("FFmpeg exited with code {code}."),
-            MediaProcessFailure::Exit(None) => "FFmpeg exited unsuccessfully.".to_owned(),
-            MediaProcessFailure::Io(kind) => format!("FFmpeg process failed: {kind:?}."),
-        },
-        AudioMixExecutionFailure::Output { reason, .. } => reason.to_string(),
-    }
-}
-
-fn failure_diagnostic(failure: &AudioMixExecutionFailure) -> &str {
-    let diagnostic = match failure {
-        AudioMixExecutionFailure::Process { diagnostic, .. }
-        | AudioMixExecutionFailure::Output { diagnostic, .. } => diagnostic.as_str(),
-    };
-
-    if diagnostic.trim().is_empty() {
-        NO_DIAGNOSTIC
-    } else {
-        diagnostic
-    }
-}
-
-fn output_parent(output: &std::path::Path) -> PathBuf {
-    output
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
 #[cfg(test)]
 mod tests {
     use std::{path::PathBuf, time::Duration};
@@ -510,9 +289,10 @@ mod tests {
 
     use super::{
         AudioMixLifecycleUiState, CANCELLED_TITLE, COMPLETE_TITLE, FAILED_TITLE, RUNNING_TITLE,
-        failure_content, failure_diagnostic, format_duration, format_integer, mixed_audio_summary,
-        progress_presentation, source_to_output, video_copy_summary,
+        failure_content, failure_diagnostic, mixed_audio_summary, progress_presentation,
+        source_to_output, video_copy_summary,
     };
+    use crate::ui::media_lifecycle::{format_duration, format_integer};
 
     #[test]
     fn lifecycle_copy_covers_running_and_terminal_states() {

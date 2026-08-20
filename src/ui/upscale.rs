@@ -441,7 +441,7 @@ fn output_display_text(media: &MediaFile, output: &Path) -> String {
     output.to_string_lossy().into_owned()
 }
 
-fn target_label(target: UpscaleTarget) -> &'static str {
+pub(super) fn target_label(target: UpscaleTarget) -> &'static str {
     match target {
         UpscaleTarget::Qhd1440 => "1440p",
         UpscaleTarget::Uhd4k => "4K",
@@ -462,7 +462,7 @@ fn target_boundary_text(target: UpscaleTarget) -> String {
     format!("{width} × {height}")
 }
 
-fn codec_label(codec: VideoCodec) -> &'static str {
+pub(super) fn codec_label(codec: VideoCodec) -> &'static str {
     match codec {
         VideoCodec::H264 => "H.264",
         VideoCodec::H265 => "H.265",
