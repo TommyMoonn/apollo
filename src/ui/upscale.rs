@@ -308,8 +308,7 @@ fn upscale_fixed_flow_height(ui: &Ui, media: &MediaFile) -> f32 {
     let field_height = section_label_height
         + theme::SPACING.compact
         + theme::COMPACT_CONTROL_HEIGHT.max(technical_height);
-    let task_width = layout::bounded_task_content_width(ui.available_width());
-    let field_flow_height = match layout::field_pair_layout(task_width) {
+    let field_flow_height = match layout::field_pair_layout(ui.available_width()) {
         layout::FieldPairLayout::Columns => field_height,
         layout::FieldPairLayout::Stacked => field_height * 2.0 + theme::SPACING.related,
     };

@@ -22,11 +22,10 @@ pub const MINIMUM_CONTENT_SIZE: Vec2 = Vec2::new(400.0, 260.0);
 /// Quiet Focus content inset on every edge of the application surface.
 pub const CONTENT_PADDING: i8 = 28;
 
-/// Maximum readable task width at the reference window size after content insets.
+/// Maximum width for bounded sparse content at the reference window size after content insets.
+///
+/// File intake keeps this reference-width bound. Ready/configuration surfaces intentionally do not.
 pub const MAX_CONTENT_WIDTH: f32 = REFERENCE_WINDOW_SIZE.x - 2.0 * CONTENT_PADDING as f32;
-
-/// Quiet Focus task columns stay narrower than the full padded surface.
-pub const TASK_CONTENT_MAX_WIDTH: f32 = 520.0;
 
 /// Selected Quiet Focus maximum for the Audio Mix track viewport before scrolling.
 pub const AUDIO_TRACK_LIST_MAX_HEIGHT: f32 = 108.0;
@@ -227,12 +226,13 @@ fn measure_intake_region(
     safe_dimension(measure_ui.min_rect().height())
 }
 
-/// Center a feature surface while keeping its contents top-down and left aligned.
+/// Center a ready/configuration feature surface while keeping its contents top-down and left aligned.
 ///
-/// Audio Mix and Upscale screens can share this policy without owning fixed viewport positions.
+/// Ready surfaces consume the current padded viewport width. The surrounding content frame owns
+/// responsive gutters, while this helper avoids any reference-size content ceiling.
 pub fn task_content<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
     let available = safe_available_size(ui.available_size());
-    let content_width = bounded_task_content_width(available.x);
+    let content_width = available.x;
 
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
         ui.allocate_ui_with_layout(
@@ -319,18 +319,18 @@ pub fn focus_content<R>(
     }
 }
 
-/// Render a bounded task column with vertical overflow only when its layout plan requires it.
+/// Render a fluid ready/configuration surface with vertical overflow only when required.
 ///
-/// Normal task surfaces retain ordinary top-down flow. Constrained surfaces use an egui
-/// [`ScrollArea`] so required terminal actions remain reachable without changing control metrics
-/// or the application's minimum window size.
+/// The surface consumes the current padded viewport width. Constrained heights use an egui
+/// [`ScrollArea`] so required actions remain reachable without changing control metrics or the
+/// application's minimum window size.
 pub fn task_surface<R>(
     ui: &mut Ui,
     overflow: TaskOverflow,
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> InnerResponse<R> {
     let available = safe_available_size(ui.available_size());
-    let content_width = bounded_task_content_width(available.x);
+    let content_width = available.x;
 
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
         ui.allocate_ui_with_layout(
@@ -450,11 +450,6 @@ pub fn bounded_content_width(available_width: f32) -> f32 {
     safe_dimension(available_width).min(MAX_CONTENT_WIDTH)
 }
 
-/// Bound a feature task column to the selected Quiet Focus task width.
-pub fn bounded_task_content_width(available_width: f32) -> f32 {
-    bounded_content_width(available_width).min(TASK_CONTENT_MAX_WIDTH)
-}
-
 /// Width left for a flexible row element after a fixed-width sibling and their shared gap.
 ///
 /// Composite controls use this rather than owning their own responsive-width policy.
@@ -552,11 +547,10 @@ mod tests {
         FIELD_PAIR_MIN_COLUMN_WIDTH, FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT,
         FieldPairLayout, IntakeLayout, ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE,
         PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
-        TASK_CONTENT_MAX_WIDTH, TaskOverflow, TextOverflowPolicy, UPSCALE_TARGET_LIST_MAX_HEIGHT,
-        WINDOW_CHROME_HEIGHT, action_group_size, action_layout, bounded_content_width,
-        bounded_task_content_width, centered_action_group, content_frame, field_pair_layout,
-        flexible_row_width, focus_content, intake_content, intake_layout_plan, list_viewport,
-        task_surface_plan,
+        TaskOverflow, TextOverflowPolicy, UPSCALE_TARGET_LIST_MAX_HEIGHT, WINDOW_CHROME_HEIGHT,
+        action_group_size, action_layout, bounded_content_width, centered_action_group,
+        content_frame, field_pair_layout, flexible_row_width, focus_content, intake_content,
+        intake_layout_plan, list_viewport, task_surface, task_surface_plan,
     };
     use crate::ui::theme;
 
@@ -568,7 +562,6 @@ mod tests {
         assert_eq!(MINIMUM_CONTENT_SIZE, Vec2::new(400.0, 260.0));
         assert_eq!(CONTENT_PADDING, 28);
         assert_eq!(MAX_CONTENT_WIDTH, 564.0);
-        assert_eq!(TASK_CONTENT_MAX_WIDTH, 520.0);
         assert_eq!(AUDIO_TRACK_LIST_MAX_HEIGHT, 108.0);
         assert_eq!(UPSCALE_TARGET_LIST_MAX_HEIGHT, 72.0);
         assert_eq!(FIELD_PAIR_MIN_COLUMN_WIDTH, 180.0);
@@ -806,7 +799,7 @@ mod tests {
     #[test]
     fn reference_task_width_keeps_field_pair_in_columns() {
         assert_eq!(
-            field_pair_layout(TASK_CONTENT_MAX_WIDTH),
+            field_pair_layout(MAX_CONTENT_WIDTH),
             FieldPairLayout::Columns
         );
     }
@@ -1177,10 +1170,53 @@ mod tests {
     }
 
     #[test]
-    fn task_content_width_is_bounded_by_quiet_focus_task_column() {
-        assert_eq!(bounded_task_content_width(700.0), TASK_CONTENT_MAX_WIDTH);
-        assert_eq!(bounded_task_content_width(320.0), 320.0);
-        assert_eq!(bounded_task_content_width(-1.0), 0.0);
+    fn task_surface_width_grows_with_required_viewports_after_shared_gutters() {
+        egui::__run_test_ui(|ui| {
+            let mut previous = 0.0;
+
+            for viewport_width in [400.0, 620.0, 900.0, 1200.0, 1600.0] {
+                let available_width = viewport_width - f32::from(CONTENT_PADDING) * 2.0;
+                let (parent_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(available_width, 80.0), egui::Sense::hover());
+
+                let rendered_width = ui
+                    .scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(parent_rect)
+                            .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                        |ui| task_surface(ui, TaskOverflow::Flow, |ui| ui.available_width()).inner,
+                    )
+                    .inner;
+
+                assert!((rendered_width - available_width).abs() < 0.01);
+                assert!(rendered_width > previous);
+                previous = rendered_width;
+            }
+        });
+    }
+
+    #[test]
+    fn wide_running_and_terminal_surfaces_keep_independent_readability_bound() {
+        egui::__run_test_ui(|ui| {
+            let available = Vec2::new(1600.0, 260.0);
+            let (parent_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+
+            let response = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(parent_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    |ui| {
+                        focus_content(ui, |ui| {
+                            ui.allocate_exact_size(Vec2::new(220.0, 120.0), egui::Sense::hover())
+                                .0
+                        })
+                    },
+                )
+                .inner;
+
+            assert_eq!(response.viewport_size.x, FOCUS_CONTENT_MAX_WIDTH);
+        });
     }
 
     #[test]
