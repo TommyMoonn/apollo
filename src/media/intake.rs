@@ -221,8 +221,12 @@ mod tests {
             .load_with_probe(&first, |path| Ok(media(path)))
             .unwrap();
 
-        let result =
-            intake.load_with_probe(&second, |_| Err(MediaProbeError::FfprobeFailed(Some(1))));
+        let result = intake.load_with_probe(&second, |_| {
+            Err(MediaProbeError::FfprobeFailed {
+                code: Some(1),
+                diagnostic: "probe failed".to_owned(),
+            })
+        });
 
         assert!(matches!(result, Err(MediaIntakeError::Probe(_))));
         assert!(intake.current().is_none());

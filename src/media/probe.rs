@@ -15,7 +15,10 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaProbeError {
     LaunchFailed(io::ErrorKind),
-    FfprobeFailed(Option<i32>),
+    FfprobeFailed {
+        code: Option<i32>,
+        diagnostic: String,
+    },
     InvalidOutput {
         message: String,
         line: usize,
@@ -27,10 +30,14 @@ impl fmt::Display for MediaProbeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LaunchFailed(kind) => write!(f, "FFprobe could not start ({kind:?})"),
-            Self::FfprobeFailed(Some(code)) => {
+            Self::FfprobeFailed {
+                code: Some(code), ..
+            } => {
                 write!(f, "FFprobe exited with status code {code}")
             }
-            Self::FfprobeFailed(None) => write!(f, "FFprobe exited unsuccessfully"),
+            Self::FfprobeFailed { code: None, .. } => {
+                write!(f, "FFprobe exited unsuccessfully")
+            }
             Self::InvalidOutput {
                 message,
                 line,
@@ -82,7 +89,7 @@ pub fn probe_media(tools: &MediaTools, path: &Path) -> Result<MediaFile, MediaPr
         .output()
         .map_err(|error| MediaProbeError::LaunchFailed(error.kind()))?;
 
-    validate_exit_status(output.status)?;
+    validate_exit_status(output.status, &output.stderr)?;
     parse_ffprobe_json(path, &output.stdout)
 }
 
@@ -110,15 +117,22 @@ fn ffprobe_command(executable: &Path, input: &Path) -> Command {
         ])
         .arg(input)
         .stdin(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     command
 }
 
-fn validate_exit_status(status: ExitStatus) -> Result<(), MediaProbeError> {
+fn validate_exit_status(status: ExitStatus, stderr: &[u8]) -> Result<(), MediaProbeError> {
     if status.success() {
         Ok(())
     } else {
-        Err(MediaProbeError::FfprobeFailed(status.code()))
+        Err(ffprobe_failure(status.code(), stderr))
+    }
+}
+
+fn ffprobe_failure(code: Option<i32>, stderr: &[u8]) -> MediaProbeError {
+    MediaProbeError::FfprobeFailed {
+        code,
+        diagnostic: String::from_utf8_lossy(stderr).into_owned(),
     }
 }
 
@@ -185,7 +199,7 @@ fn nonempty(value: Option<String>) -> Option<String> {
 mod tests {
     use std::{ffi::OsStr, path::Path};
 
-    use super::{ffprobe_command, parse_frame_rate};
+    use super::{MediaProbeError, ffprobe_command, ffprobe_failure, parse_frame_rate};
     use crate::media::model::FrameRate;
 
     #[test]
@@ -205,6 +219,18 @@ mod tests {
                 OsStr::new("json"),
                 OsStr::new("input file.mkv"),
             ]
+        );
+    }
+
+    #[test]
+    fn ffprobe_failure_retains_raw_stderr_for_diagnostics() {
+        let error = ffprobe_failure(Some(1), b"Invalid data found when processing input");
+        assert_eq!(
+            error,
+            MediaProbeError::FfprobeFailed {
+                code: Some(1),
+                diagnostic: "Invalid data found when processing input".to_owned(),
+            }
         );
     }
 

@@ -893,9 +893,10 @@ mod tests {
         app.select_tool(Tool::VideoUpscale);
         app.load_media_path_with_probe(&first, |path| Ok(media(path)));
         app.load_media_path_with_probe(&second, |_| {
-            Err(apollo::media::probe::MediaProbeError::FfprobeFailed(Some(
-                1,
-            )))
+            Err(apollo::media::probe::MediaProbeError::FfprobeFailed {
+                code: Some(1),
+                diagnostic: "probe failed".to_owned(),
+            })
         });
 
         assert!(app.state.intake_active);
