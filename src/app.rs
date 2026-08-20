@@ -1,11 +1,20 @@
-use std::{io, path::Path, process::Command, time::Duration};
+use std::{
+    ffi::OsString,
+    io,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
 use egui::{CentralPanel, Context, Ui};
 
 use apollo::{
-    audio_mix::execution::{AudioMixExecutionState, AudioMixExecutor, AudioMixStartError},
+    audio_mix::{
+        execution::{AudioMixExecutionState, AudioMixExecutor, AudioMixStartError},
+        model::OutputContainer,
+    },
     media::{
-        error::MediaError,
+        error::{MediaError, MediaErrorKind},
         intake::{MediaIntake, MediaLoadDisposition},
         model::MediaFile,
         probe::{MediaProbeError, probe_media},
@@ -25,6 +34,64 @@ use apollo::{
 };
 
 const EXECUTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputPickerFormat {
+    Mp4,
+    Mkv,
+}
+
+impl OutputPickerFormat {
+    #[cfg(any(target_os = "windows", test))]
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Mkv => "mkv",
+        }
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    const fn filter(self) -> &'static str {
+        match self {
+            Self::Mp4 => "MP4 video (*.mp4)|*.mp4|All files (*.*)|*.*",
+            Self::Mkv => "Matroska video (*.mkv)|*.mkv|All files (*.*)|*.*",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputPickerRequest {
+    initial_directory: PathBuf,
+    file_name: OsString,
+    format: OutputPickerFormat,
+}
+
+impl OutputPickerRequest {
+    fn new(output: &Path, format: OutputPickerFormat) -> Self {
+        let initial_directory = output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let file_name = output.file_name().unwrap_or_default().to_os_string();
+
+        Self {
+            initial_directory,
+            file_name,
+            format,
+        }
+    }
+}
+
+fn choose_output_destination<F>(
+    request: &OutputPickerRequest,
+    picker: F,
+) -> Result<Option<PathBuf>, MediaError>
+where
+    F: FnOnce(&OutputPickerRequest) -> io::Result<Option<PathBuf>>,
+{
+    picker(request).map_err(|error| MediaError::output_picker_unavailable(error.to_string()))
+}
 
 fn file_intake_enabled(
     audio_state: &AudioMixExecutionState,
@@ -362,10 +429,15 @@ impl ApolloApp {
             return false;
         };
 
+        let title = if error.kind() == MediaErrorKind::OutputPickerUnavailable {
+            "Output picker unavailable"
+        } else {
+            "Audio mix could not start"
+        };
         let response = layout::focus_content(ui, |ui| {
             media_error::show_failure_content(
                 ui,
-                "Audio mix could not start",
+                title,
                 error,
                 &mut session.start_error_details_open,
                 "Back",
@@ -382,9 +454,53 @@ impl ApolloApp {
         &mut self,
         action: AudioMixSelectionAction,
     ) -> Result<(), AudioMixStartError> {
+        self.handle_audio_mix_action_with_picker(action, open_output_file_dialog)
+    }
+
+    fn handle_audio_mix_action_with_picker<F>(
+        &mut self,
+        action: AudioMixSelectionAction,
+        picker: F,
+    ) -> Result<(), AudioMixStartError>
+    where
+        F: FnOnce(&OutputPickerRequest) -> io::Result<Option<PathBuf>>,
+    {
         match action {
             AudioMixSelectionAction::Back if self.file_intake_enabled() => {
                 self.state.return_to_file_intake(Tool::AudioMix);
+            }
+            AudioMixSelectionAction::BrowseOutput => {
+                let Some(session) = self.state.audio_mix.as_ref() else {
+                    return Ok(());
+                };
+                let format = match session.selection.container() {
+                    OutputContainer::Mp4 => OutputPickerFormat::Mp4,
+                    OutputContainer::Mkv => OutputPickerFormat::Mkv,
+                };
+                let request = OutputPickerRequest::new(session.selection.output_path(), format);
+
+                match choose_output_destination(&request, picker) {
+                    Ok(Some(path)) => {
+                        let session = self
+                            .state
+                            .audio_mix
+                            .as_mut()
+                            .expect("audio mix session still exists after output browse");
+                        session.selection.set_custom_output_path(path);
+                        session.start_error = None;
+                        session.start_error_details_open = false;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let session = self
+                            .state
+                            .audio_mix
+                            .as_mut()
+                            .expect("audio mix session still exists after output browse");
+                        session.start_error = Some(error);
+                        session.start_error_details_open = false;
+                    }
+                }
             }
             AudioMixSelectionAction::MixRequested => {
                 let Some(session) = self.state.audio_mix.as_ref() else {
@@ -397,9 +513,7 @@ impl ApolloApp {
                 self.audio_mix_executor
                     .start(tools, &session.media, &request)?;
             }
-            AudioMixSelectionAction::None
-            | AudioMixSelectionAction::BrowseOutput
-            | AudioMixSelectionAction::Back => {}
+            AudioMixSelectionAction::None | AudioMixSelectionAction::Back => {}
         }
         Ok(())
     }
@@ -462,10 +576,15 @@ impl ApolloApp {
             return false;
         };
 
+        let title = if error.kind() == MediaErrorKind::OutputPickerUnavailable {
+            "Output picker unavailable"
+        } else {
+            "Upscale could not start"
+        };
         let response = layout::focus_content(ui, |ui| {
             media_error::show_failure_content(
                 ui,
-                "Upscale could not start",
+                title,
                 error,
                 &mut session.start_error_details_open,
                 "Back",
@@ -482,9 +601,52 @@ impl ApolloApp {
         &mut self,
         action: UpscaleSelectionAction,
     ) -> Result<(), UpscaleStartError> {
+        self.handle_upscale_action_with_picker(action, open_output_file_dialog)
+    }
+
+    fn handle_upscale_action_with_picker<F>(
+        &mut self,
+        action: UpscaleSelectionAction,
+        picker: F,
+    ) -> Result<(), UpscaleStartError>
+    where
+        F: FnOnce(&OutputPickerRequest) -> io::Result<Option<PathBuf>>,
+    {
         match action {
             UpscaleSelectionAction::Back if self.file_intake_enabled() => {
                 self.state.return_to_file_intake(Tool::VideoUpscale);
+            }
+            UpscaleSelectionAction::BrowseOutput => {
+                let Some(session) = self.state.upscale.as_ref() else {
+                    return Ok(());
+                };
+                let request = OutputPickerRequest::new(
+                    session.selection.output_path(),
+                    OutputPickerFormat::Mp4,
+                );
+
+                match choose_output_destination(&request, picker) {
+                    Ok(Some(path)) => {
+                        let session = self
+                            .state
+                            .upscale
+                            .as_mut()
+                            .expect("upscale session still exists after output browse");
+                        session.selection.set_custom_output_path(path);
+                        session.start_error = None;
+                        session.start_error_details_open = false;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let session = self
+                            .state
+                            .upscale
+                            .as_mut()
+                            .expect("upscale session still exists after output browse");
+                        session.start_error = Some(error);
+                        session.start_error_details_open = false;
+                    }
+                }
             }
             UpscaleSelectionAction::UpscaleRequested => {
                 let Some(upscale) = self.state.upscale.as_ref() else {
@@ -497,9 +659,7 @@ impl ApolloApp {
                 self.upscale_executor
                     .start(tools, &upscale.media, &request)?;
             }
-            UpscaleSelectionAction::None
-            | UpscaleSelectionAction::BrowseOutput
-            | UpscaleSelectionAction::Back => {}
+            UpscaleSelectionAction::None | UpscaleSelectionAction::Back => {}
         }
         Ok(())
     }
@@ -519,6 +679,51 @@ fn shows_audio_mix_lifecycle(state: &AudioMixExecutionState) -> bool {
 
 fn shows_upscale_lifecycle(state: &UpscaleExecutionState) -> bool {
     !matches!(state, UpscaleExecutionState::Idle)
+}
+
+#[cfg(target_os = "windows")]
+fn open_output_file_dialog(request: &OutputPickerRequest) -> io::Result<Option<PathBuf>> {
+    const SCRIPT: &str = r#"Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.SaveFileDialog
+$dialog.Title = 'Choose output destination'
+$dialog.InitialDirectory = $env:APOLLO_OUTPUT_DIRECTORY
+$dialog.FileName = $env:APOLLO_OUTPUT_FILENAME
+$dialog.Filter = $env:APOLLO_OUTPUT_FILTER
+$dialog.DefaultExt = $env:APOLLO_OUTPUT_EXTENSION
+$dialog.AddExtension = $true
+$dialog.OverwritePrompt = $true
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    [Console]::Write($dialog.FileName)
+}"#;
+
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-STA", "-Command", SCRIPT])
+        .env("APOLLO_OUTPUT_DIRECTORY", &request.initial_directory)
+        .env("APOLLO_OUTPUT_FILENAME", &request.file_name)
+        .env("APOLLO_OUTPUT_FILTER", request.format.filter())
+        .env("APOLLO_OUTPUT_EXTENSION", request.format.extension())
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let diagnostic = if stderr.is_empty() {
+            format!("Windows output picker exited with {}", output.status)
+        } else {
+            stderr
+        };
+        return Err(io::Error::other(diagnostic));
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    Ok((!path.is_empty()).then(|| PathBuf::from(path)))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_output_file_dialog(_request: &OutputPickerRequest) -> io::Result<Option<PathBuf>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Output Browse is currently available on Windows.",
+    ))
 }
 
 #[cfg(target_os = "windows")]
@@ -596,18 +801,19 @@ impl eframe::App for ApolloApp {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
+        fs, io,
         path::{Path, PathBuf},
         sync::atomic::{AtomicUsize, Ordering},
     };
 
     use super::{
-        ApolloApp, AppState, Tool, file_intake_enabled, shows_audio_mix_lifecycle,
-        shows_upscale_lifecycle,
+        ApolloApp, AppState, OutputPickerFormat, Tool, file_intake_enabled,
+        shows_audio_mix_lifecycle, shows_upscale_lifecycle,
     };
     use apollo::{
         audio_mix::{execution::AudioMixExecutionState, model::OutputContainer},
         media::{
+            error::MediaErrorKind,
             execution::MediaExecutionFailure,
             model::{AudioStream, FrameRate, MediaFile, VideoStream},
             probe::MediaProbeError,
@@ -870,18 +1076,152 @@ mod tests {
     }
 
     #[test]
-    fn browse_intent_does_not_replace_upscale_ready_state() {
-        let (directory, path) = temp_file("browse-preserve");
+    fn audio_mix_browse_updates_destination_and_follows_container_format() {
+        let (directory, path) = temp_file("audio-browse");
+        let mut app = app();
+        app.select_tool(Tool::AudioMix);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+
+        let mp4_destination = directory.join("chosen mix.mp4");
+        app.handle_audio_mix_action_with_picker(AudioMixSelectionAction::BrowseOutput, |request| {
+            assert_eq!(request.initial_directory, directory);
+            assert_eq!(request.file_name, "recording-mixed.mp4");
+            assert_eq!(request.format, OutputPickerFormat::Mp4);
+            assert_eq!(request.format.extension(), "mp4");
+            assert!(request.format.filter().contains("*.mp4"));
+            Ok(Some(mp4_destination.clone()))
+        })
+        .unwrap();
+        assert_eq!(
+            app.state
+                .audio_mix
+                .as_ref()
+                .unwrap()
+                .selection
+                .output_path(),
+            mp4_destination
+        );
+
+        let session = app.state.audio_mix.as_mut().unwrap();
+        let media = session.media.clone();
+        session
+            .selection
+            .set_container(&media, OutputContainer::Mkv);
+        let mkv_destination = directory.join("chosen mix.mkv");
+        app.handle_audio_mix_action_with_picker(AudioMixSelectionAction::BrowseOutput, |request| {
+            assert_eq!(request.format, OutputPickerFormat::Mkv);
+            assert_eq!(request.format.extension(), "mkv");
+            assert!(request.format.filter().contains("*.mkv"));
+            Ok(Some(mkv_destination.clone()))
+        })
+        .unwrap();
+        assert_eq!(
+            app.state
+                .audio_mix
+                .as_ref()
+                .unwrap()
+                .selection
+                .output_path(),
+            mkv_destination
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn upscale_browse_updates_destination_with_mp4_picker() {
+        let (directory, path) = temp_file("upscale-browse");
         let mut app = app();
         app.select_tool(Tool::VideoUpscale);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let destination = directory.join("chosen upscale.mp4");
+
+        app.handle_upscale_action_with_picker(UpscaleSelectionAction::BrowseOutput, |request| {
+            assert_eq!(request.initial_directory, directory);
+            assert_eq!(request.file_name, "recording-4k.mp4");
+            assert_eq!(request.format, OutputPickerFormat::Mp4);
+            assert_eq!(request.format.extension(), "mp4");
+            assert!(request.format.filter().contains("*.mp4"));
+            Ok(Some(destination.clone()))
+        })
+        .unwrap();
+
+        assert_eq!(
+            app.state.upscale.as_ref().unwrap().selection.output_path(),
+            destination
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cancelled_output_browse_preserves_ready_state() {
+        let (directory, path) = temp_file("browse-cancel");
+        let mut app = app();
+        app.select_tool(Tool::AudioMix);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
         let before = app.state.clone();
 
-        app.handle_upscale_action(UpscaleSelectionAction::BrowseOutput)
-            .unwrap();
+        app.handle_audio_mix_action_with_picker(AudioMixSelectionAction::BrowseOutput, |_| {
+            Ok(None)
+        })
+        .unwrap();
 
         assert_eq!(app.state, before);
-        assert_eq!(app.upscale_executor.state(), &UpscaleExecutionState::Idle);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn output_picker_failure_surfaces_bounded_user_feedback() {
+        let (directory, path) = temp_file("browse-failure");
+        let mut app = app();
+        app.select_tool(Tool::VideoUpscale);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let output_before = app
+            .state
+            .upscale
+            .as_ref()
+            .unwrap()
+            .selection
+            .output_path()
+            .to_path_buf();
+
+        app.handle_upscale_action_with_picker(UpscaleSelectionAction::BrowseOutput, |_| {
+            Err(io::Error::other("native picker diagnostic marker"))
+        })
+        .unwrap();
+
+        let error = app
+            .state
+            .upscale
+            .as_ref()
+            .unwrap()
+            .start_error
+            .as_ref()
+            .expect("picker failure should become user-facing state");
+        assert_eq!(error.kind(), MediaErrorKind::OutputPickerUnavailable);
+        assert_eq!(error.diagnostic(), Some("native picker diagnostic marker"));
+        assert_eq!(
+            app.state.upscale.as_ref().unwrap().selection.output_path(),
+            output_before
+        );
+
+        let context = egui::Context::default();
+        fonts::install(&context).expect("test typography should install");
+        theme::install(&context);
+        let mut rendered = context.run_ui(Default::default(), |ui| {
+            assert!(app.show_upscale_start_error(ui));
+        });
+        assert!(output_contains_text(&rendered, "Output picker unavailable"));
+        assert!(output_contains_text(
+            &rendered,
+            "The output picker could not be opened."
+        ));
+        assert!(!output_contains_text(
+            &rendered,
+            "native picker diagnostic marker"
+        ));
+        rendered.textures_delta.clear();
+
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -29,6 +29,7 @@ pub enum MediaErrorKind {
     EncoderUnavailable,
     OutputExists,
     OutputNotWritable,
+    OutputPickerUnavailable,
     InvalidRequest,
     ChildProcessFailed,
     Cancellation,
@@ -58,6 +59,7 @@ impl MediaError {
             MediaErrorKind::EncoderUnavailable => "The selected video encoder is unavailable.",
             MediaErrorKind::OutputExists => "The output file already exists.",
             MediaErrorKind::OutputNotWritable => "The output location is not writable.",
+            MediaErrorKind::OutputPickerUnavailable => "The output picker could not be opened.",
             MediaErrorKind::InvalidRequest => "The requested media operation is not valid.",
             MediaErrorKind::ChildProcessFailed => "FFmpeg could not complete the media process.",
             MediaErrorKind::Cancellation => "The operation was cancelled.",
@@ -97,6 +99,7 @@ impl MediaError {
             MediaErrorKind::OutputNotWritable => {
                 Some("Choose a writable output folder and try again.")
             }
+            MediaErrorKind::OutputPickerUnavailable => Some("Try Browse again."),
             MediaErrorKind::InvalidRequest => Some("Review the current settings and try again."),
             MediaErrorKind::ChildProcessFailed | MediaErrorKind::UnknownFfmpegFailure => {
                 Some("Show details for the FFmpeg diagnostic, then retry.")
@@ -127,6 +130,10 @@ impl MediaError {
 
     pub fn output_not_writable(diagnostic: impl Into<String>) -> Self {
         Self::with_diagnostic(MediaErrorKind::OutputNotWritable, diagnostic)
+    }
+
+    pub fn output_picker_unavailable(diagnostic: impl Into<String>) -> Self {
+        Self::with_diagnostic(MediaErrorKind::OutputPickerUnavailable, diagnostic)
     }
 
     pub fn cancelled() -> Self {
@@ -439,6 +446,24 @@ mod tests {
             MediaError::from_execution_failure(&process_failure(raw), MediaOutputContainer::Mp4);
         assert!(!error.message().contains(raw));
         assert_eq!(error.diagnostic(), Some(raw));
+    }
+
+    #[test]
+    fn output_picker_failure_has_concise_copy_and_bounded_diagnostic() {
+        let diagnostic = format!(
+            "{}TAIL",
+            "x".repeat(DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES * 2)
+        );
+        let error = MediaError::output_picker_unavailable(diagnostic);
+
+        assert_eq!(error.kind(), MediaErrorKind::OutputPickerUnavailable);
+        assert_eq!(error.message(), "The output picker could not be opened.");
+        assert_eq!(error.guidance(), Some("Try Browse again."));
+        let diagnostic = error
+            .diagnostic()
+            .expect("picker diagnostic should be retained");
+        assert!(diagnostic.len() <= DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES);
+        assert!(diagnostic.ends_with("TAIL"));
     }
 
     #[test]
