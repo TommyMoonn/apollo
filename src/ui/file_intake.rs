@@ -81,7 +81,7 @@ fn show_intake_area(
 ) -> FileIntakeAction {
     let mut action = FileIntakeAction::None;
 
-    if widgets::primary_button(ui, OPEN_LABEL).clicked() {
+    if widgets::secondary_button(ui, OPEN_LABEL).clicked() {
         action = FileIntakeAction::OpenFile;
     }
     ui.add_space(theme::SPACING.compact);
