@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use egui::{CentralPanel, RichText, TextStyle, Ui};
 
 use apollo::{
@@ -10,12 +12,14 @@ use apollo::{
         upscale::{UpscaleSelectionAction, UpscaleSelectionState},
         widgets,
     },
+    upscale::execution::{UpscaleExecutor, UpscaleStartError},
 };
 
 const HOME_WORDMARK: &str = "apollo";
 const HOME_PROMPT: &str = "Choose a media operation";
 const AUDIO_MIX_LABEL: &str = "Audio Mix";
 const UPSCALE_LABEL: &str = "Upscale";
+const EXECUTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
 fn home_action_layout(available_width: f32, action_widths: [f32; 2]) -> layout::ActionLayout {
     layout::action_layout(available_width, &action_widths)
@@ -62,6 +66,7 @@ impl AppState {
 pub(crate) struct ApolloApp {
     state: AppState,
     media_tools: Result<MediaTools, MediaToolsError>,
+    upscale_executor: UpscaleExecutor,
 }
 
 impl ApolloApp {
@@ -74,6 +79,7 @@ impl ApolloApp {
         Ok(Self {
             state: AppState::default(),
             media_tools: discover_media_tools(),
+            upscale_executor: UpscaleExecutor::new(),
         })
     }
 
@@ -165,22 +171,51 @@ impl ApolloApp {
     }
 
     fn show_upscale_tool(&mut self, ui: &mut Ui) {
+        self.poll_upscale_execution(ui);
+
         let Some(upscale) = self.state.upscale.as_mut() else {
             self.show_tool_placeholder(ui, "Video Upscale");
             return;
         };
 
         let action = upscale_ui::show(ui, &upscale.media, &mut upscale.selection);
-        self.handle_upscale_action(action);
+        if let Err(error) = self.handle_upscale_action(action) {
+            eprintln!("Upscale could not start: {error}");
+        }
     }
 
-    fn handle_upscale_action(&mut self, action: UpscaleSelectionAction) {
+    fn poll_upscale_execution(&mut self, ui: &Ui) {
+        self.upscale_executor.poll();
+        if self.upscale_executor.is_running() {
+            ui.ctx().request_repaint_after(EXECUTION_REPAINT_INTERVAL);
+        }
+    }
+
+    fn handle_upscale_action(
+        &mut self,
+        action: UpscaleSelectionAction,
+    ) -> Result<(), UpscaleStartError> {
         match action {
-            UpscaleSelectionAction::ChangeSource => self.state.change_upscale_source(),
+            UpscaleSelectionAction::ChangeSource if !self.upscale_executor.is_running() => {
+                self.state.change_upscale_source();
+            }
+            UpscaleSelectionAction::UpscaleRequested => {
+                let Some(upscale) = self.state.upscale.as_ref() else {
+                    return Ok(());
+                };
+                let Ok(tools) = self.media_tools.as_ref() else {
+                    return Ok(());
+                };
+                let request = upscale.selection.request(&upscale.media);
+                self.upscale_executor
+                    .start(tools, &upscale.media, &request)?;
+            }
             UpscaleSelectionAction::None
             | UpscaleSelectionAction::BrowseOutput
-            | UpscaleSelectionAction::UpscaleRequested => {}
+            | UpscaleSelectionAction::ChangeSource => {}
         }
+
+        Ok(())
     }
 }
 
@@ -244,9 +279,10 @@ mod tests {
         ApolloApp {
             state: AppState::default(),
             media_tools: Ok(MediaTools {
-                ffmpeg: PathBuf::from("ffmpeg"),
+                ffmpeg: std::env::temp_dir().join("apollo-phase33-missing-ffmpeg"),
                 ffprobe: PathBuf::from("ffprobe"),
             }),
+            upscale_executor: apollo::upscale::execution::UpscaleExecutor::new(),
         }
     }
 
@@ -348,23 +384,50 @@ mod tests {
         let mut app = app();
         open_ready_upscale(&mut app);
 
-        app.handle_upscale_action(UpscaleSelectionAction::ChangeSource);
+        app.handle_upscale_action(UpscaleSelectionAction::ChangeSource)
+            .unwrap();
 
         assert!(app.state.current_tool.is_none());
         assert!(app.state.upscale.is_none());
     }
 
     #[test]
-    fn browse_and_upscale_intents_do_not_start_or_replace_phase_32_state() {
+    fn browse_intent_does_not_replace_ready_state() {
         let mut app = app();
         open_ready_upscale(&mut app);
         let before = app.state.clone();
 
-        app.handle_upscale_action(UpscaleSelectionAction::BrowseOutput);
-        assert_eq!(app.state, before);
+        app.handle_upscale_action(UpscaleSelectionAction::BrowseOutput)
+            .unwrap();
 
-        app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested);
         assert_eq!(app.state, before);
+        assert_eq!(
+            app.upscale_executor.state(),
+            &apollo::upscale::execution::UpscaleExecutionState::Idle
+        );
+    }
+
+    #[test]
+    fn upscale_intent_reaches_phase_33_executor() {
+        let mut app = app();
+        open_ready_upscale(&mut app);
+
+        let error = app
+            .handle_upscale_action(UpscaleSelectionAction::UpscaleRequested)
+            .expect_err("missing test FFmpeg should prove the execution path was attempted");
+
+        assert!(matches!(
+            error,
+            apollo::upscale::execution::UpscaleStartError::Process(
+                apollo::media::process::MediaProcessStartError::ProcessLaunchFailed(
+                    std::io::ErrorKind::NotFound
+                )
+            )
+        ));
+        assert_eq!(
+            app.upscale_executor.state(),
+            &apollo::upscale::execution::UpscaleExecutionState::Idle
+        );
     }
 
     #[test]

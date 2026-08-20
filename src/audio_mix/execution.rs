@@ -1,13 +1,14 @@
-use std::{fmt, path::PathBuf};
+use std::fmt;
 
 use crate::media::{
-    model::MediaFile,
-    output::{MediaOutput, MediaOutputDisposition, MediaOutputError},
-    process::{
-        MediaProcess, MediaProcessCommand, MediaProcessFailure, MediaProcessStartError,
-        MediaProcessState, ProcessProgressSource,
+    execution::{
+        MediaExecution, MediaExecutionFailure, MediaExecutionStartError, MediaExecutionState,
+        ProcessControl,
     },
-    progress::{MediaProgress, MediaProgressParser},
+    model::MediaFile,
+    output::{MediaOutput, MediaOutputError},
+    process::{MediaProcessCommand, MediaProcessStartError, ProcessProgressSource},
+    progress::MediaProgress,
     tools::MediaTools,
 };
 
@@ -40,43 +41,11 @@ impl fmt::Display for AudioMixStartError {
 
 impl std::error::Error for AudioMixStartError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AudioMixExecutionFailure {
-    Process {
-        reason: MediaProcessFailure,
-        diagnostic: String,
-    },
-    Output {
-        reason: MediaOutputError,
-        diagnostic: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AudioMixExecutionState {
-    Idle,
-    Running,
-    Completed { output: PathBuf },
-    Failed(AudioMixExecutionFailure),
-    Cancelled,
-}
-
-impl AudioMixExecutionState {
-    pub fn is_running(&self) -> bool {
-        matches!(self, Self::Running)
-    }
-
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Completed { .. } | Self::Failed(_) | Self::Cancelled
-        )
-    }
-}
+pub type AudioMixExecutionFailure = MediaExecutionFailure;
+pub type AudioMixExecutionState = MediaExecutionState;
 
 pub struct AudioMixExecutor {
-    state: AudioMixExecutionState,
-    operation: Option<RunningAudioMix>,
+    execution: MediaExecution,
 }
 
 impl Default for AudioMixExecutor {
@@ -88,34 +57,26 @@ impl Default for AudioMixExecutor {
 impl AudioMixExecutor {
     pub fn new() -> Self {
         Self {
-            state: AudioMixExecutionState::Idle,
-            operation: None,
+            execution: MediaExecution::new(),
         }
     }
 
     pub fn state(&self) -> &AudioMixExecutionState {
-        &self.state
+        self.execution.state()
     }
 
     pub fn is_running(&self) -> bool {
-        self.operation.is_some()
+        self.execution.is_running()
     }
 
     pub fn progress(&self) -> Option<&MediaProgress> {
-        self.operation
-            .as_ref()
-            .and_then(|operation| operation.progress.as_ref())
+        self.execution.progress()
     }
 
     /// Return a settled operation to its idle state so the existing configuration can be used
     /// again. Running work must be cancelled and settled before it can be reset.
     pub fn reset(&mut self) -> bool {
-        if self.operation.is_some() {
-            return false;
-        }
-
-        self.state = AudioMixExecutionState::Idle;
-        true
+        self.execution.reset()
     }
 
     pub fn start(
@@ -124,53 +85,21 @@ impl AudioMixExecutor {
         media: &MediaFile,
         request: &AudioMixRequest,
     ) -> Result<(), AudioMixStartError> {
-        self.start_with_launcher(tools, media, request, MediaProcess::start)
+        self.start_with_launcher(
+            tools,
+            media,
+            request,
+            crate::media::process::MediaProcess::start,
+        )
     }
 
     pub fn cancel(&self) -> bool {
-        self.operation
-            .as_ref()
-            .is_some_and(|operation| operation.process.cancel())
+        self.execution.cancel()
     }
 
     /// Refresh the operation lifecycle and settle output exactly once after process termination.
-    ///
-    /// Callers should poll this from their normal application update path. A terminal process is
-    /// removed only after its temporary output has either been published or discarded, which also
-    /// prevents a second Audio Mix operation from starting during settlement.
     pub fn poll(&mut self) -> &AudioMixExecutionState {
-        if let Some(operation) = self.operation.as_mut() {
-            operation.refresh_progress();
-        }
-
-        let Some(process_state) = self
-            .operation
-            .as_ref()
-            .map(|operation| operation.process.state())
-        else {
-            return &self.state;
-        };
-
-        if process_state == MediaProcessState::Running {
-            return &self.state;
-        }
-
-        let mut operation = self
-            .operation
-            .take()
-            .expect("operation exists while its terminal state is being settled");
-        let diagnostic = operation.process.diagnostic_stderr();
-        let settlement = operation.output.settle(&process_state);
-
-        self.state = match settlement {
-            Err(reason) => AudioMixExecutionState::Failed(AudioMixExecutionFailure::Output {
-                reason,
-                diagnostic,
-            }),
-            Ok(disposition) => terminal_state(process_state, disposition, diagnostic),
-        };
-
-        &self.state
+        self.execution.poll()
     }
 
     fn start_with_launcher<F, P>(
@@ -184,7 +113,7 @@ impl AudioMixExecutor {
         F: FnOnce(MediaProcessCommand) -> Result<P, MediaProcessStartError>,
         P: ProcessControl + 'static,
     {
-        if self.operation.is_some() {
+        if self.execution.is_running() {
             return Err(AudioMixStartError::AlreadyRunning);
         }
 
@@ -199,84 +128,17 @@ impl AudioMixExecutor {
         let command = MediaProcessCommand::new(&tools.ffmpeg)
             .args(invocation.args)
             .progress_source(ProcessProgressSource::Stdout);
-        let process = launcher(command).map_err(AudioMixStartError::Process)?;
 
-        self.operation = Some(RunningAudioMix {
-            process: Box::new(process),
-            output,
-            progress_parser: MediaProgressParser::new(media.duration),
-            progress: None,
-        });
-        self.state = AudioMixExecutionState::Running;
-        Ok(())
+        self.execution
+            .start_with_launcher(output, command, media.duration, launcher)
+            .map_err(map_execution_start_error)
     }
 }
 
-fn terminal_state(
-    process_state: MediaProcessState,
-    disposition: MediaOutputDisposition,
-    diagnostic: String,
-) -> AudioMixExecutionState {
-    match (process_state, disposition) {
-        (MediaProcessState::Completed, MediaOutputDisposition::Published(output)) => {
-            AudioMixExecutionState::Completed { output }
-        }
-        (MediaProcessState::Failed(reason), MediaOutputDisposition::Discarded) => {
-            AudioMixExecutionState::Failed(AudioMixExecutionFailure::Process { reason, diagnostic })
-        }
-        (MediaProcessState::Cancelled, MediaOutputDisposition::Discarded) => {
-            AudioMixExecutionState::Cancelled
-        }
-        (MediaProcessState::Running, _) => {
-            unreachable!("running media output cannot be settled")
-        }
-        (MediaProcessState::Completed, MediaOutputDisposition::Discarded)
-        | (
-            MediaProcessState::Failed(_) | MediaProcessState::Cancelled,
-            MediaOutputDisposition::Published(_),
-        ) => unreachable!("media output disposition does not match terminal process state"),
-    }
-}
-
-struct RunningAudioMix {
-    process: Box<dyn ProcessControl>,
-    output: MediaOutput,
-    progress_parser: MediaProgressParser,
-    progress: Option<MediaProgress>,
-}
-
-impl RunningAudioMix {
-    fn refresh_progress(&mut self) {
-        for line in self.process.drain_progress() {
-            if let Some(progress) = self.progress_parser.push_line(&line) {
-                self.progress = Some(progress);
-            }
-        }
-    }
-}
-
-trait ProcessControl {
-    fn state(&self) -> MediaProcessState;
-    fn cancel(&self) -> bool;
-    fn diagnostic_stderr(&self) -> String;
-    fn drain_progress(&self) -> Vec<String>;
-}
-
-impl ProcessControl for MediaProcess {
-    fn state(&self) -> MediaProcessState {
-        MediaProcess::state(self)
-    }
-
-    fn cancel(&self) -> bool {
-        MediaProcess::cancel(self)
-    }
-
-    fn diagnostic_stderr(&self) -> String {
-        MediaProcess::diagnostic_stderr(self)
-    }
-
-    fn drain_progress(&self) -> Vec<String> {
-        self.progress_channel().try_iter().collect()
+fn map_execution_start_error(error: MediaExecutionStartError) -> AudioMixStartError {
+    match error {
+        MediaExecutionStartError::AlreadyRunning => AudioMixStartError::AlreadyRunning,
+        MediaExecutionStartError::Process(error) => AudioMixStartError::Process(error),
     }
 }
 
@@ -300,9 +162,9 @@ mod tests {
 
     use super::{
         AudioMixExecutionFailure, AudioMixExecutionState, AudioMixExecutor, AudioMixStartError,
-        ProcessControl,
     };
     use crate::audio_mix::model::{AudioMixRequest, OutputContainer};
+    use crate::media::execution::ProcessControl;
 
     static NEXT_TEST_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
 
@@ -615,11 +477,9 @@ mod tests {
 
     fn temporary_output(executor: &AudioMixExecutor) -> PathBuf {
         executor
-            .operation
-            .as_ref()
-            .unwrap()
-            .output
-            .temporary_path()
+            .execution
+            .temporary_output_path()
+            .expect("running audio mix should own a temporary output")
             .to_path_buf()
     }
 

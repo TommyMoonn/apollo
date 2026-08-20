@@ -72,6 +72,9 @@ pub fn build_upscale_invocation(
     }
 
     args.extend([
+        OsString::from("-progress"),
+        OsString::from("pipe:1"),
+        OsString::from("-nostats"),
         OsString::from("-f"),
         OsString::from("mp4"),
         request.output.as_os_str().to_os_string(),

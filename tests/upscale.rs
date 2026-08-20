@@ -260,6 +260,29 @@ fn no_audio_keeps_optional_mapping_without_audio_codec_option() {
 }
 
 #[test]
+fn invocation_requests_machine_readable_progress_on_stdout() {
+    let temp = TestDirectory::new();
+    let request = request(&temp, UpscaleTarget::Uhd4k);
+    let media = media_with_audio_codecs(
+        request.input.clone(),
+        Some(1920),
+        Some(1080),
+        &[Some("aac")],
+    );
+    let args = invocation_args(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    );
+
+    assert_eq!(option_values(&args, "-progress"), vec!["pipe:1"]);
+    assert!(args.iter().any(|arg| arg == "-nostats"));
+}
+
+#[test]
 fn unusual_input_and_output_paths_remain_single_arguments() {
     let temp = TestDirectory::new();
     let request = UpscaleRequest {
