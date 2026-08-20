@@ -17,7 +17,7 @@ use super::{fonts, layout, theme, widgets};
 const UNTITLED_AUDIO: &str = "Untitled audio";
 const AUDIO_TRACKS_LABEL: &str = "Audio tracks";
 const OUTPUT_LABEL: &str = "Output";
-const CHANGE_LABEL: &str = "Change";
+const BACK_LABEL: &str = "← Back";
 const SELECT_ALL_LABEL: &str = "Select all";
 const CLEAR_LABEL: &str = "Clear";
 const BROWSE_LABEL: &str = "Browse";
@@ -36,7 +36,7 @@ pub struct AudioMixSelectionState {
 pub enum AudioMixSelectionAction {
     #[default]
     None,
-    ChangeSource,
+    Back,
     BrowseOutput,
     MixRequested,
 }
@@ -182,7 +182,7 @@ pub fn show(
         ui.spacing_mut().item_spacing.y = 0.0;
 
         if show_source_header(ui, media) {
-            action = AudioMixSelectionAction::ChangeSource;
+            action = AudioMixSelectionAction::Back;
         }
         ui.add_space(theme::SPACING.section);
 
@@ -224,7 +224,7 @@ fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
     };
     let header_height = source_header_height(ui, metadata.is_some());
 
-    let (_, change_response) = Sides::new()
+    let (_, back_response) = Sides::new()
         .height(header_height.max(theme::COMPACT_CONTROL_HEIGHT))
         .spacing(theme::SOURCE_HEADER_GAP)
         .shrink_left()
@@ -252,10 +252,10 @@ fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
                     }
                 });
             },
-            |ui| widgets::plain_button(ui, CHANGE_LABEL),
+            |ui| widgets::plain_button(ui, BACK_LABEL),
         );
 
-    change_response.clicked()
+    back_response.clicked()
 }
 
 fn show_track_list(

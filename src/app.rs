@@ -105,15 +105,11 @@ impl AppState {
         self.current_tool = tool;
     }
 
-    fn begin_source_change(&mut self, tool: Tool) {
+    fn return_to_file_intake(&mut self, tool: Tool) {
         self.current_tool = tool;
         self.intake_active = true;
         self.intake_error = None;
         self.intake_error_details_open = false;
-        match tool {
-            Tool::AudioMix => self.audio_mix = None,
-            Tool::VideoUpscale => self.upscale = None,
-        }
     }
 
     fn retire_tool_sessions(&mut self) {
@@ -278,15 +274,19 @@ impl ApolloApp {
             return;
         }
 
-        self.state.retire_tool_sessions();
         self.state.intake_active = true;
         self.state.intake_error = None;
         self.state.intake_error_details_open = false;
         match self.state.media_intake.load_with_probe(path, probe) {
-            Ok(MediaLoadDisposition::Probed | MediaLoadDisposition::Reused) => {
+            Ok(MediaLoadDisposition::Reused) => {
+                let _ = self.activate_cached_source(self.state.current_tool);
+            }
+            Ok(MediaLoadDisposition::Probed) => {
+                self.state.retire_tool_sessions();
                 let _ = self.activate_cached_source(self.state.current_tool);
             }
             Err(error) => {
+                self.state.retire_tool_sessions();
                 self.state.intake_error = Some(MediaError::from_intake_error(&error));
             }
         }
@@ -383,8 +383,8 @@ impl ApolloApp {
         action: AudioMixSelectionAction,
     ) -> Result<(), AudioMixStartError> {
         match action {
-            AudioMixSelectionAction::ChangeSource if self.file_intake_enabled() => {
-                self.state.begin_source_change(Tool::AudioMix);
+            AudioMixSelectionAction::Back if self.file_intake_enabled() => {
+                self.state.return_to_file_intake(Tool::AudioMix);
             }
             AudioMixSelectionAction::MixRequested => {
                 let Some(session) = self.state.audio_mix.as_ref() else {
@@ -399,7 +399,7 @@ impl ApolloApp {
             }
             AudioMixSelectionAction::None
             | AudioMixSelectionAction::BrowseOutput
-            | AudioMixSelectionAction::ChangeSource => {}
+            | AudioMixSelectionAction::Back => {}
         }
         Ok(())
     }
@@ -483,8 +483,8 @@ impl ApolloApp {
         action: UpscaleSelectionAction,
     ) -> Result<(), UpscaleStartError> {
         match action {
-            UpscaleSelectionAction::ChangeSource if self.file_intake_enabled() => {
-                self.state.begin_source_change(Tool::VideoUpscale);
+            UpscaleSelectionAction::Back if self.file_intake_enabled() => {
+                self.state.return_to_file_intake(Tool::VideoUpscale);
             }
             UpscaleSelectionAction::UpscaleRequested => {
                 let Some(upscale) = self.state.upscale.as_ref() else {
@@ -499,7 +499,7 @@ impl ApolloApp {
             }
             UpscaleSelectionAction::None
             | UpscaleSelectionAction::BrowseOutput
-            | UpscaleSelectionAction::ChangeSource => {}
+            | UpscaleSelectionAction::Back => {}
         }
         Ok(())
     }
@@ -606,14 +606,15 @@ mod tests {
         shows_upscale_lifecycle,
     };
     use apollo::{
-        audio_mix::execution::AudioMixExecutionState,
+        audio_mix::{execution::AudioMixExecutionState, model::OutputContainer},
         media::{
             execution::MediaExecutionFailure,
             model::{AudioStream, FrameRate, MediaFile, VideoStream},
+            probe::MediaProbeError,
             process::MediaProcessFailure,
             tools::MediaTools,
         },
-        ui::{fonts, theme, upscale::UpscaleSelectionAction},
+        ui::{audio_mix::AudioMixSelectionAction, fonts, theme, upscale::UpscaleSelectionAction},
         upscale::{
             execution::UpscaleExecutionState,
             model::{UpscaleTarget, VideoCodec},
@@ -812,6 +813,8 @@ mod tests {
         assert!(output_contains_text(&output, "Upscale to"));
         assert!(output_contains_text(&output, "Video codec"));
         assert!(output_contains_text(&output, "Actual output"));
+        assert!(output_contains_text(&output, "← Back"));
+        assert!(!output_contains_text(&output, "Change"));
         output.textures_delta.clear();
         fs::remove_dir_all(directory).unwrap();
     }
@@ -832,6 +835,8 @@ mod tests {
 
         assert!(output_contains_text(&output, "Audio tracks"));
         assert!(output_contains_text(&output, "Mix selected tracks"));
+        assert!(output_contains_text(&output, "← Back"));
+        assert!(!output_contains_text(&output, "Change"));
         output.textures_delta.clear();
         fs::remove_dir_all(directory).unwrap();
     }
@@ -948,7 +953,7 @@ mod tests {
         let mut app = app();
         app.select_tool(Tool::AudioMix);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-        app.state.begin_source_change(Tool::AudioMix);
+        app.state.return_to_file_intake(Tool::AudioMix);
 
         app.select_tool(Tool::VideoUpscale);
 
@@ -965,19 +970,130 @@ mod tests {
     }
 
     #[test]
-    fn change_source_returns_to_intake_and_keeps_cache_for_tool_reuse() {
-        let (directory, path) = temp_file("change");
+    fn audio_mix_back_returns_to_intake_and_same_source_restores_ready_state() {
+        let (directory, path) = temp_file("audio-back");
         let mut app = app();
-        app.select_tool(Tool::VideoUpscale);
+        app.select_tool(Tool::AudioMix);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-        app.handle_upscale_action(UpscaleSelectionAction::ChangeSource)
+        let session = app
+            .state
+            .audio_mix
+            .as_mut()
+            .expect("audio mix session should exist");
+        session.selection.toggle_stream(&session.media, 1);
+        session
+            .selection
+            .set_container(&session.media, OutputContainer::Mkv);
+        let custom_output = directory.join("custom-mix.mkv");
+        session
+            .selection
+            .set_custom_output_path(custom_output.clone());
+
+        app.handle_audio_mix_action(AudioMixSelectionAction::Back)
             .unwrap();
 
         assert!(app.state.intake_active);
-        assert!(app.state.upscale.is_none());
+        assert_eq!(app.state.current_tool, Tool::AudioMix);
+        assert!(app.state.audio_mix.is_some());
+
+        app.load_media_path_with_probe(&path, |_| -> Result<MediaFile, MediaProbeError> {
+            panic!("unchanged cached source must not be probed again")
+        });
+
+        let session = app
+            .state
+            .audio_mix
+            .as_ref()
+            .expect("same-source Audio Mix session should be restored");
+        assert!(!app.state.intake_active);
+        assert_eq!(session.selection.selected_count(), 0);
+        assert_eq!(session.selection.container(), OutputContainer::Mkv);
+        assert_eq!(session.selection.output_path(), custom_output);
+        assert!(session.selection.output_is_customized());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn upscale_back_returns_to_intake_and_same_source_restores_ready_state() {
+        let (directory, path) = temp_file("upscale-back");
+        let mut app = app();
+        app.select_tool(Tool::VideoUpscale);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let session = app
+            .state
+            .upscale
+            .as_mut()
+            .expect("upscale session should exist");
+        session
+            .selection
+            .set_target(&session.media, UpscaleTarget::Uhd8k);
+        session.selection.set_codec(VideoCodec::H265);
+        let custom_output = directory.join("custom-upscale.mp4");
+        session
+            .selection
+            .set_custom_output_path(custom_output.clone());
+
+        app.handle_upscale_action(UpscaleSelectionAction::Back)
+            .unwrap();
+
+        assert!(app.state.intake_active);
+        assert_eq!(app.state.current_tool, Tool::VideoUpscale);
+        assert!(app.state.upscale.is_some());
+
+        app.load_media_path_with_probe(&path, |_| -> Result<MediaFile, MediaProbeError> {
+            panic!("unchanged cached source must not be probed again")
+        });
+
+        let session = app
+            .state
+            .upscale
+            .as_ref()
+            .expect("same-source Upscale session should be restored");
+        assert!(!app.state.intake_active);
+        assert_eq!(session.selection.target(), UpscaleTarget::Uhd8k);
+        assert_eq!(session.selection.codec(), VideoCodec::H265);
+        assert_eq!(session.selection.output_path(), custom_output);
+        assert!(session.selection.output_is_customized());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn replacement_source_retires_preserved_ready_sessions() {
+        let (directory, first) = temp_file("replace-after-back");
+        let second = directory.join("replacement.mkv");
+        fs::write(&second, b"replacement").unwrap();
+        let mut app = app();
+        app.select_tool(Tool::VideoUpscale);
+        app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        app.select_tool(Tool::AudioMix);
+        assert!(app.state.audio_mix.is_some());
+        app.select_tool(Tool::VideoUpscale);
+        let old_output = directory.join("old-custom.mp4");
+        app.state
+            .upscale
+            .as_mut()
+            .expect("upscale session should exist")
+            .selection
+            .set_custom_output_path(old_output);
+        app.handle_upscale_action(UpscaleSelectionAction::Back)
+            .unwrap();
+
+        app.load_media_path_with_probe(&second, |path| Ok(media(path)));
+
+        assert!(app.state.audio_mix.is_none());
+        let session = app
+            .state
+            .upscale
+            .as_ref()
+            .expect("replacement should create a new Upscale session");
+        assert!(!app.state.intake_active);
+        assert_eq!(session.media.path, second);
+        assert!(!session.selection.output_is_customized());
+        assert_eq!(session.selection.target(), UpscaleTarget::Uhd4k);
+        assert_eq!(session.selection.codec(), VideoCodec::H264);
         assert_eq!(
-            app.state.media_intake.current().map(|m| &m.path),
-            Some(&path)
+            app.state.media_intake.current().map(|media| &media.path),
+            Some(&second)
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -988,7 +1104,7 @@ mod tests {
         let mut app = app();
         app.select_tool(Tool::AudioMix);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-        app.state.begin_source_change(Tool::AudioMix);
+        app.state.return_to_file_intake(Tool::AudioMix);
         fs::write(&path, b"changed-size").unwrap();
 
         app.select_tool(Tool::VideoUpscale);
