@@ -731,7 +731,7 @@ mod tests {
             app.show_tool(ui, tool);
         });
 
-        assert!(output_contains_text(&output, "Open file"));
+        assert!(output_contains_text(&output, "Open files"));
         assert!(output_contains_text(&output, "Audio Mix"));
         assert!(output_contains_text(&output, "Upscale"));
         output.textures_delta.clear();

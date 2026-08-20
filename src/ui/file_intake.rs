@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use egui::{RichText, Stroke, StrokeKind, TextStyle, Ui};
 
 use crate::media::error::MediaError;
@@ -5,7 +7,7 @@ use crate::media::error::MediaError;
 use super::{fonts, layout, media_error, theme, widgets};
 
 const WORDMARK: &str = "apollo";
-const OPEN_LABEL: &str = "Open file";
+const OPEN_LABEL: &str = "Open files";
 const DROP_HINT: &str = "or drop a video anywhere";
 const AUDIO_MIX_LABEL: &str = "Audio Mix";
 const UPSCALE_LABEL: &str = "Upscale";
@@ -39,55 +41,88 @@ pub fn show(
     error: Option<&MediaError>,
     error_details_open: &mut bool,
 ) -> FileIntakeAction {
+    if error.is_none() {
+        *error_details_open = false;
+    }
+
+    let action = Cell::new(FileIntakeAction::None);
+    layout::intake_content(
+        ui,
+        show_wordmark,
+        |ui| {
+            let next = show_intake_area(ui, error, error_details_open);
+            if next != FileIntakeAction::None {
+                action.set(next);
+            }
+        },
+        |ui| {
+            let next = show_mode_selector(ui, selected_tool);
+            if next != FileIntakeAction::None {
+                action.set(next);
+            }
+        },
+    );
+
+    action.get()
+}
+
+fn show_wordmark(ui: &mut Ui) {
+    ui.label(
+        RichText::new(WORDMARK)
+            .text_style(fonts::wordmark_text_style())
+            .extra_letter_spacing(fonts::WORDMARK_LETTER_SPACING),
+    );
+}
+
+fn show_intake_area(
+    ui: &mut Ui,
+    error: Option<&MediaError>,
+    error_details_open: &mut bool,
+) -> FileIntakeAction {
     let mut action = FileIntakeAction::None;
-    layout::centered_content(ui, |ui| {
-        ui.label(
-            RichText::new(WORDMARK)
-                .text_style(fonts::wordmark_text_style())
-                .extra_letter_spacing(fonts::WORDMARK_LETTER_SPACING),
-        );
-        ui.add_space(theme::SPACING.focal);
 
-        if widgets::primary_button(ui, OPEN_LABEL).clicked() {
-            action = FileIntakeAction::OpenFile;
-        }
+    if widgets::primary_button(ui, OPEN_LABEL).clicked() {
+        action = FileIntakeAction::OpenFile;
+    }
+    ui.add_space(theme::SPACING.compact);
+    ui.label(
+        RichText::new(DROP_HINT)
+            .text_style(TextStyle::Small)
+            .color(theme::SECONDARY_FAINT),
+    );
+
+    if let Some(error) = error {
         ui.add_space(theme::SPACING.compact);
-        ui.label(
-            RichText::new(DROP_HINT)
-                .text_style(TextStyle::Small)
-                .color(theme::SECONDARY_FAINT),
-        );
+        media_error::show_inline(ui, error, error_details_open);
+    }
 
-        if let Some(error) = error {
-            ui.add_space(theme::SPACING.compact);
-            media_error::show_inline(ui, error, error_details_open);
-        } else {
-            *error_details_open = false;
+    action
+}
+
+fn show_mode_selector(ui: &mut Ui, selected_tool: FileIntakeTool) -> FileIntakeAction {
+    let sizes = [
+        widgets::mode_button_intrinsic_size(ui, AUDIO_MIX_LABEL),
+        widgets::mode_button_intrinsic_size(ui, UPSCALE_LABEL),
+    ];
+    let widths = sizes.map(|size| size.x);
+    let arrangement = layout::action_layout(ui.available_width(), &widths);
+    let mut action = FileIntakeAction::None;
+
+    layout::centered_action_group(ui, &sizes, arrangement, theme::SPACING.compact, |ui| {
+        if widgets::mode_button(
+            ui,
+            AUDIO_MIX_LABEL,
+            selected_tool == FileIntakeTool::AudioMix,
+        )
+        .clicked()
+        {
+            action = FileIntakeAction::SelectTool(FileIntakeTool::AudioMix);
         }
-
-        ui.add_space(theme::SPACING.focal);
-        let sizes = [
-            widgets::mode_button_intrinsic_size(ui, AUDIO_MIX_LABEL),
-            widgets::mode_button_intrinsic_size(ui, UPSCALE_LABEL),
-        ];
-        let widths = sizes.map(|size| size.x);
-        let arrangement = layout::action_layout(ui.available_width(), &widths);
-        layout::centered_action_group(ui, &sizes, arrangement, theme::SPACING.compact, |ui| {
-            if widgets::mode_button(
-                ui,
-                AUDIO_MIX_LABEL,
-                selected_tool == FileIntakeTool::AudioMix,
-            )
+        if widgets::mode_button(ui, UPSCALE_LABEL, selected_tool == FileIntakeTool::Upscale)
             .clicked()
-            {
-                action = FileIntakeAction::SelectTool(FileIntakeTool::AudioMix);
-            }
-            if widgets::mode_button(ui, UPSCALE_LABEL, selected_tool == FileIntakeTool::Upscale)
-                .clicked()
-            {
-                action = FileIntakeAction::SelectTool(FileIntakeTool::Upscale);
-            }
-        });
+        {
+            action = FileIntakeAction::SelectTool(FileIntakeTool::Upscale);
+        }
     });
 
     action
@@ -100,7 +135,7 @@ mod tests {
     #[test]
     fn intake_copy_matches_quiet_focus_surface() {
         assert_eq!(WORDMARK, "apollo");
-        assert_eq!(OPEN_LABEL, "Open file");
+        assert_eq!(OPEN_LABEL, "Open files");
         assert_eq!(DROP_HINT, "or drop a video anywhere");
         assert_eq!(AUDIO_MIX_LABEL, "Audio Mix");
         assert_eq!(UPSCALE_LABEL, "Upscale");

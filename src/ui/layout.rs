@@ -65,6 +65,18 @@ pub enum FieldPairLayout {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntakeLayout {
+    Distributed,
+    Compact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IntakeLayoutPlan {
+    pub layout: IntakeLayout,
+    pub region_gap: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListBehavior {
     Flow,
     Scroll,
@@ -117,6 +129,102 @@ pub fn centered_content<R>(
         )
     })
     .inner
+}
+
+/// Arrange file intake as top, middle, and bottom regions when height permits.
+///
+/// The regions are measured at the current responsive content width. Remaining vertical space is
+/// distributed evenly between them, keeping the title near the top, the intake action around the
+/// visual middle, and the mode selector at the bottom. When the shared section gaps no longer fit,
+/// the surface collapses to compact top-down flow inside a vertical scroll area.
+pub fn intake_content(
+    ui: &mut Ui,
+    mut show_top: impl FnMut(&mut Ui),
+    mut show_middle: impl FnMut(&mut Ui),
+    mut show_bottom: impl FnMut(&mut Ui),
+) -> IntakeLayoutPlan {
+    let available = safe_available_size(ui.available_size());
+    let content_width = bounded_content_width(available.x);
+    let measure_rect = Rect::from_min_size(ui.cursor().min, vec2(content_width, available.y));
+
+    let region_heights = [
+        measure_intake_region(ui, "intake_top_measure", measure_rect, &mut show_top),
+        measure_intake_region(ui, "intake_middle_measure", measure_rect, &mut show_middle),
+        measure_intake_region(ui, "intake_bottom_measure", measure_rect, &mut show_bottom),
+    ];
+    let plan = intake_layout_plan(available.y, region_heights);
+
+    ui.with_layout(Layout::top_down(Align::Center), |ui| {
+        ui.allocate_ui_with_layout(
+            vec2(content_width, available.y),
+            Layout::top_down(Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                match plan.layout {
+                    IntakeLayout::Distributed => {
+                        show_top(ui);
+                        ui.add_space(plan.region_gap);
+                        show_middle(ui);
+                        ui.add_space(plan.region_gap);
+                        show_bottom(ui);
+                    }
+                    IntakeLayout::Compact => {
+                        ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                show_top(ui);
+                                ui.add_space(theme::SPACING.section);
+                                show_middle(ui);
+                                ui.add_space(theme::SPACING.section);
+                                show_bottom(ui);
+                            });
+                    }
+                }
+            },
+        );
+    });
+
+    plan
+}
+
+/// Choose the three-region intake composition only while shared section gaps still fit.
+pub fn intake_layout_plan(available_height: f32, region_heights: [f32; 3]) -> IntakeLayoutPlan {
+    let available_height = safe_dimension(available_height);
+    let total_region_height = region_heights.into_iter().map(safe_dimension).sum::<f32>();
+    let minimum_gap = theme::SPACING.section;
+    let required_height = total_region_height + minimum_gap * 2.0;
+
+    if required_height <= available_height {
+        IntakeLayoutPlan {
+            layout: IntakeLayout::Distributed,
+            region_gap: ((available_height - total_region_height) * 0.5).max(minimum_gap),
+        }
+    } else {
+        IntakeLayoutPlan {
+            layout: IntakeLayout::Compact,
+            region_gap: minimum_gap,
+        }
+    }
+}
+
+fn measure_intake_region(
+    ui: &mut Ui,
+    id_salt: &'static str,
+    max_rect: Rect,
+    add_contents: &mut impl FnMut(&mut Ui),
+) -> f32 {
+    let mut measure_ui = ui.new_child(
+        UiBuilder::new()
+            .id_salt(id_salt)
+            .max_rect(max_rect)
+            .layout(Layout::top_down(Align::Center))
+            .sizing_pass()
+            .invisible(),
+    );
+    measure_ui.spacing_mut().item_spacing.y = 0.0;
+    add_contents(&mut measure_ui);
+    safe_dimension(measure_ui.min_rect().height())
 }
 
 /// Center a feature surface while keeping its contents top-down and left aligned.
@@ -442,12 +550,13 @@ mod tests {
     use super::{
         AUDIO_TRACK_LIST_MAX_HEIGHT, ActionLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT,
         FIELD_PAIR_MIN_COLUMN_WIDTH, FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT,
-        FieldPairLayout, ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, PATH_TEXT_OVERFLOW,
-        PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
+        FieldPairLayout, IntakeLayout, ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE,
+        PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
         TASK_CONTENT_MAX_WIDTH, TaskOverflow, TextOverflowPolicy, UPSCALE_TARGET_LIST_MAX_HEIGHT,
         WINDOW_CHROME_HEIGHT, action_group_size, action_layout, bounded_content_width,
         bounded_task_content_width, centered_action_group, content_frame, field_pair_layout,
-        flexible_row_width, focus_content, list_viewport, task_surface_plan,
+        flexible_row_width, focus_content, intake_content, intake_layout_plan, list_viewport,
+        task_surface_plan,
     };
     use crate::ui::theme;
 
@@ -486,6 +595,199 @@ mod tests {
         assert_eq!(frame.inner_margin.right, CONTENT_PADDING);
         assert_eq!(frame.inner_margin.top, CONTENT_PADDING);
         assert_eq!(frame.inner_margin.bottom, CONTENT_PADDING);
+    }
+
+    #[test]
+    fn reference_intake_height_preserves_three_distinct_regions() {
+        let available_height = REFERENCE_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
+        let plan = intake_layout_plan(available_height, [26.0, 55.0, 31.0]);
+
+        assert_eq!(plan.layout, IntakeLayout::Distributed);
+        assert!(plan.region_gap > theme::SPACING.section);
+    }
+
+    #[test]
+    fn tall_intake_height_expands_negative_space_between_regions() {
+        let reference_height = REFERENCE_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
+        let reference = intake_layout_plan(reference_height, [26.0, 55.0, 31.0]);
+        let tall = intake_layout_plan(700.0, [26.0, 55.0, 31.0]);
+
+        assert_eq!(tall.layout, IntakeLayout::Distributed);
+        assert!(tall.region_gap > reference.region_gap);
+    }
+
+    #[test]
+    fn reference_intake_error_keeps_bottom_region_separated() {
+        let available_height = REFERENCE_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
+        let plan = intake_layout_plan(available_height, [26.0, 130.0, 31.0]);
+
+        assert_eq!(plan.layout, IntakeLayout::Distributed);
+        assert!(plan.region_gap >= theme::SPACING.section);
+    }
+
+    #[test]
+    fn minimum_intake_height_keeps_normal_content_reachable() {
+        let available_height = MINIMUM_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
+        let plan = intake_layout_plan(available_height, [26.0, 55.0, 31.0]);
+
+        assert_eq!(plan.layout, IntakeLayout::Distributed);
+        assert!(plan.region_gap >= theme::SPACING.section);
+    }
+
+    #[test]
+    fn constrained_intake_with_expanded_error_collapses_to_compact_flow() {
+        let available_height = MINIMUM_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
+        let plan = intake_layout_plan(available_height, [26.0, 150.0, 31.0]);
+
+        assert_eq!(plan.layout, IntakeLayout::Compact);
+        assert_eq!(plan.region_gap, theme::SPACING.section);
+    }
+
+    #[test]
+    fn distributed_intake_places_top_middle_and_bottom_in_flow() {
+        use std::cell::Cell;
+
+        egui::__run_test_ui(|ui| {
+            let available = Vec2::new(
+                MAX_CONTENT_WIDTH,
+                REFERENCE_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0,
+            );
+            let (parent_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+            let top = Cell::new(None);
+            let middle = Cell::new(None);
+            let bottom = Cell::new(None);
+
+            let plan = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(parent_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    |ui| {
+                        intake_content(
+                            ui,
+                            |ui| {
+                                let rect = ui
+                                    .allocate_exact_size(
+                                        Vec2::new(120.0, 26.0),
+                                        egui::Sense::hover(),
+                                    )
+                                    .0;
+                                if !ui.is_sizing_pass() {
+                                    top.set(Some(rect));
+                                }
+                            },
+                            |ui| {
+                                let rect = ui
+                                    .allocate_exact_size(
+                                        Vec2::new(160.0, 55.0),
+                                        egui::Sense::hover(),
+                                    )
+                                    .0;
+                                if !ui.is_sizing_pass() {
+                                    middle.set(Some(rect));
+                                }
+                            },
+                            |ui| {
+                                let rect = ui
+                                    .allocate_exact_size(
+                                        Vec2::new(180.0, 31.0),
+                                        egui::Sense::hover(),
+                                    )
+                                    .0;
+                                if !ui.is_sizing_pass() {
+                                    bottom.set(Some(rect));
+                                }
+                            },
+                        )
+                    },
+                )
+                .inner;
+
+            let top = top.get().expect("top region should render");
+            let middle = middle.get().expect("middle region should render");
+            let bottom = bottom.get().expect("bottom region should render");
+
+            assert_eq!(plan.layout, IntakeLayout::Distributed);
+            assert!((top.top() - parent_rect.top()).abs() < 0.01);
+            assert!((middle.center().y - parent_rect.center().y).abs() < 3.0);
+            assert!((bottom.bottom() - parent_rect.bottom()).abs() < 0.01);
+            assert!(middle.top() > top.bottom());
+            assert!(bottom.top() > middle.bottom());
+        });
+    }
+
+    #[test]
+    fn compact_intake_keeps_mode_reachable_in_scroll_flow() {
+        use std::cell::Cell;
+
+        egui::__run_test_ui(|ui| {
+            let available = Vec2::new(
+                MINIMUM_CONTENT_SIZE.x - f32::from(CONTENT_PADDING) * 2.0,
+                MINIMUM_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0,
+            );
+            let (parent_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+            let top = Cell::new(None);
+            let middle = Cell::new(None);
+            let bottom = Cell::new(None);
+
+            let plan = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(parent_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Center)),
+                    |ui| {
+                        intake_content(
+                            ui,
+                            |ui| {
+                                let rect = ui
+                                    .allocate_exact_size(
+                                        Vec2::new(120.0, 26.0),
+                                        egui::Sense::hover(),
+                                    )
+                                    .0;
+                                if !ui.is_sizing_pass() {
+                                    top.set(Some(rect));
+                                }
+                            },
+                            |ui| {
+                                let rect = ui
+                                    .allocate_exact_size(
+                                        Vec2::new(240.0, 150.0),
+                                        egui::Sense::hover(),
+                                    )
+                                    .0;
+                                if !ui.is_sizing_pass() {
+                                    middle.set(Some(rect));
+                                }
+                            },
+                            |ui| {
+                                let rect = ui
+                                    .allocate_exact_size(
+                                        Vec2::new(180.0, 31.0),
+                                        egui::Sense::hover(),
+                                    )
+                                    .0;
+                                if !ui.is_sizing_pass() {
+                                    bottom.set(Some(rect));
+                                }
+                            },
+                        )
+                    },
+                )
+                .inner;
+
+            let top = top.get().expect("top region should render");
+            let middle = middle.get().expect("middle region should render");
+            let bottom = bottom.get().expect("bottom region should render");
+
+            assert_eq!(plan.layout, IntakeLayout::Compact);
+            assert!((top.center().x - parent_rect.center().x).abs() < 0.01);
+            assert!((middle.center().x - parent_rect.center().x).abs() < 0.01);
+            assert!((bottom.center().x - parent_rect.center().x).abs() < 0.01);
+            assert!(middle.top() > top.bottom());
+            assert!(bottom.top() > middle.bottom());
+            assert!(bottom.bottom() > parent_rect.bottom());
+        });
     }
 
     #[test]
