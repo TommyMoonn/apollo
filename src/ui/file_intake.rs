@@ -1,6 +1,8 @@
 use egui::{RichText, Stroke, StrokeKind, TextStyle, Ui};
 
-use super::{fonts, layout, theme, widgets};
+use crate::media::error::MediaError;
+
+use super::{fonts, layout, media_error, theme, widgets};
 
 const WORDMARK: &str = "apollo";
 const OPEN_LABEL: &str = "Open file";
@@ -31,7 +33,12 @@ pub fn show_drag_hover(ui: &Ui) {
     );
 }
 
-pub fn show(ui: &mut Ui, selected_tool: FileIntakeTool, error: Option<&str>) -> FileIntakeAction {
+pub fn show(
+    ui: &mut Ui,
+    selected_tool: FileIntakeTool,
+    error: Option<&MediaError>,
+    error_details_open: &mut bool,
+) -> FileIntakeAction {
     let mut action = FileIntakeAction::None;
     layout::centered_content(ui, |ui| {
         ui.label(
@@ -53,11 +60,9 @@ pub fn show(ui: &mut Ui, selected_tool: FileIntakeTool, error: Option<&str>) -> 
 
         if let Some(error) = error {
             ui.add_space(theme::SPACING.compact);
-            ui.label(
-                RichText::new(error)
-                    .text_style(TextStyle::Small)
-                    .color(theme::SECONDARY),
-            );
+            media_error::show_inline(ui, error, error_details_open);
+        } else {
+            *error_details_open = false;
         }
 
         ui.add_space(theme::SPACING.focal);

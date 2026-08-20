@@ -3,6 +3,7 @@ pub mod audio_mix_progress;
 pub mod file_intake;
 pub mod fonts;
 pub mod layout;
+pub mod media_error;
 mod media_lifecycle;
 pub mod theme;
 pub mod upscale;

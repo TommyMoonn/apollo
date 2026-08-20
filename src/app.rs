@@ -5,6 +5,7 @@ use egui::{CentralPanel, Context, RichText, TextStyle, Ui};
 use apollo::{
     audio_mix::execution::{AudioMixExecutionState, AudioMixExecutor, AudioMixStartError},
     media::{
+        error::MediaError,
         intake::{MediaIntake, MediaLoadDisposition},
         model::MediaFile,
         probe::{MediaProbeError, probe_media},
@@ -15,7 +16,7 @@ use apollo::{
         audio_mix::{AudioMixSelectionAction, AudioMixSelectionState},
         audio_mix_progress::{self, AudioMixLifecycleAction, AudioMixLifecycleUiState},
         file_intake::{self, FileIntakeAction, FileIntakeTool},
-        fonts, layout, theme, upscale as upscale_ui,
+        fonts, layout, media_error, theme, upscale as upscale_ui,
         upscale::{UpscaleSelectionAction, UpscaleSelectionState},
         upscale_progress::{self, UpscaleLifecycleAction, UpscaleLifecycleUiState},
         widgets,
@@ -71,6 +72,8 @@ struct AudioMixToolState {
     media: MediaFile,
     selection: AudioMixSelectionState,
     lifecycle_ui: AudioMixLifecycleUiState,
+    start_error: Option<MediaError>,
+    start_error_details_open: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,13 +81,16 @@ struct UpscaleToolState {
     media: MediaFile,
     selection: UpscaleSelectionState,
     lifecycle_ui: UpscaleLifecycleUiState,
+    start_error: Option<MediaError>,
+    start_error_details_open: bool,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct AppState {
     current_tool: Option<Tool>,
     intake_active: bool,
-    intake_error: Option<String>,
+    intake_error: Option<MediaError>,
+    intake_error_details_open: bool,
     media_intake: MediaIntake,
     audio_mix: Option<AudioMixToolState>,
     upscale: Option<UpscaleToolState>,
@@ -99,6 +105,7 @@ impl AppState {
         self.current_tool = Some(tool);
         self.intake_active = true;
         self.intake_error = None;
+        self.intake_error_details_open = false;
         match tool {
             Tool::AudioMix => self.audio_mix = None,
             Tool::VideoUpscale => self.upscale = None,
@@ -116,6 +123,7 @@ pub(crate) struct ApolloApp {
     media_tools: Result<MediaTools, MediaToolsError>,
     audio_mix_executor: AudioMixExecutor,
     upscale_executor: UpscaleExecutor,
+    tools_error_details_open: bool,
 }
 
 impl ApolloApp {
@@ -130,6 +138,7 @@ impl ApolloApp {
             media_tools: discover_media_tools(),
             audio_mix_executor: AudioMixExecutor::new(),
             upscale_executor: UpscaleExecutor::new(),
+            tools_error_details_open: false,
         })
     }
 
@@ -186,6 +195,7 @@ impl ApolloApp {
     fn select_tool(&mut self, tool: Tool) {
         self.state.select_tool(tool);
         self.state.intake_error = None;
+        self.state.intake_error_details_open = false;
         if !self.activate_cached_source(tool) {
             self.state.intake_active = true;
         }
@@ -208,6 +218,8 @@ impl ApolloApp {
                     self.state.audio_mix = Some(AudioMixToolState {
                         selection: AudioMixSelectionState::new(&media),
                         lifecycle_ui: AudioMixLifecycleUiState::default(),
+                        start_error: None,
+                        start_error_details_open: false,
                         media,
                     });
                 }
@@ -222,6 +234,8 @@ impl ApolloApp {
                     self.state.upscale = Some(UpscaleToolState {
                         selection: UpscaleSelectionState::new(&media),
                         lifecycle_ui: UpscaleLifecycleUiState::default(),
+                        start_error: None,
+                        start_error_details_open: false,
                         media,
                     });
                 }
@@ -232,20 +246,21 @@ impl ApolloApp {
     }
 
     fn show_media_tools_unavailable(&mut self, ui: &mut Ui) {
-        let message = self
+        let error = self
             .media_tools
             .as_ref()
             .err()
-            .map(MediaToolsError::user_message)
-            .unwrap_or("FFmpeg and FFprobe could not be validated.");
+            .map(MediaError::from_tools_error)
+            .unwrap_or_else(|| MediaError::invalid_request("media tools are unavailable"));
 
         layout::centered_content(ui, |ui| {
-            ui.heading("FFmpeg is required");
+            ui.heading("Media tools unavailable");
             ui.add_space(theme::SPACING.compact);
-            ui.label(message);
+            media_error::show_inline(ui, &error, &mut self.tools_error_details_open);
             ui.add_space(theme::SPACING.section);
             if widgets::secondary_button(ui, "Retry").clicked() {
                 self.media_tools = discover_media_tools();
+                self.tools_error_details_open = false;
             }
         });
     }
@@ -264,12 +279,20 @@ impl ApolloApp {
     }
 
     fn show_file_intake(&mut self, ui: &mut Ui, tool: Tool) {
-        let action = file_intake::show(ui, tool.intake_tool(), self.state.intake_error.as_deref());
+        let action = file_intake::show(
+            ui,
+            tool.intake_tool(),
+            self.state.intake_error.as_ref(),
+            &mut self.state.intake_error_details_open,
+        );
         match action {
             FileIntakeAction::OpenFile => match open_media_file_dialog() {
                 Ok(Some(path)) => self.load_media_path(&path),
                 Ok(None) => {}
-                Err(error) => self.state.intake_error = Some(error.to_string()),
+                Err(error) => {
+                    self.state.intake_error = Some(MediaError::invalid_request(error.to_string()));
+                    self.state.intake_error_details_open = false;
+                }
             },
             FileIntakeAction::SelectTool(selected) if selected != tool.intake_tool() => {
                 self.select_tool(Tool::from_intake(selected));
@@ -297,6 +320,7 @@ impl ApolloApp {
         self.state.retire_tool_sessions();
         self.state.intake_active = true;
         self.state.intake_error = None;
+        self.state.intake_error_details_open = false;
         match self.state.media_intake.load_with_probe(path, probe) {
             Ok(MediaLoadDisposition::Probed | MediaLoadDisposition::Reused) => {
                 let tool = self
@@ -305,7 +329,9 @@ impl ApolloApp {
                     .expect("selected tool exists while accepting media");
                 let _ = self.activate_cached_source(tool);
             }
-            Err(error) => self.state.intake_error = Some(error.to_string()),
+            Err(error) => {
+                self.state.intake_error = Some(MediaError::from_intake_error(&error));
+            }
         }
     }
 
@@ -353,15 +379,46 @@ impl ApolloApp {
             return;
         }
 
+        if self.show_audio_mix_start_error(ui) {
+            return;
+        }
+
         let session = self
             .state
             .audio_mix
             .as_mut()
             .expect("audio mix source exists while ready surface is shown");
         let action = audio_mix_ui::show(ui, &session.media, &mut session.selection);
-        if let Err(error) = self.handle_audio_mix_action(action) {
-            eprintln!("Audio Mix could not start: {error}");
+        if let Err(error) = self.handle_audio_mix_action(action)
+            && let Some(session) = self.state.audio_mix.as_mut()
+        {
+            session.start_error = Some(error.user_error());
+            session.start_error_details_open = false;
         }
+    }
+
+    fn show_audio_mix_start_error(&mut self, ui: &mut Ui) -> bool {
+        let Some(session) = self.state.audio_mix.as_mut() else {
+            return false;
+        };
+        let Some(error) = session.start_error.as_ref() else {
+            return false;
+        };
+
+        let response = layout::focus_content(ui, |ui| {
+            media_error::show_failure_content(
+                ui,
+                "Audio mix could not start",
+                error,
+                &mut session.start_error_details_open,
+                "Back",
+            )
+        });
+        if response.inner.clicked() {
+            session.start_error = None;
+            session.start_error_details_open = false;
+        }
+        true
     }
 
     fn handle_audio_mix_action(
@@ -422,15 +479,46 @@ impl ApolloApp {
             return;
         }
 
+        if self.show_upscale_start_error(ui) {
+            return;
+        }
+
         let upscale = self
             .state
             .upscale
             .as_mut()
             .expect("upscale source exists while ready surface is shown");
         let action = upscale_ui::show(ui, &upscale.media, &mut upscale.selection);
-        if let Err(error) = self.handle_upscale_action(action) {
-            eprintln!("Upscale could not start: {error}");
+        if let Err(error) = self.handle_upscale_action(action)
+            && let Some(session) = self.state.upscale.as_mut()
+        {
+            session.start_error = Some(error.user_error());
+            session.start_error_details_open = false;
         }
+    }
+
+    fn show_upscale_start_error(&mut self, ui: &mut Ui) -> bool {
+        let Some(session) = self.state.upscale.as_mut() else {
+            return false;
+        };
+        let Some(error) = session.start_error.as_ref() else {
+            return false;
+        };
+
+        let response = layout::focus_content(ui, |ui| {
+            media_error::show_failure_content(
+                ui,
+                "Upscale could not start",
+                error,
+                &mut session.start_error_details_open,
+                "Back",
+            )
+        });
+        if response.inner.clicked() {
+            session.start_error = None;
+            session.start_error_details_open = false;
+        }
+        true
     }
 
     fn handle_upscale_action(
@@ -630,6 +718,7 @@ mod tests {
             }),
             audio_mix_executor: apollo::audio_mix::execution::AudioMixExecutor::new(),
             upscale_executor: apollo::upscale::execution::UpscaleExecutor::new(),
+            tools_error_details_open: false,
         }
     }
 
