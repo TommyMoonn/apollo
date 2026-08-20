@@ -1,5 +1,6 @@
 pub mod audio_mix;
 pub mod audio_mix_progress;
+pub mod file_intake;
 pub mod fonts;
 pub mod layout;
 mod media_lifecycle;
