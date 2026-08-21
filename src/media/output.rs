@@ -108,50 +108,77 @@ pub struct MediaOutput {
     settled: bool,
 }
 
+struct ValidatedOutputDestination {
+    parent: PathBuf,
+    file_name: std::ffi::OsString,
+    final_path: PathBuf,
+}
+
+/// Validate a requested final output without creating staging state.
+///
+/// Ready-state request validation and [`MediaOutput::prepare`] share this owner so filesystem
+/// safety checks cannot drift between preflight and execution startup.
+pub fn validate_output_destination(input: &Path, output: &Path) -> Result<(), MediaOutputError> {
+    validated_output_destination(input, output).map(|_| ())
+}
+
+fn validated_output_destination(
+    input: &Path,
+    output: &Path,
+) -> Result<ValidatedOutputDestination, MediaOutputError> {
+    let file_name = output
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| MediaOutputError::InvalidOutputPath(output.to_path_buf()))?
+        .to_os_string();
+    let requested_parent = output_parent(output);
+    let parent_metadata = fs::metadata(&requested_parent).map_err(|error| {
+        MediaOutputError::OutputParentUnavailable {
+            path: requested_parent.clone(),
+            kind: error.kind(),
+        }
+    })?;
+
+    if !parent_metadata.is_dir() {
+        return Err(MediaOutputError::OutputParentNotDirectory(requested_parent));
+    }
+
+    let parent = fs::canonicalize(&requested_parent).map_err(|error| {
+        MediaOutputError::OutputParentUnavailable {
+            path: requested_parent.clone(),
+            kind: error.kind(),
+        }
+    })?;
+    let final_path = parent.join(&file_name);
+    let input_path =
+        comparison_path(input).map_err(|error| MediaOutputError::OutputParentUnavailable {
+            path: input.to_path_buf(),
+            kind: error.kind(),
+        })?;
+
+    if paths_equal(&input_path, &final_path) {
+        return Err(MediaOutputError::SameInputAndOutput(final_path));
+    }
+
+    if path_exists_without_following(&final_path)? {
+        return Err(MediaOutputError::OutputAlreadyExists(final_path));
+    }
+
+    Ok(ValidatedOutputDestination {
+        parent,
+        file_name,
+        final_path,
+    })
+}
+
 impl MediaOutput {
     pub fn prepare(input: &Path, output: &Path) -> Result<Self, MediaOutputError> {
-        let file_name = output
-            .file_name()
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| MediaOutputError::InvalidOutputPath(output.to_path_buf()))?;
-        let requested_parent = output_parent(output);
-        let parent_metadata = fs::metadata(&requested_parent).map_err(|error| {
-            MediaOutputError::OutputParentUnavailable {
-                path: requested_parent.clone(),
-                kind: error.kind(),
-            }
-        })?;
-
-        if !parent_metadata.is_dir() {
-            return Err(MediaOutputError::OutputParentNotDirectory(requested_parent));
-        }
-
-        let canonical_parent = fs::canonicalize(&requested_parent).map_err(|error| {
-            MediaOutputError::OutputParentUnavailable {
-                path: requested_parent.clone(),
-                kind: error.kind(),
-            }
-        })?;
-        let final_path = canonical_parent.join(file_name);
-        let input_path =
-            comparison_path(input).map_err(|error| MediaOutputError::OutputParentUnavailable {
-                path: input.to_path_buf(),
-                kind: error.kind(),
-            })?;
-
-        if paths_equal(&input_path, &final_path) {
-            return Err(MediaOutputError::SameInputAndOutput(final_path));
-        }
-
-        if path_exists_without_following(&final_path)? {
-            return Err(MediaOutputError::OutputAlreadyExists(final_path));
-        }
-
-        let staging_directory = create_staging_directory(&canonical_parent)?;
-        let temporary_path = staging_directory.join(file_name);
+        let destination = validated_output_destination(input, output)?;
+        let staging_directory = create_staging_directory(&destination.parent)?;
+        let temporary_path = staging_directory.join(&destination.file_name);
 
         Ok(Self {
-            final_path,
+            final_path: destination.final_path,
             temporary_path,
             staging_directory,
             settled: false,
@@ -472,7 +499,8 @@ mod tests {
     };
 
     use super::{
-        MediaOutput, MediaOutputDisposition, MediaOutputError, staging_directory_candidate,
+        MediaOutput, MediaOutputDisposition, MediaOutputError, STAGING_DIRECTORY_PREFIX,
+        staging_directory_candidate, validate_output_destination,
     };
     use crate::media::process::{MediaProcessFailure, MediaProcessState};
 
@@ -536,6 +564,26 @@ mod tests {
 
         assert!(matches!(error, MediaOutputError::OutputAlreadyExists(_)));
         assert_eq!(fs::read(&output).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn destination_preflight_does_not_create_staging_state() {
+        let directory = TestDirectory::new("preflight-no-staging");
+        let input = directory.path().join("input.mkv");
+        let output = directory.path().join("output.mp4");
+        fs::write(&input, b"input").unwrap();
+
+        assert_eq!(validate_output_destination(&input, &output), Ok(()));
+        assert!(!output.exists());
+        assert!(
+            fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(STAGING_DIRECTORY_PREFIX))
+        );
     }
 
     #[test]

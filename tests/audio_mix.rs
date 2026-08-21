@@ -13,7 +13,10 @@ use apollo::{
         model::{AudioMixRequest, OutputContainer},
         validation::{AudioMixValidationError, validate_audio_mix_request},
     },
-    media::model::{AudioStream, MediaFile, VideoStream},
+    media::{
+        model::{AudioStream, MediaFile, VideoStream},
+        output::MediaOutputError,
+    },
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -145,14 +148,17 @@ fn numeric_video_stream_index_is_not_accepted_as_audio_selection() {
 fn same_input_and_output_is_rejected() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
+    fs::write(&request.input, b"input").expect("fixture input should be created");
     request.output = request.input.clone();
     request.container = OutputContainer::Mkv;
     let media = media(request.input.clone());
 
     assert_eq!(
         validate_audio_mix_request(&request, &media),
-        Err(AudioMixValidationError::SameInputAndOutput(
-            request.output.clone()
+        Err(AudioMixValidationError::Output(
+            MediaOutputError::SameInputAndOutput(
+                fs::canonicalize(temp.path()).unwrap().join("input.mkv")
+            )
         ))
     );
 }
@@ -193,10 +199,12 @@ fn nonexistent_output_parent_is_rejected() {
 
     assert_eq!(
         validate_audio_mix_request(&request, &media),
-        Err(AudioMixValidationError::OutputParentUnavailable {
-            path: missing_parent,
-            kind: std::io::ErrorKind::NotFound,
-        })
+        Err(AudioMixValidationError::Output(
+            MediaOutputError::OutputParentUnavailable {
+                path: missing_parent,
+                kind: std::io::ErrorKind::NotFound,
+            }
+        ))
     );
 }
 
@@ -211,10 +219,25 @@ fn output_parent_must_be_a_directory() {
 
     assert_eq!(
         validate_audio_mix_request(&request, &media),
-        Err(AudioMixValidationError::OutputParentNotDirectory(
-            parent_file
+        Err(AudioMixValidationError::Output(
+            MediaOutputError::OutputParentNotDirectory(parent_file)
         ))
     );
+}
+
+#[test]
+fn existing_output_is_rejected_before_execution() {
+    let temp = TestDirectory::new();
+    let request = valid_request(&temp);
+    fs::write(&request.output, b"occupied").expect("fixture output should be created");
+    let media = media(request.input.clone());
+
+    assert!(matches!(
+        validate_audio_mix_request(&request, &media),
+        Err(AudioMixValidationError::Output(
+            MediaOutputError::OutputAlreadyExists(_)
+        ))
+    ));
 }
 
 #[test]

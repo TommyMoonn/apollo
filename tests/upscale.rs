@@ -7,7 +7,10 @@ use std::{
 };
 
 use apollo::{
-    media::model::{AudioStream, MediaFile, VideoStream},
+    media::{
+        model::{AudioStream, MediaFile, VideoStream},
+        output::MediaOutputError,
+    },
     upscale::{
         command::{UpscaleCommandError, build_upscale_invocation},
         model::{UpscaleRequest, UpscaleTarget, VideoCodec},
@@ -643,13 +646,16 @@ fn zero_source_dimensions_are_rejected() {
 fn same_input_and_output_is_rejected() {
     let temp = TestDirectory::new();
     let mut request = request(&temp, UpscaleTarget::Uhd4k);
+    fs::write(&request.input, b"input").expect("fixture input should be created");
     request.output = request.input.clone();
     let media = media(request.input.clone(), Some(1920), Some(1080));
 
     assert_eq!(
         validate_upscale_request(&request, &media),
-        Err(UpscaleValidationError::SameInputAndOutput(
-            request.output.clone()
+        Err(UpscaleValidationError::Output(
+            MediaOutputError::SameInputAndOutput(
+                fs::canonicalize(temp.path()).unwrap().join("input.mp4")
+            )
         ))
     );
 }
@@ -706,7 +712,9 @@ fn output_path_requires_a_usable_file_name() {
 
     assert_eq!(
         validate_upscale_request(&request, &media),
-        Err(UpscaleValidationError::InvalidOutputPath(PathBuf::new()))
+        Err(UpscaleValidationError::Output(
+            MediaOutputError::InvalidOutputPath(PathBuf::new())
+        ))
     );
 }
 
@@ -720,10 +728,12 @@ fn nonexistent_output_parent_is_rejected() {
 
     assert_eq!(
         validate_upscale_request(&request, &media),
-        Err(UpscaleValidationError::OutputParentUnavailable {
-            path: parent,
-            kind: std::io::ErrorKind::NotFound,
-        })
+        Err(UpscaleValidationError::Output(
+            MediaOutputError::OutputParentUnavailable {
+                path: parent,
+                kind: std::io::ErrorKind::NotFound,
+            }
+        ))
     );
 }
 
@@ -738,10 +748,25 @@ fn output_parent_must_be_a_directory() {
 
     assert_eq!(
         validate_upscale_request(&request, &media),
-        Err(UpscaleValidationError::OutputParentNotDirectory(
-            parent_file
+        Err(UpscaleValidationError::Output(
+            MediaOutputError::OutputParentNotDirectory(parent_file)
         ))
     );
+}
+
+#[test]
+fn existing_output_is_rejected_before_execution() {
+    let temp = TestDirectory::new();
+    let request = request(&temp, UpscaleTarget::Uhd4k);
+    fs::write(&request.output, b"occupied").expect("fixture output should be created");
+    let media = media(request.input.clone(), Some(1920), Some(1080));
+
+    assert!(matches!(
+        validate_upscale_request(&request, &media),
+        Err(UpscaleValidationError::Output(
+            MediaOutputError::OutputAlreadyExists(_)
+        ))
+    ));
 }
 
 #[test]

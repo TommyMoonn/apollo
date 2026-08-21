@@ -51,12 +51,8 @@ impl AudioMixStartError {
                 | AudioMixValidationError::UnknownAudioStream(_) => {
                     MediaError::missing_stream(error.to_string())
                 }
-                AudioMixValidationError::OutputParentUnavailable { .. }
-                | AudioMixValidationError::OutputParentNotDirectory(_) => {
-                    MediaError::output_not_writable(error.to_string())
-                }
+                AudioMixValidationError::Output(error) => MediaError::from_output_error(error),
                 AudioMixValidationError::DuplicateSelectedStream(_)
-                | AudioMixValidationError::SameInputAndOutput(_)
                 | AudioMixValidationError::OutputExtensionMismatch { .. } => {
                     MediaError::invalid_request(error.to_string())
                 }
@@ -185,6 +181,7 @@ mod tests {
     use crate::media::{
         error::MediaErrorKind,
         model::{AudioStream, MediaFile, VideoStream},
+        output::MediaOutputError,
         process::{MediaProcessCommand, MediaProcessFailure, MediaProcessState},
         tools::MediaTools,
     };
@@ -207,12 +204,13 @@ mod tests {
                 .user_error();
         assert_eq!(missing_stream.kind(), MediaErrorKind::MissingStream);
 
-        let output_not_writable =
-            AudioMixStartError::Validation(AudioMixValidationError::OutputParentUnavailable {
+        let output_not_writable = AudioMixStartError::Validation(AudioMixValidationError::Output(
+            MediaOutputError::OutputParentUnavailable {
                 path: PathBuf::from("missing-parent"),
                 kind: std::io::ErrorKind::NotFound,
-            })
-            .user_error();
+            },
+        ))
+        .user_error();
         assert_eq!(
             output_not_writable.kind(),
             MediaErrorKind::OutputNotWritable

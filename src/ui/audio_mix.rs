@@ -8,8 +8,14 @@ use std::{
 use egui::{Align, Label, Layout, RichText, ScrollArea, Sides, TextStyle, Ui};
 
 use crate::{
-    audio_mix::model::{AudioMixRequest, OutputContainer},
-    media::model::{AudioStream, MediaFile},
+    audio_mix::{
+        model::{AudioMixRequest, OutputContainer},
+        validation::{AudioMixValidationError, validate_audio_mix_request},
+    },
+    media::{
+        model::{AudioStream, MediaFile},
+        output::MediaOutputError,
+    },
 };
 
 use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
@@ -95,8 +101,12 @@ impl AudioMixSelectionState {
         self.selected_streams.contains(&stream_index)
     }
 
-    pub fn can_mix(&self) -> bool {
-        !self.selected_streams.is_empty() && self.output_name.is_usable()
+    pub fn can_mix(&self, media: &MediaFile) -> bool {
+        self.validation(media).is_ok()
+    }
+
+    fn validation(&self, media: &MediaFile) -> Result<(), AudioMixValidationError> {
+        validate_audio_mix_request(&self.request(media), media)
     }
 
     /// Toggle only a stream that belongs to the current probed media.
@@ -177,9 +187,15 @@ pub fn show(
     let mut action = AudioMixSelectionAction::None;
     let tracks = track_presentations(media);
     let list_content_height = tracks.len() as f32 * theme::SELECTABLE_ROW_MIN_HEIGHT;
+    let has_validation_feedback = state
+        .validation(media)
+        .as_ref()
+        .err()
+        .and_then(audio_mix_ready_feedback)
+        .is_some();
     let plan = layout::task_surface_plan(
         ui.available_height(),
-        audio_mix_fixed_flow_height(ui, media, tracks.is_empty()),
+        audio_mix_fixed_flow_height(ui, media, tracks.is_empty(), has_validation_feedback),
         list_content_height,
     );
 
@@ -205,10 +221,16 @@ pub fn show(
             action = output_action;
         }
 
+        let validation = state.validation(media);
+        if let Some(feedback) = validation.as_ref().err().and_then(audio_mix_ready_feedback) {
+            ui.add_space(theme::SPACING.tight);
+            let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
+        }
+
         ui.add_space(theme::SPACING.related);
         let response = ui
             .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                widgets::primary_button_enabled(ui, MIX_LABEL, state.can_mix())
+                widgets::primary_button_enabled(ui, MIX_LABEL, validation.is_ok())
             })
             .inner;
         if response.clicked() {
@@ -298,7 +320,12 @@ fn show_track_list(
         });
 }
 
-fn audio_mix_fixed_flow_height(ui: &Ui, media: &MediaFile, track_list_empty: bool) -> f32 {
+fn audio_mix_fixed_flow_height(
+    ui: &Ui,
+    media: &MediaFile,
+    track_list_empty: bool,
+    has_validation_feedback: bool,
+) -> f32 {
     let section_label_height = ui.text_style_height(&TextStyle::Small);
     let source_header_height = source_header_height(ui, source_metadata(media).is_some());
     let output_row_height = widgets::output_filename_row_plan(
@@ -312,6 +339,11 @@ fn audio_mix_fixed_flow_height(ui: &Ui, media: &MediaFile, track_list_empty: boo
     } else {
         theme::SEPARATOR_WIDTH
     };
+    let feedback_height = if has_validation_feedback {
+        theme::SPACING.tight + ui.text_style_height(&TextStyle::Body)
+    } else {
+        0.0
+    };
 
     source_header_height
         + theme::SPACING.section
@@ -324,6 +356,7 @@ fn audio_mix_fixed_flow_height(ui: &Ui, media: &MediaFile, track_list_empty: boo
         + section_label_height
         + theme::SPACING.compact
         + output_row_height
+        + feedback_height
         + theme::SPACING.related
         + theme::PRIMARY_CONTROL_HEIGHT
 }
@@ -361,6 +394,29 @@ fn show_track_actions(ui: &mut Ui, media: &MediaFile, state: &mut AudioMixSelect
             );
         },
     );
+}
+
+fn audio_mix_ready_feedback(error: &AudioMixValidationError) -> Option<&'static str> {
+    match error {
+        AudioMixValidationError::OutputExtensionMismatch { actual: None, .. }
+        | AudioMixValidationError::Output(MediaOutputError::InvalidOutputPath(_)) => {
+            Some("Enter a usable output filename.")
+        }
+        AudioMixValidationError::OutputExtensionMismatch { .. } => {
+            Some("Output filename must match the selected container.")
+        }
+        AudioMixValidationError::Output(MediaOutputError::SameInputAndOutput(_)) => {
+            Some("Output must be different from the source file.")
+        }
+        AudioMixValidationError::Output(MediaOutputError::OutputParentUnavailable { .. })
+        | AudioMixValidationError::Output(MediaOutputError::OutputParentNotDirectory(_)) => {
+            Some("Choose an available output folder.")
+        }
+        AudioMixValidationError::Output(MediaOutputError::OutputAlreadyExists(_)) => {
+            Some("Choose a different output filename or destination.")
+        }
+        _ => None,
+    }
 }
 
 fn show_output_row(
@@ -630,11 +686,17 @@ mod tests {
         time::Duration,
     };
 
-    use crate::media::model::{AudioStream, MediaFile, VideoStream};
+    use crate::{
+        audio_mix::validation::AudioMixValidationError,
+        media::{
+            model::{AudioStream, MediaFile, VideoStream},
+            output::MediaOutputError,
+        },
+    };
 
     use super::{
-        AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height, source_metadata,
-        track_presentations,
+        AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height,
+        audio_mix_ready_feedback, source_metadata, track_presentations,
     };
     use crate::audio_mix::model::OutputContainer;
     use crate::ui::{layout, theme};
@@ -688,7 +750,15 @@ mod tests {
         assert!(state.is_selected(1));
         assert!(state.is_selected(4));
         assert!(state.is_selected(9));
-        assert!(state.can_mix());
+    }
+
+    #[test]
+    fn valid_request_enables_primary_action() {
+        let mut media = media();
+        media.path = PathBuf::from("audio-mix-ready-source.mkv");
+        let state = AudioMixSelectionState::new(&media);
+
+        assert!(state.can_mix(&media));
     }
 
     #[test]
@@ -722,7 +792,65 @@ mod tests {
         state.clear();
 
         assert_eq!(state.selected_count(), 0);
-        assert!(!state.can_mix());
+        assert!(!state.can_mix(&media));
+        assert_eq!(
+            state
+                .validation(&media)
+                .as_ref()
+                .err()
+                .and_then(|error| audio_mix_ready_feedback(error)),
+            None
+        );
+    }
+
+    #[test]
+    fn selected_tracks_do_not_override_invalid_output_and_feedback_clears_when_corrected() {
+        let mut media = media();
+        let source_path = std::env::temp_dir().join(format!(
+            "apollo-audio-mix-ready-source-{}.mkv",
+            std::process::id()
+        ));
+        let corrected_stem = format!("apollo-audio-mix-ready-corrected-{}", std::process::id());
+        let _ = std::fs::remove_file(&source_path);
+        std::fs::write(&source_path, b"input").expect("fixture input should be created");
+        media.path = source_path.clone();
+        let mut state = AudioMixSelectionState::new(&media);
+        state.set_container(&media, OutputContainer::Mkv);
+        state.set_custom_output_path(media.path.clone());
+
+        let error = state.validation(&media).unwrap_err();
+        assert!(matches!(
+            &error,
+            AudioMixValidationError::Output(MediaOutputError::SameInputAndOutput(_))
+        ));
+        assert!(!state.can_mix(&media));
+        assert_eq!(
+            audio_mix_ready_feedback(&error),
+            Some("Output must be different from the source file.")
+        );
+
+        state.set_output_filename_stem(OsString::from(corrected_stem));
+
+        assert!(state.validation(&media).is_ok());
+        assert!(state.can_mix(&media));
+
+        let corrected_output = state.output_path();
+        std::fs::write(&corrected_output, b"occupied").expect("fixture output should be created");
+        let collision = state.validation(&media).unwrap_err();
+        assert!(matches!(
+            &collision,
+            AudioMixValidationError::Output(MediaOutputError::OutputAlreadyExists(_))
+        ));
+        assert!(!state.can_mix(&media));
+        assert_eq!(
+            audio_mix_ready_feedback(&collision),
+            Some("Choose a different output filename or destination.")
+        );
+
+        std::fs::remove_file(corrected_output).expect("fixture output should be removable");
+        assert!(state.can_mix(&media));
+
+        std::fs::remove_file(source_path).expect("fixture input should be removable");
     }
 
     #[test]
@@ -831,8 +959,13 @@ mod tests {
 
         for stem in ["", "   ", "../escape", "bad\\name"] {
             state.set_output_filename_stem(OsString::from(stem));
-            assert!(!state.can_mix(), "{stem:?} should not be runnable");
+            assert!(!state.can_mix(&media), "{stem:?} should not be runnable");
             assert!(state.request(&media).output.as_os_str().is_empty());
+            let error = state.validation(&media).unwrap_err();
+            assert_eq!(
+                audio_mix_ready_feedback(&error),
+                Some("Enter a usable output filename.")
+            );
         }
     }
 
@@ -843,7 +976,7 @@ mod tests {
 
         state.set_output_filename_stem(OsString::from("cOn"));
 
-        assert!(!state.can_mix());
+        assert!(!state.can_mix(&media));
         assert!(state.request(&media).output.as_os_str().is_empty());
     }
 
@@ -978,7 +1111,7 @@ mod tests {
             let media = media();
             let usable_height =
                 layout::MINIMUM_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = audio_mix_fixed_flow_height(ui, &media, false);
+            let fixed_height = audio_mix_fixed_flow_height(ui, &media, false, false);
             let plan = layout::task_surface_plan(
                 usable_height,
                 fixed_height,
@@ -1002,7 +1135,7 @@ mod tests {
             let media = media();
             let usable_height =
                 layout::REFERENCE_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = audio_mix_fixed_flow_height(ui, &media, false);
+            let fixed_height = audio_mix_fixed_flow_height(ui, &media, false, false);
             let plan = layout::task_surface_plan(
                 usable_height,
                 fixed_height,
@@ -1028,7 +1161,7 @@ mod tests {
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media();
-            let fixed_height = audio_mix_fixed_flow_height(ui, &media, false);
+            let fixed_height = audio_mix_fixed_flow_height(ui, &media, false, false);
             let content_height = 20.0 * theme::SELECTABLE_ROW_MIN_HEIGHT;
             let reference = layout::task_surface_plan(323.0, fixed_height, content_height);
             let tall = layout::task_surface_plan(700.0, fixed_height, content_height);

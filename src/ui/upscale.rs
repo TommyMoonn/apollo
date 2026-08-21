@@ -6,11 +6,14 @@ use std::{
 use egui::{Align, Label, Layout, RichText, ScrollArea, Sides, TextStyle, Ui};
 
 use crate::{
-    media::model::{FrameRate, MediaFile},
+    media::{
+        model::{FrameRate, MediaFile},
+        output::MediaOutputError,
+    },
     upscale::{
         model::{UpscaleRequest, UpscaleTarget, VideoCodec},
         sizing::{OutputDimensions, calculate_output_dimensions},
-        validation::validate_upscale_request,
+        validation::{UpscaleValidationError, validate_upscale_request},
     },
 };
 
@@ -111,8 +114,11 @@ impl UpscaleSelectionState {
     }
 
     pub fn can_upscale(&self, media: &MediaFile) -> bool {
-        self.output_name.is_usable()
-            && validate_upscale_request(&self.request(media), media).is_ok()
+        self.validation(media).is_ok()
+    }
+
+    fn validation(&self, media: &MediaFile) -> Result<(), UpscaleValidationError> {
+        validate_upscale_request(&self.request(media), media)
     }
 
     /// Build the Phase 29 request without starting work.
@@ -137,9 +143,15 @@ pub fn show(
 ) -> UpscaleSelectionAction {
     let mut action = UpscaleSelectionAction::None;
     let list_content_height = TARGETS.len() as f32 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT;
+    let has_validation_feedback = state
+        .validation(media)
+        .as_ref()
+        .err()
+        .and_then(upscale_ready_feedback)
+        .is_some();
     let plan = layout::task_surface_plan(
         ui.available_height(),
-        upscale_fixed_flow_height(ui, media),
+        upscale_fixed_flow_height(ui, media, has_validation_feedback),
         list_content_height,
     );
 
@@ -170,10 +182,16 @@ pub fn show(
             action = UpscaleSelectionAction::BrowseOutput;
         }
 
+        let validation = state.validation(media);
+        if let Some(feedback) = validation.as_ref().err().and_then(upscale_ready_feedback) {
+            ui.add_space(theme::SPACING.tight);
+            let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
+        }
+
         ui.add_space(theme::SPACING.related);
         let response = ui
             .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                widgets::primary_button_enabled(ui, UPSCALE_LABEL, state.can_upscale(media))
+                widgets::primary_button_enabled(ui, UPSCALE_LABEL, validation.is_ok())
             })
             .inner;
         if response.clicked() {
@@ -182,6 +200,25 @@ pub fn show(
     });
 
     action
+}
+
+fn upscale_ready_feedback(error: &UpscaleValidationError) -> Option<&'static str> {
+    match error {
+        UpscaleValidationError::Output(MediaOutputError::InvalidOutputPath(_)) => {
+            Some("Enter a usable output filename.")
+        }
+        UpscaleValidationError::Output(MediaOutputError::SameInputAndOutput(_)) => {
+            Some("Output must be different from the source file.")
+        }
+        UpscaleValidationError::Output(MediaOutputError::OutputParentUnavailable { .. })
+        | UpscaleValidationError::Output(MediaOutputError::OutputParentNotDirectory(_)) => {
+            Some("Choose an available output folder.")
+        }
+        UpscaleValidationError::Output(MediaOutputError::OutputAlreadyExists(_)) => {
+            Some("Choose a different output filename or destination.")
+        }
+        _ => None,
+    }
 }
 
 fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
@@ -310,7 +347,7 @@ fn show_actual_output_field(ui: &mut Ui, actual_output: &str) {
     );
 }
 
-fn upscale_fixed_flow_height(ui: &Ui, media: &MediaFile) -> f32 {
+fn upscale_fixed_flow_height(ui: &Ui, media: &MediaFile, has_validation_feedback: bool) -> f32 {
     let section_label_height = ui.text_style_height(&TextStyle::Small);
     let technical_height = ui.text_style_height(&fonts::technical_text_style());
     let source_header_height = source_header_height(ui, source_metadata(media).is_some());
@@ -321,6 +358,11 @@ fn upscale_fixed_flow_height(ui: &Ui, media: &MediaFile) -> f32 {
     let field_flow_height = match layout::field_pair_layout(ui.available_width()) {
         layout::FieldPairLayout::Columns => field_height,
         layout::FieldPairLayout::Stacked => field_height * 2.0 + theme::SPACING.related,
+    };
+    let feedback_height = if has_validation_feedback {
+        theme::SPACING.tight + ui.text_style_height(&TextStyle::Body)
+    } else {
+        0.0
     };
 
     source_header_height
@@ -334,6 +376,7 @@ fn upscale_fixed_flow_height(ui: &Ui, media: &MediaFile) -> f32 {
         + section_label_height
         + theme::SPACING.compact
         + output_row_height
+        + feedback_height
         + theme::SPACING.related
         + theme::PRIMARY_CONTROL_HEIGHT
 }
@@ -471,13 +514,20 @@ mod tests {
     };
 
     use crate::{
-        media::model::{FrameRate, MediaFile, VideoStream},
+        media::{
+            model::{FrameRate, MediaFile, VideoStream},
+            output::MediaOutputError,
+        },
         ui::{layout, theme},
-        upscale::model::{UpscaleTarget, VideoCodec},
+        upscale::{
+            model::{UpscaleTarget, VideoCodec},
+            validation::UpscaleValidationError,
+        },
     };
 
     use super::{
         UpscaleSelectionState, actual_output_text, source_metadata, upscale_fixed_flow_height,
+        upscale_ready_feedback,
     };
 
     fn media(width: Option<u32>, height: Option<u32>) -> MediaFile {
@@ -557,6 +607,59 @@ mod tests {
 
         state.set_custom_output_path(PathBuf::from("missing-upscale-ui-parent/output.mp4"));
         assert!(!state.can_upscale(&source));
+    }
+
+    #[test]
+    fn output_feedback_clears_when_the_request_is_corrected() {
+        let mut source = media(Some(1920), Some(1080));
+        let source_path = std::env::temp_dir().join(format!(
+            "apollo-upscale-ready-source-{}.mp4",
+            std::process::id()
+        ));
+        let corrected_stem = format!("apollo-upscale-ready-corrected-{}", std::process::id());
+        let _ = std::fs::remove_file(&source_path);
+        std::fs::write(&source_path, b"input").expect("fixture input should be created");
+        source.path = source_path.clone();
+        let mut state = UpscaleSelectionState::new(&source);
+        state.set_custom_output_path(source.path.clone());
+
+        let error = state.validation(&source).unwrap_err();
+        assert!(matches!(
+            &error,
+            UpscaleValidationError::Output(MediaOutputError::SameInputAndOutput(_))
+        ));
+        assert_eq!(
+            upscale_ready_feedback(&error),
+            Some("Output must be different from the source file.")
+        );
+        assert!(!state.can_upscale(&source));
+
+        state.set_output_filename_stem(OsString::from(corrected_stem));
+
+        assert!(state.validation(&source).is_ok());
+        assert!(state.can_upscale(&source));
+
+        std::fs::remove_file(source_path).expect("fixture input should be removable");
+    }
+
+    #[test]
+    fn invalid_target_remains_quiet_while_output_errors_have_feedback() {
+        let target_error = UpscaleValidationError::TargetNotLarger {
+            target: UpscaleTarget::Uhd4k,
+            source_width: 3840,
+            source_height: 2160,
+            target_width: 3840,
+            target_height: 2160,
+        };
+        let output_error = UpscaleValidationError::Output(MediaOutputError::OutputAlreadyExists(
+            PathBuf::from("existing.mp4"),
+        ));
+
+        assert_eq!(upscale_ready_feedback(&target_error), None);
+        assert_eq!(
+            upscale_ready_feedback(&output_error),
+            Some("Choose a different output filename or destination.")
+        );
     }
 
     #[test]
@@ -650,6 +753,11 @@ mod tests {
                 "{stem:?} should not be runnable"
             );
             assert!(state.request(&media).output.as_os_str().is_empty());
+            let error = state.validation(&media).unwrap_err();
+            assert_eq!(
+                upscale_ready_feedback(&error),
+                Some("Enter a usable output filename.")
+            );
         }
     }
 
@@ -720,7 +828,7 @@ mod tests {
             let media = media(Some(1920), Some(1080));
             let usable_height =
                 layout::MINIMUM_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = upscale_fixed_flow_height(ui, &media);
+            let fixed_height = upscale_fixed_flow_height(ui, &media, false);
             let plan = layout::task_surface_plan(
                 usable_height,
                 fixed_height,
@@ -750,7 +858,7 @@ mod tests {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
-            let fixed_height = upscale_fixed_flow_height(&child, &media);
+            let fixed_height = upscale_fixed_flow_height(&child, &media, false);
             let plan = layout::task_surface_plan(
                 child.available_height(),
                 fixed_height,
@@ -776,7 +884,7 @@ mod tests {
             let media = media(Some(1920), Some(1080));
             let usable_height =
                 layout::REFERENCE_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = upscale_fixed_flow_height(ui, &media);
+            let fixed_height = upscale_fixed_flow_height(ui, &media, false);
             let plan = layout::task_surface_plan(
                 usable_height,
                 fixed_height,
@@ -802,7 +910,7 @@ mod tests {
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media(Some(1920), Some(1080));
-            let fixed_height = upscale_fixed_flow_height(ui, &media);
+            let fixed_height = upscale_fixed_flow_height(ui, &media, false);
             let content_height = 3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT;
             let plan = layout::task_surface_plan(
                 fixed_height + content_height,

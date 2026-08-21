@@ -1,10 +1,9 @@
-use std::{
-    collections::HashSet,
-    fmt, fs, io,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, fmt};
 
-use crate::media::model::MediaFile;
+use crate::media::{
+    model::MediaFile,
+    output::{MediaOutputError, validate_output_destination},
+};
 
 use super::model::AudioMixRequest;
 
@@ -14,16 +13,11 @@ pub enum AudioMixValidationError {
     NoAudioStreamsSelected,
     DuplicateSelectedStream(u32),
     UnknownAudioStream(u32),
-    SameInputAndOutput(PathBuf),
     OutputExtensionMismatch {
         expected: &'static str,
         actual: Option<String>,
     },
-    OutputParentUnavailable {
-        path: PathBuf,
-        kind: io::ErrorKind,
-    },
-    OutputParentNotDirectory(PathBuf),
+    Output(MediaOutputError),
 }
 
 impl fmt::Display for AudioMixValidationError {
@@ -42,9 +36,6 @@ impl fmt::Display for AudioMixValidationError {
                     "audio stream {stream_index} does not exist in the probed media"
                 )
             }
-            Self::SameInputAndOutput(path) => {
-                write!(f, "input and output must differ: {}", path.display())
-            }
             Self::OutputExtensionMismatch { expected, actual } => match actual {
                 Some(actual) => write!(
                     f,
@@ -55,14 +46,7 @@ impl fmt::Display for AudioMixValidationError {
                     "output path must use the '.{expected}' extension for the selected container"
                 ),
             },
-            Self::OutputParentUnavailable { path, kind } => write!(
-                f,
-                "output parent is unavailable ({}): {kind:?}",
-                path.display()
-            ),
-            Self::OutputParentNotDirectory(path) => {
-                write!(f, "output parent is not a directory: {}", path.display())
-            }
+            Self::Output(error) => write!(f, "{error}"),
         }
     }
 }
@@ -86,15 +70,9 @@ pub fn validate_audio_mix_request(
 
     reject_duplicate_streams(&request.selected_streams)?;
     validate_selected_streams(&request.selected_streams, media)?;
-
-    if same_requested_path(&request.input, &request.output) {
-        return Err(AudioMixValidationError::SameInputAndOutput(
-            request.output.clone(),
-        ));
-    }
-
     validate_output_extension(request)?;
-    validate_output_parent(&request.output)?;
+    validate_output_destination(&request.input, &request.output)
+        .map_err(AudioMixValidationError::Output)?;
 
     Ok(())
 }
@@ -131,20 +109,6 @@ fn validate_selected_streams(
     Ok(())
 }
 
-fn same_requested_path(input: &Path, output: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        input
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&output.to_string_lossy())
-    }
-
-    #[cfg(not(windows))]
-    {
-        input == output
-    }
-}
-
 fn validate_output_extension(request: &AudioMixRequest) -> Result<(), AudioMixValidationError> {
     let expected = request.container.extension();
     let actual = request
@@ -160,27 +124,4 @@ fn validate_output_extension(request: &AudioMixRequest) -> Result<(), AudioMixVa
         expected,
         actual: actual.map(str::to_owned),
     })
-}
-
-fn validate_output_parent(output: &Path) -> Result<(), AudioMixValidationError> {
-    let parent = output_parent(output);
-    let metadata = fs::metadata(&parent).map_err(|error| {
-        AudioMixValidationError::OutputParentUnavailable {
-            path: parent.clone(),
-            kind: error.kind(),
-        }
-    })?;
-
-    if !metadata.is_dir() {
-        return Err(AudioMixValidationError::OutputParentNotDirectory(parent));
-    }
-
-    Ok(())
-}
-
-fn output_parent(output: &Path) -> PathBuf {
-    match output.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => PathBuf::from("."),
-    }
 }

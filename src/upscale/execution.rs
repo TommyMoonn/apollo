@@ -52,15 +52,10 @@ impl UpscaleStartError {
                 UpscaleValidationError::MissingVideoStream => {
                     MediaError::missing_stream(error.to_string())
                 }
-                UpscaleValidationError::OutputParentUnavailable { .. }
-                | UpscaleValidationError::OutputParentNotDirectory(_) => {
-                    MediaError::output_not_writable(error.to_string())
-                }
+                UpscaleValidationError::Output(error) => MediaError::from_output_error(error),
                 UpscaleValidationError::MissingSourceDimensions { .. }
                 | UpscaleValidationError::InvalidSourceDimensions { .. }
-                | UpscaleValidationError::SameInputAndOutput(_)
-                | UpscaleValidationError::TargetNotLarger { .. }
-                | UpscaleValidationError::InvalidOutputPath(_) => {
+                | UpscaleValidationError::TargetNotLarger { .. } => {
                     MediaError::invalid_request(error.to_string())
                 }
             },

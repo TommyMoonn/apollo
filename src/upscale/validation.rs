@@ -1,9 +1,9 @@
-use std::{
-    fmt, fs, io,
-    path::{Path, PathBuf},
-};
+use std::fmt;
 
-use crate::media::model::MediaFile;
+use crate::media::{
+    model::MediaFile,
+    output::{MediaOutputError, validate_output_destination},
+};
 
 use super::{
     model::{UpscaleRequest, UpscaleTarget},
@@ -20,7 +20,6 @@ pub enum UpscaleValidationError {
         width: u32,
         height: u32,
     },
-    SameInputAndOutput(PathBuf),
     TargetNotLarger {
         target: UpscaleTarget,
         source_width: u32,
@@ -28,12 +27,7 @@ pub enum UpscaleValidationError {
         target_width: u32,
         target_height: u32,
     },
-    InvalidOutputPath(PathBuf),
-    OutputParentUnavailable {
-        path: PathBuf,
-        kind: io::ErrorKind,
-    },
-    OutputParentNotDirectory(PathBuf),
+    Output(MediaOutputError),
 }
 
 impl fmt::Display for UpscaleValidationError {
@@ -47,9 +41,6 @@ impl fmt::Display for UpscaleValidationError {
             Self::InvalidSourceDimensions { width, height } => {
                 write!(f, "source dimensions must be non-zero: {width}x{height}")
             }
-            Self::SameInputAndOutput(path) => {
-                write!(f, "input and output must differ: {}", path.display())
-            }
             Self::TargetNotLarger {
                 target,
                 source_width,
@@ -60,17 +51,7 @@ impl fmt::Display for UpscaleValidationError {
                 f,
                 "{target:?} boundary {target_width}x{target_height} is not larger than source {source_width}x{source_height}"
             ),
-            Self::InvalidOutputPath(path) => {
-                write!(f, "output path has no usable file name: {}", path.display())
-            }
-            Self::OutputParentUnavailable { path, kind } => write!(
-                f,
-                "output parent is unavailable ({}): {kind:?}",
-                path.display()
-            ),
-            Self::OutputParentNotDirectory(path) => {
-                write!(f, "output parent is not a directory: {}", path.display())
-            }
+            Self::Output(error) => write!(f, "{error}"),
         }
     }
 }
@@ -104,14 +85,9 @@ pub fn validate_upscale_request(
         return Err(UpscaleValidationError::InvalidSourceDimensions { width, height });
     }
 
-    if same_requested_path(&request.input, &request.output) {
-        return Err(UpscaleValidationError::SameInputAndOutput(
-            request.output.clone(),
-        ));
-    }
-
     validate_target_is_larger(request.target, width, height)?;
-    validate_output_path(&request.output)?;
+    validate_output_destination(&request.input, &request.output)
+        .map_err(UpscaleValidationError::Output)?;
 
     Ok(())
 }
@@ -134,51 +110,4 @@ fn validate_target_is_larger(
         target_width: boundary.width,
         target_height: boundary.height,
     })
-}
-
-fn same_requested_path(input: &Path, output: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        input
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&output.to_string_lossy())
-    }
-
-    #[cfg(not(windows))]
-    {
-        input == output
-    }
-}
-
-fn validate_output_path(output: &Path) -> Result<(), UpscaleValidationError> {
-    output
-        .file_name()
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| UpscaleValidationError::InvalidOutputPath(output.to_path_buf()))?;
-
-    if fs::metadata(output).is_ok_and(|metadata| metadata.is_dir()) {
-        return Err(UpscaleValidationError::InvalidOutputPath(
-            output.to_path_buf(),
-        ));
-    }
-
-    let parent = output_parent(output);
-    let metadata =
-        fs::metadata(&parent).map_err(|error| UpscaleValidationError::OutputParentUnavailable {
-            path: parent.clone(),
-            kind: error.kind(),
-        })?;
-
-    if !metadata.is_dir() {
-        return Err(UpscaleValidationError::OutputParentNotDirectory(parent));
-    }
-
-    Ok(())
-}
-
-fn output_parent(output: &Path) -> PathBuf {
-    match output.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => PathBuf::from("."),
-    }
 }
