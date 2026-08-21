@@ -9,6 +9,7 @@ use super::{fonts, layout, media_error, theme, widgets};
 const WORDMARK: &str = "apollo";
 const OPEN_LABEL: &str = "Open files";
 const DROP_HINT: &str = "or drop a video anywhere";
+const INSPECTING_LABEL: &str = "Inspecting media…";
 const AUDIO_MIX_LABEL: &str = "Audio Mix";
 const UPSCALE_LABEL: &str = "Upscale";
 
@@ -38,6 +39,7 @@ pub fn show_drag_hover(ui: &Ui) {
 pub fn show(
     ui: &mut Ui,
     selected_tool: FileIntakeTool,
+    inspecting: bool,
     error: Option<&MediaError>,
     error_details_open: &mut bool,
 ) -> FileIntakeAction {
@@ -50,7 +52,7 @@ pub fn show(
         ui,
         show_wordmark,
         |ui| {
-            let next = show_intake_area(ui, error, error_details_open);
+            let next = show_intake_area(ui, inspecting, error, error_details_open);
             if next != FileIntakeAction::None {
                 action.set(next);
             }
@@ -76,10 +78,20 @@ fn show_wordmark(ui: &mut Ui) {
 
 fn show_intake_area(
     ui: &mut Ui,
+    inspecting: bool,
     error: Option<&MediaError>,
     error_details_open: &mut bool,
 ) -> FileIntakeAction {
     let mut action = FileIntakeAction::None;
+
+    if inspecting {
+        ui.label(
+            RichText::new(INSPECTING_LABEL)
+                .text_style(TextStyle::Body)
+                .color(theme::SECONDARY),
+        );
+        return action;
+    }
 
     if widgets::secondary_button(ui, OPEN_LABEL).clicked() {
         action = FileIntakeAction::OpenFile;
@@ -130,13 +142,16 @@ fn show_mode_selector(ui: &mut Ui, selected_tool: FileIntakeTool) -> FileIntakeA
 
 #[cfg(test)]
 mod tests {
-    use super::{AUDIO_MIX_LABEL, DROP_HINT, OPEN_LABEL, UPSCALE_LABEL, WORDMARK};
+    use super::{
+        AUDIO_MIX_LABEL, DROP_HINT, INSPECTING_LABEL, OPEN_LABEL, UPSCALE_LABEL, WORDMARK,
+    };
 
     #[test]
     fn intake_copy_matches_quiet_focus_surface() {
         assert_eq!(WORDMARK, "apollo");
         assert_eq!(OPEN_LABEL, "Open files");
         assert_eq!(DROP_HINT, "or drop a video anywhere");
+        assert_eq!(INSPECTING_LABEL, "Inspecting media…");
         assert_eq!(AUDIO_MIX_LABEL, "Audio Mix");
         assert_eq!(UPSCALE_LABEL, "Upscale");
     }

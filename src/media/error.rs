@@ -128,6 +128,10 @@ impl MediaError {
         Self::with_diagnostic(MediaErrorKind::InvalidRequest, diagnostic)
     }
 
+    pub fn probe_failure(diagnostic: impl Into<String>) -> Self {
+        Self::with_diagnostic(MediaErrorKind::ProbeFailure, diagnostic)
+    }
+
     pub fn output_not_writable(diagnostic: impl Into<String>) -> Self {
         Self::with_diagnostic(MediaErrorKind::OutputNotWritable, diagnostic)
     }

@@ -7,9 +7,27 @@ use std::{
 use super::{model::MediaFile, probe::MediaProbeError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MediaLoadDisposition {
-    Probed,
+pub enum MediaProbeDisposition {
+    Published,
+    Retired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaIntakeRequest {
+    id: u64,
+    path: PathBuf,
+}
+
+impl MediaIntakeRequest {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaLoadStart {
     Reused,
+    Probe(MediaIntakeRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,10 +93,18 @@ struct CachedMedia {
     media: MediaFile,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingProbe {
+    id: u64,
+    identity: FileIdentity,
+}
+
 /// Owns the one reusable successful probe used by both media tools.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MediaIntake {
     current: Option<CachedMedia>,
+    pending_probe: Option<PendingProbe>,
+    next_request_id: u64,
 }
 
 impl MediaIntake {
@@ -96,27 +122,19 @@ impl MediaIntake {
         let unchanged =
             FileIdentity::read(&path).is_ok_and(|identity| expected.is_reliably_same(&identity));
         if !unchanged {
-            self.clear();
+            self.clear_current();
         }
         self.current()
     }
 
-    fn clear(&mut self) {
-        self.current = None;
-    }
-
-    pub fn load_with_probe<F>(
-        &mut self,
-        path: &Path,
-        probe: F,
-    ) -> Result<MediaLoadDisposition, MediaIntakeError>
-    where
-        F: FnOnce(&Path) -> Result<MediaFile, MediaProbeError>,
-    {
+    /// Validate a selected source and either reuse the unchanged cache or create the one
+    /// authoritative probe request. Beginning a replacement retires prior metadata immediately.
+    pub fn begin_load(&mut self, path: &Path) -> Result<MediaLoadStart, MediaIntakeError> {
+        self.pending_probe = None;
         let identity = match FileIdentity::read(path) {
             Ok(identity) => identity,
             Err(error) => {
-                self.clear();
+                self.clear_current();
                 return Err(error);
             }
         };
@@ -126,15 +144,57 @@ impl MediaIntake {
             .as_ref()
             .is_some_and(|cached| cached.identity.is_reliably_same(&identity))
         {
-            return Ok(MediaLoadDisposition::Reused);
+            return Ok(MediaLoadStart::Reused);
         }
 
-        // Retire previous metadata before probing a replacement so a failure cannot present stale
-        // source details as if they belonged to the newly selected path.
-        self.clear();
-        let media = probe(path).map_err(MediaIntakeError::Probe)?;
-        self.current = Some(CachedMedia { identity, media });
-        Ok(MediaLoadDisposition::Probed)
+        self.clear_current();
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        self.pending_probe = Some(PendingProbe { id, identity });
+        Ok(MediaLoadStart::Probe(MediaIntakeRequest {
+            id,
+            path: path.to_path_buf(),
+        }))
+    }
+
+    /// Publish a probe only when it still belongs to the current intake request.
+    pub fn complete_probe(
+        &mut self,
+        request: MediaIntakeRequest,
+        result: Result<MediaFile, MediaProbeError>,
+    ) -> Result<MediaProbeDisposition, MediaIntakeError> {
+        if !self
+            .pending_probe
+            .as_ref()
+            .is_some_and(|pending| pending.id == request.id)
+        {
+            return Ok(MediaProbeDisposition::Retired);
+        }
+
+        let pending = self
+            .pending_probe
+            .take()
+            .expect("matching pending probe exists while completion is published");
+        let media = result.map_err(MediaIntakeError::Probe)?;
+        self.current = Some(CachedMedia {
+            identity: pending.identity,
+            media,
+        });
+        Ok(MediaProbeDisposition::Published)
+    }
+
+    pub fn retire_probe(&mut self, request: &MediaIntakeRequest) {
+        if self
+            .pending_probe
+            .as_ref()
+            .is_some_and(|pending| pending.id == request.id)
+        {
+            self.pending_probe = None;
+        }
+    }
+
+    fn clear_current(&mut self) {
+        self.current = None;
     }
 }
 
@@ -146,7 +206,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use super::{MediaIntake, MediaIntakeError, MediaLoadDisposition};
+    use super::{MediaIntake, MediaIntakeError, MediaLoadStart, MediaProbeDisposition};
     use crate::media::{model::MediaFile, probe::MediaProbeError};
 
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
@@ -170,6 +230,17 @@ mod tests {
         }
     }
 
+    fn inspect_successfully(intake: &mut MediaIntake, path: &std::path::Path) {
+        let request = match intake.begin_load(path).unwrap() {
+            MediaLoadStart::Probe(request) => request,
+            MediaLoadStart::Reused => panic!("new or changed source should require inspection"),
+        };
+        assert_eq!(
+            intake.complete_probe(request, Ok(media(path))),
+            Ok(MediaProbeDisposition::Published)
+        );
+    }
+
     #[test]
     fn valid_file_is_probed_and_stored() {
         let directory = temp_directory("valid");
@@ -177,10 +248,7 @@ mod tests {
         fs::write(&path, b"video").unwrap();
         let mut intake = MediaIntake::default();
 
-        assert_eq!(
-            intake.load_with_probe(&path, |path| Ok(media(path))),
-            Ok(MediaLoadDisposition::Probed)
-        );
+        inspect_successfully(&mut intake, &path);
         assert_eq!(intake.current().map(|media| &media.path), Some(&path));
         fs::remove_dir_all(directory).unwrap();
     }
@@ -190,7 +258,7 @@ mod tests {
         let directory = temp_directory("directory");
         let mut intake = MediaIntake::default();
         assert_eq!(
-            intake.load_with_probe(&directory, |path| Ok(media(path))),
+            intake.begin_load(&directory),
             Err(MediaIntakeError::Directory)
         );
         assert!(intake.current().is_none());
@@ -202,7 +270,7 @@ mod tests {
         let directory = temp_directory("missing");
         let mut intake = MediaIntake::default();
         assert_eq!(
-            intake.load_with_probe(&directory.join("missing.mkv"), |path| Ok(media(path))),
+            intake.begin_load(&directory.join("missing.mkv")),
             Err(MediaIntakeError::Missing)
         );
         assert!(intake.current().is_none());
@@ -217,16 +285,19 @@ mod tests {
         fs::write(&first, b"first").unwrap();
         fs::write(&second, b"second").unwrap();
         let mut intake = MediaIntake::default();
-        intake
-            .load_with_probe(&first, |path| Ok(media(path)))
-            .unwrap();
+        inspect_successfully(&mut intake, &first);
+        let request = match intake.begin_load(&second).unwrap() {
+            MediaLoadStart::Probe(request) => request,
+            MediaLoadStart::Reused => panic!("replacement should require inspection"),
+        };
 
-        let result = intake.load_with_probe(&second, |_| {
+        let result = intake.complete_probe(
+            request,
             Err(MediaProbeError::FfprobeFailed {
                 code: Some(1),
                 diagnostic: "probe failed".to_owned(),
-            })
-        });
+            }),
+        );
 
         assert!(matches!(result, Err(MediaIntakeError::Probe(_))));
         assert!(intake.current().is_none());
@@ -241,12 +312,8 @@ mod tests {
         fs::write(&first, b"first").unwrap();
         fs::write(&second, b"second source").unwrap();
         let mut intake = MediaIntake::default();
-        intake
-            .load_with_probe(&first, |path| Ok(media(path)))
-            .unwrap();
-        intake
-            .load_with_probe(&second, |path| Ok(media(path)))
-            .unwrap();
+        inspect_successfully(&mut intake, &first);
+        inspect_successfully(&mut intake, &second);
 
         assert_eq!(intake.current().map(|media| &media.path), Some(&second));
         fs::remove_dir_all(directory).unwrap();
@@ -258,18 +325,9 @@ mod tests {
         let path = directory.join("video.mkv");
         fs::write(&path, b"video").unwrap();
         let mut intake = MediaIntake::default();
-        intake
-            .load_with_probe(&path, |path| Ok(media(path)))
-            .unwrap();
-        let probes = AtomicUsize::new(0);
+        inspect_successfully(&mut intake, &path);
 
-        let result = intake.load_with_probe(&path, |_| {
-            probes.fetch_add(1, Ordering::Relaxed);
-            unreachable!("unchanged file should reuse the cached probe")
-        });
-
-        assert_eq!(result, Ok(MediaLoadDisposition::Reused));
-        assert_eq!(probes.load(Ordering::Relaxed), 0);
+        assert_eq!(intake.begin_load(&path), Ok(MediaLoadStart::Reused));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -279,9 +337,7 @@ mod tests {
         let path = directory.join("video.mkv");
         fs::write(&path, b"a").unwrap();
         let mut intake = MediaIntake::default();
-        intake
-            .load_with_probe(&path, |path| Ok(media(path)))
-            .unwrap();
+        inspect_successfully(&mut intake, &path);
         fs::write(&path, b"changed-size").unwrap();
 
         assert!(intake.current_if_unchanged().is_none());
@@ -295,19 +351,69 @@ mod tests {
         let path = directory.join("video.mkv");
         fs::write(&path, b"a").unwrap();
         let mut intake = MediaIntake::default();
-        intake
-            .load_with_probe(&path, |path| Ok(media(path)))
-            .unwrap();
+        inspect_successfully(&mut intake, &path);
         fs::write(&path, b"changed-size").unwrap();
-        let probes = AtomicUsize::new(0);
 
-        let result = intake.load_with_probe(&path, |path| {
-            probes.fetch_add(1, Ordering::Relaxed);
-            Ok(media(path))
-        });
+        let request = match intake.begin_load(&path).unwrap() {
+            MediaLoadStart::Probe(request) => request,
+            MediaLoadStart::Reused => panic!("changed source should require inspection"),
+        };
+        assert_eq!(
+            intake.complete_probe(request, Ok(media(&path))),
+            Ok(MediaProbeDisposition::Published)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
 
-        assert_eq!(result, Ok(MediaLoadDisposition::Probed));
-        assert_eq!(probes.load(Ordering::Relaxed), 1);
+    #[test]
+    fn split_probe_publishes_only_after_completion() {
+        let directory = temp_directory("split-probe");
+        let path = directory.join("video.mkv");
+        fs::write(&path, b"video").unwrap();
+        let mut intake = MediaIntake::default();
+
+        let request = match intake.begin_load(&path).unwrap() {
+            MediaLoadStart::Probe(request) => request,
+            MediaLoadStart::Reused => panic!("new source should require inspection"),
+        };
+        assert!(intake.current().is_none());
+
+        assert_eq!(
+            intake.complete_probe(request, Ok(media(&path))),
+            Ok(MediaProbeDisposition::Published)
+        );
+        assert_eq!(intake.current().map(|media| &media.path), Some(&path));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn retired_probe_cannot_overwrite_newer_intake_request() {
+        let directory = temp_directory("retired-probe");
+        let first = directory.join("first.mkv");
+        let second = directory.join("second.mkv");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        let mut intake = MediaIntake::default();
+
+        let first_request = match intake.begin_load(&first).unwrap() {
+            MediaLoadStart::Probe(request) => request,
+            MediaLoadStart::Reused => panic!("new source should require inspection"),
+        };
+        let second_request = match intake.begin_load(&second).unwrap() {
+            MediaLoadStart::Probe(request) => request,
+            MediaLoadStart::Reused => panic!("replacement should require inspection"),
+        };
+
+        assert_eq!(
+            intake.complete_probe(first_request, Ok(media(&first))),
+            Ok(MediaProbeDisposition::Retired)
+        );
+        assert!(intake.current().is_none());
+        assert_eq!(
+            intake.complete_probe(second_request, Ok(media(&second))),
+            Ok(MediaProbeDisposition::Published)
+        );
+        assert_eq!(intake.current().map(|media| &media.path), Some(&second));
         fs::remove_dir_all(directory).unwrap();
     }
 }

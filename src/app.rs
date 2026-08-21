@@ -3,6 +3,8 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::Command,
+    sync::mpsc::{self, Receiver, TryRecvError},
+    thread,
     time::Duration,
 };
 
@@ -15,7 +17,7 @@ use apollo::{
     },
     media::{
         error::{MediaError, MediaErrorKind},
-        intake::{MediaIntake, MediaLoadDisposition},
+        intake::{MediaIntake, MediaIntakeRequest, MediaLoadStart, MediaProbeDisposition},
         model::MediaFile,
         probe::{MediaProbeError, probe_media},
         tools::{MediaTools, MediaToolsError, discover_media_tools},
@@ -34,6 +36,7 @@ use apollo::{
 };
 
 const EXECUTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
+const INSPECTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputPickerFormat {
@@ -167,6 +170,25 @@ impl Default for AppState {
     }
 }
 
+struct MediaInspection {
+    request: MediaIntakeRequest,
+    receiver: Receiver<Result<MediaFile, MediaProbeError>>,
+}
+
+impl MediaInspection {
+    fn spawn(tools: MediaTools, request: MediaIntakeRequest) -> io::Result<Self> {
+        let path = request.path().to_path_buf();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("apollo-media-inspection".to_owned())
+            .spawn(move || {
+                let _ = sender.send(probe_media(&tools, &path));
+            })?;
+
+        Ok(Self { request, receiver })
+    }
+}
+
 impl AppState {
     fn select_tool(&mut self, tool: Tool) {
         self.current_tool = tool;
@@ -190,6 +212,7 @@ pub(crate) struct ApolloApp {
     media_tools: Result<MediaTools, MediaToolsError>,
     audio_mix_executor: AudioMixExecutor,
     upscale_executor: UpscaleExecutor,
+    media_inspection: Option<MediaInspection>,
     tools_error_details_open: bool,
 }
 
@@ -205,15 +228,17 @@ impl ApolloApp {
             media_tools: discover_media_tools(),
             audio_mix_executor: AudioMixExecutor::new(),
             upscale_executor: UpscaleExecutor::new(),
+            media_inspection: None,
             tools_error_details_open: false,
         })
     }
 
     fn file_intake_enabled(&self) -> bool {
-        file_intake_enabled(
-            self.audio_mix_executor.state(),
-            self.upscale_executor.state(),
-        )
+        self.media_inspection.is_none()
+            && file_intake_enabled(
+                self.audio_mix_executor.state(),
+                self.upscale_executor.state(),
+            )
     }
 
     fn select_tool(&mut self, tool: Tool) {
@@ -306,6 +331,7 @@ impl ApolloApp {
         let action = file_intake::show(
             ui,
             tool.intake_tool(),
+            self.media_inspection.is_some(),
             self.state.intake_error.as_ref(),
             &mut self.state.intake_error_details_open,
         );
@@ -330,33 +356,107 @@ impl ApolloApp {
             return;
         };
         let tools = tools.clone();
-        self.load_media_path_with_probe(path, |path| probe_media(&tools, path));
+        let Some(request) = self.begin_media_path(path) else {
+            return;
+        };
+        let request_for_failure = request.clone();
+
+        match MediaInspection::spawn(tools, request) {
+            Ok(inspection) => self.media_inspection = Some(inspection),
+            Err(error) => {
+                self.state.media_intake.retire_probe(&request_for_failure);
+                self.state.intake_error = Some(MediaError::probe_failure(format!(
+                    "Media inspection worker could not start: {error}"
+                )));
+            }
+        }
     }
 
-    fn load_media_path_with_probe<F>(&mut self, path: &Path, probe: F)
-    where
-        F: FnOnce(&Path) -> Result<MediaFile, MediaProbeError>,
-    {
+    fn begin_media_path(&mut self, path: &Path) -> Option<MediaIntakeRequest> {
         if !self.file_intake_enabled() {
-            return;
+            return None;
         }
 
         self.state.intake_active = true;
         self.state.intake_error = None;
         self.state.intake_error_details_open = false;
-        match self.state.media_intake.load_with_probe(path, probe) {
-            Ok(MediaLoadDisposition::Reused) => {
+        match self.state.media_intake.begin_load(path) {
+            Ok(MediaLoadStart::Reused) => {
                 let _ = self.activate_cached_source(self.state.current_tool);
+                None
             }
-            Ok(MediaLoadDisposition::Probed) => {
+            Ok(MediaLoadStart::Probe(request)) => {
                 self.state.retire_tool_sessions();
-                let _ = self.activate_cached_source(self.state.current_tool);
+                Some(request)
             }
             Err(error) => {
                 self.state.retire_tool_sessions();
                 self.state.intake_error = Some(MediaError::from_intake_error(&error));
+                None
             }
         }
+    }
+
+    fn poll_media_inspection(&mut self) {
+        let result = match self.media_inspection.as_ref() {
+            Some(inspection) => inspection.receiver.try_recv(),
+            None => return,
+        };
+
+        match result {
+            Ok(result) => {
+                let inspection = self
+                    .media_inspection
+                    .take()
+                    .expect("inspection exists while its result is settled");
+                self.complete_media_probe(inspection.request, result);
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                let inspection = self
+                    .media_inspection
+                    .take()
+                    .expect("inspection exists while its worker disconnect is settled");
+                self.state.media_intake.retire_probe(&inspection.request);
+                self.state.intake_active = true;
+                self.state.retire_tool_sessions();
+                self.state.intake_error = Some(MediaError::probe_failure(
+                    "Media inspection worker stopped before returning a result.",
+                ));
+                self.state.intake_error_details_open = false;
+            }
+        }
+    }
+
+    fn complete_media_probe(
+        &mut self,
+        request: MediaIntakeRequest,
+        result: Result<MediaFile, MediaProbeError>,
+    ) {
+        match self.state.media_intake.complete_probe(request, result) {
+            Ok(MediaProbeDisposition::Published) => {
+                let _ = self.activate_cached_source(self.state.current_tool);
+            }
+            Ok(MediaProbeDisposition::Retired) => {}
+            Err(error) => {
+                self.state.intake_active = true;
+                self.state.retire_tool_sessions();
+                self.state.intake_error = Some(MediaError::from_intake_error(&error));
+                self.state.intake_error_details_open = false;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn load_media_path_with_probe<F>(&mut self, path: &Path, probe: F)
+    where
+        F: FnOnce(&Path) -> Result<MediaFile, MediaProbeError>,
+    {
+        let Some(request) = self.begin_media_path(path) else {
+            return;
+        };
+        let result = probe(request.path());
+        self.complete_media_probe(request, result);
     }
 
     fn handle_window_file_drop(&mut self, context: &Context) {
@@ -787,6 +887,11 @@ impl eframe::App for ApolloApp {
                     return;
                 }
 
+                self.poll_media_inspection();
+                if self.media_inspection.is_some() {
+                    ui.ctx().request_repaint_after(INSPECTION_REPAINT_INTERVAL);
+                }
+
                 self.handle_window_file_drop(ui.ctx());
                 if self.drag_hovered(ui.ctx()) {
                     file_intake::show_drag_hover(ui);
@@ -802,17 +907,20 @@ mod tests {
     use std::{
         fs, io,
         path::{Path, PathBuf},
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
     };
 
     use super::{
-        ApolloApp, AppState, OutputPickerFormat, Tool, file_intake_enabled,
+        ApolloApp, AppState, MediaInspection, OutputPickerFormat, Tool, file_intake_enabled,
         shows_audio_mix_lifecycle, shows_upscale_lifecycle,
     };
     use apollo::{
         audio_mix::{execution::AudioMixExecutionState, model::OutputContainer},
         media::{
-            error::MediaErrorKind,
+            error::{MediaError, MediaErrorKind},
             execution::MediaExecutionFailure,
             model::{AudioStream, FrameRate, MediaFile, VideoStream},
             probe::MediaProbeError,
@@ -871,8 +979,21 @@ mod tests {
             }),
             audio_mix_executor: apollo::audio_mix::execution::AudioMixExecutor::new(),
             upscale_executor: apollo::upscale::execution::UpscaleExecutor::new(),
+            media_inspection: None,
             tools_error_details_open: false,
         }
+    }
+
+    fn begin_pending_inspection(
+        app: &mut ApolloApp,
+        path: &Path,
+    ) -> mpsc::SyncSender<Result<MediaFile, MediaProbeError>> {
+        let request = app
+            .begin_media_path(path)
+            .expect("new test source should require inspection");
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.media_inspection = Some(MediaInspection { request, receiver });
+        sender
     }
 
     fn shape_contains_text(shape: &egui::Shape, needle: &str) -> bool {
@@ -941,6 +1062,85 @@ mod tests {
         assert!(output_contains_text(&output, "Audio Mix"));
         assert!(output_contains_text(&output, "Upscale"));
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn inspecting_state_is_sparse_and_blocks_source_replacement() {
+        let (directory, path) = temp_file("inspecting-state");
+        let mut app = app();
+        let _sender = begin_pending_inspection(&mut app, &path);
+        let context = egui::Context::default();
+        fonts::install(&context).expect("test typography should install");
+        theme::install(&context);
+
+        assert!(app.state.intake_active);
+        assert!(app.media_inspection.is_some());
+        assert!(!app.file_intake_enabled());
+
+        let mut output = context.run_ui(Default::default(), |ui| {
+            app.show_tool(ui, Tool::AudioMix);
+        });
+
+        assert!(output_contains_text(&output, "Inspecting media…"));
+        assert!(output_contains_text(&output, "Audio Mix"));
+        assert!(output_contains_text(&output, "Upscale"));
+        assert!(!output_contains_text(&output, "Open files"));
+        assert!(!output_contains_text(&output, "or drop a video anywhere"));
+        output.textures_delta.clear();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn inspection_completion_activates_currently_selected_mode() {
+        let (directory, path) = temp_file("inspection-mode-switch");
+        let mut app = app();
+        let sender = begin_pending_inspection(&mut app, &path);
+
+        app.select_tool(Tool::VideoUpscale);
+        sender.send(Ok(media(&path))).unwrap();
+        app.poll_media_inspection();
+
+        assert!(app.media_inspection.is_none());
+        assert!(!app.state.intake_active);
+        assert!(app.state.audio_mix.is_none());
+        assert_eq!(
+            app.state
+                .upscale
+                .as_ref()
+                .map(|session| &session.media.path),
+            Some(&path)
+        );
+        assert_eq!(
+            app.state.media_intake.current().map(|media| &media.path),
+            Some(&path)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_inspection_returns_to_intake_without_current_metadata() {
+        let (directory, path) = temp_file("inspection-failure");
+        let mut app = app();
+        let sender = begin_pending_inspection(&mut app, &path);
+
+        sender
+            .send(Err(MediaProbeError::FfprobeFailed {
+                code: Some(1),
+                diagnostic: "probe failed".to_owned(),
+            }))
+            .unwrap();
+        app.poll_media_inspection();
+
+        assert!(app.media_inspection.is_none());
+        assert!(app.state.intake_active);
+        assert!(app.state.media_intake.current().is_none());
+        assert!(app.state.audio_mix.is_none());
+        assert!(app.state.upscale.is_none());
+        assert_eq!(
+            app.state.intake_error.as_ref().map(MediaError::kind),
+            Some(MediaErrorKind::ProbeFailure)
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
