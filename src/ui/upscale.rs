@@ -314,6 +314,7 @@ fn upscale_fixed_flow_height(ui: &Ui, media: &MediaFile) -> f32 {
     let section_label_height = ui.text_style_height(&TextStyle::Small);
     let technical_height = ui.text_style_height(&fonts::technical_text_style());
     let source_header_height = source_header_height(ui, source_metadata(media).is_some());
+    let output_row_height = widgets::output_filename_row_plan(ui, None, BROWSE_LABEL).flow_height();
     let field_height = section_label_height
         + theme::SPACING.compact
         + theme::COMPACT_CONTROL_HEIGHT.max(technical_height);
@@ -332,7 +333,7 @@ fn upscale_fixed_flow_height(ui: &Ui, media: &MediaFile) -> f32 {
         + theme::SPACING.focal
         + section_label_height
         + theme::SPACING.compact
-        + theme::COMPACT_CONTROL_HEIGHT
+        + output_row_height
         + theme::SPACING.related
         + theme::PRIMARY_CONTROL_HEIGHT
 }

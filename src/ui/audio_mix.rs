@@ -22,6 +22,7 @@ const SELECT_ALL_LABEL: &str = "Select all";
 const CLEAR_LABEL: &str = "Clear";
 const BROWSE_LABEL: &str = "Browse";
 const MIX_LABEL: &str = "Mix selected tracks";
+const CONTAINER_OPTIONS: [&str; 2] = ["MP4", "MKV"];
 
 /// Pre-execution Audio Mix state. Process lifecycle remains owned by `AudioMixExecutor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +301,12 @@ fn show_track_list(
 fn audio_mix_fixed_flow_height(ui: &Ui, media: &MediaFile, track_list_empty: bool) -> f32 {
     let section_label_height = ui.text_style_height(&TextStyle::Small);
     let source_header_height = source_header_height(ui, source_metadata(media).is_some());
+    let output_row_height = widgets::output_filename_row_plan(
+        ui,
+        Some(widgets::select_menu_intrinsic_width(ui, &CONTAINER_OPTIONS)),
+        BROWSE_LABEL,
+    )
+    .flow_height();
     let track_list_chrome = if track_list_empty {
         theme::SEPARATOR_WIDTH * 2.0
     } else {
@@ -316,7 +323,7 @@ fn audio_mix_fixed_flow_height(ui: &Ui, media: &MediaFile, track_list_empty: boo
         + theme::SPACING.section
         + section_label_height
         + theme::SPACING.compact
-        + theme::COMPACT_CONTROL_HEIGHT
+        + output_row_height
         + theme::SPACING.related
         + theme::PRIMARY_CONTROL_HEIGHT
 }
@@ -362,49 +369,54 @@ fn show_output_row(
     state: &mut AudioMixSelectionState,
 ) -> AudioMixSelectionAction {
     let mut requested_container = None;
-    let mut browse_clicked = false;
     let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
+    let selector_width = widgets::select_menu_intrinsic_width(ui, &CONTAINER_OPTIONS);
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::SPACING.compact;
-
-        widgets::select_menu(
-            ui,
-            container_label(state.container()),
-            &["MP4", "MKV"],
-            |ui| {
-                if widgets::select_menu_option(ui, "MP4", state.container() == OutputContainer::Mp4)
+    let row = widgets::output_filename_row_with_leading(
+        ui,
+        &mut output_stem,
+        state.container().extension(),
+        BROWSE_LABEL,
+        selector_width,
+        |ui| {
+            widgets::select_menu(
+                ui,
+                container_label(state.container()),
+                &CONTAINER_OPTIONS,
+                |ui| {
+                    if widgets::select_menu_option(
+                        ui,
+                        "MP4",
+                        state.container() == OutputContainer::Mp4,
+                    )
                     .clicked()
-                {
-                    requested_container = Some(OutputContainer::Mp4);
-                    ui.close();
-                }
-                if widgets::select_menu_option(ui, "MKV", state.container() == OutputContainer::Mkv)
+                    {
+                        requested_container = Some(OutputContainer::Mp4);
+                        ui.close();
+                    }
+                    if widgets::select_menu_option(
+                        ui,
+                        "MKV",
+                        state.container() == OutputContainer::Mkv,
+                    )
                     .clicked()
-                {
-                    requested_container = Some(OutputContainer::Mkv);
-                    ui.close();
-                }
-            },
-        );
+                    {
+                        requested_container = Some(OutputContainer::Mkv);
+                        ui.close();
+                    }
+                },
+            );
+        },
+    );
 
-        let row = widgets::output_filename_row(
-            ui,
-            &mut output_stem,
-            state.container().extension(),
-            BROWSE_LABEL,
-        );
-        if row.filename.changed() {
-            state.set_output_filename_stem(OsString::from(output_stem));
-        }
-        browse_clicked = row.browse.clicked();
-    });
-
+    if row.filename.changed() {
+        state.set_output_filename_stem(OsString::from(output_stem));
+    }
     if let Some(container) = requested_container {
         state.set_container(media, container);
     }
 
-    if browse_clicked {
+    if row.browse.clicked() {
         AudioMixSelectionAction::BrowseOutput
     } else {
         AudioMixSelectionAction::None

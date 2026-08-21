@@ -30,6 +30,9 @@ pub const MAX_CONTENT_WIDTH: f32 = REFERENCE_WINDOW_SIZE.x - 2.0 * CONTENT_PADDI
 /// Minimum comfortable width for each field in a responsive two-field row.
 pub const FIELD_PAIR_MIN_COLUMN_WIDTH: f32 = 180.0;
 
+/// Minimum useful inline width for the editable output filename before the row stacks.
+pub const OUTPUT_FILENAME_MIN_INLINE_WIDTH: f32 = 180.0;
+
 /// Narrow focal width used by Audio Mix running and terminal surfaces.
 pub const FOCUS_CONTENT_MAX_WIDTH: f32 = 470.0;
 
@@ -55,6 +58,36 @@ pub enum ActionLayout {
 pub enum FieldPairLayout {
     Columns,
     Stacked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputRowLayout {
+    Inline,
+    Stacked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutputRowPlan {
+    pub layout: OutputRowLayout,
+    pub filename_width: f32,
+    pub leading_width: Option<f32>,
+}
+
+impl OutputRowPlan {
+    pub fn flow_height(self) -> f32 {
+        match self.layout {
+            OutputRowLayout::Inline => theme::COMPACT_CONTROL_HEIGHT,
+            OutputRowLayout::Stacked => {
+                let control_count = if self.leading_width.is_some() {
+                    3.0
+                } else {
+                    2.0
+                };
+                let gap_count = control_count - 1.0;
+                control_count * theme::COMPACT_CONTROL_HEIGHT + gap_count * theme::SPACING.compact
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,11 +477,37 @@ pub fn bounded_content_width(available_width: f32) -> f32 {
     safe_dimension(available_width).min(MAX_CONTENT_WIDTH)
 }
 
-/// Width left for a flexible row element after a fixed-width sibling and their shared gap.
+/// Plan the shared editable-output row from the current content width and intrinsic fixed controls.
 ///
-/// Composite controls use this rather than owning their own responsive-width policy.
-pub fn flexible_row_width(available_width: f32, fixed_width: f32, gap: f32) -> f32 {
-    (safe_dimension(available_width) - safe_dimension(fixed_width) - safe_dimension(gap)).max(0.0)
+/// Inline rows reserve stable space for an optional leading control and Browse, leaving the
+/// filename as the only flexible element. When that would squeeze the filename below its useful
+/// width, the controls stack in leading/name/Browse order without shrinking hit targets.
+pub fn output_row_plan(
+    available_width: f32,
+    leading_width: Option<f32>,
+    browse_width: f32,
+) -> OutputRowPlan {
+    let available_width = safe_dimension(available_width);
+    let leading_width = leading_width.map(safe_dimension);
+    let browse_width = safe_dimension(browse_width);
+    let gap_count = if leading_width.is_some() { 2.0 } else { 1.0 };
+    let fixed_width =
+        leading_width.unwrap_or(0.0) + browse_width + gap_count * theme::SPACING.compact;
+    let inline_filename_width = (available_width - fixed_width).max(0.0);
+
+    if inline_filename_width >= OUTPUT_FILENAME_MIN_INLINE_WIDTH {
+        OutputRowPlan {
+            layout: OutputRowLayout::Inline,
+            filename_width: inline_filename_width,
+            leading_width,
+        }
+    } else {
+        OutputRowPlan {
+            layout: OutputRowLayout::Stacked,
+            filename_width: available_width,
+            leading_width,
+        }
+    }
 }
 
 /// Reserve flow space after a potentially long list and request scrolling only when needed.
@@ -536,12 +595,12 @@ mod tests {
     use super::{
         ActionLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT, FIELD_PAIR_MIN_COLUMN_WIDTH,
         FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, FieldPairLayout, IntakeLayout,
-        ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, PATH_TEXT_OVERFLOW,
-        PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE, TaskOverflow,
-        TextOverflowPolicy, WINDOW_CHROME_HEIGHT, action_group_size, action_layout,
-        bounded_content_width, centered_action_group, content_frame, field_pair_layout,
-        flexible_row_width, focus_content, intake_content, intake_layout_plan, list_viewport,
-        task_surface, task_surface_plan,
+        ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, OUTPUT_FILENAME_MIN_INLINE_WIDTH,
+        OutputRowLayout, PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE,
+        REFERENCE_WINDOW_SIZE, TaskOverflow, TextOverflowPolicy, WINDOW_CHROME_HEIGHT,
+        action_group_size, action_layout, bounded_content_width, centered_action_group,
+        content_frame, field_pair_layout, focus_content, intake_content, intake_layout_plan,
+        list_viewport, output_row_plan, task_surface, task_surface_plan,
     };
     use crate::ui::theme;
 
@@ -554,6 +613,7 @@ mod tests {
         assert_eq!(CONTENT_PADDING, 28);
         assert_eq!(MAX_CONTENT_WIDTH, 564.0);
         assert_eq!(FIELD_PAIR_MIN_COLUMN_WIDTH, 180.0);
+        assert_eq!(OUTPUT_FILENAME_MIN_INLINE_WIDTH, 180.0);
         assert_eq!(FOCUS_CONTENT_MAX_WIDTH, 470.0);
         assert_eq!(FOCUS_CONTENT_MIN_HEIGHT, 230.0);
         assert_eq!(DIAGNOSTIC_MAX_HEIGHT, 80.0);
@@ -1085,10 +1145,42 @@ mod tests {
     }
 
     #[test]
-    fn flexible_row_width_reserves_fixed_controls_without_going_negative() {
-        assert_eq!(flexible_row_width(320.0, 72.0, 7.0), 241.0);
-        assert_eq!(flexible_row_width(40.0, 72.0, 7.0), 0.0);
-        assert_eq!(flexible_row_width(f32::NAN, 72.0, 7.0), 0.0);
+    fn output_row_keeps_fixed_controls_inline_when_filename_has_room() {
+        let normal = output_row_plan(564.0, Some(68.0), 72.0);
+        let wide = output_row_plan(900.0, Some(68.0), 72.0);
+
+        assert_eq!(normal.layout, OutputRowLayout::Inline);
+        assert_eq!(normal.filename_width, 410.0);
+        assert_eq!(normal.flow_height(), theme::COMPACT_CONTROL_HEIGHT);
+        assert_eq!(wide.layout, OutputRowLayout::Inline);
+        assert!(wide.filename_width > normal.filename_width);
+    }
+
+    #[test]
+    fn output_row_stacks_before_filename_or_fixed_controls_are_squeezed() {
+        let mix = output_row_plan(320.0, Some(68.0), 72.0);
+        let upscale = output_row_plan(240.0, None, 72.0);
+
+        assert_eq!(mix.layout, OutputRowLayout::Stacked);
+        assert_eq!(mix.filename_width, 320.0);
+        assert_eq!(
+            mix.flow_height(),
+            theme::COMPACT_CONTROL_HEIGHT * 3.0 + theme::SPACING.compact * 2.0
+        );
+        assert_eq!(upscale.layout, OutputRowLayout::Stacked);
+        assert_eq!(
+            upscale.flow_height(),
+            theme::COMPACT_CONTROL_HEIGHT * 2.0 + theme::SPACING.compact
+        );
+    }
+
+    #[test]
+    fn output_row_plan_sanitizes_invalid_dimensions() {
+        let plan = output_row_plan(f32::NAN, Some(f32::INFINITY), f32::NEG_INFINITY);
+
+        assert_eq!(plan.layout, OutputRowLayout::Stacked);
+        assert_eq!(plan.filename_width, 0.0);
+        assert_eq!(plan.leading_width, Some(f32::MAX));
     }
 
     #[test]
