@@ -30,6 +30,7 @@ pub enum MediaErrorKind {
     OutputExists,
     OutputNotWritable,
     OutputPickerUnavailable,
+    MultipleFiles,
     InvalidRequest,
     ChildProcessFailed,
     Cancellation,
@@ -60,6 +61,7 @@ impl MediaError {
             MediaErrorKind::OutputExists => "The output file already exists.",
             MediaErrorKind::OutputNotWritable => "The output location is not writable.",
             MediaErrorKind::OutputPickerUnavailable => "The output picker could not be opened.",
+            MediaErrorKind::MultipleFiles => "Drop one file at a time.",
             MediaErrorKind::InvalidRequest => "The requested media operation is not valid.",
             MediaErrorKind::ChildProcessFailed => "FFmpeg could not complete the media process.",
             MediaErrorKind::Cancellation => "The operation was cancelled.",
@@ -100,6 +102,7 @@ impl MediaError {
                 Some("Choose a writable output folder and try again.")
             }
             MediaErrorKind::OutputPickerUnavailable => Some("Try Browse again."),
+            MediaErrorKind::MultipleFiles => None,
             MediaErrorKind::InvalidRequest => Some("Review the current settings and try again."),
             MediaErrorKind::ChildProcessFailed | MediaErrorKind::UnknownFfmpegFailure => {
                 Some("Show details for the FFmpeg diagnostic, then retry.")
@@ -138,6 +141,10 @@ impl MediaError {
 
     pub fn output_picker_unavailable(diagnostic: impl Into<String>) -> Self {
         Self::with_diagnostic(MediaErrorKind::OutputPickerUnavailable, diagnostic)
+    }
+
+    pub fn multiple_files() -> Self {
+        Self::new(MediaErrorKind::MultipleFiles, None)
     }
 
     pub fn cancelled() -> Self {
@@ -468,6 +475,16 @@ mod tests {
             .expect("picker diagnostic should be retained");
         assert!(diagnostic.len() <= DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES);
         assert!(diagnostic.ends_with("TAIL"));
+    }
+
+    #[test]
+    fn multiple_file_drop_has_concise_intake_copy() {
+        let error = MediaError::multiple_files();
+
+        assert_eq!(error.kind(), MediaErrorKind::MultipleFiles);
+        assert_eq!(error.message(), "Drop one file at a time.");
+        assert_eq!(error.guidance(), None);
+        assert_eq!(error.diagnostic(), None);
     }
 
     #[test]

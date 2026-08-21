@@ -463,20 +463,24 @@ impl ApolloApp {
         if !self.file_intake_enabled() {
             return;
         }
-        let dropped = context.input(|input| {
-            input
-                .raw
-                .dropped_files
-                .first()
-                .map(|file| file.path().to_path_buf())
+        let dropped = context.input(|input| match input.raw.dropped_files.as_slice() {
+            [] => None,
+            [file] => Some(Ok(file.path().to_path_buf())),
+            _ => Some(Err(MediaError::multiple_files())),
         });
-        if let Some(path) = dropped {
-            self.load_media_path(&path);
+        match dropped {
+            Some(Ok(path)) => self.load_media_path(&path),
+            Some(Err(error)) => {
+                self.state.intake_active = true;
+                self.state.intake_error = Some(error);
+                self.state.intake_error_details_open = false;
+            }
+            None => {}
         }
     }
 
     fn drag_hovered(&self, context: &Context) -> bool {
-        self.file_intake_enabled() && context.input(|input| !input.raw.hovered_files.is_empty())
+        self.file_intake_enabled() && context.input(|input| input.raw.hovered_files.len() == 1)
     }
 
     fn show_audio_mix_tool(&mut self, ui: &mut Ui) {
@@ -908,6 +912,7 @@ mod tests {
         fs, io,
         path::{Path, PathBuf},
         sync::{
+            Arc,
             atomic::{AtomicUsize, Ordering},
             mpsc,
         },
@@ -935,6 +940,21 @@ mod tests {
     };
 
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug)]
+    struct TestDroppedFile {
+        path: PathBuf,
+    }
+
+    impl egui::DroppedFile for TestDroppedFile {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            fs::read(&self.path).map_err(|error| error.to_string())
+        }
+    }
 
     fn temp_file(label: &str) -> (PathBuf, PathBuf) {
         let directory = std::env::temp_dir().join(format!(
@@ -982,6 +1002,40 @@ mod tests {
             media_inspection: None,
             tools_error_details_open: false,
         }
+    }
+
+    fn dropped_file(path: &Path) -> egui::DroppedFileHandle {
+        Arc::new(TestDroppedFile {
+            path: path.to_path_buf(),
+        })
+    }
+
+    fn handle_drop(app: &mut ApolloApp, paths: &[&Path]) {
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            dropped_files: paths.iter().map(|path| dropped_file(path)).collect(),
+            ..Default::default()
+        };
+        let output = context.run_ui(input, |ui| app.handle_window_file_drop(ui.ctx()));
+        output.drop_without_applying_deltas();
+    }
+
+    fn drag_hovered(app: &ApolloApp, paths: &[&Path]) -> bool {
+        let context = egui::Context::default();
+        let input = egui::RawInput {
+            hovered_files: paths
+                .iter()
+                .map(|path| egui::HoveredFile {
+                    path: Some((*path).to_path_buf()),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut hovered = false;
+        let output = context.run_ui(input, |ui| hovered = app.drag_hovered(ui.ctx()));
+        output.drop_without_applying_deltas();
+        hovered
     }
 
     fn begin_pending_inspection(
@@ -1199,6 +1253,84 @@ mod tests {
             Some(&path)
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn one_file_drop_starts_normal_media_inspection() {
+        let (directory, path) = temp_file("single-drop");
+        let mut app = app();
+
+        handle_drop(&mut app, &[&path]);
+
+        assert_eq!(
+            app.media_inspection
+                .as_ref()
+                .map(|inspection| inspection.request.path()),
+            Some(path.as_path())
+        );
+        assert!(app.state.intake_error.is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn multiple_file_drop_is_rejected_before_any_probe_starts() {
+        let (first_directory, first) = temp_file("multi-drop-first");
+        let (second_directory, second) = temp_file("multi-drop-second");
+        let mut app = app();
+
+        handle_drop(&mut app, &[&first, &second]);
+
+        assert!(app.media_inspection.is_none());
+        assert!(app.state.media_intake.current().is_none());
+        assert_eq!(
+            app.state.intake_error.as_ref().map(MediaError::kind),
+            Some(MediaErrorKind::MultipleFiles)
+        );
+        assert_eq!(
+            app.state.intake_error.as_ref().map(MediaError::message),
+            Some("Drop one file at a time.")
+        );
+        fs::remove_dir_all(first_directory).unwrap();
+        fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn directory_drop_uses_shared_intake_error_path() {
+        let directory = std::env::temp_dir().join(format!(
+            "apollo-phase49-directory-drop-{}-{}",
+            std::process::id(),
+            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let mut app = app();
+
+        handle_drop(&mut app, &[&directory]);
+
+        assert!(app.media_inspection.is_none());
+        assert_eq!(
+            app.state.intake_error.as_ref().map(MediaError::kind),
+            Some(MediaErrorKind::SourceUnavailable)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn missing_path_drop_uses_shared_intake_error_path() {
+        let directory = std::env::temp_dir().join(format!(
+            "apollo-phase49-missing-drop-{}-{}",
+            std::process::id(),
+            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        let missing = directory.join("missing.mkv");
+        let mut app = app();
+
+        handle_drop(&mut app, &[&missing]);
+
+        assert!(app.media_inspection.is_none());
+        assert_eq!(
+            app.state.intake_error.as_ref().map(MediaError::kind),
+            Some(MediaErrorKind::SourceUnavailable)
+        );
     }
 
     #[test]
@@ -1674,6 +1806,22 @@ mod tests {
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Running,
         ));
+    }
+
+    #[test]
+    fn drag_hover_marks_only_one_available_file_as_a_valid_target() {
+        let (first_directory, first) = temp_file("hover-first");
+        let (second_directory, second) = temp_file("hover-second");
+        let mut app = app();
+
+        assert!(drag_hovered(&app, &[&first]));
+        assert!(!drag_hovered(&app, &[&first, &second]));
+
+        let _sender = begin_pending_inspection(&mut app, &first);
+        assert!(!drag_hovered(&app, &[&second]));
+
+        fs::remove_dir_all(first_directory).unwrap();
+        fs::remove_dir_all(second_directory).unwrap();
     }
 
     #[test]
