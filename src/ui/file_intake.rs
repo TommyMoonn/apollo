@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use egui::{RichText, Stroke, StrokeKind, TextStyle, Ui};
+use egui::{CornerRadius, RichText, Stroke, StrokeKind, TextStyle, Ui};
 
 use crate::media::error::MediaError;
 
@@ -29,9 +29,9 @@ pub enum FileIntakeAction {
 
 pub fn show_drag_hover(ui: &Ui) {
     ui.painter().rect_stroke(
-        ui.max_rect().shrink(8.0),
-        0.0,
-        Stroke::new(1.0, theme::BORDER_STRONG),
+        ui.max_rect().shrink(theme::SPACING.compact),
+        CornerRadius::same(theme::CONTAINER_RADIUS),
+        Stroke::new(theme::SEPARATOR_WIDTH, theme::BORDER_STRONG),
         StrokeKind::Inside,
     );
 }

@@ -214,7 +214,7 @@ fn monochrome_visuals() -> Visuals {
     visuals.selection.bg_fill = SELECTION;
     visuals.selection.stroke = Stroke::new(SEPARATOR_WIDTH, BACKGROUND);
     visuals.ime_composition = ImeComposition {
-        active_underline_stroke: Stroke::new(2.0, FOCUS),
+        active_underline_stroke: Stroke::new(FOCUS_STROKE_WIDTH, FOCUS),
         inactive_underline_stroke: Stroke::new(SEPARATOR_WIDTH, SEPARATOR),
         ..visuals.ime_composition
     };
@@ -234,7 +234,7 @@ fn monochrome_visuals() -> Visuals {
     visuals.panel_fill = BACKGROUND;
     visuals.popup_shadow = Shadow::NONE;
     visuals.text_cursor = TextCursorStyle {
-        stroke: Stroke::new(2.0, FOCUS),
+        stroke: Stroke::new(FOCUS_STROKE_WIDTH, FOCUS),
         ..visuals.text_cursor
     };
     visuals.button_frame = true;
@@ -442,6 +442,12 @@ mod tests {
     #[test]
     fn shared_geometry_uses_four_px_radius_and_progress_stays_square() {
         let visuals = monochrome_visuals();
+
+        assert_eq!(
+            visuals.ime_composition.active_underline_stroke.width,
+            FOCUS_STROKE_WIDTH
+        );
+        assert_eq!(visuals.text_cursor.stroke.width, FOCUS_STROKE_WIDTH);
 
         for widget in [
             visuals.widgets.noninteractive,
