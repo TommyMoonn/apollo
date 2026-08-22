@@ -89,6 +89,24 @@ Compatibility entry point:
 
 The only initial cleanup targets are `target/` and `.dev/chatgpt/bundles/`. Tracked files are protected unless `--force` is explicitly supplied.
 
+### Validate release metadata
+
+```powershell
+.\scripts\check-release.ps1
+.\scripts\check-release.ps1 --tag v0.1.0
+.\scripts\check-release.ps1 --tag v0.1.0 --release-changelog
+```
+
+Checks the `Cargo.toml` package version against the root `apollo` entry in `Cargo.lock`. An explicit release tag must equal `v<version>`. In a GitHub tag workflow, `GITHUB_REF_NAME` is used when no tag is supplied. `--release-changelog` additionally requires a dated release heading and matching version link in `CHANGELOG.md`. Validation is read-only.
+
+### Set the release version
+
+```powershell
+.\scripts\set-version.ps1 0.2.0
+```
+
+Updates the `[package].version` in `Cargo.toml`, lets Cargo refresh the root package entry in `Cargo.lock`, verifies the result with locked Cargo metadata, and runs the shared release validator. If any step fails, both version files are restored.
+
 ## Tests
 
 Run all PowerShell tooling tests from the repository root:
