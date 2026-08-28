@@ -17,6 +17,8 @@ Public commands use:
 
 Do not add script-local argument parsers.
 
+For the end-to-end release operator workflow, see [`docs/RELEASES.md`](../docs/RELEASES.md).
+
 ## Commands
 
 ### Full-project snapshot

@@ -15,6 +15,10 @@ Rustup is the recommended way to install the pinned Rust toolchain. From the rep
 
 FFmpeg and FFprobe are external runtime tools. Bootstrap and early foundation phases do not require them to run, but later media phases will discover and validate them through one shared application owner rather than ad hoc feature-specific checks.
 
+## Releases
+
+The operator workflow for versioning, tagging, Windows artifacts, draft GitHub Releases, verification, and publication is documented in [RELEASES.md](RELEASES.md).
+
 ## Build
 
 Build the native application:
