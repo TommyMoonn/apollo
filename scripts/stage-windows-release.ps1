@@ -209,14 +209,21 @@ function New-WindowsReleaseZip {
     }
 }
 
-$cli = ConvertFrom-CliArguments -Arguments $args -OptionSpecs @{
-    project = @{ Aliases = @('-p', '-ProjectRoot'); Default = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
-    executable = @{ Aliases = @('-e', '-Executable') }
-    output = @{ Aliases = @('-o', '-Output') }
-}
+function Invoke-StageWindowsReleaseCli {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Arguments
+    )
 
-if ($cli['help']) {
-    Write-CliHelp @'
+    $cli = ConvertFrom-CliArguments -Arguments $Arguments -OptionSpecs @{
+        project = @{ Aliases = @('-p', '-ProjectRoot'); Default = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
+        executable = @{ Aliases = @('-e', '-Executable') }
+        output = @{ Aliases = @('-o', '-Output') }
+    }
+
+    if ($cli['help']) {
+        Write-CliHelp @'
 Usage: .\scripts\stage-windows-release.ps1 [options]
 
 Options:
@@ -227,65 +234,70 @@ Options:
 
 Relative executable and output paths resolve from the project root.
 '@
-    return
-}
-
-$projectRoot = Resolve-RepositoryRoot -Path ([string]$cli['project'])
-$defaultExecutable = 'target/x86_64-pc-windows-msvc/release/apollo.exe'
-$defaultOutput = 'artifacts/windows'
-$executableValue = if ($null -eq $cli['executable']) { $defaultExecutable } else { [string]$cli['executable'] }
-$outputValue = if ($null -eq $cli['output']) { $defaultOutput } else { [string]$cli['output'] }
-$executablePath = Resolve-ReleasePath -ProjectRoot $projectRoot -Path $executableValue -OptionName '--executable'
-$outputPath = Resolve-ReleasePath -ProjectRoot $projectRoot -Path $outputValue -OptionName '--output'
-
-& (Join-Path $PSScriptRoot 'check-release.ps1') --project $projectRoot
-
-Assert-WindowsX64ApolloExecutable -Path $executablePath
-Assert-SafeStagingDirectory -ProjectRoot $projectRoot -ExecutablePath $executablePath -OutputPath $outputPath
-
-$licensePath = Join-Path $projectRoot 'LICENSE'
-$noticesPath = Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md'
-if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) {
-    throw "Project license does not exist: $licensePath"
-}
-if (-not (Test-Path -LiteralPath $noticesPath -PathType Leaf)) {
-    throw "Third-party notices do not exist: $noticesPath"
-}
-
-$outputParent = Split-Path $outputPath -Parent
-New-Item -ItemType Directory -Path $outputParent -Force | Out-Null
-$outputName = Split-Path $outputPath -Leaf
-$temporaryOutput = Join-Path $outputParent (".$outputName.stage-" + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $temporaryOutput | Out-Null
-
-try {
-    $zipName = 'Apollo-windows-x64.zip'
-    $zipPath = Join-Path $temporaryOutput $zipName
-    $checksumPath = Join-Path $temporaryOutput 'SHA256SUMS.txt'
-
-    New-WindowsReleaseZip `
-        -ZipPath $zipPath `
-        -ExecutablePath $executablePath `
-        -LicensePath $licensePath `
-        -NoticesPath $noticesPath
-
-    $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    [System.IO.File]::WriteAllText(
-        $checksumPath,
-        "$hash  $zipName`n",
-        [System.Text.UTF8Encoding]::new($false)
-    )
-
-    if (Test-Path -LiteralPath $outputPath) {
-        Remove-Item -LiteralPath $outputPath -Recurse -Force
+        return
     }
-    Move-Item -LiteralPath $temporaryOutput -Destination $outputPath
-}
-finally {
-    if (Test-Path -LiteralPath $temporaryOutput) {
-        Remove-Item -LiteralPath $temporaryOutput -Recurse -Force
+
+    $projectRoot = Resolve-RepositoryRoot -Path ([string]$cli['project'])
+    $defaultExecutable = 'target/x86_64-pc-windows-msvc/release/apollo.exe'
+    $defaultOutput = 'artifacts/windows'
+    $executableValue = if ($null -eq $cli['executable']) { $defaultExecutable } else { [string]$cli['executable'] }
+    $outputValue = if ($null -eq $cli['output']) { $defaultOutput } else { [string]$cli['output'] }
+    $executablePath = Resolve-ReleasePath -ProjectRoot $projectRoot -Path $executableValue -OptionName '--executable'
+    $outputPath = Resolve-ReleasePath -ProjectRoot $projectRoot -Path $outputValue -OptionName '--output'
+
+    & (Join-Path $PSScriptRoot 'check-release.ps1') --project $projectRoot
+
+    Assert-WindowsX64ApolloExecutable -Path $executablePath
+    Assert-SafeStagingDirectory -ProjectRoot $projectRoot -ExecutablePath $executablePath -OutputPath $outputPath
+
+    $licensePath = Join-Path $projectRoot 'LICENSE'
+    $noticesPath = Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md'
+    if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) {
+        throw "Project license does not exist: $licensePath"
     }
+    if (-not (Test-Path -LiteralPath $noticesPath -PathType Leaf)) {
+        throw "Third-party notices do not exist: $noticesPath"
+    }
+
+    $outputParent = Split-Path $outputPath -Parent
+    New-Item -ItemType Directory -Path $outputParent -Force | Out-Null
+    $outputName = Split-Path $outputPath -Leaf
+    $temporaryOutput = Join-Path $outputParent (".$outputName.stage-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $temporaryOutput | Out-Null
+
+    try {
+        $zipName = 'Apollo-windows-x64.zip'
+        $zipPath = Join-Path $temporaryOutput $zipName
+        $checksumPath = Join-Path $temporaryOutput 'SHA256SUMS.txt'
+
+        New-WindowsReleaseZip `
+            -ZipPath $zipPath `
+            -ExecutablePath $executablePath `
+            -LicensePath $licensePath `
+            -NoticesPath $noticesPath
+
+        $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        [System.IO.File]::WriteAllText(
+            $checksumPath,
+            "$hash  $zipName`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        if (Test-Path -LiteralPath $outputPath) {
+            Remove-Item -LiteralPath $outputPath -Recurse -Force
+        }
+        Move-Item -LiteralPath $temporaryOutput -Destination $outputPath
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryOutput) {
+            Remove-Item -LiteralPath $temporaryOutput -Recurse -Force
+        }
+    }
+
+    Write-Host "Created:  $(Join-Path $outputPath 'Apollo-windows-x64.zip')"
+    Write-Host "Checksum: $(Join-Path $outputPath 'SHA256SUMS.txt')"
 }
 
-Write-Host "Created:  $(Join-Path $outputPath 'Apollo-windows-x64.zip')"
-Write-Host "Checksum: $(Join-Path $outputPath 'SHA256SUMS.txt')"
+if ($MyInvocation.InvocationName -ne '.') {
+    Invoke-StageWindowsReleaseCli -Arguments $args
+}

@@ -9,58 +9,6 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 
 $stageReleaseScript = Join-Path $projectRoot 'scripts/stage-windows-release.ps1'
 
-function New-TestWindowsExecutable {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [ValidateSet('x64', 'x86')]
-        [string]$Architecture = 'x64',
-
-        [uint16]$OptionalHeaderMagic = 0x020B,
-
-        [uint16]$Subsystem = 2,
-
-        [uint16]$OptionalHeaderSize = 0x00F0
-    )
-
-    $parent = Split-Path $Path -Parent
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-
-    $peOffset = 0x80
-    $optionalHeaderOffset = $peOffset + 24
-    $bytes = [byte[]]::new($optionalHeaderOffset + $OptionalHeaderSize)
-    $bytes[0] = 0x4D
-    $bytes[1] = 0x5A
-    $bytes[0x3C] = $peOffset
-    $bytes[$peOffset] = 0x50
-    $bytes[$peOffset + 1] = 0x45
-
-    if ($Architecture -eq 'x64') {
-        $bytes[$peOffset + 4] = 0x64
-        $bytes[$peOffset + 5] = 0x86
-    }
-    else {
-        $bytes[$peOffset + 4] = 0x4C
-        $bytes[$peOffset + 5] = 0x01
-    }
-
-    $bytes[$peOffset + 20] = [byte]($OptionalHeaderSize -band 0xFF)
-    $bytes[$peOffset + 21] = [byte](($OptionalHeaderSize -shr 8) -band 0xFF)
-
-    if ($OptionalHeaderSize -ge 2) {
-        $bytes[$optionalHeaderOffset] = [byte]($OptionalHeaderMagic -band 0xFF)
-        $bytes[$optionalHeaderOffset + 1] = [byte](($OptionalHeaderMagic -shr 8) -band 0xFF)
-    }
-    if ($OptionalHeaderSize -ge 70) {
-        $bytes[$optionalHeaderOffset + 68] = [byte]($Subsystem -band 0xFF)
-        $bytes[$optionalHeaderOffset + 69] = [byte](($Subsystem -shr 8) -band 0xFF)
-    }
-
-    [System.IO.File]::WriteAllBytes($Path, $bytes)
-    return $Path
-}
-
 function New-ReleaseStagingFixture {
     param(
         [string]$Name = 'apollo release staging',

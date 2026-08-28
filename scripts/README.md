@@ -122,6 +122,23 @@ SHA256SUMS.txt
 
 The ZIP contains only `Apollo.exe`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`. FFmpeg and FFprobe remain external runtime requirements and are not bundled. By default the executable is read from `target/x86_64-pc-windows-msvc/release/apollo.exe`; use `--executable` and `--output` for explicit paths. Relative paths resolve from the selected project root. The generated `artifacts/` tree is ignored by Git and full-project snapshots.
 
+
+### Build the Windows installer
+
+```powershell
+.\scripts\build-windows-installer.ps1
+```
+
+Builds Apollo's per-user NSIS installer from the validated Windows GUI x64 release executable. The default output is:
+
+```text
+artifacts/windows-installer/Apollo-Setup-x64.exe
+```
+
+Install [NSIS](https://nsis.sourceforge.io/) so `makensis.exe` is available on `PATH`, or pass its path explicitly with `--makensis`. The wrapper derives the installer version from `Cargo.toml`, validates the release executable through the same PE32+/x64/GUI-subsystem owner used by release staging, and passes the root `LICENSE` and `THIRD_PARTY_NOTICES.md` to the installer definition. Use `--executable` and `--output` to override the build input or destination; the destination filename must remain `Apollo-Setup-x64.exe`.
+
+The installer is per-user, installs under `%LOCALAPPDATA%\Programs\Apollo`, creates an Apollo Start Menu shortcut and Installed Apps entry, and does not bundle FFmpeg/FFprobe or create a desktop shortcut.
+
 ## Tests
 
 Run all PowerShell tooling tests from the repository root:
