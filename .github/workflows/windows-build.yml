@@ -11,7 +11,11 @@ env:
   NSIS_VERSION: "3.11"
 
 jobs:
+  quality:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: quality
     runs-on: windows-latest
 
     steps:
@@ -45,18 +49,6 @@ jobs:
       - name: Validate release metadata
         shell: pwsh
         run: pwsh -NoProfile -File .\scripts\check-release.ps1
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Lint
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
-
-      - name: Test Rust
-        run: cargo test --locked --all-targets
-
-      - name: Test PowerShell tooling
-        run: pwsh -NoProfile -File .\tests\scripts\run.ps1
 
       - name: Install pinned NSIS compiler
         shell: pwsh

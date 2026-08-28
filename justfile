@@ -26,8 +26,9 @@ lint:
 
 gate:
     cargo fmt --check
-    cargo clippy --all-targets --all-features -- -D warnings
-    cargo test --all-targets
+    cargo clippy --locked --all-targets --all-features -- -D warnings
+    cargo test --locked --all-targets
+    pwsh -NoProfile -File tests/scripts/run.ps1
 
 zip:
     pwsh -NoProfile -File scripts/zip-project.ps1

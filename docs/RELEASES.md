@@ -63,7 +63,7 @@ cargo test --locked --all-targets
 pwsh -NoProfile -File .\tests\scripts\run.ps1
 ```
 
-Commit the release preparation and get that exact commit onto `main`. Push it, then wait for the `CI` workflow on the `main` push to succeed. The tag workflow later requires a successful push-triggered `CI` run for the exact tagged commit.
+Commit the release preparation and get that exact commit onto `main`. Push it and resolve any failures reported by the `CI` workflow before tagging. Tagged releases run the same repository-owned quality gate again on the exact tagged revision before any Windows release build can start.
 
 Before creating the tag, verify the working tree is clean and local `HEAD` matches `origin/main`:
 
@@ -79,7 +79,7 @@ git rev-parse origin/main
 
 ## Optional pre-tag Windows artifact check
 
-The manually dispatched `Windows Installer Build` workflow runs the same Windows build and staging owner used by tagged releases. It uploads one Actions artifact named `Apollo-windows-x64` containing the three staged release files.
+The manually dispatched `Windows Installer Build` workflow first runs the same repository-owned quality gate as normal CI. The Windows build and staging job cannot start unless that gate succeeds. It then uses the same build and staging owner as tagged releases and uploads one Actions artifact named `Apollo-windows-x64` containing the three staged release files.
 
 That Actions artifact is temporary build output with short retention. It is **not** a GitHub Release and does not publish anything to users.
 
@@ -87,7 +87,7 @@ Use it when you want to inspect the Windows installer and portable package befor
 
 ## Tag the release
 
-Create the version tag only after the release commit is on `main` and its push-triggered CI run has succeeded:
+Create the version tag only after the release commit is on `main` and the normal `CI` run is green:
 
 ```powershell
 git tag $tag
@@ -99,9 +99,9 @@ Pushing `v*` starts the `Draft GitHub Release` workflow. Before building, the wo
 - the tag exactly matches the Cargo package version;
 - `CHANGELOG.md` has the dated release section and matching version link;
 - the tagged commit is contained in `main`;
-- the exact tagged commit has a successful push-triggered `CI` run on `main`.
+- the shared formatting, Clippy, Rust-test, and PowerShell-tooling gate succeeds for the exact tagged revision.
 
-The workflow then builds the Windows GUI x64 release, stages the installer, portable ZIP, and checksum file, verifies the staged checksums, and creates or refreshes a **draft** GitHub Release titled `Apollo <tag>`.
+The quality gate runs after release metadata and `main` ancestry validation and before the build job. The workflow then builds the Windows GUI x64 release, stages the installer, portable ZIP, and checksum file, verifies the staged checksums, and creates or refreshes a **draft** GitHub Release titled `Apollo <tag>`.
 
 ## Review the draft release
 

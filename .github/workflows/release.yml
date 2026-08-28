@@ -5,7 +5,8 @@ on:
     tags:
       - "v*"
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -20,7 +21,6 @@ jobs:
     name: Verify release commit
     runs-on: windows-latest
     permissions:
-      actions: read
       contents: read
 
     steps:
@@ -42,36 +42,14 @@ jobs:
             throw "Tagged commit $env:GITHUB_SHA is not contained in main."
           }
 
-      - name: Require successful main CI run
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          $headers = @{
-            Accept = 'application/vnd.github+json'
-            Authorization = "Bearer $env:GITHUB_TOKEN"
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $sha = [System.Uri]::EscapeDataString($env:GITHUB_SHA)
-          $uri = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=$sha&status=completed&per_page=100"
-          $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
-          $runs = @($response.workflow_runs | Where-Object {
-            $_.head_sha -eq $env:GITHUB_SHA -and
-            $_.head_branch -eq 'main' -and
-            $_.event -eq 'push'
-          })
-
-          if ($runs.Count -eq 0) {
-            throw "No completed push-triggered CI run exists for tagged commit $env:GITHUB_SHA on main."
-          }
-          if (-not ($runs | Where-Object { $_.conclusion -eq 'success' })) {
-            $conclusions = ($runs | ForEach-Object { $_.conclusion }) -join ', '
-            throw "CI did not succeed for tagged commit $env:GITHUB_SHA. Conclusions: $conclusions"
-          }
+  quality:
+    name: Quality gate
+    needs: verify
+    uses: ./.github/workflows/ci.yml
 
   build:
     name: Build Windows release assets
-    needs: verify
+    needs: quality
     runs-on: windows-latest
     permissions:
       contents: read
