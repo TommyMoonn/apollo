@@ -312,9 +312,7 @@ mod tests {
         assert_eq!(
             executor.poll(),
             &UpscaleExecutionState::Completed {
-                output: fs::canonicalize(request.output.parent().unwrap())
-                    .unwrap()
-                    .join(request.output.file_name().unwrap()),
+                output: request.output.clone(),
             }
         );
         assert_eq!(fs::read(&request.output).unwrap(), b"complete upscale");

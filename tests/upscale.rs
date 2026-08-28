@@ -653,9 +653,7 @@ fn same_input_and_output_is_rejected() {
     assert_eq!(
         validate_upscale_request(&request, &media),
         Err(UpscaleValidationError::Output(
-            MediaOutputError::SameInputAndOutput(
-                fs::canonicalize(temp.path()).unwrap().join("input.mp4")
-            )
+            MediaOutputError::SameInputAndOutput(temp.path().join("input.mp4"))
         ))
     );
 }

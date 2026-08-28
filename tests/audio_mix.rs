@@ -156,9 +156,7 @@ fn same_input_and_output_is_rejected() {
     assert_eq!(
         validate_audio_mix_request(&request, &media),
         Err(AudioMixValidationError::Output(
-            MediaOutputError::SameInputAndOutput(
-                fs::canonicalize(temp.path()).unwrap().join("input.mkv")
-            )
+            MediaOutputError::SameInputAndOutput(temp.path().join("input.mkv"))
         ))
     );
 }

@@ -143,7 +143,7 @@ fn validated_output_destination(
         return Err(MediaOutputError::OutputParentNotDirectory(requested_parent));
     }
 
-    let parent = fs::canonicalize(&requested_parent).map_err(|error| {
+    let parent = absolute_lexical(&requested_parent).map_err(|error| {
         MediaOutputError::OutputParentUnavailable {
             path: requested_parent.clone(),
             kind: error.kind(),
@@ -155,8 +155,14 @@ fn validated_output_destination(
             path: input.to_path_buf(),
             kind: error.kind(),
         })?;
+    let output_path = comparison_path(&final_path).map_err(|error| {
+        MediaOutputError::OutputParentUnavailable {
+            path: final_path.clone(),
+            kind: error.kind(),
+        }
+    })?;
 
-    if paths_equal(&input_path, &final_path) {
+    if paths_equal(&input_path, &output_path) {
         return Err(MediaOutputError::SameInputAndOutput(final_path));
     }
 
@@ -601,9 +607,10 @@ mod tests {
         let prepared = MediaOutput::prepare(&input, &output).unwrap();
 
         assert_eq!(prepared.temporary_path().file_name(), output.file_name());
+        assert_eq!(prepared.final_path(), output);
         assert_eq!(
             prepared.temporary_path().parent().unwrap().parent(),
-            prepared.final_path().parent()
+            output.parent()
         );
         assert!(!prepared.temporary_path().exists());
         assert!(!prepared.final_path().exists());
