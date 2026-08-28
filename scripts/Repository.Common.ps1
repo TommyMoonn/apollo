@@ -11,6 +11,35 @@ function Get-RepositoryPathComparison {
     return [System.StringComparison]::Ordinal
 }
 
+function Test-RepositoryFileSystemRoot {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+        $rootPath = [System.IO.Path]::GetPathRoot($fullPath)
+    }
+    catch {
+        return $false
+    }
+
+    if ([string]::IsNullOrWhiteSpace($rootPath)) {
+        return $false
+    }
+
+    $trimChars = [char[]]@('\', '/')
+    $normalizedPath = $fullPath.TrimEnd($trimChars)
+    $normalizedRoot = $rootPath.TrimEnd($trimChars)
+
+    return $normalizedPath.Equals($normalizedRoot, (Get-RepositoryPathComparison))
+}
+
 function Resolve-RepositoryRoot {
     param(
         [Parameter(Mandatory)]
