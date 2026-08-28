@@ -17,7 +17,7 @@ fn main() -> eframe::Result {
         "Apollo",
         native_options,
         Box::new(|creation_context| {
-            let app = ApolloApp::new(creation_context)?;
+            let app = ApolloApp::new(creation_context);
             Ok(Box::new(app))
         }),
     )

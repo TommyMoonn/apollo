@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn editable_filename_field_stays_bounded_with_long_text() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
         let original = "very long output filename ".repeat(12);
         let mut stem = original.clone();
 
@@ -764,7 +764,7 @@ mod tests {
     #[test]
     fn editable_filename_text_is_vertically_centered() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
         let mut stem = String::from("base");
         let mut field_rect = egui::Rect::NOTHING;
 
@@ -784,7 +784,7 @@ mod tests {
     #[test]
     fn output_row_anchors_browse_and_gives_long_filename_only_flexible_width() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
         let mut stem = "very long output filename ".repeat(12);
         let mut row_rect = egui::Rect::NOTHING;
         let mut selector_rect = egui::Rect::NOTHING;
@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn minimum_content_width_keeps_audio_container_selector_usable() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
         let mut stem = String::from("recording-mix");
         let content_width =
             layout::MINIMUM_CONTENT_SIZE.x - f32::from(layout::CONTENT_PADDING) * 2.0;
@@ -859,7 +859,7 @@ mod tests {
     #[test]
     fn narrow_output_row_stacks_selector_filename_and_browse_without_overlap() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
         let mut stem = String::from("recording-mix");
         let mut selector_rect = egui::Rect::NOTHING;
 
@@ -891,7 +891,7 @@ mod tests {
     #[test]
     fn narrow_output_row_without_selector_stacks_filename_then_browse() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
         let mut stem = String::from("recording-4k");
 
         let output = context.run_ui(Default::default(), |ui| {

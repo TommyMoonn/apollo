@@ -217,20 +217,18 @@ pub(crate) struct ApolloApp {
 }
 
 impl ApolloApp {
-    pub(crate) fn new(
-        creation_context: &eframe::CreationContext<'_>,
-    ) -> Result<Self, fonts::FontSetupError> {
-        fonts::install(&creation_context.egui_ctx)?;
+    pub(crate) fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
+        fonts::install(&creation_context.egui_ctx);
         theme::install(&creation_context.egui_ctx);
 
-        Ok(Self {
+        Self {
             state: AppState::default(),
             media_tools: discover_media_tools(),
             audio_mix_executor: AudioMixExecutor::new(),
             upscale_executor: UpscaleExecutor::new(),
             media_inspection: None,
             tools_error_details_open: false,
-        })
+        }
     }
 
     fn file_intake_enabled(&self) -> bool {
@@ -1104,7 +1102,7 @@ mod tests {
     fn fresh_application_state_renders_unified_file_intake() {
         let mut app = app();
         let context = egui::Context::default();
-        fonts::install(&context).expect("test typography should install");
+        fonts::install(&context);
         theme::install(&context);
 
         let tool = app.state.current_tool;
@@ -1124,7 +1122,7 @@ mod tests {
         let mut app = app();
         let _sender = begin_pending_inspection(&mut app, &path);
         let context = egui::Context::default();
-        fonts::install(&context).expect("test typography should install");
+        fonts::install(&context);
         theme::install(&context);
 
         assert!(app.state.intake_active);
@@ -1340,7 +1338,7 @@ mod tests {
         app.select_tool(Tool::VideoUpscale);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
         let context = egui::Context::default();
-        fonts::install(&context).expect("test typography should install");
+        fonts::install(&context);
         theme::install(&context);
 
         let mut output = context.run_ui(Default::default(), |ui| {
@@ -1363,7 +1361,7 @@ mod tests {
         app.select_tool(Tool::AudioMix);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
         let context = egui::Context::default();
-        fonts::install(&context).expect("test typography should install");
+        fonts::install(&context);
         theme::install(&context);
 
         let mut output = context.run_ui(Default::default(), |ui| {
@@ -1537,7 +1535,7 @@ mod tests {
         );
 
         let context = egui::Context::default();
-        fonts::install(&context).expect("test typography should install");
+        fonts::install(&context);
         theme::install(&context);
         let mut rendered = context.run_ui(Default::default(), |ui| {
             assert!(app.show_upscale_start_error(ui));

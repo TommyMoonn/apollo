@@ -822,7 +822,7 @@ mod tests {
     #[test]
     fn minimum_height_uses_outer_task_scroll_before_shrinking_target_rows() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media(Some(1920), Some(1080));
@@ -845,7 +845,7 @@ mod tests {
     #[test]
     fn narrow_stacked_fields_are_accounted_for_before_task_overflow() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media(Some(1920), Some(1080));
@@ -878,7 +878,7 @@ mod tests {
     #[test]
     fn reference_height_keeps_target_list_nested_and_primary_action_in_flow() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media(Some(1920), Some(1080));
@@ -906,7 +906,7 @@ mod tests {
     #[test]
     fn all_three_targets_are_visible_when_height_can_fit_them() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media(Some(1920), Some(1080));

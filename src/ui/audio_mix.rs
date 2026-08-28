@@ -1105,7 +1105,7 @@ mod tests {
     #[test]
     fn minimum_height_uses_outer_task_scroll_when_fixed_audio_mix_flow_cannot_fit() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media();
@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn reference_height_keeps_long_track_list_nested_and_task_surface_in_flow() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media();
@@ -1157,7 +1157,7 @@ mod tests {
     #[test]
     fn taller_height_exposes_more_audio_tracks_before_scrolling() {
         let context = egui::Context::default();
-        super::fonts::install(&context).expect("test typography should install");
+        super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media();
