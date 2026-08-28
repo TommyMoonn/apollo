@@ -252,6 +252,45 @@ function Get-ZipEntryText {
     finally { $archive.Dispose() }
 }
 
+
+function New-TestNsisCompiler {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $parent = Split-Path $Path -Parent
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    @'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+if (-not [string]::IsNullOrWhiteSpace($env:APOLLO_TEST_NSIS_MARKER)) {
+    [System.IO.File]::WriteAllText($env:APOLLO_TEST_NSIS_MARKER, 'invoked')
+}
+if (-not [string]::IsNullOrWhiteSpace($env:APOLLO_TEST_NSIS_LOG)) {
+    [System.IO.File]::WriteAllLines($env:APOLLO_TEST_NSIS_LOG, [string[]]$args)
+}
+if ($env:APOLLO_TEST_NSIS_FAIL -eq '1') {
+    throw 'fake makensis failure'
+}
+
+$outputArgument = @($args | Where-Object { $_.StartsWith('/DOUTPUT_FILE=', [System.StringComparison]::Ordinal) })
+if ($outputArgument.Count -ne 1) {
+    throw 'fake makensis expected exactly one OUTPUT_FILE define'
+}
+$outputPath = $outputArgument[0].Substring('/DOUTPUT_FILE='.Length)
+if ($env:APOLLO_TEST_NSIS_UNEXPECTED -eq '1') {
+    $outputPath = Join-Path (Split-Path $outputPath -Parent) 'Unexpected-Setup.exe'
+}
+
+New-Item -ItemType Directory -Path (Split-Path $outputPath -Parent) -Force | Out-Null
+[System.IO.File]::WriteAllText($outputPath, 'fake Apollo installer')
+'@ | Set-Content -LiteralPath $Path -Encoding utf8
+
+    return $Path
+}
+
 function New-TestWindowsExecutable {
     param(
         [Parameter(Mandatory)]

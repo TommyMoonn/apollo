@@ -37,33 +37,7 @@ function New-InstallerFixture {
     New-TestWindowsExecutable -Path (Join-Path $root 'target/x86_64-pc-windows-msvc/release/apollo.exe') | Out-Null
 
     $compiler = Join-Path $root 'tools/fake-makensis.ps1'
-    New-Item -ItemType Directory -Path (Split-Path $compiler -Parent) -Force | Out-Null
-    @'
-Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
-
-if (-not [string]::IsNullOrWhiteSpace($env:APOLLO_TEST_NSIS_MARKER)) {
-    [System.IO.File]::WriteAllText($env:APOLLO_TEST_NSIS_MARKER, 'invoked')
-}
-if (-not [string]::IsNullOrWhiteSpace($env:APOLLO_TEST_NSIS_LOG)) {
-    [System.IO.File]::WriteAllLines($env:APOLLO_TEST_NSIS_LOG, [string[]]$args)
-}
-if ($env:APOLLO_TEST_NSIS_FAIL -eq '1') {
-    throw 'fake makensis failure'
-}
-
-$outputArgument = @($args | Where-Object { $_.StartsWith('/DOUTPUT_FILE=', [System.StringComparison]::Ordinal) })
-if ($outputArgument.Count -ne 1) {
-    throw 'fake makensis expected exactly one OUTPUT_FILE define'
-}
-$outputPath = $outputArgument[0].Substring('/DOUTPUT_FILE='.Length)
-if ($env:APOLLO_TEST_NSIS_UNEXPECTED -eq '1') {
-    $outputPath = Join-Path (Split-Path $outputPath -Parent) 'Unexpected-Setup.exe'
-}
-
-New-Item -ItemType Directory -Path (Split-Path $outputPath -Parent) -Force | Out-Null
-[System.IO.File]::WriteAllText($outputPath, 'fake Apollo installer')
-'@ | Set-Content -LiteralPath $compiler -Encoding utf8
+    New-TestNsisCompiler -Path $compiler | Out-Null
 
     return [pscustomobject]@{
         Root = $root

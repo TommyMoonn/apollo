@@ -219,6 +219,7 @@ function Invoke-StageWindowsReleaseCli {
     $cli = ConvertFrom-CliArguments -Arguments $Arguments -OptionSpecs @{
         project = @{ Aliases = @('-p', '-ProjectRoot'); Default = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
         executable = @{ Aliases = @('-e', '-Executable') }
+        makensis = @{ Aliases = @('-m', '-Makensis') }
         output = @{ Aliases = @('-o', '-Output') }
     }
 
@@ -229,10 +230,11 @@ Usage: .\scripts\stage-windows-release.ps1 [options]
 Options:
   -p, --project <path>          Project root. Defaults to this repository.
   -e, --executable <path>       Built apollo.exe. Defaults to the Windows x64 release target.
+  -m, --makensis <path>         NSIS makensis compiler. Defaults to installer-build discovery.
   -o, --output <path>           Staging directory. Defaults to artifacts/windows.
   -h, --help                    Show this help.
 
-Relative executable and output paths resolve from the project root.
+Relative executable, compiler, and output paths resolve from the project root.
 '@
         return
     }
@@ -266,9 +268,25 @@ Relative executable and output paths resolve from the project root.
     New-Item -ItemType Directory -Path $temporaryOutput | Out-Null
 
     try {
+        $installerName = 'Apollo-Setup-x64.exe'
         $zipName = 'Apollo-windows-x64.zip'
+        $installerPath = Join-Path $temporaryOutput $installerName
         $zipPath = Join-Path $temporaryOutput $zipName
         $checksumPath = Join-Path $temporaryOutput 'SHA256SUMS.txt'
+
+        $installerArguments = @(
+            '--project', $projectRoot,
+            '--executable', $executablePath,
+            '--output', $installerPath
+        )
+        if ($null -ne $cli['makensis']) {
+            $installerArguments += @('--makensis', [string]$cli['makensis'])
+        }
+        & (Join-Path $PSScriptRoot 'build-windows-installer.ps1') @installerArguments
+
+        if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
+            throw "Installer build did not produce the expected staged artifact: $installerPath"
+        }
 
         New-WindowsReleaseZip `
             -ZipPath $zipPath `
@@ -276,10 +294,14 @@ Relative executable and output paths resolve from the project root.
             -LicensePath $licensePath `
             -NoticesPath $noticesPath
 
-        $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $checksumLines = foreach ($name in @($installerName, $zipName)) {
+            $artifactPath = Join-Path $temporaryOutput $name
+            $hash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+        }
         [System.IO.File]::WriteAllText(
             $checksumPath,
-            "$hash  $zipName`n",
+            (($checksumLines -join "`n") + "`n"),
             [System.Text.UTF8Encoding]::new($false)
         )
 
@@ -294,6 +316,7 @@ Relative executable and output paths resolve from the project root.
         }
     }
 
+    Write-Host "Created:  $(Join-Path $outputPath 'Apollo-Setup-x64.exe')"
     Write-Host "Created:  $(Join-Path $outputPath 'Apollo-windows-x64.zip')"
     Write-Host "Checksum: $(Join-Path $outputPath 'SHA256SUMS.txt')"
 }

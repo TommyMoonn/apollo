@@ -8,6 +8,9 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 . (Join-Path $projectRoot 'scripts/Repository.Common.ps1')
 
 $stageReleaseScript = Join-Path $projectRoot 'scripts/stage-windows-release.ps1'
+$installerDefinition = Join-Path $projectRoot 'installer/windows/apollo.nsi'
+
+$originalFail = $env:APOLLO_TEST_NSIS_FAIL
 
 function New-ReleaseStagingFixture {
     param(
@@ -17,6 +20,7 @@ function New-ReleaseStagingFixture {
     )
 
     $root = New-TestDirectory -Name $Name
+    New-Item -ItemType Directory -Path (Join-Path $root 'installer/windows') -Force | Out-Null
 
     $manifest = "[package]`nname = `"apollo`"`nversion = `"$Version`"`nedition = `"2024`"`n"
     [System.IO.File]::WriteAllText((Join-Path $root 'Cargo.toml'), $manifest, [System.Text.UTF8Encoding]::new($false))
@@ -26,6 +30,9 @@ function New-ReleaseStagingFixture {
 
     'Apollo project license' | Set-Content -LiteralPath (Join-Path $root 'LICENSE') -Encoding utf8
     'Apollo third-party notices' | Set-Content -LiteralPath (Join-Path $root 'THIRD_PARTY_NOTICES.md') -Encoding utf8
+    Copy-Item -LiteralPath $installerDefinition -Destination (Join-Path $root 'installer/windows/apollo.nsi')
+
+    New-TestNsisCompiler -Path (Join-Path $root 'tools/fake-makensis.ps1') | Out-Null
 
     $executable = Join-Path $root 'target/x86_64-pc-windows-msvc/release/apollo.exe'
     New-TestWindowsExecutable -Path $executable | Out-Null
@@ -33,17 +40,39 @@ function New-ReleaseStagingFixture {
     return $root
 }
 
+function Invoke-ReleaseStagingFixture {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Repository,
+
+        [object[]]$Arguments = @()
+    )
+
+    $compiler = Join-Path $Repository 'tools/fake-makensis.ps1'
+    $scriptArguments = @(
+        '--project', $Repository,
+        '--makensis', $compiler
+    ) + $Arguments
+    return Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments $scriptArguments
+}
+
 Invoke-TestCase 'windows release staging accepts a GUI x64 PE32+ executable and creates the expected archive and checksum' {
     $repo = New-ReleaseStagingFixture
     try {
-        $output = Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo)
+        $output = Invoke-ReleaseStagingFixture -Repository $repo
         $staging = Join-Path $repo 'artifacts/windows'
+        $installerPath = Join-Path $staging 'Apollo-Setup-x64.exe'
         $zipPath = Join-Path $staging 'Apollo-windows-x64.zip'
         $checksumPath = Join-Path $staging 'SHA256SUMS.txt'
 
+        Assert-PathExists $installerPath 'Windows installer should be staged.'
         Assert-PathExists $zipPath 'Release ZIP should be staged.'
         Assert-PathExists $checksumPath 'Release checksum should be staged.'
-        Assert-Contains $output 'Created:' 'Successful staging should report the release ZIP.'
+        Assert-Contains $output 'Apollo-Setup-x64.exe' 'Successful staging should report the installer.'
+        Assert-Contains $output 'Apollo-windows-x64.zip' 'Successful staging should report the portable ZIP.'
+
+        $stagedFiles = @(Get-ChildItem -LiteralPath $staging -File | ForEach-Object { $_.Name } | Sort-Object)
+        Assert-Equal @('Apollo-Setup-x64.exe', 'Apollo-windows-x64.zip', 'SHA256SUMS.txt') $stagedFiles 'Staging should contain exactly the final release set.'
 
         $entries = @(Get-ZipEntryNames -Path $zipPath | Sort-Object)
         Assert-Equal @('Apollo.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.md') $entries 'Release ZIP should contain only the expected payload.'
@@ -51,9 +80,11 @@ Invoke-TestCase 'windows release staging accepts a GUI x64 PE32+ executable and 
         Assert-Contains (Get-ZipEntryText -Path $zipPath -EntryName 'THIRD_PARTY_NOTICES.md') 'Apollo third-party notices' 'Third-party notices should be copied into the archive.'
 
         $checksum = [System.IO.File]::ReadAllText($checksumPath)
-        Assert-True ($checksum -cmatch '\A[0-9a-f]{64}  Apollo-windows-x64\.zip\r?\n\z') 'Checksum file should contain one lowercase SHA-256 line.'
-        $expectedHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        Assert-True ($checksum.StartsWith($expectedHash, [System.StringComparison]::Ordinal)) 'Checksum should verify the staged ZIP.'
+        Assert-True ($checksum -cmatch '\A[0-9a-f]{64}  Apollo-Setup-x64\.exe\r?\n[0-9a-f]{64}  Apollo-windows-x64\.zip\r?\n\z') 'Checksum file should contain two lowercase SHA-256 lines in stable filename order.'
+        $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $expectedChecksum = "$installerHash  Apollo-Setup-x64.exe`n$zipHash  Apollo-windows-x64.zip`n"
+        Assert-Equal $expectedChecksum ($checksum -replace "`r`n", "`n") 'Checksums should cover each staged release artifact exactly once.'
     }
     finally {
         Remove-Item -LiteralPath $repo -Recurse -Force
@@ -67,7 +98,7 @@ Invoke-TestCase 'windows release staging rejects a missing executable without gu
         New-TestWindowsExecutable -Path (Join-Path $repo 'target/release/apollo.exe') | Out-Null
 
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo) | Out-Null
+            Invoke-ReleaseStagingFixture -Repository $repo | Out-Null
         } '*Windows x64 Apollo release executable does not exist*'
     }
     finally {
@@ -83,7 +114,7 @@ Invoke-TestCase 'windows release staging requires one explicit executable file' 
         New-TestWindowsExecutable -Path (Join-Path $candidates 'apollo-copy.exe') | Out-Null
 
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--executable', $candidates) | Out-Null
+            Invoke-ReleaseStagingFixture -Repository $repo -Arguments @('--executable', $candidates) | Out-Null
         } '*must identify exactly one file*'
     }
     finally {
@@ -97,13 +128,13 @@ Invoke-TestCase 'windows release staging rejects unexpected executable identity 
         $wrongName = Join-Path $repo 'build/wrong.exe'
         New-TestWindowsExecutable -Path $wrongName | Out-Null
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--executable', $wrongName) | Out-Null
+            Invoke-ReleaseStagingFixture -Repository $repo -Arguments @('--executable', $wrongName) | Out-Null
         } "*must be named 'apollo.exe'*"
 
         $wrongArchitecture = Join-Path $repo 'build/apollo.exe'
         New-TestWindowsExecutable -Path $wrongArchitecture -Architecture x86 | Out-Null
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--executable', $wrongArchitecture) | Out-Null
+            Invoke-ReleaseStagingFixture -Repository $repo -Arguments @('--executable', $wrongArchitecture) | Out-Null
         } '*must target Windows x64*'
     }
     finally {
@@ -118,7 +149,7 @@ Invoke-TestCase 'windows release staging rejects a console-subsystem executable'
         New-TestWindowsExecutable -Path $consoleExecutable -Subsystem 3 | Out-Null
 
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--executable', $consoleExecutable) | Out-Null
+            Invoke-ReleaseStagingFixture -Repository $repo -Arguments @('--executable', $consoleExecutable) | Out-Null
         } '*must use the Windows GUI subsystem*'
     }
     finally {
@@ -132,13 +163,13 @@ Invoke-TestCase 'windows release staging rejects unsupported or malformed option
         $unsupported = Join-Path $repo 'unsupported/apollo.exe'
         New-TestWindowsExecutable -Path $unsupported -OptionalHeaderMagic 0x010B | Out-Null
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--executable', $unsupported) | Out-Null
+            Invoke-ReleaseStagingFixture -Repository $repo -Arguments @('--executable', $unsupported) | Out-Null
         } '*must use PE32+*'
 
         $malformed = Join-Path $repo 'malformed/apollo.exe'
         New-TestWindowsExecutable -Path $malformed -OptionalHeaderSize 2 | Out-Null
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--executable', $malformed) | Out-Null
+            Invoke-ReleaseStagingFixture -Repository $repo -Arguments @('--executable', $malformed) | Out-Null
         } '*malformed Windows PE optional header*'
 
         $truncated = Join-Path $repo 'truncated/apollo.exe'
@@ -151,7 +182,7 @@ Invoke-TestCase 'windows release staging rejects unsupported or malformed option
             $truncatedStream.Dispose()
         }
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--executable', $truncated) | Out-Null
+            Invoke-ReleaseStagingFixture -Repository $repo -Arguments @('--executable', $truncated) | Out-Null
         } '*malformed Windows PE optional header*'
     }
     finally {
@@ -165,7 +196,7 @@ Invoke-TestCase 'windows release staging requires project license and third-part
         try {
             Remove-Item -LiteralPath (Join-Path $repo $missingName) -Force
             Assert-Throws {
-                Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo) | Out-Null
+                Invoke-ReleaseStagingFixture -Repository $repo | Out-Null
             } '*does not exist*'
         }
         finally {
@@ -196,7 +227,7 @@ Invoke-TestCase 'windows release staging rejects a filesystem root on another dr
         $otherDriveRoot = if ($projectRootPath.StartsWith('C:', [System.StringComparison]::OrdinalIgnoreCase)) { 'D:\' } else { 'C:\' }
 
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--output', $otherDriveRoot) | Out-Null
+            Invoke-ReleaseStagingFixture -Repository $repo -Arguments @('--output', $otherDriveRoot) | Out-Null
         } '*Refusing to use a filesystem root as the staging directory*'
     }
     finally {
@@ -212,8 +243,7 @@ Invoke-TestCase 'windows release staging rejects a UNC share root without contac
     $repo = New-ReleaseStagingFixture
     try {
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @(
-                '--project', $repo,
+            Invoke-ReleaseStagingFixture -Repository $repo -Arguments @(
                 '--output', '\\apollo-test-server\apollo-share\'
             ) | Out-Null
         } '*Refusing to use a filesystem root as the staging directory*'
@@ -244,8 +274,9 @@ Invoke-TestCase 'windows release staging permits a real subdirectory on another 
         }
 
         $output = Join-Path $otherDrive.Root ('apollo-release-test-' + [Guid]::NewGuid().ToString('N'))
-        Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--output', $output) | Out-Null
+        Invoke-ReleaseStagingFixture -Repository $repo -Arguments @('--output', $output) | Out-Null
 
+        Assert-PathExists (Join-Path $output 'Apollo-Setup-x64.exe') 'A normal output directory on another drive should include the installer.'
         Assert-PathExists (Join-Path $output 'Apollo-windows-x64.zip') 'A normal output directory on another drive should be staged successfully.'
         Assert-PathExists (Join-Path $output 'SHA256SUMS.txt') 'A normal output directory on another drive should receive the checksum file.'
     }
@@ -257,20 +288,25 @@ Invoke-TestCase 'windows release staging permits a real subdirectory on another 
     }
 }
 
-Invoke-TestCase 'windows release staging replaces only the owned output directory' {
+Invoke-TestCase 'windows release staging replaces stale release assets only after the new set succeeds' {
     $repo = New-ReleaseStagingFixture
     try {
         $staging = Join-Path $repo 'artifacts/windows'
         New-Item -ItemType Directory -Path $staging -Force | Out-Null
-        'stale' | Set-Content -LiteralPath (Join-Path $staging 'stale.txt') -Encoding utf8
+        'stale installer' | Set-Content -LiteralPath (Join-Path $staging 'Apollo-Setup-x64.exe') -Encoding utf8
+        'stale zip' | Set-Content -LiteralPath (Join-Path $staging 'Apollo-windows-x64.zip') -Encoding utf8
+        'stale checksums' | Set-Content -LiteralPath (Join-Path $staging 'SHA256SUMS.txt') -Encoding utf8
+        'stale extra' | Set-Content -LiteralPath (Join-Path $staging 'stale.txt') -Encoding utf8
         'keep' | Set-Content -LiteralPath (Join-Path $repo 'artifacts/keep.txt') -Encoding utf8
 
-        Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo) | Out-Null
+        Invoke-ReleaseStagingFixture -Repository $repo | Out-Null
 
-        Assert-PathMissing (Join-Path $staging 'stale.txt') 'Owned staging directory should be recreated.'
+        Assert-PathMissing (Join-Path $staging 'stale.txt') 'Owned staging directory should be recreated only after successful packaging.'
         Assert-PathExists (Join-Path $repo 'artifacts/keep.txt') 'Sibling artifact content must remain untouched.'
         $stagedFiles = @(Get-ChildItem -LiteralPath $staging -File | ForEach-Object { $_.Name } | Sort-Object)
-        Assert-Equal @('Apollo-windows-x64.zip', 'SHA256SUMS.txt') $stagedFiles 'Staging directory should contain only release outputs.'
+        Assert-Equal @('Apollo-Setup-x64.exe', 'Apollo-windows-x64.zip', 'SHA256SUMS.txt') $stagedFiles 'Staging directory should contain only the successful release set.'
+        Assert-False (([System.IO.File]::ReadAllText((Join-Path $staging 'Apollo-Setup-x64.exe'))).Contains('stale installer', [System.StringComparison]::Ordinal)) 'Successful staging must replace the stale installer.'
+        Assert-False (([System.IO.File]::ReadAllText((Join-Path $staging 'SHA256SUMS.txt'))).Contains('stale checksums', [System.StringComparison]::Ordinal)) 'Successful staging must replace stale checksums.'
     }
     finally {
         Remove-Item -LiteralPath $repo -Recurse -Force
@@ -284,16 +320,47 @@ Invoke-TestCase 'windows release staging supports explicit paths containing spac
         $output = Join-Path $repo 'release artifacts with spaces/windows'
         New-TestWindowsExecutable -Path $executable | Out-Null
 
-        Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @(
-            '--project', $repo,
+        Invoke-ReleaseStagingFixture -Repository $repo -Arguments @(
             '--executable', $executable,
             '--output', $output
         ) | Out-Null
 
+        Assert-PathExists (Join-Path $output 'Apollo-Setup-x64.exe') 'Installer should support an explicit staging path with spaces.'
         Assert-PathExists (Join-Path $output 'Apollo-windows-x64.zip') 'Explicit output path with spaces should be supported.'
         Assert-PathExists (Join-Path $output 'SHA256SUMS.txt') 'Checksum should be written beside the release ZIP.'
     }
     finally {
+        Remove-Item -LiteralPath $repo -Recurse -Force
+    }
+}
+
+Invoke-TestCase 'installer build failure preserves the previous valid release staging directory' {
+    $repo = New-ReleaseStagingFixture
+    try {
+        $staging = Join-Path $repo 'artifacts/windows'
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        'previous installer' | Set-Content -LiteralPath (Join-Path $staging 'Apollo-Setup-x64.exe') -Encoding utf8
+        'previous zip' | Set-Content -LiteralPath (Join-Path $staging 'Apollo-windows-x64.zip') -Encoding utf8
+        'previous checksums' | Set-Content -LiteralPath (Join-Path $staging 'SHA256SUMS.txt') -Encoding utf8
+        'keep sibling' | Set-Content -LiteralPath (Join-Path $repo 'artifacts/keep.txt') -Encoding utf8
+        $before = @{}
+        foreach ($name in @('Apollo-Setup-x64.exe', 'Apollo-windows-x64.zip', 'SHA256SUMS.txt')) {
+            $path = Join-Path $staging $name
+            $before[$name] = [System.IO.File]::ReadAllText($path)
+        }
+
+        $env:APOLLO_TEST_NSIS_FAIL = '1'
+        Assert-Throws {
+            Invoke-ReleaseStagingFixture -Repository $repo | Out-Null
+        } '*fake makensis failure*'
+
+        foreach ($name in $before.Keys) {
+            Assert-Equal $before[$name] ([System.IO.File]::ReadAllText((Join-Path $staging $name))) "Failed installer creation must preserve prior '$name'."
+        }
+        Assert-PathExists (Join-Path $repo 'artifacts/keep.txt') 'Failed staging must not touch sibling artifact content.'
+    }
+    finally {
+        $env:APOLLO_TEST_NSIS_FAIL = $null
         Remove-Item -LiteralPath $repo -Recurse -Force
     }
 }
@@ -306,7 +373,7 @@ Invoke-TestCase 'windows release staging validates release metadata before repla
         'previous release' | Set-Content -LiteralPath (Join-Path $staging 'keep.txt') -Encoding utf8
 
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo) | Out-Null
+            Invoke-ReleaseStagingFixture -Repository $repo | Out-Null
         } '*does not match Cargo.toml version*'
 
         Assert-PathExists (Join-Path $staging 'keep.txt') 'Failed release validation must not replace existing staged output.'
@@ -320,6 +387,9 @@ Invoke-TestCase 'windows release staging exposes help without creating artifacts
     $output = Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--help')
     Assert-Contains $output 'Usage:' 'Staging help should show usage.'
     Assert-Contains $output '--executable' 'Staging help should describe the explicit executable option.'
+    Assert-Contains $output '--makensis' 'Staging help should describe NSIS compiler selection.'
 }
+
+$env:APOLLO_TEST_NSIS_FAIL = $originalFail
 
 Complete-TestRun

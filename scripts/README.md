@@ -113,14 +113,17 @@ Updates the `[package].version` in `Cargo.toml`, lets Cargo refresh the root pac
 .\scripts\stage-windows-release.ps1
 ```
 
-Validates the current release metadata, verifies the Windows GUI x64 `apollo.exe`, and recreates `artifacts/windows/` with:
+Validates the current release metadata, verifies the Windows GUI x64 `apollo.exe`, builds the repository-owned NSIS installer, and atomically recreates `artifacts/windows/` with:
 
 ```text
+Apollo-Setup-x64.exe
 Apollo-windows-x64.zip
 SHA256SUMS.txt
 ```
 
-The ZIP contains only `Apollo.exe`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`. FFmpeg and FFprobe remain external runtime requirements and are not bundled. By default the executable is read from `target/x86_64-pc-windows-msvc/release/apollo.exe`; use `--executable` and `--output` for explicit paths. Relative paths resolve from the selected project root. The generated `artifacts/` tree is ignored by Git and full-project snapshots.
+The installer is the primary Windows distribution artifact. The portable ZIP remains available as a secondary option and still contains only `Apollo.exe`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`. `SHA256SUMS.txt` contains lowercase SHA-256 entries for the installer and ZIP in stable filename order. FFmpeg and FFprobe remain external runtime requirements and are not bundled.
+
+By default the executable is read from `target/x86_64-pc-windows-msvc/release/apollo.exe`; use `--executable` and `--output` for explicit paths. Installer creation uses the same `build-windows-installer.ps1` owner described below; pass `--makensis` when the NSIS compiler is not discoverable automatically. Relative paths resolve from the selected project root. A failed installer, ZIP, or checksum build leaves any previously staged release directory unchanged. The generated `artifacts/` tree is ignored by Git and full-project snapshots.
 
 
 ### Build the Windows installer
