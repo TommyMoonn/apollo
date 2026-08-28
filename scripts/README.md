@@ -50,13 +50,13 @@ Compatibility entry point:
 .\scripts\package-changed-files.ps1
 ```
 
-### Apply a changed-files package
+### Apply a project ZIP
 
 ```powershell
 .\scripts\apply-changes.ps1 --zip C:\path\to\apollo-task-changed-files.zip
 ```
 
-Without `--zip`, the command searches Downloads for the newest `<project-slug>-*-changed-files.zip`, including Windows duplicate-download names such as `...-changed-files (1).zip`, `(2).zip`, and repeated/no-space suffixes such as `...-changed-files(1)(1).zip`. It rejects unsafe archive paths and `.git`, skips identical files, refuses tracked dirty state by default, supports dry runs, applies the deletion manifest, and backs up overwritten/deleted paths unless `--no-backup` is used.
+Without `--zip`, the command searches Downloads for the newest `<project-slug>*.zip`. This accepts both full project snapshots such as `apollo(2608281142).zip` and changed-files packages such as `apollo-phase-0.1.0.56-changed-files.zip`, including browser duplicate names like ` (1)` and ` (2)`. Use `--pattern` to narrow discovery when needed. The importer rejects unsafe archive paths and `.git`, skips identical files, refuses tracked dirty state by default, supports dry runs, applies the deletion manifest, and backs up overwritten/deleted paths unless `--no-backup` is used.
 
 Compatibility entry point:
 
@@ -106,6 +106,21 @@ Checks the `Cargo.toml` package version against the root `apollo` entry in `Carg
 ```
 
 Updates the `[package].version` in `Cargo.toml`, lets Cargo refresh the root package entry in `Cargo.lock`, verifies the result with locked Cargo metadata, and runs the shared release validator. If any step fails, both version files are restored.
+
+### Stage Windows release artifacts
+
+```powershell
+.\scripts\stage-windows-release.ps1
+```
+
+Validates the current release metadata, verifies the Windows x64 `apollo.exe`, and recreates `artifacts/windows/` with:
+
+```text
+Apollo-windows-x64.zip
+SHA256SUMS.txt
+```
+
+The ZIP contains only `Apollo.exe`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`. FFmpeg and FFprobe remain external runtime requirements and are not bundled. By default the executable is read from `target/x86_64-pc-windows-msvc/release/apollo.exe`; use `--executable` and `--output` for explicit paths. Relative paths resolve from the selected project root. The generated `artifacts/` tree is ignored by Git and full-project snapshots.
 
 ## Tests
 

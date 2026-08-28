@@ -175,7 +175,7 @@ Apply a package explicitly:
 .\scripts\apply-changes.ps1 --zip <path>
 ```
 
-Or omit `--zip` to select the newest `<project-slug>-*-changed-files.zip` from Downloads, including Windows duplicate-download names such as `...-changed-files (1).zip`, `(2).zip`, and repeated/no-space suffixes such as `...-changed-files(1)(1).zip`. The importer rejects absolute/traversal paths and `.git`, refuses tracked dirty state by default, skips identical files, supports dry run, requires explicit opt-in for directory deletion, and backs up overwritten/deleted paths by default under:
+Or omit `--zip` to select the newest `<project-slug>*.zip` from Downloads. Automatic discovery accepts both full project snapshots and changed-files packages, including browser duplicate names such as ` (1)` and ` (2)`. Use `--pattern` to narrow discovery when needed. The importer rejects absolute/traversal paths and `.git`, refuses tracked dirty state by default, skips identical files, supports dry run, requires explicit opt-in for directory deletion, and backs up overwritten/deleted paths by default under:
 
 ```text
 %LOCALAPPDATA%\ChatGPTImports\<project-slug>\<timestamp>\

@@ -25,11 +25,10 @@ if ($cli['help']) {
 Usage: .\scripts\apply-changes.ps1 [options]
 
 Options:
-  --zip <path>                  Apply a specific changed-files ZIP.
+  --zip <path>                  Apply a specific project ZIP.
   -p, --project <path>          Target project root.
   --downloads <path>            Directory used for automatic ZIP discovery.
-  --pattern <glob>              ZIP discovery pattern. Default: <project-slug>-*-changed-files.zip
-                                Windows duplicate suffixes like (1), (2), or repeated copies such as (1)(1) are accepted.
+  --pattern <glob>              ZIP discovery pattern. Default: <project-slug>*.zip
   --strip-root                  Strip one redundant top-level archive directory.
   -n, --dry-run                 Preview without modifying files.
   --allow-dirty                 Allow tracked working-tree changes.
@@ -49,7 +48,7 @@ $zipPath = $cli['zip']
 $downloadsPath = [string]$cli['downloads']
 $zipPattern = [string]$cli['pattern']
 if ([string]::IsNullOrWhiteSpace($zipPattern)) {
-    $zipPattern = "$projectSlug-*-changed-files.zip"
+    $zipPattern = "$projectSlug*.zip"
 }
 $stripRoot = [bool]$cli['strip-root']
 $dryRun = [bool]$cli['dry-run']
@@ -167,11 +166,7 @@ if ([string]::IsNullOrWhiteSpace([string]$zipPath)) {
         throw "Downloads directory does not exist: $downloadsPath"
     }
 
-    $latestZip = Get-ChildItem -LiteralPath $downloadsPath -File -Filter '*.zip' |
-        Where-Object {
-            $discoveryName = $_.Name -replace '(?:\s*\([1-9][0-9]*\))+(?=\.zip$)', ''
-            $_.Name -like $zipPattern -or $discoveryName -like $zipPattern
-        } |
+    $latestZip = Get-ChildItem -LiteralPath $downloadsPath -File -Filter $zipPattern |
         Sort-Object LastWriteTime, Name -Descending |
         Select-Object -First 1
     if ($null -eq $latestZip) {
