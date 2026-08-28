@@ -11,11 +11,8 @@ env:
   NSIS_VERSION: "3.11"
 
 jobs:
-  quality:
-    uses: ./.github/workflows/ci.yml
-
-  build:
-    needs: quality
+  formatting:
+    name: Rust formatting
     runs-on: windows-latest
 
     steps:
@@ -33,7 +30,104 @@ jobs:
           }
 
           $channel = $match.Matches[0].Groups[1].Value
-          rustup toolchain install $channel --profile minimal --component rustfmt --component clippy --target $env:WINDOWS_TARGET
+          rustup toolchain install $channel --profile minimal --component rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+  clippy:
+    name: Rust Clippy
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"\s*$'
+          if ($match.Count -ne 1) {
+            throw "Expected exactly one Rust toolchain channel in rust-toolchain.toml."
+          }
+
+          $channel = $match.Matches[0].Groups[1].Value
+          rustup toolchain install $channel --profile minimal --component clippy
+
+      - name: Restore Cargo cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-clippy-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-clippy-${{ runner.os }}-
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  rust-tests:
+    name: Rust tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"\s*$'
+          if ($match.Count -ne 1) {
+            throw "Expected exactly one Rust toolchain channel in rust-toolchain.toml."
+          }
+
+          $channel = $match.Matches[0].Groups[1].Value
+          rustup toolchain install $channel --profile minimal
+
+      - name: Restore Cargo cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-tests-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-tests-${{ runner.os }}-
+
+      - name: Test Rust
+        run: cargo test --locked --all-targets
+
+  build:
+    needs:
+      - formatting
+      - clippy
+      - rust-tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"\s*$'
+          if ($match.Count -ne 1) {
+            throw "Expected exactly one Rust toolchain channel in rust-toolchain.toml."
+          }
+
+          $channel = $match.Matches[0].Groups[1].Value
+          rustup toolchain install $channel --profile minimal --target $env:WINDOWS_TARGET
 
       - name: Restore Cargo cache
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
