@@ -90,6 +90,31 @@ function Assert-WindowsX64ApolloExecutable {
         if ($machine -ne 0x8664) {
             throw ("Release executable must target Windows x64 (AMD64); PE machine is 0x{0:x4}." -f $machine)
         }
+
+        if (([int64]$peOffset + 24) -gt $stream.Length) {
+            throw "Release executable has a truncated Windows PE file header: $Path"
+        }
+
+        $stream.Position = $peOffset + 20
+        $optionalHeaderSize = $reader.ReadUInt16()
+        $optionalHeaderOffset = [int64]$peOffset + 24
+        $minimumOptionalHeaderSize = 70
+        if ($optionalHeaderSize -lt $minimumOptionalHeaderSize -or
+            ($optionalHeaderOffset + $optionalHeaderSize) -gt $stream.Length) {
+            throw "Release executable has a malformed Windows PE optional header: $Path"
+        }
+
+        $stream.Position = $optionalHeaderOffset
+        $optionalHeaderMagic = $reader.ReadUInt16()
+        if ($optionalHeaderMagic -ne 0x020B) {
+            throw ("Release executable must use PE32+; optional-header magic is 0x{0:x4}." -f $optionalHeaderMagic)
+        }
+
+        $stream.Position = $optionalHeaderOffset + 68
+        $subsystem = $reader.ReadUInt16()
+        if ($subsystem -ne 2) {
+            throw ("Release executable must use the Windows GUI subsystem; PE subsystem is {0}." -f $subsystem)
+        }
     }
     finally {
         $reader.Dispose()
@@ -109,9 +134,7 @@ function Assert-SafeStagingDirectory {
         [string]$OutputPath
     )
 
-    $comparison = Get-RepositoryPathComparison
-    $pathRoot = [System.IO.Path]::GetPathRoot($OutputPath)
-    if ($OutputPath.Equals($pathRoot, $comparison)) {
+    if (Test-RepositoryFileSystemRoot -Path $OutputPath) {
         throw "Refusing to use a filesystem root as the staging directory: $OutputPath"
     }
 

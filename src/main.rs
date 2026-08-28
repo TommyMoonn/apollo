@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 use apollo::ui::layout;
 use app::ApolloApp;
@@ -12,7 +14,7 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "apollo",
+        "Apollo",
         native_options,
         Box::new(|creation_context| {
             let app = ApolloApp::new(creation_context)?;

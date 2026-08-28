@@ -113,7 +113,7 @@ Updates the `[package].version` in `Cargo.toml`, lets Cargo refresh the root pac
 .\scripts\stage-windows-release.ps1
 ```
 
-Validates the current release metadata, verifies the Windows x64 `apollo.exe`, and recreates `artifacts/windows/` with:
+Validates the current release metadata, verifies the Windows GUI x64 `apollo.exe`, and recreates `artifacts/windows/` with:
 
 ```text
 Apollo-windows-x64.zip

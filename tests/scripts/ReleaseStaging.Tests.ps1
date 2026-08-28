@@ -5,6 +5,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 . (Join-Path $PSScriptRoot 'Test.Common.ps1')
+. (Join-Path $projectRoot 'scripts/Repository.Common.ps1')
 
 $stageReleaseScript = Join-Path $projectRoot 'scripts/stage-windows-release.ps1'
 
@@ -14,28 +15,46 @@ function New-TestWindowsExecutable {
         [string]$Path,
 
         [ValidateSet('x64', 'x86')]
-        [string]$Architecture = 'x64'
+        [string]$Architecture = 'x64',
+
+        [uint16]$OptionalHeaderMagic = 0x020B,
+
+        [uint16]$Subsystem = 2,
+
+        [uint16]$OptionalHeaderSize = 0x00F0
     )
 
     $parent = Split-Path $Path -Parent
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
 
-    $bytes = [byte[]]::new(134)
+    $peOffset = 0x80
+    $optionalHeaderOffset = $peOffset + 24
+    $bytes = [byte[]]::new($optionalHeaderOffset + $OptionalHeaderSize)
     $bytes[0] = 0x4D
     $bytes[1] = 0x5A
-    $bytes[0x3C] = 0x80
-    $bytes[0x80] = 0x50
-    $bytes[0x81] = 0x45
-    $bytes[0x82] = 0x00
-    $bytes[0x83] = 0x00
+    $bytes[0x3C] = $peOffset
+    $bytes[$peOffset] = 0x50
+    $bytes[$peOffset + 1] = 0x45
 
     if ($Architecture -eq 'x64') {
-        $bytes[0x84] = 0x64
-        $bytes[0x85] = 0x86
+        $bytes[$peOffset + 4] = 0x64
+        $bytes[$peOffset + 5] = 0x86
     }
     else {
-        $bytes[0x84] = 0x4C
-        $bytes[0x85] = 0x01
+        $bytes[$peOffset + 4] = 0x4C
+        $bytes[$peOffset + 5] = 0x01
+    }
+
+    $bytes[$peOffset + 20] = [byte]($OptionalHeaderSize -band 0xFF)
+    $bytes[$peOffset + 21] = [byte](($OptionalHeaderSize -shr 8) -band 0xFF)
+
+    if ($OptionalHeaderSize -ge 2) {
+        $bytes[$optionalHeaderOffset] = [byte]($OptionalHeaderMagic -band 0xFF)
+        $bytes[$optionalHeaderOffset + 1] = [byte](($OptionalHeaderMagic -shr 8) -band 0xFF)
+    }
+    if ($OptionalHeaderSize -ge 70) {
+        $bytes[$optionalHeaderOffset + 68] = [byte]($Subsystem -band 0xFF)
+        $bytes[$optionalHeaderOffset + 69] = [byte](($Subsystem -shr 8) -band 0xFF)
     }
 
     [System.IO.File]::WriteAllBytes($Path, $bytes)
@@ -66,7 +85,7 @@ function New-ReleaseStagingFixture {
     return $root
 }
 
-Invoke-TestCase 'windows release staging creates the expected archive and checksum' {
+Invoke-TestCase 'windows release staging accepts a GUI x64 PE32+ executable and creates the expected archive and checksum' {
     $repo = New-ReleaseStagingFixture
     try {
         $output = Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo)
@@ -144,6 +163,54 @@ Invoke-TestCase 'windows release staging rejects unexpected executable identity 
     }
 }
 
+Invoke-TestCase 'windows release staging rejects a console-subsystem executable' {
+    $repo = New-ReleaseStagingFixture
+    try {
+        $consoleExecutable = Join-Path $repo 'build/apollo.exe'
+        New-TestWindowsExecutable -Path $consoleExecutable -Subsystem 3 | Out-Null
+
+        Assert-Throws {
+            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--executable', $consoleExecutable) | Out-Null
+        } '*must use the Windows GUI subsystem*'
+    }
+    finally {
+        Remove-Item -LiteralPath $repo -Recurse -Force
+    }
+}
+
+Invoke-TestCase 'windows release staging rejects unsupported or malformed optional headers' {
+    $repo = New-ReleaseStagingFixture
+    try {
+        $unsupported = Join-Path $repo 'unsupported/apollo.exe'
+        New-TestWindowsExecutable -Path $unsupported -OptionalHeaderMagic 0x010B | Out-Null
+        Assert-Throws {
+            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--executable', $unsupported) | Out-Null
+        } '*must use PE32+*'
+
+        $malformed = Join-Path $repo 'malformed/apollo.exe'
+        New-TestWindowsExecutable -Path $malformed -OptionalHeaderSize 2 | Out-Null
+        Assert-Throws {
+            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--executable', $malformed) | Out-Null
+        } '*malformed Windows PE optional header*'
+
+        $truncated = Join-Path $repo 'truncated/apollo.exe'
+        New-TestWindowsExecutable -Path $truncated | Out-Null
+        $truncatedStream = [System.IO.File]::Open($truncated, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $truncatedStream.SetLength(200)
+        }
+        finally {
+            $truncatedStream.Dispose()
+        }
+        Assert-Throws {
+            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--executable', $truncated) | Out-Null
+        } '*malformed Windows PE optional header*'
+    }
+    finally {
+        Remove-Item -LiteralPath $repo -Recurse -Force
+    }
+}
+
 Invoke-TestCase 'windows release staging requires project license and third-party notices' {
     foreach ($missingName in @('LICENSE', 'THIRD_PARTY_NOTICES.md')) {
         $repo = New-ReleaseStagingFixture
@@ -156,6 +223,89 @@ Invoke-TestCase 'windows release staging requires project license and third-part
         finally {
             Remove-Item -LiteralPath $repo -Recurse -Force
         }
+    }
+}
+
+Invoke-TestCase 'release path helper distinguishes Windows roots from subdirectories' {
+    if (-not $IsWindows) {
+        return
+    }
+
+    Assert-True (Test-RepositoryFileSystemRoot -Path 'D:\') 'Drive roots must be recognized independent of the project drive.'
+    Assert-False (Test-RepositoryFileSystemRoot -Path 'D:\apollo-release\windows') 'A normal directory below another drive root must remain valid.'
+    Assert-True (Test-RepositoryFileSystemRoot -Path '\\apollo-test-server\apollo-share\') 'UNC share roots must be recognized without contacting the share.'
+    Assert-False (Test-RepositoryFileSystemRoot -Path '\\apollo-test-server\apollo-share\release\windows') 'A directory below a UNC share root must remain valid.'
+}
+
+Invoke-TestCase 'windows release staging rejects a filesystem root on another drive before cleanup' {
+    if (-not $IsWindows) {
+        return
+    }
+
+    $repo = New-ReleaseStagingFixture
+    try {
+        $projectRootPath = [System.IO.Path]::GetPathRoot($repo)
+        $otherDriveRoot = if ($projectRootPath.StartsWith('C:', [System.StringComparison]::OrdinalIgnoreCase)) { 'D:\' } else { 'C:\' }
+
+        Assert-Throws {
+            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--output', $otherDriveRoot) | Out-Null
+        } '*Refusing to use a filesystem root as the staging directory*'
+    }
+    finally {
+        Remove-Item -LiteralPath $repo -Recurse -Force
+    }
+}
+
+Invoke-TestCase 'windows release staging rejects a UNC share root without contacting the share' {
+    if (-not $IsWindows) {
+        return
+    }
+
+    $repo = New-ReleaseStagingFixture
+    try {
+        Assert-Throws {
+            Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @(
+                '--project', $repo,
+                '--output', '\\apollo-test-server\apollo-share\'
+            ) | Out-Null
+        } '*Refusing to use a filesystem root as the staging directory*'
+    }
+    finally {
+        Remove-Item -LiteralPath $repo -Recurse -Force
+    }
+}
+
+Invoke-TestCase 'windows release staging permits a real subdirectory on another drive when available' {
+    if (-not $IsWindows) {
+        return
+    }
+
+    $repo = New-ReleaseStagingFixture
+    $output = $null
+    try {
+        $projectDrive = [System.IO.Path]::GetPathRoot($repo)
+        $otherDrive = Get-PSDrive -PSProvider FileSystem |
+            Where-Object {
+                (Test-Path -LiteralPath $_.Root -PathType Container) -and
+                -not ([System.IO.Path]::GetPathRoot($_.Root)).Equals($projectDrive, [System.StringComparison]::OrdinalIgnoreCase)
+            } |
+            Select-Object -First 1
+
+        if ($null -eq $otherDrive) {
+            return
+        }
+
+        $output = Join-Path $otherDrive.Root ('apollo-release-test-' + [Guid]::NewGuid().ToString('N'))
+        Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--project', $repo, '--output', $output) | Out-Null
+
+        Assert-PathExists (Join-Path $output 'Apollo-windows-x64.zip') 'A normal output directory on another drive should be staged successfully.'
+        Assert-PathExists (Join-Path $output 'SHA256SUMS.txt') 'A normal output directory on another drive should receive the checksum file.'
+    }
+    finally {
+        if ($null -ne $output -and (Test-Path -LiteralPath $output)) {
+            Remove-Item -LiteralPath $output -Recurse -Force
+        }
+        Remove-Item -LiteralPath $repo -Recurse -Force
     }
 }
 
