@@ -79,3 +79,28 @@ toolchain:
     pwsh -NoProfile -File .dev/chatgpt/scripts/rust/prepare-chatgpt-rust-toolchain.ps1
 
 bundles: vendor toolchain
+
+set-version version:
+    pwsh -NoProfile -File .\scripts\set-version.ps1 {{version}}
+
+check-release:
+    pwsh -NoProfile -File .\scripts\check-release.ps1
+
+check-release-tag tag:
+    pwsh -NoProfile -File .\scripts\check-release.ps1 --tag {{tag}} --release-changelog
+
+build-release:
+    cargo build --locked --release --target x86_64-pc-windows-msvc
+
+build-installer:
+    pwsh -NoProfile -File .\scripts\build-windows-installer.ps1
+
+stage-release:
+    pwsh -NoProfile -File .\scripts\stage-windows-release.ps1
+
+release-check version:
+    pwsh -NoProfile -File .\scripts\check-release.ps1 --tag v{{version}} --release-changelog
+
+release-stage:
+    cargo build --locked --release --target x86_64-pc-windows-msvc
+    pwsh -NoProfile -File .\scripts\stage-windows-release.ps1
