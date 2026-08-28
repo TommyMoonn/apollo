@@ -41,7 +41,7 @@ function Assert-Equal {
 
         for ($index = 0; $index -lt $expectedArray.Count; $index++) {
             if ($expectedArray[$index] -ne $actualArray[$index]) {
-                throw "$Message Difference at index $index: expected '$($expectedArray[$index])', got '$($actualArray[$index])'."
+                throw "$Message Difference at index ${index}: expected '$($expectedArray[$index])', got '$($actualArray[$index])'."
             }
         }
         return
