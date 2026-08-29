@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-29
+
+Apollo 0.1.1 is a corrective Windows release that improves standalone startup, external media-tool detection, and application branding.
+
+### Changed
+
+- Apollo now uses its own application icon in native windows, the portable executable, the installer and uninstaller, Start Menu shortcuts, and Installed Apps.
+
+### Fixed
+
+- Installed and portable builds now carry the required IBM Plex Sans and Fira Code fonts inside `Apollo.exe`, so startup no longer depends on font files from the source repository.
+- Existing system FFmpeg and FFprobe installations are now discovered using native Windows executable-search behavior, with resolution, launch, timeout, and validation failures reported distinctly.
+
 ## [0.1.0] - 2026-08-28
 
 Apollo 0.1.0 is the first public Windows release, bringing focused Audio Mix and Video Upscale workflows in a compact native interface.
@@ -30,5 +43,6 @@ Apollo 0.1.0 is the first public Windows release, bringing focused Audio Mix and
 - Missing optional FFprobe metadata falls back to usable media and track labels instead of preventing intake or selection.
 - Upscale sizing preserves the source aspect ratio within the selected target boundary without default cropping, stretching, or black padding.
 
-[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/TommyMoonn/apollo/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/TommyMoonn/apollo/releases/tag/v0.1.0
