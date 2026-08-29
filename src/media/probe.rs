@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use super::{
     model::{AudioStream, FrameRate, MediaFile, VideoStream},
+    process::background_command,
     tools::MediaTools,
 };
 
@@ -105,7 +106,7 @@ pub fn parse_ffprobe_json(path: &Path, json: &[u8]) -> Result<MediaFile, MediaPr
 }
 
 fn ffprobe_command(executable: &Path, input: &Path) -> Command {
-    let mut command = Command::new(executable);
+    let mut command = background_command(executable);
     command
         .args([
             "-v",

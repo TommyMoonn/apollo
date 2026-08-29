@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fmt, io,
     io::Read,
     path::PathBuf,
@@ -12,11 +12,28 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const OUTPUT_CHANNEL_CAPACITY: usize = 256;
 const STREAM_READ_CHUNK_BYTES: usize = 4 * 1024;
 const LIVE_OUTPUT_MESSAGE_LIMIT_BYTES: usize = 16 * 1024;
 pub const DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES: usize = 64 * 1024;
+
+#[cfg(windows)]
+pub(super) fn background_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(not(windows))]
+pub(super) fn background_command(program: impl AsRef<OsStr>) -> Command {
+    Command::new(program)
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProcessProgressSource {
@@ -479,7 +496,7 @@ fn run_worker(
 }
 
 fn spawn_child(command: &MediaProcessCommand) -> io::Result<Child> {
-    Command::new(&command.program)
+    background_command(&command.program)
         .args(&command.args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

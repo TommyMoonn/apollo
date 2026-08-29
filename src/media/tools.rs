@@ -1,7 +1,7 @@
 use std::{
     fmt, io,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -19,6 +19,8 @@ use std::{
 
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::SearchPathW;
+
+use super::process::background_command;
 
 const VERSION_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_QUERY_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -159,7 +161,7 @@ impl VersionValidator for SystemVersionValidator {
         _tool: MediaToolKind,
         executable: &Path,
     ) -> Result<(), MediaToolValidationError> {
-        let mut child = Command::new(executable)
+        let mut child = background_command(executable)
             .arg("-version")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -308,13 +310,14 @@ mod tests {
         collections::HashMap,
         env, io,
         path::{Path, PathBuf},
-        process::{Command, Stdio},
+        process::Stdio,
         time::Duration,
     };
 
     use super::{
         ExecutableResolver, MediaToolKind, MediaToolValidationError, MediaTools, MediaToolsError,
-        SystemVersionValidator, VersionValidator, discover_with, wait_for_version_query,
+        SystemVersionValidator, VersionValidator, background_command, discover_with,
+        wait_for_version_query,
     };
 
     #[derive(Default)]
@@ -450,7 +453,7 @@ mod tests {
 
     #[test]
     fn version_query_that_finishes_within_bound_succeeds() {
-        let mut child = Command::new(env::current_exe().unwrap())
+        let mut child = background_command(env::current_exe().unwrap())
             .arg("--help")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -466,7 +469,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn version_query_that_exceeds_bound_is_terminated() {
-        let mut child = Command::new("sh")
+        let mut child = background_command("sh")
             .args(["-c", "sleep 1"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
