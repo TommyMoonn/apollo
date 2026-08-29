@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-29
+
+Apollo 0.1.2 is a corrective Windows release that improves interface responsiveness, removes terminal-backed file selection, and makes installed Apollo builds easier to discover and manage.
+
+### Changed
+
+- Media-tool discovery and media inspection now initialize in the background and wake the interface when results are ready instead of blocking normal window interaction.
+- Destination filesystem checks now run at execution preflight rather than during ready-surface rendering, while existing output-safety rules remain authoritative.
+- The Windows installer now uses a conventional Welcome, License, install-location, component, install, and Finish flow with an optional desktop shortcut and direct post-install launch.
+- Installed builds now register Apollo through the current-user Start Menu, App Paths, and Installed Apps entries while preserving the established per-user upgrade and uninstall identity.
+- Windows release executables now expose Cargo-derived file and product version metadata alongside the Apollo application icon.
+
+### Fixed
+
+- Open and Browse now use Apollo-owned native Windows file dialogs without PowerShell or WinForms startup, and stale dialog results cannot change a replacement or running tool session.
+- FFmpeg and FFprobe background processes no longer open visible console windows during discovery, inspection, Audio Mix, or Video Upscale work.
+- Ready and intake surfaces avoid repeated presentation and layout work when their underlying media or error state has not changed.
+
 ## [0.1.1] - 2026-08-29
 
 Apollo 0.1.1 is a corrective Windows release that improves standalone startup, external media-tool detection, and application branding.
@@ -43,6 +61,7 @@ Apollo 0.1.0 is the first public Windows release, bringing focused Audio Mix and
 - Missing optional FFprobe metadata falls back to usable media and track labels instead of preventing intake or selection.
 - Upscale sizing preserves the source aspect ratio within the selected target boundary without default cropping, stretching, or black padding.
 
-[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/TommyMoonn/apollo/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/TommyMoonn/apollo/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/TommyMoonn/apollo/releases/tag/v0.1.0
