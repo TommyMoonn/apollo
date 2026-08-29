@@ -197,8 +197,10 @@ dependencies = [
  "eframe",
  "egui",
  "embed-resource",
+ "raw-window-handle",
  "serde",
  "serde_json",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

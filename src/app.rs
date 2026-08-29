@@ -1,7 +1,6 @@
 use std::{
-    ffi::OsString,
     io,
-    path::{Path, PathBuf},
+    path::Path,
     process::Command,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
@@ -9,6 +8,11 @@ use std::{
 };
 
 use egui::{CentralPanel, Context, Ui};
+
+use crate::file_dialog::{
+    DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
+    FileDialogStartError, OutputFormat, SaveDialogOptions, WindowOwner,
+};
 
 use apollo::{
     audio_mix::{
@@ -37,64 +41,6 @@ use apollo::{
 
 const EXECUTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 const INSPECTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutputPickerFormat {
-    Mp4,
-    Mkv,
-}
-
-impl OutputPickerFormat {
-    #[cfg(any(target_os = "windows", test))]
-    const fn extension(self) -> &'static str {
-        match self {
-            Self::Mp4 => "mp4",
-            Self::Mkv => "mkv",
-        }
-    }
-
-    #[cfg(any(target_os = "windows", test))]
-    const fn filter(self) -> &'static str {
-        match self {
-            Self::Mp4 => "MP4 video (*.mp4)|*.mp4|All files (*.*)|*.*",
-            Self::Mkv => "Matroska video (*.mkv)|*.mkv|All files (*.*)|*.*",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OutputPickerRequest {
-    initial_directory: PathBuf,
-    file_name: OsString,
-    format: OutputPickerFormat,
-}
-
-impl OutputPickerRequest {
-    fn new(output: &Path, format: OutputPickerFormat) -> Self {
-        let initial_directory = output
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        let file_name = output.file_name().unwrap_or_default().to_os_string();
-
-        Self {
-            initial_directory,
-            file_name,
-            format,
-        }
-    }
-}
-
-fn choose_output_destination<F>(
-    request: &OutputPickerRequest,
-    picker: F,
-) -> Result<Option<PathBuf>, MediaError>
-where
-    F: FnOnce(&OutputPickerRequest) -> io::Result<Option<PathBuf>>,
-{
-    picker(request).map_err(|error| MediaError::output_picker_unavailable(error.to_string()))
-}
 
 fn file_intake_enabled(
     audio_state: &AudioMixExecutionState,
@@ -129,6 +75,7 @@ impl Tool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AudioMixToolState {
+    session_id: u64,
     media: MediaFile,
     selection: AudioMixSelectionState,
     lifecycle_ui: AudioMixLifecycleUiState,
@@ -138,6 +85,7 @@ struct AudioMixToolState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UpscaleToolState {
+    session_id: u64,
     media: MediaFile,
     selection: UpscaleSelectionState,
     lifecycle_ui: UpscaleLifecycleUiState,
@@ -213,6 +161,9 @@ pub(crate) struct ApolloApp {
     audio_mix_executor: AudioMixExecutor,
     upscale_executor: UpscaleExecutor,
     media_inspection: Option<MediaInspection>,
+    file_dialog: FileDialogOwner,
+    native_window_owner: Result<WindowOwner, String>,
+    next_session_id: u64,
     tools_error_details_open: bool,
 }
 
@@ -227,12 +178,16 @@ impl ApolloApp {
             audio_mix_executor: AudioMixExecutor::new(),
             upscale_executor: UpscaleExecutor::new(),
             media_inspection: None,
+            file_dialog: FileDialogOwner::default(),
+            native_window_owner: WindowOwner::from_window(creation_context),
+            next_session_id: 1,
             tools_error_details_open: false,
         }
     }
 
     fn file_intake_enabled(&self) -> bool {
         self.media_inspection.is_none()
+            && !self.file_dialog.is_pending()
             && file_intake_enabled(
                 self.audio_mix_executor.state(),
                 self.upscale_executor.state(),
@@ -262,7 +217,9 @@ impl ApolloApp {
                     .as_ref()
                     .is_some_and(|session| session.media == media)
                 {
+                    let session_id = self.take_session_id();
                     self.state.audio_mix = Some(AudioMixToolState {
+                        session_id,
                         selection: AudioMixSelectionState::new(&media),
                         lifecycle_ui: AudioMixLifecycleUiState::default(),
                         start_error: None,
@@ -278,7 +235,9 @@ impl ApolloApp {
                     .as_ref()
                     .is_some_and(|session| session.media == media)
                 {
+                    let session_id = self.take_session_id();
                     self.state.upscale = Some(UpscaleToolState {
+                        session_id,
                         selection: UpscaleSelectionState::new(&media),
                         lifecycle_ui: UpscaleLifecycleUiState::default(),
                         start_error: None,
@@ -290,6 +249,15 @@ impl ApolloApp {
         }
         self.state.intake_active = false;
         true
+    }
+
+    fn take_session_id(&mut self) -> u64 {
+        let session_id = self.next_session_id;
+        self.next_session_id = self
+            .next_session_id
+            .checked_add(1)
+            .expect("Apollo tool session identifier space is exhausted");
+        session_id
     }
 
     fn show_media_tools_unavailable(&mut self, ui: &mut Ui) {
@@ -337,22 +305,21 @@ impl ApolloApp {
     }
 
     fn show_file_intake(&mut self, ui: &mut Ui, tool: Tool) {
-        let action = file_intake::show(
-            ui,
-            tool.intake_tool(),
-            self.media_inspection.is_some(),
-            self.state.intake_error.as_ref(),
-            &mut self.state.intake_error_details_open,
-        );
+        let action = ui
+            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+                file_intake::show(
+                    ui,
+                    tool.intake_tool(),
+                    self.media_inspection.is_some(),
+                    self.state.intake_error.as_ref(),
+                    &mut self.state.intake_error_details_open,
+                )
+            })
+            .inner;
         match action {
-            FileIntakeAction::OpenFile => match open_media_file_dialog() {
-                Ok(Some(path)) => self.load_media_path(&path),
-                Ok(None) => {}
-                Err(error) => {
-                    self.state.intake_error = Some(MediaError::invalid_request(error.to_string()));
-                    self.state.intake_error_details_open = false;
-                }
-            },
+            FileIntakeAction::OpenFile => {
+                self.start_file_dialog(FileDialogRequest::OpenMedia, ui.ctx().clone())
+            }
             FileIntakeAction::SelectTool(selected) if selected != tool.intake_tool() => {
                 self.select_tool(Tool::from_intake(selected));
             }
@@ -520,13 +487,17 @@ impl ApolloApp {
             return;
         }
 
-        let session = self
-            .state
-            .audio_mix
-            .as_mut()
-            .expect("audio mix source exists while ready surface is shown");
-        let action = audio_mix_ui::show(ui, &session.media, &mut session.selection);
-        if let Err(error) = self.handle_audio_mix_action(action)
+        let action = ui
+            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+                let session = self
+                    .state
+                    .audio_mix
+                    .as_mut()
+                    .expect("audio mix source exists while ready surface is shown");
+                audio_mix_ui::show(ui, &session.media, &mut session.selection)
+            })
+            .inner;
+        if let Err(error) = self.handle_audio_mix_action(action, ui.ctx().clone())
             && let Some(session) = self.state.audio_mix.as_mut()
         {
             session.start_error = Some(error.user_error());
@@ -566,18 +537,11 @@ impl ApolloApp {
     fn handle_audio_mix_action(
         &mut self,
         action: AudioMixSelectionAction,
+        context: Context,
     ) -> Result<(), AudioMixStartError> {
-        self.handle_audio_mix_action_with_picker(action, open_output_file_dialog)
-    }
-
-    fn handle_audio_mix_action_with_picker<F>(
-        &mut self,
-        action: AudioMixSelectionAction,
-        picker: F,
-    ) -> Result<(), AudioMixStartError>
-    where
-        F: FnOnce(&OutputPickerRequest) -> io::Result<Option<PathBuf>>,
-    {
+        if self.file_dialog.is_pending() {
+            return Ok(());
+        }
         match action {
             AudioMixSelectionAction::Back if self.file_intake_enabled() => {
                 self.state.return_to_file_intake(Tool::AudioMix);
@@ -586,35 +550,8 @@ impl ApolloApp {
                 let Some(session) = self.state.audio_mix.as_ref() else {
                     return Ok(());
                 };
-                let format = match session.selection.container() {
-                    OutputContainer::Mp4 => OutputPickerFormat::Mp4,
-                    OutputContainer::Mkv => OutputPickerFormat::Mkv,
-                };
-                let output = session.selection.output_path();
-                let request = OutputPickerRequest::new(&output, format);
-
-                match choose_output_destination(&request, picker) {
-                    Ok(Some(path)) => {
-                        let session = self
-                            .state
-                            .audio_mix
-                            .as_mut()
-                            .expect("audio mix session still exists after output browse");
-                        session.selection.set_custom_output_path(path);
-                        session.start_error = None;
-                        session.start_error_details_open = false;
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let session = self
-                            .state
-                            .audio_mix
-                            .as_mut()
-                            .expect("audio mix session still exists after output browse");
-                        session.start_error = Some(error);
-                        session.start_error_details_open = false;
-                    }
-                }
+                let request = audio_mix_output_dialog_request(session);
+                self.start_file_dialog(request, context);
             }
             AudioMixSelectionAction::MixRequested => {
                 let Some(session) = self.state.audio_mix.as_ref() else {
@@ -668,13 +605,17 @@ impl ApolloApp {
             return;
         }
 
-        let upscale = self
-            .state
-            .upscale
-            .as_mut()
-            .expect("upscale source exists while ready surface is shown");
-        let action = upscale_ui::show(ui, &upscale.media, &mut upscale.selection);
-        if let Err(error) = self.handle_upscale_action(action)
+        let action = ui
+            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+                let upscale = self
+                    .state
+                    .upscale
+                    .as_mut()
+                    .expect("upscale source exists while ready surface is shown");
+                upscale_ui::show(ui, &upscale.media, &mut upscale.selection)
+            })
+            .inner;
+        if let Err(error) = self.handle_upscale_action(action, ui.ctx().clone())
             && let Some(session) = self.state.upscale.as_mut()
         {
             session.start_error = Some(error.user_error());
@@ -714,18 +655,11 @@ impl ApolloApp {
     fn handle_upscale_action(
         &mut self,
         action: UpscaleSelectionAction,
+        context: Context,
     ) -> Result<(), UpscaleStartError> {
-        self.handle_upscale_action_with_picker(action, open_output_file_dialog)
-    }
-
-    fn handle_upscale_action_with_picker<F>(
-        &mut self,
-        action: UpscaleSelectionAction,
-        picker: F,
-    ) -> Result<(), UpscaleStartError>
-    where
-        F: FnOnce(&OutputPickerRequest) -> io::Result<Option<PathBuf>>,
-    {
+        if self.file_dialog.is_pending() {
+            return Ok(());
+        }
         match action {
             UpscaleSelectionAction::Back if self.file_intake_enabled() => {
                 self.state.return_to_file_intake(Tool::VideoUpscale);
@@ -734,31 +668,8 @@ impl ApolloApp {
                 let Some(session) = self.state.upscale.as_ref() else {
                     return Ok(());
                 };
-                let output = session.selection.output_path();
-                let request = OutputPickerRequest::new(&output, OutputPickerFormat::Mp4);
-
-                match choose_output_destination(&request, picker) {
-                    Ok(Some(path)) => {
-                        let session = self
-                            .state
-                            .upscale
-                            .as_mut()
-                            .expect("upscale session still exists after output browse");
-                        session.selection.set_custom_output_path(path);
-                        session.start_error = None;
-                        session.start_error_details_open = false;
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let session = self
-                            .state
-                            .upscale
-                            .as_mut()
-                            .expect("upscale session still exists after output browse");
-                        session.start_error = Some(error);
-                        session.start_error_details_open = false;
-                    }
-                }
+                let request = upscale_output_dialog_request(session);
+                self.start_file_dialog(request, context);
             }
             UpscaleSelectionAction::UpscaleRequested => {
                 let Some(upscale) = self.state.upscale.as_ref() else {
@@ -783,6 +694,157 @@ impl ApolloApp {
             eprintln!("Upscale output folder could not be opened: {error}");
         }
     }
+
+    fn start_file_dialog(&mut self, request: FileDialogRequest, context: Context) {
+        let target = request.target();
+        if let Err(error) =
+            self.file_dialog
+                .request(request, context, self.native_window_owner.clone())
+            && !matches!(error, FileDialogStartError::AlreadyPending)
+        {
+            self.settle_file_dialog(FileDialogCompletion {
+                target,
+                outcome: DialogOutcome::Failed(error.to_string()),
+            });
+        }
+    }
+
+    fn poll_file_dialog(&mut self) {
+        if let Some(completion) = self.file_dialog.poll() {
+            self.settle_file_dialog(completion);
+        }
+    }
+
+    fn settle_file_dialog(&mut self, completion: FileDialogCompletion) {
+        match (completion.target, completion.outcome) {
+            (_, DialogOutcome::Cancelled) => {}
+            (DialogTarget::MediaInput, DialogOutcome::Selected(path)) => {
+                self.load_media_path(&path);
+            }
+            (DialogTarget::MediaInput, DialogOutcome::Failed(diagnostic)) => {
+                self.state.intake_error = Some(MediaError::file_picker_unavailable(diagnostic));
+                self.state.intake_error_details_open = false;
+            }
+            (target, outcome) => settle_output_file_dialog(
+                &mut self.state,
+                self.audio_mix_executor.state(),
+                self.upscale_executor.state(),
+                target,
+                outcome,
+            ),
+        }
+    }
+}
+
+fn settle_output_file_dialog(
+    state: &mut AppState,
+    audio_execution: &AudioMixExecutionState,
+    upscale_execution: &UpscaleExecutionState,
+    target: DialogTarget,
+    outcome: DialogOutcome,
+) {
+    match (target, outcome) {
+        (DialogTarget::AudioMixOutput { session_id }, DialogOutcome::Selected(path))
+            if matches!(audio_execution, AudioMixExecutionState::Idle) =>
+        {
+            if let Some(session) = state
+                .audio_mix
+                .as_mut()
+                .filter(|session| session.session_id == session_id)
+            {
+                session.selection.set_custom_output_path(path);
+                session.start_error = None;
+                session.start_error_details_open = false;
+            }
+        }
+        (DialogTarget::AudioMixOutput { session_id }, DialogOutcome::Failed(diagnostic))
+            if matches!(audio_execution, AudioMixExecutionState::Idle) =>
+        {
+            if let Some(session) = state
+                .audio_mix
+                .as_mut()
+                .filter(|session| session.session_id == session_id)
+            {
+                session.start_error = Some(MediaError::output_picker_unavailable(diagnostic));
+                session.start_error_details_open = false;
+            }
+        }
+        (DialogTarget::UpscaleOutput { session_id }, DialogOutcome::Selected(path))
+            if matches!(upscale_execution, UpscaleExecutionState::Idle) =>
+        {
+            if let Some(session) = state
+                .upscale
+                .as_mut()
+                .filter(|session| session.session_id == session_id)
+            {
+                session.selection.set_custom_output_path(path);
+                session.start_error = None;
+                session.start_error_details_open = false;
+            }
+        }
+        (DialogTarget::UpscaleOutput { session_id }, DialogOutcome::Failed(diagnostic))
+            if matches!(upscale_execution, UpscaleExecutionState::Idle) =>
+        {
+            if let Some(session) = state
+                .upscale
+                .as_mut()
+                .filter(|session| session.session_id == session_id)
+            {
+                session.start_error = Some(MediaError::output_picker_unavailable(diagnostic));
+                session.start_error_details_open = false;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn save_dialog_options(output: &Path, format: OutputFormat) -> SaveDialogOptions {
+    let initial_directory = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let file_name = output.file_name().unwrap_or_default().to_os_string();
+    SaveDialogOptions {
+        initial_directory,
+        file_name,
+        format,
+    }
+}
+
+fn output_dialog_request(
+    target: DialogTarget,
+    output: &Path,
+    format: OutputFormat,
+) -> FileDialogRequest {
+    FileDialogRequest::SaveOutput {
+        target,
+        options: save_dialog_options(output, format),
+    }
+}
+
+fn audio_mix_output_dialog_request(session: &AudioMixToolState) -> FileDialogRequest {
+    let format = match session.selection.container() {
+        OutputContainer::Mp4 => OutputFormat::Mp4,
+        OutputContainer::Mkv => OutputFormat::Mkv,
+    };
+    output_dialog_request(
+        DialogTarget::AudioMixOutput {
+            session_id: session.session_id,
+        },
+        &session.selection.output_path(),
+        format,
+    )
+}
+
+fn upscale_output_dialog_request(session: &UpscaleToolState) -> FileDialogRequest {
+    output_dialog_request(
+        DialogTarget::UpscaleOutput {
+            session_id: session.session_id,
+        },
+        &session.selection.output_path(),
+        OutputFormat::Mp4,
+    )
 }
 
 fn shows_audio_mix_lifecycle(state: &AudioMixExecutionState) -> bool {
@@ -791,80 +853,6 @@ fn shows_audio_mix_lifecycle(state: &AudioMixExecutionState) -> bool {
 
 fn shows_upscale_lifecycle(state: &UpscaleExecutionState) -> bool {
     !matches!(state, UpscaleExecutionState::Idle)
-}
-
-#[cfg(target_os = "windows")]
-fn open_output_file_dialog(request: &OutputPickerRequest) -> io::Result<Option<PathBuf>> {
-    const SCRIPT: &str = r#"Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.SaveFileDialog
-$dialog.Title = 'Choose output destination'
-$dialog.InitialDirectory = $env:APOLLO_OUTPUT_DIRECTORY
-$dialog.FileName = $env:APOLLO_OUTPUT_FILENAME
-$dialog.Filter = $env:APOLLO_OUTPUT_FILTER
-$dialog.DefaultExt = $env:APOLLO_OUTPUT_EXTENSION
-$dialog.AddExtension = $true
-$dialog.OverwritePrompt = $true
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    [Console]::Write($dialog.FileName)
-}"#;
-
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-STA", "-Command", SCRIPT])
-        .env("APOLLO_OUTPUT_DIRECTORY", &request.initial_directory)
-        .env("APOLLO_OUTPUT_FILENAME", &request.file_name)
-        .env("APOLLO_OUTPUT_FILTER", request.format.filter())
-        .env("APOLLO_OUTPUT_EXTENSION", request.format.extension())
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        let diagnostic = if stderr.is_empty() {
-            format!("Windows output picker exited with {}", output.status)
-        } else {
-            stderr
-        };
-        return Err(io::Error::other(diagnostic));
-    }
-
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!path.is_empty()).then(|| PathBuf::from(path)))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn open_output_file_dialog(_request: &OutputPickerRequest) -> io::Result<Option<PathBuf>> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "Output Browse is currently available on Windows.",
-    ))
-}
-
-#[cfg(target_os = "windows")]
-fn open_media_file_dialog() -> io::Result<Option<std::path::PathBuf>> {
-    const SCRIPT: &str = r#"Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.OpenFileDialog
-$dialog.Title = 'Open media file'
-$dialog.Filter = 'Video files|*.mp4;*.mkv;*.mov;*.avi;*.webm;*.m4v|All files|*.*'
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    [Console]::Write($dialog.FileName)
-}"#;
-
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-STA", "-Command", SCRIPT])
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other("Windows file picker failed"));
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    Ok((!path.is_empty()).then(|| std::path::PathBuf::from(path)))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn open_media_file_dialog() -> io::Result<Option<std::path::PathBuf>> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "Open File is currently available on Windows; drag and drop is supported here.",
-    ))
 }
 
 fn open_folder(path: &Path) -> io::Result<()> {
@@ -900,6 +888,7 @@ impl eframe::App for ApolloApp {
                     return;
                 }
 
+                self.poll_file_dialog();
                 self.poll_media_inspection();
                 if self.media_inspection.is_some() {
                     ui.ctx().request_repaint_after(INSPECTION_REPAINT_INTERVAL);
@@ -918,7 +907,7 @@ impl eframe::App for ApolloApp {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs, io,
+        fs,
         path::{Path, PathBuf},
         sync::{
             Arc,
@@ -928,8 +917,13 @@ mod tests {
     };
 
     use super::{
-        ApolloApp, AppState, MediaInspection, OutputPickerFormat, Tool, file_intake_enabled,
-        shows_audio_mix_lifecycle, shows_upscale_lifecycle,
+        ApolloApp, AppState, MediaInspection, Tool, audio_mix_output_dialog_request,
+        file_intake_enabled, settle_output_file_dialog, shows_audio_mix_lifecycle,
+        shows_upscale_lifecycle,
+    };
+    use crate::file_dialog::{
+        DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
+        FileDialogStartError, OutputFormat, WindowOwner,
     };
     use apollo::{
         audio_mix::{execution::AudioMixExecutionState, model::OutputContainer},
@@ -1009,6 +1003,9 @@ mod tests {
             audio_mix_executor: apollo::audio_mix::execution::AudioMixExecutor::new(),
             upscale_executor: apollo::upscale::execution::UpscaleExecutor::new(),
             media_inspection: None,
+            file_dialog: FileDialogOwner::default(),
+            native_window_owner: Ok(WindowOwner::test_value()),
+            next_session_id: 1,
             tools_error_details_open: false,
         }
     }
@@ -1431,45 +1428,71 @@ mod tests {
     }
 
     #[test]
-    fn audio_mix_browse_updates_destination_and_follows_container_format() {
+    fn audio_mix_output_dialog_request_follows_current_container() {
         let (directory, path) = temp_file("audio-browse");
         let mut app = app();
         app.select_tool(Tool::AudioMix);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
 
-        let mp4_destination = directory.join("chosen mix.mp4");
-        app.handle_audio_mix_action_with_picker(AudioMixSelectionAction::BrowseOutput, |request| {
-            assert_eq!(request.initial_directory, directory);
-            assert_eq!(request.file_name, "recording-mixed.mp4");
-            assert_eq!(request.format, OutputPickerFormat::Mp4);
-            assert_eq!(request.format.extension(), "mp4");
-            assert!(request.format.filter().contains("*.mp4"));
-            Ok(Some(mp4_destination.clone()))
-        })
-        .unwrap();
+        let session = app.state.audio_mix.as_ref().unwrap();
+        let request = audio_mix_output_dialog_request(session);
+        let FileDialogRequest::SaveOutput { target, options } = request else {
+            panic!("audio browse must create a save request");
+        };
         assert_eq!(
-            app.state
-                .audio_mix
-                .as_ref()
-                .unwrap()
-                .selection
-                .output_path(),
-            mp4_destination
+            target,
+            DialogTarget::AudioMixOutput {
+                session_id: session.session_id,
+            }
         );
+        assert_eq!(options.initial_directory, directory);
+        assert_eq!(options.file_name, "recording-mixed.mp4");
+        assert_eq!(options.format, OutputFormat::Mp4);
 
         let session = app.state.audio_mix.as_mut().unwrap();
         let media = session.media.clone();
         session
             .selection
             .set_container(&media, OutputContainer::Mkv);
-        let mkv_destination = directory.join("chosen mix.mkv");
-        app.handle_audio_mix_action_with_picker(AudioMixSelectionAction::BrowseOutput, |request| {
-            assert_eq!(request.format, OutputPickerFormat::Mkv);
-            assert_eq!(request.format.extension(), "mkv");
-            assert!(request.format.filter().contains("*.mkv"));
-            Ok(Some(mkv_destination.clone()))
-        })
-        .unwrap();
+        let request = audio_mix_output_dialog_request(session);
+        let FileDialogRequest::SaveOutput { options, .. } = request else {
+            unreachable!();
+        };
+        assert_eq!(options.file_name, "recording-mixed.mkv");
+        assert_eq!(options.format, OutputFormat::Mkv);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn selected_output_paths_route_to_the_owning_tool() {
+        let (directory, path) = temp_file("upscale-browse");
+        let mut app = app();
+        app.select_tool(Tool::VideoUpscale);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let upscale_session_id = app.state.upscale.as_ref().unwrap().session_id;
+        let destination = directory.join("chosen upscale.mp4");
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::UpscaleOutput {
+                session_id: upscale_session_id,
+            },
+            outcome: DialogOutcome::Selected(destination.clone()),
+        });
+
+        assert_eq!(
+            app.state.upscale.as_ref().unwrap().selection.output_path(),
+            destination
+        );
+
+        app.select_tool(Tool::AudioMix);
+        let audio_session_id = app.state.audio_mix.as_ref().unwrap().session_id;
+        let audio_destination = directory.join("chosen mix.mp4");
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::AudioMixOutput {
+                session_id: audio_session_id,
+            },
+            outcome: DialogOutcome::Selected(audio_destination.clone()),
+        });
         assert_eq!(
             app.state
                 .audio_mix
@@ -1477,33 +1500,7 @@ mod tests {
                 .unwrap()
                 .selection
                 .output_path(),
-            mkv_destination
-        );
-
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn upscale_browse_updates_destination_with_mp4_picker() {
-        let (directory, path) = temp_file("upscale-browse");
-        let mut app = app();
-        app.select_tool(Tool::VideoUpscale);
-        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-        let destination = directory.join("chosen upscale.mp4");
-
-        app.handle_upscale_action_with_picker(UpscaleSelectionAction::BrowseOutput, |request| {
-            assert_eq!(request.initial_directory, directory);
-            assert_eq!(request.file_name, "recording-4k.mp4");
-            assert_eq!(request.format, OutputPickerFormat::Mp4);
-            assert_eq!(request.format.extension(), "mp4");
-            assert!(request.format.filter().contains("*.mp4"));
-            Ok(Some(destination.clone()))
-        })
-        .unwrap();
-
-        assert_eq!(
-            app.state.upscale.as_ref().unwrap().selection.output_path(),
-            destination
+            audio_destination
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1515,14 +1512,202 @@ mod tests {
         app.select_tool(Tool::AudioMix);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
         let before = app.state.clone();
+        let session_id = app.state.audio_mix.as_ref().unwrap().session_id;
 
-        app.handle_audio_mix_action_with_picker(AudioMixSelectionAction::BrowseOutput, |_| {
-            Ok(None)
-        })
-        .unwrap();
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::AudioMixOutput { session_id },
+            outcome: DialogOutcome::Cancelled,
+        });
 
         assert_eq!(app.state, before);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn pending_dialog_blocks_conflicting_app_actions_and_a_second_request() {
+        let (directory, path) = temp_file("pending-dialog-boundary");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let (release_sender, release_receiver) = mpsc::channel();
+        app.file_dialog
+            .request_for_test(
+                FileDialogRequest::OpenMedia,
+                egui::Context::default(),
+                move |_| {
+                    release_receiver.recv().unwrap();
+                    Ok(None)
+                },
+            )
+            .unwrap();
+
+        assert!(!app.file_intake_enabled());
+        app.handle_audio_mix_action(AudioMixSelectionAction::Back, egui::Context::default())
+            .unwrap();
+        assert!(!app.state.intake_active);
+        assert_eq!(
+            app.file_dialog.request(
+                FileDialogRequest::OpenMedia,
+                egui::Context::default(),
+                Ok(WindowOwner::test_value()),
+            ),
+            Err(FileDialogStartError::AlreadyPending)
+        );
+
+        release_sender.send(()).unwrap();
+        for _ in 0..100 {
+            if app.file_dialog.poll().is_some() {
+                fs::remove_dir_all(directory).unwrap();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("test dialog worker did not complete");
+    }
+
+    #[test]
+    fn stale_output_completions_cannot_mutate_replacement_sessions() {
+        let (directory, first) = temp_file("stale-dialog-session");
+        let second = directory.join("replacement.mkv");
+        let third = directory.join("third.mkv");
+        fs::write(&second, b"replacement").unwrap();
+        fs::write(&third, b"third").unwrap();
+        let mut app = app();
+
+        app.select_tool(Tool::AudioMix);
+        app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        let old_audio_id = app.state.audio_mix.as_ref().unwrap().session_id;
+        app.load_media_path_with_probe(&second, |path| Ok(media(path)));
+        let replacement_audio = app.state.audio_mix.as_ref().unwrap();
+        let replacement_audio_id = replacement_audio.session_id;
+        let replacement_audio_output = replacement_audio.selection.output_path();
+        assert_ne!(old_audio_id, replacement_audio_id);
+
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::AudioMixOutput {
+                session_id: old_audio_id,
+            },
+            outcome: DialogOutcome::Selected(directory.join("stale-mix.mp4")),
+        });
+        assert_eq!(
+            app.state
+                .audio_mix
+                .as_ref()
+                .unwrap()
+                .selection
+                .output_path(),
+            replacement_audio_output
+        );
+
+        app.select_tool(Tool::VideoUpscale);
+        let old_upscale_id = app.state.upscale.as_ref().unwrap().session_id;
+        app.load_media_path_with_probe(&third, |path| Ok(media(path)));
+        let replacement_upscale = app.state.upscale.as_ref().unwrap();
+        let replacement_upscale_id = replacement_upscale.session_id;
+        let replacement_upscale_output = replacement_upscale.selection.output_path();
+        assert_ne!(old_upscale_id, replacement_upscale_id);
+
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::UpscaleOutput {
+                session_id: old_upscale_id,
+            },
+            outcome: DialogOutcome::Selected(directory.join("stale-upscale.mp4")),
+        });
+        assert_eq!(
+            app.state.upscale.as_ref().unwrap().selection.output_path(),
+            replacement_upscale_output
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn output_completion_cannot_mutate_selection_after_execution_starts() {
+        let (directory, path) = temp_file("dialog-after-execution");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let audio_id = app.state.audio_mix.as_ref().unwrap().session_id;
+        let audio_output = app
+            .state
+            .audio_mix
+            .as_ref()
+            .unwrap()
+            .selection
+            .output_path();
+
+        settle_output_file_dialog(
+            &mut app.state,
+            &AudioMixExecutionState::Running,
+            &UpscaleExecutionState::Idle,
+            DialogTarget::AudioMixOutput {
+                session_id: audio_id,
+            },
+            DialogOutcome::Selected(directory.join("late-mix.mp4")),
+        );
+        assert_eq!(
+            app.state
+                .audio_mix
+                .as_ref()
+                .unwrap()
+                .selection
+                .output_path(),
+            audio_output
+        );
+
+        app.select_tool(Tool::VideoUpscale);
+        let upscale_id = app.state.upscale.as_ref().unwrap().session_id;
+        let upscale_output = app.state.upscale.as_ref().unwrap().selection.output_path();
+        settle_output_file_dialog(
+            &mut app.state,
+            &AudioMixExecutionState::Idle,
+            &UpscaleExecutionState::Running,
+            DialogTarget::UpscaleOutput {
+                session_id: upscale_id,
+            },
+            DialogOutcome::Selected(directory.join("late-upscale.mp4")),
+        );
+        assert_eq!(
+            app.state.upscale.as_ref().unwrap().selection.output_path(),
+            upscale_output
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn open_dialog_selected_path_starts_the_shared_intake_route() {
+        let (directory, path) = temp_file("dialog-open-route");
+        let mut app = app();
+
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::MediaInput,
+            outcome: DialogOutcome::Selected(path.clone()),
+        });
+
+        let inspection = app
+            .media_inspection
+            .as_ref()
+            .expect("selected Open path should start media inspection");
+        assert_eq!(inspection.request.path(), path);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn open_dialog_failure_surfaces_bounded_intake_feedback() {
+        let mut app = app();
+
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::MediaInput,
+            outcome: DialogOutcome::Failed("native open diagnostic marker".to_owned()),
+        });
+
+        let error = app
+            .state
+            .intake_error
+            .as_ref()
+            .expect("open dialog failure should become intake state");
+        assert_eq!(error.kind(), MediaErrorKind::FilePickerUnavailable);
+        assert_eq!(error.diagnostic(), Some("native open diagnostic marker"));
+        assert!(!app.state.intake_error_details_open);
     }
 
     #[test]
@@ -1539,11 +1724,12 @@ mod tests {
             .selection
             .output_path()
             .to_path_buf();
+        let session_id = app.state.upscale.as_ref().unwrap().session_id;
 
-        app.handle_upscale_action_with_picker(UpscaleSelectionAction::BrowseOutput, |_| {
-            Err(io::Error::other("native picker diagnostic marker"))
-        })
-        .unwrap();
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::UpscaleOutput { session_id },
+            outcome: DialogOutcome::Failed("native picker diagnostic marker".to_owned()),
+        });
 
         let error = app
             .state
@@ -1588,7 +1774,10 @@ mod tests {
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
 
         let error = app
-            .handle_upscale_action(UpscaleSelectionAction::UpscaleRequested)
+            .handle_upscale_action(
+                UpscaleSelectionAction::UpscaleRequested,
+                egui::Context::default(),
+            )
             .expect_err("missing test FFmpeg should prove the execution path was attempted");
 
         assert!(matches!(
@@ -1684,7 +1873,7 @@ mod tests {
             .selection
             .set_custom_output_path(custom_output.clone());
 
-        app.handle_audio_mix_action(AudioMixSelectionAction::Back)
+        app.handle_audio_mix_action(AudioMixSelectionAction::Back, egui::Context::default())
             .unwrap();
 
         assert!(app.state.intake_active);
@@ -1728,7 +1917,7 @@ mod tests {
             .selection
             .set_custom_output_path(custom_output.clone());
 
-        app.handle_upscale_action(UpscaleSelectionAction::Back)
+        app.handle_upscale_action(UpscaleSelectionAction::Back, egui::Context::default())
             .unwrap();
 
         assert!(app.state.intake_active);
@@ -1770,7 +1959,7 @@ mod tests {
             .expect("upscale session should exist")
             .selection
             .set_custom_output_path(old_output);
-        app.handle_upscale_action(UpscaleSelectionAction::Back)
+        app.handle_upscale_action(UpscaleSelectionAction::Back, egui::Context::default())
             .unwrap();
 
         app.load_media_path_with_probe(&second, |path| Ok(media(path)));

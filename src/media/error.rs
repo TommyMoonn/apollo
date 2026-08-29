@@ -31,6 +31,7 @@ pub enum MediaErrorKind {
     EncoderUnavailable,
     OutputExists,
     OutputNotWritable,
+    FilePickerUnavailable,
     OutputPickerUnavailable,
     MultipleFiles,
     InvalidRequest,
@@ -64,6 +65,7 @@ impl MediaError {
             MediaErrorKind::EncoderUnavailable => "The selected video encoder is unavailable.",
             MediaErrorKind::OutputExists => "The output file already exists.",
             MediaErrorKind::OutputNotWritable => "The output location is not writable.",
+            MediaErrorKind::FilePickerUnavailable => "The file picker could not be opened.",
             MediaErrorKind::OutputPickerUnavailable => "The output picker could not be opened.",
             MediaErrorKind::MultipleFiles => "Drop one file at a time.",
             MediaErrorKind::InvalidRequest => "The requested media operation is not valid.",
@@ -111,6 +113,7 @@ impl MediaError {
             MediaErrorKind::OutputNotWritable => {
                 Some("Choose a writable output folder and try again.")
             }
+            MediaErrorKind::FilePickerUnavailable => Some("Try Open files again."),
             MediaErrorKind::OutputPickerUnavailable => Some("Try Browse again."),
             MediaErrorKind::MultipleFiles => None,
             MediaErrorKind::InvalidRequest => Some("Review the current settings and try again."),
@@ -151,6 +154,10 @@ impl MediaError {
 
     pub fn output_picker_unavailable(diagnostic: impl Into<String>) -> Self {
         Self::with_diagnostic(MediaErrorKind::OutputPickerUnavailable, diagnostic)
+    }
+
+    pub fn file_picker_unavailable(diagnostic: impl Into<String>) -> Self {
+        Self::with_diagnostic(MediaErrorKind::FilePickerUnavailable, diagnostic)
     }
 
     pub fn multiple_files() -> Self {
@@ -507,6 +514,16 @@ mod tests {
             .expect("picker diagnostic should be retained");
         assert!(diagnostic.len() <= DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES);
         assert!(diagnostic.ends_with("TAIL"));
+    }
+
+    #[test]
+    fn file_picker_failure_has_intake_specific_copy() {
+        let error = MediaError::file_picker_unavailable("native dialog diagnostic");
+
+        assert_eq!(error.kind(), MediaErrorKind::FilePickerUnavailable);
+        assert_eq!(error.message(), "The file picker could not be opened.");
+        assert_eq!(error.guidance(), Some("Try Open files again."));
+        assert_eq!(error.diagnostic(), Some("native dialog diagnostic"));
     }
 
     #[test]
