@@ -95,12 +95,13 @@ fn show_running(
 ) -> AudioMixLifecycleAction {
     let mut action = AudioMixLifecycleAction::None;
     let presentation = progress_presentation(progress);
+    let path_summary = source_to_output(request);
 
     layout::focus_content(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         heading(ui, RUNNING_TITLE);
         ui.add_space(theme::STATUS_COPY_GAP);
-        secondary_copy(ui, &source_to_output(request));
+        secondary_copy(ui, &path_summary);
 
         ui.add_space(theme::SPACING.spacious);
         show_progress(ui, &presentation);
@@ -108,7 +109,7 @@ fn show_running(
         ui.add_space(theme::RUNNING_FOOTER_GAP);
         let response =
             right_aligned_actions(ui, |ui| widgets::destructive_button(ui, CANCEL_LABEL));
-        if response.clicked() && executor.cancel() {
+        if !ui.is_sizing_pass() && response.clicked() && executor.cancel() {
             action = AudioMixLifecycleAction::CancelRequested;
         }
     });
@@ -125,6 +126,8 @@ fn show_completed(
     ui_state: &mut AudioMixLifecycleUiState,
 ) -> AudioMixLifecycleAction {
     let mut action = AudioMixLifecycleAction::None;
+    let video_summary = video_copy_summary(media);
+    let audio_summary = mixed_audio_summary(request.container);
 
     layout::focus_content(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -132,12 +135,12 @@ fn show_completed(
         ui.add_space(theme::SPACING.focal);
         file_name(ui, output);
 
-        if let Some(summary) = video_copy_summary(media) {
+        if let Some(summary) = &video_summary {
             ui.add_space(theme::SPACING.tight);
-            technical_faint(ui, &summary);
+            technical_faint(ui, summary);
         }
         ui.add_space(theme::SPACING.tight);
-        technical_faint(ui, &mixed_audio_summary(request.container));
+        technical_faint(ui, &audio_summary);
 
         ui.add_space(theme::RESULT_FOOTER_GAP);
         let (done, open_folder) = right_aligned_actions(ui, |ui| {
@@ -147,13 +150,15 @@ fn show_completed(
             (done, open_folder)
         });
 
-        if done.clicked() {
-            let reset = executor.reset();
-            debug_assert!(reset, "completed executor must be resettable");
-            ui_state.reset();
-            action = AudioMixLifecycleAction::Done;
-        } else if open_folder.clicked() {
-            action = AudioMixLifecycleAction::OpenFolder(output_parent(output));
+        if !ui.is_sizing_pass() {
+            if done.clicked() {
+                let reset = executor.reset();
+                debug_assert!(reset, "completed executor must be resettable");
+                ui_state.reset();
+                action = AudioMixLifecycleAction::Done;
+            } else if open_folder.clicked() {
+                action = AudioMixLifecycleAction::OpenFolder(output_parent(output));
+            }
         }
     });
 
@@ -171,8 +176,15 @@ fn show_failed(
     executor: &mut AudioMixExecutor,
     ui_state: &mut AudioMixLifecycleUiState,
 ) -> AudioMixLifecycleAction {
+    let error = failure_error(failure, request.container);
     let response = layout::focus_content(ui, |ui| {
-        failure_content(ui, request.container, failure, ui_state)
+        let mut sizing_details_open = ui_state.details_open;
+        let details_open = if ui.is_sizing_pass() {
+            &mut sizing_details_open
+        } else {
+            &mut ui_state.details_open
+        };
+        failure_content(ui, &error, details_open)
     });
 
     if response.inner.back.clicked() {
@@ -187,18 +199,10 @@ fn show_failed(
 
 fn failure_content(
     ui: &mut Ui,
-    container: OutputContainer,
-    failure: &AudioMixExecutionFailure,
-    ui_state: &mut AudioMixLifecycleUiState,
+    error: &MediaError,
+    details_open: &mut bool,
 ) -> FailureContentResponse {
-    let error = failure_error(failure, container);
-    let back = media_error::show_failure_content(
-        ui,
-        FAILED_TITLE,
-        &error,
-        &mut ui_state.details_open,
-        BACK_LABEL,
-    );
+    let back = media_error::show_failure_content(ui, FAILED_TITLE, error, details_open, BACK_LABEL);
     FailureContentResponse { back }
 }
 
@@ -227,7 +231,7 @@ fn show_cancelled(
 
         ui.add_space(theme::RESULT_FOOTER_GAP);
         let response = right_aligned_actions(ui, |ui| widgets::primary_button(ui, DONE_LABEL));
-        if response.clicked() {
+        if !ui.is_sizing_pass() && response.clicked() {
             let reset = executor.reset();
             debug_assert!(reset, "cancelled executor must be resettable");
             ui_state.reset();
@@ -341,6 +345,7 @@ mod tests {
             let available = egui::Vec2::new(470.0, 260.0);
             let (parent_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
             let failure = process_failure(long_diagnostic());
+            let error = failure_error(&failure, OutputContainer::Mp4);
             let mut state = AudioMixLifecycleUiState { details_open: true };
 
             let response = ui
@@ -350,7 +355,7 @@ mod tests {
                         .layout(egui::Layout::top_down(egui::Align::LEFT)),
                     |ui| {
                         crate::ui::layout::focus_content(ui, |ui| {
-                            failure_content(ui, OutputContainer::Mp4, &failure, &mut state)
+                            failure_content(ui, &error, &mut state.details_open)
                         })
                     },
                 )
@@ -367,6 +372,7 @@ mod tests {
         run_test_ui_with_fonts(|ui| {
             let available = egui::Vec2::new(470.0, 260.0);
             let failure = process_failure(long_diagnostic());
+            let error = failure_error(&failure, OutputContainer::Mp4);
 
             let (expanded_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
             let mut expanded_state = AudioMixLifecycleUiState { details_open: true };
@@ -377,7 +383,7 @@ mod tests {
                         .layout(egui::Layout::top_down(egui::Align::LEFT)),
                     |ui| {
                         crate::ui::layout::focus_content(ui, |ui| {
-                            failure_content(ui, OutputContainer::Mp4, &failure, &mut expanded_state)
+                            failure_content(ui, &error, &mut expanded_state.details_open)
                         })
                     },
                 )
@@ -392,7 +398,7 @@ mod tests {
                         .layout(egui::Layout::top_down(egui::Align::LEFT)),
                     |ui| {
                         crate::ui::layout::focus_content(ui, |ui| {
-                            failure_content(ui, OutputContainer::Mp4, &failure, &mut compact_state)
+                            failure_content(ui, &error, &mut compact_state.details_open)
                         })
                     },
                 )
@@ -410,6 +416,7 @@ mod tests {
             let available = egui::Vec2::new(220.0, 240.0);
             let (parent_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
             let failure = process_failure("short diagnostic".to_owned());
+            let error = failure_error(&failure, OutputContainer::Mp4);
             let mut state = AudioMixLifecycleUiState::default();
 
             let response = ui
@@ -419,7 +426,7 @@ mod tests {
                         .layout(egui::Layout::top_down(egui::Align::LEFT)),
                     |ui| {
                         crate::ui::layout::focus_content(ui, |ui| {
-                            failure_content(ui, OutputContainer::Mp4, &failure, &mut state)
+                            failure_content(ui, &error, &mut state.details_open)
                         })
                     },
                 )

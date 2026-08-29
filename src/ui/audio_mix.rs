@@ -48,6 +48,23 @@ pub enum AudioMixSelectionAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioMixPresentation {
+    source_file_name: String,
+    source_metadata: Option<String>,
+    tracks: Vec<TrackPresentation>,
+}
+
+impl AudioMixPresentation {
+    pub fn new(media: &MediaFile) -> Self {
+        Self {
+            source_file_name: source_file_name(&media.path),
+            source_metadata: source_metadata(media),
+            tracks: track_presentations(media),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TrackPresentation {
     stream_index: u32,
     title: String,
@@ -182,11 +199,11 @@ impl AudioMixSelectionState {
 pub fn show(
     ui: &mut Ui,
     media: &MediaFile,
+    presentation: &AudioMixPresentation,
     state: &mut AudioMixSelectionState,
 ) -> AudioMixSelectionAction {
     let mut action = AudioMixSelectionAction::None;
-    let tracks = track_presentations(media);
-    let list_content_height = tracks.len() as f32 * theme::SELECTABLE_ROW_MIN_HEIGHT;
+    let list_content_height = presentation.tracks.len() as f32 * theme::SELECTABLE_ROW_MIN_HEIGHT;
     let validation = state.validation(media);
     let has_validation_feedback = validation
         .as_ref()
@@ -195,21 +212,26 @@ pub fn show(
         .is_some();
     let plan = layout::task_surface_plan(
         ui.available_height(),
-        audio_mix_fixed_flow_height(ui, media, tracks.is_empty(), has_validation_feedback),
+        audio_mix_fixed_flow_height(
+            ui,
+            presentation,
+            presentation.tracks.is_empty(),
+            has_validation_feedback,
+        ),
         list_content_height,
     );
 
     layout::task_surface(ui, plan.overflow, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
 
-        if show_source_header(ui, media) {
+        if show_source_header(ui, presentation) {
             action = AudioMixSelectionAction::Back;
         }
         ui.add_space(theme::SPACING.section);
 
         let _ = widgets::section_label(ui, AUDIO_TRACKS_LABEL);
         ui.add_space(theme::SPACING.compact);
-        show_track_list(ui, media, state, &tracks, plan.list.max_height);
+        show_track_list(ui, media, state, &presentation.tracks, plan.list.max_height);
         ui.add_space(theme::INLINE_ACTION_GAP);
         show_track_actions(ui, media, state);
         ui.add_space(theme::SPACING.section);
@@ -240,15 +262,13 @@ pub fn show(
     action
 }
 
-fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
-    let file_name = source_file_name(&media.path);
-    let metadata = source_metadata(media);
-    let metadata_gap = if metadata.is_some() {
+fn show_source_header(ui: &mut Ui, presentation: &AudioMixPresentation) -> bool {
+    let metadata_gap = if presentation.source_metadata.is_some() {
         theme::SPACING.tight
     } else {
         0.0
     };
-    let header_height = source_header_height(ui, metadata.is_some());
+    let header_height = source_header_height(ui, presentation.source_metadata.is_some());
 
     let (_, back_response) = Sides::new()
         .height(header_height.max(theme::COMPACT_CONTROL_HEIGHT))
@@ -261,11 +281,14 @@ fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = metadata_gap;
                     ui.add(
-                        Label::new(RichText::new(file_name).text_style(TextStyle::Body))
-                            .truncate()
-                            .selectable(false),
+                        Label::new(
+                            RichText::new(&presentation.source_file_name)
+                                .text_style(TextStyle::Body),
+                        )
+                        .truncate()
+                        .selectable(false),
                     );
-                    if let Some(metadata) = metadata {
+                    if let Some(metadata) = &presentation.source_metadata {
                         ui.add(
                             Label::new(
                                 RichText::new(metadata)
@@ -321,12 +344,12 @@ fn show_track_list(
 
 fn audio_mix_fixed_flow_height(
     ui: &Ui,
-    media: &MediaFile,
+    presentation: &AudioMixPresentation,
     track_list_empty: bool,
     has_validation_feedback: bool,
 ) -> f32 {
     let section_label_height = ui.text_style_height(&TextStyle::Small);
-    let source_header_height = source_header_height(ui, source_metadata(media).is_some());
+    let source_header_height = source_header_height(ui, presentation.source_metadata.is_some());
     let output_row_height = widgets::output_filename_row_plan(
         ui,
         Some(widgets::select_menu_intrinsic_width(ui, &CONTAINER_OPTIONS)),
@@ -678,7 +701,7 @@ mod tests {
     use crate::media::model::{AudioStream, MediaFile, VideoStream};
 
     use super::{
-        AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height,
+        AudioMixPresentation, AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height,
         audio_mix_ready_feedback, source_metadata, track_presentations,
     };
     use crate::audio_mix::model::OutputContainer;
@@ -722,6 +745,37 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn presentation_changes_only_when_probe_data_changes() {
+        let original = media();
+        let original_presentation = AudioMixPresentation::new(&original);
+
+        let mut replaced = original.clone();
+        replaced.audio_streams[0].title = Some("Game Audio".to_owned());
+        let replaced_presentation = AudioMixPresentation::new(&replaced);
+
+        assert_ne!(original_presentation, replaced_presentation);
+    }
+
+    #[test]
+    fn selection_changes_do_not_rebuild_or_mutate_track_presentation() {
+        let media = media();
+        let presentation = AudioMixPresentation::new(&media);
+        let expected = presentation.clone();
+        let mut state = AudioMixSelectionState::new(&media);
+
+        assert!(state.toggle_stream(&media, 4));
+
+        assert_eq!(presentation, expected);
+        assert!(!state.is_selected(4));
+        assert!(
+            presentation
+                .tracks
+                .iter()
+                .any(|track| track.stream_index == 4 && track.title == "Microphone")
+        );
     }
 
     #[test]
@@ -1057,9 +1111,10 @@ mod tests {
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media();
+            let presentation = AudioMixPresentation::new(&media);
             let usable_height =
                 layout::MINIMUM_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = audio_mix_fixed_flow_height(ui, &media, false, false);
+            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false);
             let plan = layout::task_surface_plan(
                 usable_height,
                 fixed_height,
@@ -1081,9 +1136,10 @@ mod tests {
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media();
+            let presentation = AudioMixPresentation::new(&media);
             let usable_height =
                 layout::REFERENCE_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = audio_mix_fixed_flow_height(ui, &media, false, false);
+            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false);
             let plan = layout::task_surface_plan(
                 usable_height,
                 fixed_height,
@@ -1109,7 +1165,8 @@ mod tests {
 
         let output = context.run_ui(Default::default(), |ui| {
             let media = media();
-            let fixed_height = audio_mix_fixed_flow_height(ui, &media, false, false);
+            let presentation = AudioMixPresentation::new(&media);
+            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false);
             let content_height = 20.0 * theme::SELECTABLE_ROW_MIN_HEIGHT;
             let reference = layout::task_surface_plan(323.0, fixed_height, content_height);
             let tall = layout::task_surface_plan(700.0, fixed_height, content_height);

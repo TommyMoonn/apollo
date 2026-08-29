@@ -96,12 +96,14 @@ fn show_running(
 ) -> UpscaleLifecycleAction {
     let mut action = UpscaleLifecycleAction::None;
     let presentation = progress_presentation(progress);
+    let title = running_title(request);
+    let path_summary = source_to_output(&request.input, &request.output);
 
     layout::focus_content(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        heading(ui, &running_title(request));
+        heading(ui, &title);
         ui.add_space(theme::STATUS_COPY_GAP);
-        secondary_copy(ui, &source_to_output(&request.input, &request.output));
+        secondary_copy(ui, &path_summary);
 
         ui.add_space(theme::SPACING.spacious);
         show_progress(ui, &presentation);
@@ -109,7 +111,7 @@ fn show_running(
         ui.add_space(theme::RUNNING_FOOTER_GAP);
         let response =
             right_aligned_actions(ui, |ui| widgets::destructive_button(ui, CANCEL_LABEL));
-        if response.clicked() && executor.cancel() {
+        if !ui.is_sizing_pass() && response.clicked() && executor.cancel() {
             action = UpscaleLifecycleAction::CancelRequested;
         }
     });
@@ -126,6 +128,8 @@ fn show_completed(
     ui_state: &mut UpscaleLifecycleUiState,
 ) -> UpscaleLifecycleAction {
     let mut action = UpscaleLifecycleAction::None;
+    let dimensions = completion_dimensions(media, request);
+    let codec = codec_label(request.codec);
 
     layout::focus_content(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -134,9 +138,9 @@ fn show_completed(
         file_name(ui, output);
 
         ui.add_space(theme::SPACING.tight);
-        technical_faint(ui, &completion_dimensions(media, request));
+        technical_faint(ui, &dimensions);
         ui.add_space(theme::SPACING.tight);
-        technical_faint(ui, codec_label(request.codec));
+        technical_faint(ui, codec);
 
         ui.add_space(theme::RESULT_FOOTER_GAP);
         let (done, open_folder) = right_aligned_actions(ui, |ui| {
@@ -146,11 +150,13 @@ fn show_completed(
             (done, open_folder)
         });
 
-        if done.clicked() {
-            reset_terminal(executor, ui_state, "completed");
-            action = UpscaleLifecycleAction::Done;
-        } else if open_folder.clicked() {
-            action = UpscaleLifecycleAction::OpenFolder(output_parent(output));
+        if !ui.is_sizing_pass() {
+            if done.clicked() {
+                reset_terminal(executor, ui_state, "completed");
+                action = UpscaleLifecycleAction::Done;
+            } else if open_folder.clicked() {
+                action = UpscaleLifecycleAction::OpenFolder(output_parent(output));
+            }
         }
     });
 
@@ -167,7 +173,16 @@ fn show_failed(
     executor: &mut UpscaleExecutor,
     ui_state: &mut UpscaleLifecycleUiState,
 ) -> UpscaleLifecycleAction {
-    let response = layout::focus_content(ui, |ui| failure_content(ui, failure, ui_state));
+    let error = failure_error(failure);
+    let response = layout::focus_content(ui, |ui| {
+        let mut sizing_details_open = ui_state.details_open;
+        let details_open = if ui.is_sizing_pass() {
+            &mut sizing_details_open
+        } else {
+            &mut ui_state.details_open
+        };
+        failure_content(ui, &error, details_open)
+    });
 
     if response.inner.back.clicked() {
         reset_terminal(executor, ui_state, "failed");
@@ -179,17 +194,10 @@ fn show_failed(
 
 fn failure_content(
     ui: &mut Ui,
-    failure: &UpscaleExecutionFailure,
-    ui_state: &mut UpscaleLifecycleUiState,
+    error: &MediaError,
+    details_open: &mut bool,
 ) -> FailureContentResponse {
-    let error = failure_error(failure);
-    let back = media_error::show_failure_content(
-        ui,
-        FAILED_TITLE,
-        &error,
-        &mut ui_state.details_open,
-        BACK_LABEL,
-    );
+    let back = media_error::show_failure_content(ui, FAILED_TITLE, error, details_open, BACK_LABEL);
     FailureContentResponse { back }
 }
 
@@ -214,7 +222,7 @@ fn show_cancelled(
 
         ui.add_space(theme::RESULT_FOOTER_GAP);
         let response = right_aligned_actions(ui, |ui| widgets::primary_button(ui, DONE_LABEL));
-        if response.clicked() {
+        if !ui.is_sizing_pass() && response.clicked() {
             reset_terminal(executor, ui_state, "cancelled");
             action = UpscaleLifecycleAction::Done;
         }
@@ -447,6 +455,7 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join("\n"),
             };
+            let error = failure_error(&failure);
             let mut state = UpscaleLifecycleUiState { details_open: true };
 
             let response = ui
@@ -456,7 +465,7 @@ mod tests {
                         .layout(egui::Layout::top_down(egui::Align::LEFT)),
                     |ui| {
                         crate::ui::layout::focus_content(ui, |ui| {
-                            failure_content(ui, &failure, &mut state)
+                            failure_content(ui, &error, &mut state.details_open)
                         })
                     },
                 )

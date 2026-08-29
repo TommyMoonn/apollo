@@ -159,25 +159,20 @@ pub fn centered_content<R>(
 
 /// Arrange file intake as top, middle, and bottom regions when height permits.
 ///
-/// The regions are measured at the current responsive content width. Remaining vertical space is
-/// distributed evenly between them, keeping the title near the top, the intake action around the
-/// visual middle, and the mode selector at the bottom. When the shared section gaps no longer fit,
-/// the surface collapses to compact top-down flow inside a vertical scroll area.
+/// The caller supplies presentation-only region heights so each region renders exactly once. Stable
+/// controls use deterministic metrics while wrapped copy can be measured directly from text. Remaining
+/// vertical space is distributed evenly between them, keeping the title near the top, the intake
+/// action around the visual middle, and the mode selector at the bottom. When the shared section
+/// gaps no longer fit, the surface collapses to compact top-down flow inside a vertical scroll area.
 pub fn intake_content(
     ui: &mut Ui,
-    mut show_top: impl FnMut(&mut Ui),
-    mut show_middle: impl FnMut(&mut Ui),
-    mut show_bottom: impl FnMut(&mut Ui),
+    region_heights: [f32; 3],
+    show_top: impl FnOnce(&mut Ui),
+    show_middle: impl FnOnce(&mut Ui),
+    show_bottom: impl FnOnce(&mut Ui),
 ) -> IntakeLayoutPlan {
     let available = safe_available_size(ui.available_size());
     let content_width = bounded_content_width(available.x);
-    let measure_rect = Rect::from_min_size(ui.cursor().min, vec2(content_width, available.y));
-
-    let region_heights = [
-        measure_intake_region(ui, "intake_top_measure", measure_rect, &mut show_top),
-        measure_intake_region(ui, "intake_middle_measure", measure_rect, &mut show_middle),
-        measure_intake_region(ui, "intake_bottom_measure", measure_rect, &mut show_bottom),
-    ];
     let plan = intake_layout_plan(available.y, region_heights);
 
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
@@ -234,25 +229,6 @@ pub fn intake_layout_plan(available_height: f32, region_heights: [f32; 3]) -> In
     }
 }
 
-fn measure_intake_region(
-    ui: &mut Ui,
-    id_salt: &'static str,
-    max_rect: Rect,
-    add_contents: &mut impl FnMut(&mut Ui),
-) -> f32 {
-    let mut measure_ui = ui.new_child(
-        UiBuilder::new()
-            .id_salt(id_salt)
-            .max_rect(max_rect)
-            .layout(Layout::top_down(Align::Center))
-            .sizing_pass()
-            .invisible(),
-    );
-    measure_ui.spacing_mut().item_spacing.y = 0.0;
-    add_contents(&mut measure_ui);
-    safe_dimension(measure_ui.min_rect().height())
-}
-
 /// Center a ready/configuration feature surface while keeping its contents top-down and left aligned.
 ///
 /// Ready surfaces consume the current padded viewport width. The surrounding content frame owns
@@ -293,7 +269,8 @@ impl<R> FocusContentResponse<R> {
 /// Center a narrow running/result surface as one sparse focal composition.
 ///
 /// A sizing pass measures the current composition at the same bounded width, including wrapped
-/// copy and expanded bounded diagnostics. If that measured height fits, the real surface keeps
+/// copy and expanded bounded diagnostics. Callers must keep that sizing invocation presentation-only
+/// because the closure runs again for the real render. If the measured height fits, the real surface keeps
 /// vertically centered top-down flow with no outer scroll area. If it does not fit, the real
 /// surface uses a vertical [`ScrollArea`] so terminal actions remain reachable.
 ///
@@ -698,6 +675,9 @@ mod tests {
             let top = Cell::new(None);
             let middle = Cell::new(None);
             let bottom = Cell::new(None);
+            let top_calls = Cell::new(0);
+            let middle_calls = Cell::new(0);
+            let bottom_calls = Cell::new(0);
 
             let plan = ui
                 .scope_builder(
@@ -707,7 +687,9 @@ mod tests {
                     |ui| {
                         intake_content(
                             ui,
+                            [26.0, 55.0, 31.0],
                             |ui| {
+                                top_calls.set(top_calls.get() + 1);
                                 let rect = ui
                                     .allocate_exact_size(
                                         Vec2::new(120.0, 26.0),
@@ -719,6 +701,7 @@ mod tests {
                                 }
                             },
                             |ui| {
+                                middle_calls.set(middle_calls.get() + 1);
                                 let rect = ui
                                     .allocate_exact_size(
                                         Vec2::new(160.0, 55.0),
@@ -730,6 +713,7 @@ mod tests {
                                 }
                             },
                             |ui| {
+                                bottom_calls.set(bottom_calls.get() + 1);
                                 let rect = ui
                                     .allocate_exact_size(
                                         Vec2::new(180.0, 31.0),
@@ -749,6 +733,9 @@ mod tests {
             let middle = middle.get().expect("middle region should render");
             let bottom = bottom.get().expect("bottom region should render");
 
+            assert_eq!(top_calls.get(), 1);
+            assert_eq!(middle_calls.get(), 1);
+            assert_eq!(bottom_calls.get(), 1);
             assert_eq!(plan.layout, IntakeLayout::Distributed);
             assert!((top.top() - parent_rect.top()).abs() < 0.01);
             assert!((middle.center().y - parent_rect.center().y).abs() < 3.0);
@@ -771,6 +758,9 @@ mod tests {
             let top = Cell::new(None);
             let middle = Cell::new(None);
             let bottom = Cell::new(None);
+            let top_calls = Cell::new(0);
+            let middle_calls = Cell::new(0);
+            let bottom_calls = Cell::new(0);
 
             let plan = ui
                 .scope_builder(
@@ -780,7 +770,9 @@ mod tests {
                     |ui| {
                         intake_content(
                             ui,
+                            [26.0, 150.0, 31.0],
                             |ui| {
+                                top_calls.set(top_calls.get() + 1);
                                 let rect = ui
                                     .allocate_exact_size(
                                         Vec2::new(120.0, 26.0),
@@ -792,6 +784,7 @@ mod tests {
                                 }
                             },
                             |ui| {
+                                middle_calls.set(middle_calls.get() + 1);
                                 let rect = ui
                                     .allocate_exact_size(
                                         Vec2::new(240.0, 150.0),
@@ -803,6 +796,7 @@ mod tests {
                                 }
                             },
                             |ui| {
+                                bottom_calls.set(bottom_calls.get() + 1);
                                 let rect = ui
                                     .allocate_exact_size(
                                         Vec2::new(180.0, 31.0),
@@ -822,6 +816,9 @@ mod tests {
             let middle = middle.get().expect("middle region should render");
             let bottom = bottom.get().expect("bottom region should render");
 
+            assert_eq!(top_calls.get(), 1);
+            assert_eq!(middle_calls.get(), 1);
+            assert_eq!(bottom_calls.get(), 1);
             assert_eq!(plan.layout, IntakeLayout::Compact);
             assert!((top.center().x - parent_rect.center().x).abs() < 0.01);
             assert!((middle.center().x - parent_rect.center().x).abs() < 0.01);

@@ -28,7 +28,7 @@ use apollo::{
     },
     ui::{
         audio_mix as audio_mix_ui,
-        audio_mix::{AudioMixSelectionAction, AudioMixSelectionState},
+        audio_mix::{AudioMixPresentation, AudioMixSelectionAction, AudioMixSelectionState},
         audio_mix_progress::{self, AudioMixLifecycleAction, AudioMixLifecycleUiState},
         file_intake::{self, FileIntakeAction, FileIntakeTool},
         fonts, layout, media_error, theme, upscale as upscale_ui,
@@ -77,6 +77,7 @@ impl Tool {
 struct AudioMixToolState {
     session_id: u64,
     media: MediaFile,
+    presentation: AudioMixPresentation,
     selection: AudioMixSelectionState,
     lifecycle_ui: AudioMixLifecycleUiState,
     start_error: Option<MediaError>,
@@ -220,6 +221,7 @@ impl ApolloApp {
                     let session_id = self.take_session_id();
                     self.state.audio_mix = Some(AudioMixToolState {
                         session_id,
+                        presentation: AudioMixPresentation::new(&media),
                         selection: AudioMixSelectionState::new(&media),
                         lifecycle_ui: AudioMixLifecycleUiState::default(),
                         start_error: None,
@@ -494,7 +496,12 @@ impl ApolloApp {
                     .audio_mix
                     .as_mut()
                     .expect("audio mix source exists while ready surface is shown");
-                audio_mix_ui::show(ui, &session.media, &mut session.selection)
+                audio_mix_ui::show(
+                    ui,
+                    &session.media,
+                    &session.presentation,
+                    &mut session.selection,
+                )
             })
             .inner;
         if let Err(error) = self.handle_audio_mix_action(action, ui.ctx().clone())
@@ -519,13 +526,13 @@ impl ApolloApp {
             "Audio mix could not start"
         };
         let response = layout::focus_content(ui, |ui| {
-            media_error::show_failure_content(
-                ui,
-                title,
-                error,
-                &mut session.start_error_details_open,
-                "Back",
-            )
+            let mut sizing_details_open = session.start_error_details_open;
+            let details_open = if ui.is_sizing_pass() {
+                &mut sizing_details_open
+            } else {
+                &mut session.start_error_details_open
+            };
+            media_error::show_failure_content(ui, title, error, details_open, "Back")
         });
         if response.inner.clicked() {
             session.start_error = None;
@@ -637,13 +644,13 @@ impl ApolloApp {
             "Upscale could not start"
         };
         let response = layout::focus_content(ui, |ui| {
-            media_error::show_failure_content(
-                ui,
-                title,
-                error,
-                &mut session.start_error_details_open,
-                "Back",
-            )
+            let mut sizing_details_open = session.start_error_details_open;
+            let details_open = if ui.is_sizing_pass() {
+                &mut sizing_details_open
+            } else {
+                &mut session.start_error_details_open
+            };
+            media_error::show_failure_content(ui, title, error, details_open, "Back")
         });
         if response.inner.clicked() {
             session.start_error = None;

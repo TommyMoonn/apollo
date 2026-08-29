@@ -3,7 +3,10 @@ use egui::{Response, Ui};
 use crate::media::error::MediaError;
 
 use super::{
-    media_lifecycle::{diagnostic_viewport, heading, right_aligned_actions, secondary_copy},
+    layout,
+    media_lifecycle::{
+        diagnostic_viewport, heading, right_aligned_actions, secondary_copy, secondary_copy_height,
+    },
     theme, widgets,
 };
 
@@ -14,6 +17,31 @@ pub fn show_inline(ui: &mut Ui, error: &MediaError, details_open: &mut bool) {
     ui.spacing_mut().item_spacing.y = 0.0;
     show_copy(ui, error);
     show_details(ui, error, details_open);
+}
+
+pub(super) fn inline_height(
+    ui: &Ui,
+    error: &MediaError,
+    details_open: bool,
+    wrap_width: f32,
+) -> f32 {
+    let mut height = secondary_copy_height(ui, error.message(), wrap_width);
+
+    if let Some(guidance) = error.guidance() {
+        height += theme::SPACING.tight + secondary_copy_height(ui, guidance, wrap_width);
+    }
+
+    if error.diagnostic().is_some() {
+        height += theme::DETAILS_TOP_GAP + theme::COMPACT_CONTROL_HEIGHT;
+        if details_open {
+            height += theme::DETAILS_TOP_GAP
+                + theme::SEPARATOR_WIDTH
+                + theme::DETAILS_SEPARATOR_GAP
+                + layout::DIAGNOSTIC_MAX_HEIGHT;
+        }
+    }
+
+    height
 }
 
 pub fn show_failure_content(
@@ -67,13 +95,17 @@ fn show_details(ui: &mut Ui, error: &MediaError, details_open: &mut bool) {
 
 #[cfg(test)]
 mod tests {
-    use crate::media::{
-        error::{MediaError, MediaOutputContainer},
-        execution::MediaExecutionFailure,
-        process::MediaProcessFailure,
+    use crate::{
+        media::{
+            error::{MediaError, MediaOutputContainer},
+            execution::MediaExecutionFailure,
+            process::MediaProcessFailure,
+            tools::MediaToolsError,
+        },
+        ui::{fonts, theme},
     };
 
-    use super::show_inline;
+    use super::{inline_height, show_inline};
 
     #[test]
     fn inline_error_shows_concise_copy_without_raw_diagnostic_until_expanded() {
@@ -92,6 +124,59 @@ mod tests {
         let debug = format!("{:?}", output.shapes);
 
         assert!(!debug.contains("RAW-STDERR-MARKER"));
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn inline_height_matches_wrapped_error_presentation_at_current_width() {
+        let error = MediaError::from_tools_error(&MediaToolsError::MissingBoth);
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+
+        for (width, details_open) in [(344.0, false), (520.0, false), (344.0, true)] {
+            let mut measured = 0.0;
+            let mut rendered = 0.0;
+            let output = context.run_ui(Default::default(), |ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(width, 500.0), egui::Sense::hover());
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                );
+                let wrap_width = child.available_width();
+                measured = inline_height(&child, &error, details_open, wrap_width);
+
+                let mut rendered_details_open = details_open;
+                let start_y = child.cursor().top();
+                show_inline(&mut child, &error, &mut rendered_details_open);
+                rendered = child.cursor().top() - start_y;
+            });
+
+            assert!(
+                (measured - rendered).abs() <= 0.5,
+                "width={width}, details_open={details_open}, measured={measured}, rendered={rendered}"
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn narrower_width_increases_wrapped_inline_error_height() {
+        let error = MediaError::from_tools_error(&MediaToolsError::MissingBoth);
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let mut narrow = 0.0;
+        let mut wide = 0.0;
+
+        let output = context.run_ui(Default::default(), |ui| {
+            narrow = inline_height(ui, &error, false, 344.0);
+            wide = inline_height(ui, &error, false, 520.0);
+        });
+
+        assert!(narrow > wide);
         output.drop_without_applying_deltas();
     }
 }

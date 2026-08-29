@@ -35,12 +35,28 @@ pub(super) fn secondary_copy(ui: &mut Ui, text: &str) {
     ui.add(
         Label::new(
             RichText::new(text)
-                .text_style(TextStyle::Small)
+                .text_style(secondary_copy_text_style())
                 .color(theme::SECONDARY),
         )
         .selectable(false)
         .wrap(),
     );
+}
+
+pub(super) fn secondary_copy_height(ui: &Ui, text: &str, wrap_width: f32) -> f32 {
+    ui.painter()
+        .layout(
+            text.to_owned(),
+            secondary_copy_text_style().resolve(ui.style()),
+            theme::SECONDARY,
+            wrap_width.max(0.0),
+        )
+        .size()
+        .y
+}
+
+fn secondary_copy_text_style() -> TextStyle {
+    TextStyle::Small
 }
 
 pub(super) fn technical_faint(ui: &mut Ui, text: &str) {
