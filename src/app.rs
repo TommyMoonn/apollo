@@ -306,10 +306,21 @@ impl ApolloApp {
             media_error::show_inline(ui, &error, &mut self.tools_error_details_open);
             ui.add_space(theme::SPACING.section);
             if widgets::secondary_button(ui, "Retry").clicked() {
-                self.media_tools = discover_media_tools();
-                self.tools_error_details_open = false;
+                self.retry_media_tools();
             }
         });
+    }
+
+    fn retry_media_tools(&mut self) {
+        self.retry_media_tools_with(discover_media_tools);
+    }
+
+    fn retry_media_tools_with(
+        &mut self,
+        discover: impl FnOnce() -> Result<MediaTools, MediaToolsError>,
+    ) {
+        self.media_tools = discover();
+        self.tools_error_details_open = false;
     }
 
     fn show_tool(&mut self, ui: &mut Ui, tool: Tool) {
@@ -1000,6 +1011,21 @@ mod tests {
             media_inspection: None,
             tools_error_details_open: false,
         }
+    }
+
+    #[test]
+    fn media_tools_retry_uses_the_shared_discovery_result() {
+        let mut app = app();
+        app.tools_error_details_open = true;
+        let expected = MediaTools {
+            ffmpeg: PathBuf::from(r"C:\Media Tools\ffmpeg.exe"),
+            ffprobe: PathBuf::from(r"C:\Media Tools\ffprobe.exe"),
+        };
+
+        app.retry_media_tools_with(|| Ok(expected.clone()));
+
+        assert_eq!(app.media_tools, Ok(expected));
+        assert!(!app.tools_error_details_open);
     }
 
     fn dropped_file(path: &Path) -> egui::DroppedFileHandle {

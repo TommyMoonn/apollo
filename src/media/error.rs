@@ -22,6 +22,8 @@ pub enum MediaErrorKind {
     FfmpegUnavailable,
     FfprobeUnavailable,
     MediaToolsUnavailable,
+    FfmpegValidationFailed,
+    FfprobeValidationFailed,
     ProbeFailure,
     SourceUnavailable,
     MissingStream,
@@ -53,6 +55,8 @@ impl MediaError {
             MediaErrorKind::FfmpegUnavailable => "FFmpeg is unavailable.",
             MediaErrorKind::FfprobeUnavailable => "FFprobe is unavailable.",
             MediaErrorKind::MediaToolsUnavailable => "FFmpeg and FFprobe are unavailable.",
+            MediaErrorKind::FfmpegValidationFailed => "FFmpeg could not be validated.",
+            MediaErrorKind::FfprobeValidationFailed => "FFprobe could not be validated.",
             MediaErrorKind::ProbeFailure => "This file could not be inspected.",
             MediaErrorKind::SourceUnavailable => "This source file is unavailable.",
             MediaErrorKind::MissingStream => "A required media stream is missing or unsupported.",
@@ -80,6 +84,12 @@ impl MediaError {
             MediaErrorKind::MediaToolsUnavailable => Some(
                 "Install FFmpeg and FFprobe and make sure both are available on PATH, then retry.",
             ),
+            MediaErrorKind::FfmpegValidationFailed => {
+                Some("Check the installed FFmpeg executable and retry.")
+            }
+            MediaErrorKind::FfprobeValidationFailed => {
+                Some("Check the installed FFprobe executable and retry.")
+            }
             MediaErrorKind::ProbeFailure => {
                 Some("Check that the source is a readable media file and try again.")
             }
@@ -159,11 +169,11 @@ impl MediaError {
             MediaToolsError::ValidationFailed {
                 tool: MediaToolKind::Ffmpeg,
                 ..
-            } => MediaErrorKind::FfmpegUnavailable,
+            } => MediaErrorKind::FfmpegValidationFailed,
             MediaToolsError::ValidationFailed {
                 tool: MediaToolKind::Ffprobe,
                 ..
-            } => MediaErrorKind::FfprobeUnavailable,
+            } => MediaErrorKind::FfprobeValidationFailed,
         };
         Self::with_diagnostic(kind, error.to_string())
     }
@@ -331,7 +341,7 @@ mod tests {
         process::{
             DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES, MediaProcessFailure, MediaProcessStartError,
         },
-        tools::MediaToolsError,
+        tools::{MediaToolKind, MediaToolValidationError, MediaToolsError},
     };
 
     #[test]
@@ -350,6 +360,28 @@ mod tests {
         });
         assert_eq!(probe_error.kind(), MediaErrorKind::ProbeFailure);
         assert_eq!(probe_error.diagnostic(), Some("Invalid data found"));
+    }
+
+    #[test]
+    fn tool_validation_failure_is_not_presented_as_missing() {
+        let error = MediaError::from_tools_error(&MediaToolsError::ValidationFailed {
+            tool: MediaToolKind::Ffmpeg,
+            path: PathBuf::from(r"C:\Media Tools\ffmpeg.exe"),
+            reason: MediaToolValidationError::TimedOut,
+        });
+
+        assert_eq!(error.kind(), MediaErrorKind::FfmpegValidationFailed);
+        assert_eq!(error.message(), "FFmpeg could not be validated.");
+        assert!(
+            error
+                .diagnostic()
+                .is_some_and(|diagnostic| diagnostic.contains("version query timed out"))
+        );
+        assert!(
+            error
+                .guidance()
+                .is_some_and(|guidance| !guidance.contains("Install FFmpeg"))
+        );
     }
 
     #[test]

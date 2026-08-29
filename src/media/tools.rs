@@ -1,10 +1,24 @@
 use std::{
-    env, fmt, io,
+    fmt, io,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(not(windows))]
+use std::env;
+
+#[cfg(windows)]
+use std::{
+    ffi::{OsStr, OsString},
+    iter,
+    os::windows::ffi::{OsStrExt, OsStringExt},
+    ptr,
+};
+
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::SearchPathW;
 
 const VERSION_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_QUERY_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -122,7 +136,7 @@ struct SystemExecutableResolver;
 
 impl ExecutableResolver for SystemExecutableResolver {
     fn resolve(&self, tool: MediaToolKind) -> Option<PathBuf> {
-        resolve_from_path(tool.executable_name())
+        resolve_executable(tool.executable_name())
     }
 }
 
@@ -153,26 +167,33 @@ impl VersionValidator for SystemVersionValidator {
             .spawn()
             .map_err(|error| MediaToolValidationError::LaunchFailed(error.kind()))?;
 
-        let started = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) if status.success() => return Ok(()),
-                Ok(Some(status)) => {
-                    return Err(MediaToolValidationError::NonZeroExit(status.code()));
-                }
-                Ok(None) if started.elapsed() < self.timeout => {
-                    thread::sleep(VERSION_QUERY_POLL_INTERVAL);
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(MediaToolValidationError::TimedOut);
-                }
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(MediaToolValidationError::LaunchFailed(error.kind()));
-                }
+        wait_for_version_query(&mut child, self.timeout)
+    }
+}
+
+fn wait_for_version_query(
+    child: &mut Child,
+    timeout: Duration,
+) -> Result<(), MediaToolValidationError> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(MediaToolValidationError::NonZeroExit(status.code()));
+            }
+            Ok(None) if started.elapsed() < timeout => {
+                thread::sleep(VERSION_QUERY_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(MediaToolValidationError::TimedOut);
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(MediaToolValidationError::LaunchFailed(error.kind()));
             }
         }
     }
@@ -219,50 +240,65 @@ where
         })
 }
 
-fn resolve_from_path(executable_name: &str) -> Option<PathBuf> {
+#[cfg(not(windows))]
+fn resolve_executable(executable_name: &str) -> Option<PathBuf> {
     let path = env::var_os("PATH")?;
-    let extensions = executable_extensions();
 
     for directory in env::split_paths(&path) {
-        for candidate_name in candidate_names(executable_name, &extensions) {
-            let candidate = directory.join(candidate_name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+        let candidate = directory.join(executable_name);
+        if candidate.is_file() {
+            return Some(candidate);
         }
     }
 
     None
 }
 
-fn candidate_names(executable_name: &str, extensions: &[String]) -> Vec<String> {
-    if Path::new(executable_name).extension().is_some() || extensions.is_empty() {
-        return vec![executable_name.to_owned()];
-    }
-
-    extensions
-        .iter()
-        .map(|extension| format!("{executable_name}{extension}"))
-        .collect()
+#[cfg(windows)]
+fn resolve_executable(executable_name: &str) -> Option<PathBuf> {
+    search_windows_executable(executable_name, None)
 }
 
-fn executable_extensions() -> Vec<String> {
-    #[cfg(windows)]
-    {
-        let raw = env::var_os("PATHEXT")
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_owned());
+#[cfg(windows)]
+fn search_windows_executable(
+    executable_name: &str,
+    search_path: Option<&OsStr>,
+) -> Option<PathBuf> {
+    let search_path = search_path.map(wide_nul);
+    let executable_name = wide_nul(OsStr::new(executable_name));
+    let executable_extension = wide_nul(OsStr::new(".exe"));
+    let mut buffer = vec![0_u16; 260];
 
-        raw.split(';')
-            .filter(|extension| !extension.is_empty())
-            .map(|extension| extension.to_ascii_lowercase())
-            .collect()
-    }
+    loop {
+        // SAFETY: every input is NUL-terminated and the output buffer is writable for its length.
+        let length = unsafe {
+            SearchPathW(
+                search_path
+                    .as_ref()
+                    .map_or(ptr::null(), |path| path.as_ptr()),
+                executable_name.as_ptr(),
+                executable_extension.as_ptr(),
+                buffer.len().try_into().ok()?,
+                buffer.as_mut_ptr(),
+                ptr::null_mut(),
+            )
+        } as usize;
 
-    #[cfg(not(windows))]
-    {
-        Vec::new()
+        if length == 0 {
+            return None;
+        }
+
+        if length < buffer.len() {
+            return Some(PathBuf::from(OsString::from_wide(&buffer[..length])));
+        }
+
+        buffer.resize(length.saturating_add(1), 0);
     }
+}
+
+#[cfg(windows)]
+fn wide_nul(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(iter::once(0)).collect()
 }
 
 #[cfg(test)]
@@ -270,14 +306,15 @@ mod tests {
     use std::{
         cell::RefCell,
         collections::HashMap,
-        env,
+        env, io,
         path::{Path, PathBuf},
+        process::{Command, Stdio},
         time::Duration,
     };
 
     use super::{
         ExecutableResolver, MediaToolKind, MediaToolValidationError, MediaTools, MediaToolsError,
-        SystemVersionValidator, VersionValidator, discover_with,
+        SystemVersionValidator, VersionValidator, discover_with, wait_for_version_query,
     };
 
     #[derive(Default)]
@@ -391,6 +428,58 @@ mod tests {
     }
 
     #[test]
+    fn executable_that_cannot_start_reports_launch_failure() {
+        let validator = SystemVersionValidator {
+            timeout: Duration::from_secs(1),
+        };
+        let missing = env::temp_dir().join(format!(
+            "apollo-missing-media-tool-{}.exe",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+
+        let error = validator
+            .validate(MediaToolKind::Ffmpeg, &missing)
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            MediaToolValidationError::LaunchFailed(io::ErrorKind::NotFound)
+        );
+    }
+
+    #[test]
+    fn version_query_that_finishes_within_bound_succeeds() {
+        let mut child = Command::new(env::current_exe().unwrap())
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let result = wait_for_version_query(&mut child, Duration::from_secs(1));
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_query_that_exceeds_bound_is_terminated() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let result = wait_for_version_query(&mut child, Duration::from_millis(20));
+
+        assert_eq!(result, Err(MediaToolValidationError::TimedOut));
+    }
+
+    #[test]
     fn executable_version_failure_is_typed() {
         let validator = FakeValidator::failing(
             MediaToolKind::Ffmpeg,
@@ -420,5 +509,46 @@ mod tests {
                 ffprobe: PathBuf::from("/tools/ffprobe"),
             }
         );
+    }
+
+    #[test]
+    fn resolved_paths_with_spaces_are_preserved() {
+        let resolver = FakeResolver::default()
+            .with(MediaToolKind::Ffmpeg, "/media tools/ffmpeg")
+            .with(MediaToolKind::Ffprobe, "/media tools/ffprobe");
+
+        let tools = discover_with(&resolver, &FakeValidator::default()).unwrap();
+
+        assert_eq!(tools.ffmpeg, PathBuf::from("/media tools/ffmpeg"));
+        assert_eq!(tools.ffprobe, PathBuf::from("/media tools/ffprobe"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_resolver_uses_native_exe_search_semantics() {
+        use std::fs;
+
+        use super::search_windows_executable;
+
+        let directory = env::temp_dir().join(format!("apollo media tools {}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("ffmpeg.exe");
+        fs::write(&executable, b"test executable placeholder").unwrap();
+
+        let resolved_without_extension =
+            search_windows_executable("ffmpeg", Some(directory.as_os_str()));
+        let resolved_with_extension =
+            search_windows_executable("ffmpeg.exe", Some(directory.as_os_str()));
+
+        assert_eq!(
+            resolved_without_extension.as_deref(),
+            Some(executable.as_path())
+        );
+        assert_eq!(
+            resolved_with_extension.as_deref(),
+            Some(executable.as_path())
+        );
+
+        fs::remove_dir_all(directory).unwrap();
     }
 }
