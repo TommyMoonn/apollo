@@ -141,6 +141,7 @@ impl MediaInspection {
                 if let Ok(result) = result {
                     let _ = sender.send(result);
                 }
+                drop(sender);
                 context.request_repaint();
             })?;
 
@@ -1066,7 +1067,7 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         sync::{
-            Arc,
+            Arc, Barrier,
             atomic::{AtomicUsize, Ordering},
             mpsc,
         },
@@ -1484,8 +1485,11 @@ mod tests {
             .expect("new source should require inspection");
         let context = egui::Context::default();
         let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
+        let repaint_barrier = Arc::new(Barrier::new(2));
+        let worker_barrier = Arc::clone(&repaint_barrier);
         context.set_request_repaint_callback(move |_| {
             let _ = repaint_sender.try_send(());
+            worker_barrier.wait();
         });
         app.media_inspection = Some(
             MediaInspection::spawn_with(request, context, || {
@@ -1498,6 +1502,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("failed inspection worker should request repaint");
         app.poll_media_inspection();
+        repaint_barrier.wait();
 
         assert!(app.media_inspection.is_none());
         assert_eq!(
