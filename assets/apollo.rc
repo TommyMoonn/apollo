@@ -1,1 +1,43 @@
+#include <windows.h>
+
+#ifndef APOLLO_VERSION_MAJOR
+#error APOLLO_VERSION_MAJOR must be defined by build.rs
+#endif
+#ifndef APOLLO_VERSION_MINOR
+#error APOLLO_VERSION_MINOR must be defined by build.rs
+#endif
+#ifndef APOLLO_VERSION_PATCH
+#error APOLLO_VERSION_PATCH must be defined by build.rs
+#endif
+#ifndef APOLLO_VERSION_STRING
+#error APOLLO_VERSION_STRING must be defined by build.rs
+#endif
+
 1 ICON "assets/apollo.ico"
+
+1 VERSIONINFO
+FILEVERSION APOLLO_VERSION_MAJOR,APOLLO_VERSION_MINOR,APOLLO_VERSION_PATCH,0
+PRODUCTVERSION APOLLO_VERSION_MAJOR,APOLLO_VERSION_MINOR,APOLLO_VERSION_PATCH,0
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "ProductName", "Apollo\0"
+            VALUE "FileDescription", "Apollo\0"
+            VALUE "InternalName", "Apollo\0"
+            VALUE "OriginalFilename", "Apollo.exe\0"
+            VALUE "FileVersion", APOLLO_VERSION_STRING "\0"
+            VALUE "ProductVersion", APOLLO_VERSION_STRING "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

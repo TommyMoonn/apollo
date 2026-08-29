@@ -96,6 +96,7 @@ Options:
   -h, --help                    Show this help.
 
 Relative executable, compiler, and output paths resolve from the project root.
+The repository-owned assets/apollo.ico file is required and validated before NSIS runs.
 The output filename must be exactly Apollo-Setup-x64.exe.
 '@
         return
@@ -130,7 +131,7 @@ The output filename must be exactly Apollo-Setup-x64.exe.
 
     $licensePath = Join-Path $projectRoot 'LICENSE'
     $noticesPath = Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md'
-    $iconPath = Join-Path $projectRoot 'assets/apollo.ico'
+    $iconPath = [System.IO.Path]::GetFullPath((Join-Path $projectRoot 'assets/apollo.ico'))
     $nsiPath = Join-Path $projectRoot 'installer/windows/apollo.nsi'
     Assert-InstallerSourceFile -Path $licensePath -Description 'Project license'
     Assert-InstallerSourceFile -Path $noticesPath -Description 'Third-party notices'

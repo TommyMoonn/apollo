@@ -9,6 +9,8 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $buildInstallerScript = Join-Path $projectRoot 'scripts/build-windows-installer.ps1'
 $installerDefinition = Join-Path $projectRoot 'installer/windows/apollo.nsi'
 $applicationIcon = Join-Path $projectRoot 'assets/apollo.ico'
+$applicationResource = Join-Path $projectRoot 'assets/apollo.rc'
+$buildResourceScript = Join-Path $projectRoot 'build.rs'
 
 $originalLog = $env:APOLLO_TEST_NSIS_LOG
 $originalMarker = $env:APOLLO_TEST_NSIS_MARKER
@@ -248,28 +250,87 @@ Invoke-TestCase 'installer build does not mutate the source payload' {
     }
 }
 
-Invoke-TestCase 'installer definition uses stable per-user install identity and owned uninstall cleanup' {
+Invoke-TestCase 'windows executable resource uses Cargo-owned version metadata' {
+    $resource = [System.IO.File]::ReadAllText($applicationResource)
+    $build = [System.IO.File]::ReadAllText($buildResourceScript)
+
+    Assert-Contains $build 'CARGO_PKG_VERSION' 'Windows resource version strings must come from Cargo package metadata.'
+    Assert-Contains $build 'CARGO_PKG_VERSION_MAJOR' 'Windows resource numeric major version must come from Cargo package metadata.'
+    Assert-Contains $build 'CARGO_PKG_VERSION_MINOR' 'Windows resource numeric minor version must come from Cargo package metadata.'
+    Assert-Contains $build 'CARGO_PKG_VERSION_PATCH' 'Windows resource numeric patch version must come from Cargo package metadata.'
+    Assert-Contains $build 'APOLLO_VERSION_STRING' 'Build script must pass the Cargo package version to the Windows resource compiler.'
+    Assert-Contains $resource '1 ICON "assets/apollo.ico"' 'Windows executable must retain the Apollo icon resource.'
+    Assert-Contains $resource '1 VERSIONINFO' 'Windows executable must contain VERSIONINFO.'
+    Assert-Contains $resource 'FILEVERSION APOLLO_VERSION_MAJOR,APOLLO_VERSION_MINOR,APOLLO_VERSION_PATCH,0' 'File version must use Cargo-derived numeric components.'
+    Assert-Contains $resource 'PRODUCTVERSION APOLLO_VERSION_MAJOR,APOLLO_VERSION_MINOR,APOLLO_VERSION_PATCH,0' 'Product version must use Cargo-derived numeric components.'
+    Assert-Contains $resource 'VALUE "ProductName", "Apollo\0"' 'VERSIONINFO must expose the Apollo product name.'
+    Assert-Contains $resource 'VALUE "FileDescription", "Apollo\0"' 'VERSIONINFO must expose the Apollo file description.'
+    Assert-Contains $resource 'VALUE "InternalName", "Apollo\0"' 'VERSIONINFO must expose the Apollo internal name.'
+    Assert-Contains $resource 'VALUE "OriginalFilename", "Apollo.exe\0"' 'VERSIONINFO must expose the installed executable filename.'
+    Assert-Contains $resource 'VALUE "FileVersion", APOLLO_VERSION_STRING "\0"' 'FileVersion string must use the Cargo package version.'
+    Assert-Contains $resource 'VALUE "ProductVersion", APOLLO_VERSION_STRING "\0"' 'ProductVersion string must use the Cargo package version.'
+}
+
+Invoke-TestCase 'installer definition uses Modern UI flow and stable per-user application identity' {
     $content = [System.IO.File]::ReadAllText($installerDefinition)
 
-    Assert-Contains $content 'RequestExecutionLevel user' 'Installer must not require elevation.'
-    Assert-Contains $content 'InstallDir "$LOCALAPPDATA\Programs\Apollo"' 'Installer must use the current user local Programs directory.'
-    Assert-Contains $content 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Apollo' 'Installer must use one stable HKCU uninstall identity.'
-    Assert-Contains $content 'WriteRegStr HKCU' 'Installed Apps registration must be per-user.'
-    Assert-Contains $content '"DisplayVersion" "${VERSION}"' 'Installed Apps version must use the Cargo-derived NSIS define.'
-    Assert-Contains $content 'CreateShortcut "$SMPROGRAMS\Apollo.lnk" "$INSTDIR\Apollo.exe"' 'Installer must create the Apollo Start Menu shortcut.'
-    Assert-Contains $content 'LicenseData "${PROJECT_ROOT}\LICENSE"' 'Installer license page must use the root GPLv3 file.'
+    Assert-Contains $content '!include "MUI2.nsh"' 'Installer must use NSIS Modern UI 2.'
+    $welcome = $content.IndexOf('!insertmacro MUI_PAGE_WELCOME', [System.StringComparison]::Ordinal)
+    $license = $content.IndexOf('!insertmacro MUI_PAGE_LICENSE', [System.StringComparison]::Ordinal)
+    $directory = $content.IndexOf('!insertmacro MUI_PAGE_DIRECTORY', [System.StringComparison]::Ordinal)
+    $components = $content.IndexOf('!insertmacro MUI_PAGE_COMPONENTS', [System.StringComparison]::Ordinal)
+    $install = $content.IndexOf('!insertmacro MUI_PAGE_INSTFILES', [System.StringComparison]::Ordinal)
+    $finish = $content.IndexOf('!insertmacro MUI_PAGE_FINISH', [System.StringComparison]::Ordinal)
+    Assert-True ($welcome -ge 0 -and $welcome -lt $license -and $license -lt $directory -and $directory -lt $components -and $components -lt $install -and $install -lt $finish) 'Installer pages must be Welcome, License, Directory, Components, Install, Finish in order.'
+    Assert-Contains $content '!define MUI_FINISHPAGE_RUN "$INSTDIR\Apollo.exe"' 'Finish page must offer direct Apollo launch.'
+    Assert-Contains $content '!define MUI_FINISHPAGE_RUN_TEXT "Launch Apollo"' 'Finish page launch option must be labeled clearly.'
+    Assert-Contains $content '!insertmacro MUI_PAGE_LICENSE "${PROJECT_ROOT}\LICENSE"' 'Installer license page must use the repository GPLv3 file.'
     Assert-Contains $content 'Icon "${APP_ICON}"' 'Installer branding must use the repository-owned Apollo icon.'
     Assert-Contains $content 'UninstallIcon "${APP_ICON}"' 'Uninstaller branding must use the repository-owned Apollo icon.'
-    Assert-Contains $content 'File /oname=THIRD_PARTY_NOTICES.md' 'Third-party notices must be installed.'
-    Assert-Contains $content 'SetOverwrite on' 'Reinstalling through the stable install path must replace the owned payload.'
-    Assert-Contains $content 'WriteUninstaller "$INSTDIR\Uninstall.exe"' 'Uninstaller must be owned by the Apollo install directory.'
+
+    Assert-Contains $content 'RequestExecutionLevel user' 'Installer must not require elevation.'
+    Assert-Contains $content 'InstallDir "$LOCALAPPDATA\Programs\Apollo"' 'Installer must preserve the current-user local Programs install root.'
+    Assert-Contains $content 'ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"' 'Upgrade must read the existing Apollo install directory from the stable uninstall registration.'
+    Assert-Contains $content 'StrCpy $INSTDIR $0' 'Upgrade must reuse the previously registered Apollo install directory.'
+    Assert-Contains $content 'StrCpy $ExistingInstall "1"' 'Installer must distinguish upgrades from clean installs using the existing registration.'
+    Assert-Contains $content '!define MUI_PAGE_CUSTOMFUNCTION_PRE DirectoryPagePre' 'Install-location page must have an upgrade guard.'
+    Assert-Contains $content 'Function DirectoryPagePre' 'Upgrade must own a dedicated directory-page guard.'
+    Assert-Contains $content 'Abort' 'Established installs must skip relocation and remain in the registered install directory.'
+    Assert-Contains $content 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Apollo' 'Installer must use one stable HKCU uninstall identity.'
+    Assert-Contains $content 'SectionIn RO' 'Core Apollo installation must be required.'
+    Assert-Contains $content 'Section /o "Create desktop shortcut" SEC_DESKTOP' 'Desktop shortcut must be an optional component and clean-install unchecked.'
+    Assert-Contains $content 'StrCmp $ExistingInstall "1" 0 desktop_choice_done' 'Desktop shortcut preservation must apply only to an established Apollo installation.'
+    Assert-Contains $content 'IfFileExists "$DESKTOP\Apollo.lnk"' 'Upgrade must preserve an existing desktop-shortcut selection.'
+    Assert-Contains $content 'Section "-Finalize shortcut choice"' 'Installer must deterministically apply the final desktop-shortcut selection on reinstall.'
+    Assert-Contains $content 'SectionGetFlags ${SEC_DESKTOP} $0' 'Installer must evaluate the final desktop-shortcut component state.'
+    Assert-Contains $content 'Delete "$DESKTOP\Apollo.lnk"' 'Unselecting or uninstalling must remove the Apollo desktop shortcut.'
+    Assert-Contains $content 'CreateShortcut "$SMPROGRAMS\Apollo.lnk" "$INSTDIR\Apollo.exe" "" "$INSTDIR\Apollo.exe" 0' 'Start Menu shortcut must target Apollo directly and use the installed executable icon.'
+
+    Assert-Contains $content 'Software\Microsoft\Windows\CurrentVersion\App Paths\Apollo.exe' 'Installer must register Apollo under the current-user App Paths key.'
+    Assert-Contains $content 'WriteRegStr HKCU "${APP_PATHS_KEY}" "" "$INSTDIR\Apollo.exe"' 'App Paths default value must point directly to the installed executable.'
+    Assert-Contains $content 'DeleteRegKey HKCU "${APP_PATHS_KEY}"' 'Uninstall must remove Apollo App Paths registration.'
+
+    Assert-Contains $content 'WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME}"' 'Installed Apps must expose Apollo display name.'
+    Assert-Contains $content '"DisplayVersion" "${VERSION}"' 'Installed Apps version must use the Cargo-derived NSIS define.'
+    Assert-Contains $content '"DisplayIcon" "$INSTDIR\Apollo.exe"' 'Installed Apps must use the installed executable as its icon.'
+    Assert-Contains $content '"InstallLocation" "$INSTDIR"' 'Installed Apps must expose the active install directory.'
+    Assert-Contains $content '"UninstallString" "$\"$INSTDIR\Uninstall.exe$\""' 'Installed Apps must expose the active uninstaller.'
+    Assert-Contains $content '"NoModify" 1' 'Installed Apps must disable Modify.'
+    Assert-Contains $content '"NoRepair" 1' 'Installed Apps must disable Repair.'
+    Assert-Contains $content 'SetOverwrite on' 'Reinstalling through the stable install path must replace Apollo-owned payload files.'
+    Assert-Contains $content 'WriteUninstaller "$INSTDIR\Uninstall.exe"' 'Installer must maintain one active uninstaller in the stable install directory.'
+    Assert-Equal 1 ([regex]::Matches($content, [regex]::Escape('WriteUninstaller "$INSTDIR\Uninstall.exe"')).Count) 'Installer definition must create exactly one active uninstaller.'
+
+    Assert-Contains $content 'File /oname=LICENSE' 'Project license must remain in the installed payload.'
+    Assert-Contains $content 'File /oname=THIRD_PARTY_NOTICES.md' 'Third-party notices must remain in the installed payload.'
     Assert-Contains $content 'Delete "$SMPROGRAMS\Apollo.lnk"' 'Uninstall must remove the Apollo Start Menu shortcut.'
     Assert-Contains $content 'DeleteRegKey HKCU "${UNINSTALL_KEY}"' 'Uninstall must remove the stable Installed Apps entry.'
     Assert-Contains $content 'Delete "$INSTDIR\Apollo.exe"' 'Uninstall must remove the installed executable.'
     Assert-Contains $content 'Delete "$INSTDIR\LICENSE"' 'Uninstall must remove the installed project license.'
-    Assert-Contains $content 'Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"' 'Uninstall must remove the installed third-party notices.'
-    Assert-Contains $content 'RMDir "$INSTDIR"' 'Uninstall may remove the Apollo directory only after deleting installer-owned files.'
-    Assert-False ($content.Contains('$DESKTOP', [System.StringComparison]::Ordinal)) 'Installer must not create a desktop shortcut by default.'
+    Assert-Contains $content 'Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"' 'Uninstall must remove installed third-party notices.'
+    Assert-Contains $content 'RMDir "$INSTDIR"' 'Uninstall may remove the install directory only after deleting installer-owned files.'
+    Assert-False ($content.Contains('RMDir /r "$INSTDIR"', [System.StringComparison]::OrdinalIgnoreCase)) 'Uninstall must not recursively delete unrelated files manually placed in the install directory.'
+    Assert-False ($content.Contains('Environment', [System.StringComparison]::OrdinalIgnoreCase)) 'Installer must not mutate the user or system PATH.'
     Assert-False ($content.Contains('FFmpeg', [System.StringComparison]::OrdinalIgnoreCase)) 'Installer must not bundle FFmpeg.'
     Assert-False ($content.Contains('ffprobe', [System.StringComparison]::OrdinalIgnoreCase)) 'Installer must not bundle ffprobe.'
 }
@@ -278,6 +339,7 @@ Invoke-TestCase 'installer build exposes help without requiring NSIS or build pa
     $output = Invoke-ScriptCapture -ScriptPath $buildInstallerScript -Arguments @('--help')
     Assert-Contains $output 'Usage:' 'Installer build help should show usage.'
     Assert-Contains $output '--makensis' 'Installer build help should describe NSIS compiler selection.'
+    Assert-Contains $output 'assets/apollo.ico' 'Installer build help should expose the required repository-owned icon input.'
     Assert-Contains $output 'Apollo-Setup-x64.exe' 'Installer build help should state the stable installer filename.'
 }
 
