@@ -55,6 +55,7 @@ impl MediaToolKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaToolsError {
+    DiscoveryFailed(String),
     MissingFfmpeg,
     MissingFfprobe,
     MissingBoth,
@@ -68,6 +69,7 @@ pub enum MediaToolsError {
 impl MediaToolsError {
     pub fn user_message(&self) -> &'static str {
         match self {
+            Self::DiscoveryFailed(_) => "Media tools could not be checked.",
             Self::MissingFfmpeg => "FFmpeg could not be found.",
             Self::MissingFfprobe => "FFprobe could not be found.",
             Self::MissingBoth => "FFmpeg and FFprobe could not be found.",
@@ -86,6 +88,9 @@ impl MediaToolsError {
 impl fmt::Display for MediaToolsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DiscoveryFailed(diagnostic) => {
+                write!(f, "Media tool discovery failed: {diagnostic}")
+            }
             Self::MissingFfmpeg => write!(f, "FFmpeg could not be found"),
             Self::MissingFfprobe => write!(f, "FFprobe could not be found"),
             Self::MissingBoth => write!(f, "FFmpeg and FFprobe could not be found"),

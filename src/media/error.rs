@@ -19,6 +19,7 @@ pub enum MediaOutputContainer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaErrorKind {
+    MediaToolsCheckFailed,
     FfmpegUnavailable,
     FfprobeUnavailable,
     MediaToolsUnavailable,
@@ -53,6 +54,7 @@ impl MediaError {
 
     pub fn message(&self) -> &'static str {
         match self.kind {
+            MediaErrorKind::MediaToolsCheckFailed => "Media tools could not be checked.",
             MediaErrorKind::FfmpegUnavailable => "FFmpeg is unavailable.",
             MediaErrorKind::FfprobeUnavailable => "FFprobe is unavailable.",
             MediaErrorKind::MediaToolsUnavailable => "FFmpeg and FFprobe are unavailable.",
@@ -77,6 +79,7 @@ impl MediaError {
 
     pub fn guidance(&self) -> Option<&'static str> {
         match self.kind {
+            MediaErrorKind::MediaToolsCheckFailed => Some("Retry the media tool check."),
             MediaErrorKind::FfmpegUnavailable => {
                 Some("Install FFmpeg and make sure it is available on PATH, then retry.")
             }
@@ -170,6 +173,7 @@ impl MediaError {
 
     pub fn from_tools_error(error: &MediaToolsError) -> Self {
         let kind = match error {
+            MediaToolsError::DiscoveryFailed(_) => MediaErrorKind::MediaToolsCheckFailed,
             MediaToolsError::MissingFfmpeg => MediaErrorKind::FfmpegUnavailable,
             MediaToolsError::MissingFfprobe => MediaErrorKind::FfprobeUnavailable,
             MediaToolsError::MissingBoth => MediaErrorKind::MediaToolsUnavailable,
@@ -353,6 +357,13 @@ mod tests {
 
     #[test]
     fn known_tool_and_probe_failures_are_classified() {
+        assert_eq!(
+            MediaError::from_tools_error(&MediaToolsError::DiscoveryFailed(
+                "worker stopped".to_owned(),
+            ))
+            .kind(),
+            MediaErrorKind::MediaToolsCheckFailed
+        );
         assert_eq!(
             MediaError::from_tools_error(&MediaToolsError::MissingFfmpeg).kind(),
             MediaErrorKind::FfmpegUnavailable

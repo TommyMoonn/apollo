@@ -40,7 +40,6 @@ use apollo::{
 };
 
 const EXECUTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
-const INSPECTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
 fn file_intake_enabled(
     audio_state: &AudioMixExecutionState,
@@ -125,16 +124,66 @@ struct MediaInspection {
 }
 
 impl MediaInspection {
-    fn spawn(tools: MediaTools, request: MediaIntakeRequest) -> io::Result<Self> {
+    fn spawn(tools: MediaTools, request: MediaIntakeRequest, context: Context) -> io::Result<Self> {
         let path = request.path().to_path_buf();
+        Self::spawn_with(request, context, move || probe_media(&tools, &path))
+    }
+
+    fn spawn_with<F>(request: MediaIntakeRequest, context: Context, inspect: F) -> io::Result<Self>
+    where
+        F: FnOnce() -> Result<MediaFile, MediaProbeError> + Send + 'static,
+    {
         let (sender, receiver) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name("apollo-media-inspection".to_owned())
             .spawn(move || {
-                let _ = sender.send(probe_media(&tools, &path));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inspect));
+                if let Ok(result) = result {
+                    let _ = sender.send(result);
+                }
+                context.request_repaint();
             })?;
 
         Ok(Self { request, receiver })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MediaToolsState {
+    Checking { attempt_id: u64 },
+    Ready(MediaTools),
+    Unavailable(MediaToolsError),
+}
+
+struct MediaToolsDiscovery {
+    attempt_id: u64,
+    receiver: Receiver<Result<MediaTools, MediaToolsError>>,
+}
+
+impl MediaToolsDiscovery {
+    fn spawn<F>(attempt_id: u64, context: Context, discover: F) -> io::Result<Self>
+    where
+        F: FnOnce() -> Result<MediaTools, MediaToolsError> + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("apollo-media-tools".to_owned())
+            .spawn(move || {
+                let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(discover))
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(MediaToolsError::DiscoveryFailed(
+                        "The media tool discovery worker stopped unexpectedly.".to_owned(),
+                    )),
+                };
+                let _ = sender.send(result);
+                context.request_repaint();
+            })?;
+
+        Ok(Self {
+            attempt_id,
+            receiver,
+        })
     }
 }
 
@@ -158,12 +207,15 @@ impl AppState {
 
 pub(crate) struct ApolloApp {
     state: AppState,
-    media_tools: Result<MediaTools, MediaToolsError>,
+    media_tools: MediaToolsState,
+    media_tools_discovery: Option<MediaToolsDiscovery>,
     audio_mix_executor: AudioMixExecutor,
     upscale_executor: UpscaleExecutor,
     media_inspection: Option<MediaInspection>,
     file_dialog: FileDialogOwner,
     native_window_owner: Result<WindowOwner, String>,
+    egui_context: Context,
+    next_media_tools_attempt_id: u64,
     next_session_id: u64,
     tools_error_details_open: bool,
 }
@@ -173,16 +225,31 @@ impl ApolloApp {
         fonts::install(&creation_context.egui_ctx);
         theme::install(&creation_context.egui_ctx);
 
-        Self {
+        let egui_context = creation_context.egui_ctx.clone();
+        let mut app = Self {
             state: AppState::default(),
-            media_tools: discover_media_tools(),
+            media_tools: MediaToolsState::Unavailable(MediaToolsError::DiscoveryFailed(
+                "Media tool discovery has not started.".to_owned(),
+            )),
+            media_tools_discovery: None,
             audio_mix_executor: AudioMixExecutor::new(),
             upscale_executor: UpscaleExecutor::new(),
             media_inspection: None,
             file_dialog: FileDialogOwner::default(),
             native_window_owner: WindowOwner::from_window(creation_context),
+            egui_context: egui_context.clone(),
+            next_media_tools_attempt_id: 0,
             next_session_id: 1,
             tools_error_details_open: false,
+        };
+        app.start_media_tools_discovery_with(egui_context, discover_media_tools);
+        app
+    }
+
+    fn ready_media_tools(&self) -> Option<&MediaTools> {
+        match &self.media_tools {
+            MediaToolsState::Ready(tools) => Some(tools),
+            MediaToolsState::Checking { .. } | MediaToolsState::Unavailable(_) => None,
         }
     }
 
@@ -263,12 +330,12 @@ impl ApolloApp {
     }
 
     fn show_media_tools_unavailable(&mut self, ui: &mut Ui) {
-        let error = self
-            .media_tools
-            .as_ref()
-            .err()
-            .map(MediaError::from_tools_error)
-            .unwrap_or_else(|| MediaError::invalid_request("media tools are unavailable"));
+        let error = match &self.media_tools {
+            MediaToolsState::Unavailable(error) => MediaError::from_tools_error(error),
+            MediaToolsState::Checking { .. } | MediaToolsState::Ready(_) => {
+                MediaError::invalid_request("media tools are unavailable")
+            }
+        };
 
         layout::centered_content(ui, |ui| {
             ui.heading("Media tools unavailable");
@@ -281,16 +348,96 @@ impl ApolloApp {
         });
     }
 
-    fn retry_media_tools(&mut self) {
-        self.retry_media_tools_with(discover_media_tools);
+    fn show_media_tools_checking(&self, ui: &mut Ui) {
+        layout::centered_content(ui, |ui| {
+            ui.label("Checking media tools…");
+        });
     }
 
-    fn retry_media_tools_with(
-        &mut self,
-        discover: impl FnOnce() -> Result<MediaTools, MediaToolsError>,
-    ) {
-        self.media_tools = discover();
+    fn retry_media_tools(&mut self) {
+        self.start_media_tools_discovery_with(self.egui_context.clone(), discover_media_tools);
+    }
+
+    fn start_media_tools_discovery_with<F>(&mut self, context: Context, discover: F) -> bool
+    where
+        F: FnOnce() -> Result<MediaTools, MediaToolsError> + Send + 'static,
+    {
+        if matches!(&self.media_tools, MediaToolsState::Checking { .. })
+            || self.media_tools_discovery.is_some()
+        {
+            return false;
+        }
+
+        let attempt_id = self.next_media_tools_attempt_id;
+        self.next_media_tools_attempt_id = self.next_media_tools_attempt_id.wrapping_add(1);
         self.tools_error_details_open = false;
+
+        match MediaToolsDiscovery::spawn(attempt_id, context, discover) {
+            Ok(discovery) => {
+                self.media_tools = MediaToolsState::Checking { attempt_id };
+                self.media_tools_discovery = Some(discovery);
+                true
+            }
+            Err(error) => {
+                self.media_tools = MediaToolsState::Unavailable(MediaToolsError::DiscoveryFailed(
+                    format!("Media tool discovery worker could not start: {error}"),
+                ));
+                false
+            }
+        }
+    }
+
+    fn poll_media_tools_discovery(&mut self) {
+        let result = match self.media_tools_discovery.as_ref() {
+            Some(discovery) => discovery.receiver.try_recv(),
+            None => return,
+        };
+
+        match result {
+            Ok(result) => {
+                let discovery = self
+                    .media_tools_discovery
+                    .take()
+                    .expect("media tool discovery exists while its result is settled");
+                self.complete_media_tools_discovery(discovery.attempt_id, result);
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                let discovery = self
+                    .media_tools_discovery
+                    .take()
+                    .expect("media tool discovery exists while disconnect is settled");
+                self.complete_media_tools_discovery(
+                    discovery.attempt_id,
+                    Err(MediaToolsError::DiscoveryFailed(
+                        "The media tool discovery worker stopped before returning a result."
+                            .to_owned(),
+                    )),
+                );
+            }
+        }
+    }
+
+    fn complete_media_tools_discovery(
+        &mut self,
+        attempt_id: u64,
+        result: Result<MediaTools, MediaToolsError>,
+    ) -> bool {
+        if !matches!(
+            &self.media_tools,
+            MediaToolsState::Checking {
+                attempt_id: current
+            } if *current == attempt_id
+        ) {
+            return false;
+        }
+
+        self.media_tools = match result {
+            Ok(tools) => MediaToolsState::Ready(tools),
+            Err(error) => MediaToolsState::Unavailable(error),
+        };
+        self.tools_error_details_open = false;
+        true
     }
 
     fn show_tool(&mut self, ui: &mut Ui, tool: Tool) {
@@ -330,7 +477,7 @@ impl ApolloApp {
     }
 
     fn load_media_path(&mut self, path: &Path) {
-        let Ok(tools) = self.media_tools.as_ref() else {
+        let Some(tools) = self.ready_media_tools() else {
             return;
         };
         let tools = tools.clone();
@@ -339,7 +486,7 @@ impl ApolloApp {
         };
         let request_for_failure = request.clone();
 
-        match MediaInspection::spawn(tools, request) {
+        match MediaInspection::spawn(tools, request, self.egui_context.clone()) {
             Ok(inspection) => self.media_inspection = Some(inspection),
             Err(error) => {
                 self.state.media_intake.retire_probe(&request_for_failure);
@@ -564,12 +711,12 @@ impl ApolloApp {
                 let Some(session) = self.state.audio_mix.as_ref() else {
                     return Ok(());
                 };
-                let Ok(tools) = self.media_tools.as_ref() else {
+                let Some(tools) = self.ready_media_tools().cloned() else {
                     return Ok(());
                 };
                 let request = session.selection.request(&session.media);
                 self.audio_mix_executor
-                    .start(tools, &session.media, &request)?;
+                    .start(&tools, &session.media, &request)?;
             }
             AudioMixSelectionAction::None | AudioMixSelectionAction::Back => {}
         }
@@ -682,12 +829,12 @@ impl ApolloApp {
                 let Some(upscale) = self.state.upscale.as_ref() else {
                     return Ok(());
                 };
-                let Ok(tools) = self.media_tools.as_ref() else {
+                let Some(tools) = self.ready_media_tools().cloned() else {
                     return Ok(());
                 };
                 let request = upscale.selection.request(&upscale.media);
                 self.upscale_executor
-                    .start(tools, &upscale.media, &request)?;
+                    .start(&tools, &upscale.media, &request)?;
             }
             UpscaleSelectionAction::None | UpscaleSelectionAction::Back => {}
         }
@@ -890,16 +1037,18 @@ impl eframe::App for ApolloApp {
         CentralPanel::default()
             .frame(layout::content_frame(ui.style()))
             .show(ui, |ui| {
-                if self.media_tools.is_err() {
+                self.poll_media_tools_discovery();
+                if matches!(&self.media_tools, MediaToolsState::Checking { .. }) {
+                    self.show_media_tools_checking(ui);
+                    return;
+                }
+                if matches!(&self.media_tools, MediaToolsState::Unavailable(_)) {
                     self.show_media_tools_unavailable(ui);
                     return;
                 }
 
                 self.poll_file_dialog();
                 self.poll_media_inspection();
-                if self.media_inspection.is_some() {
-                    ui.ctx().request_repaint_after(INSPECTION_REPAINT_INTERVAL);
-                }
 
                 self.handle_window_file_drop(ui.ctx());
                 if self.drag_hovered(ui.ctx()) {
@@ -921,12 +1070,13 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
             mpsc,
         },
+        time::Duration,
     };
 
     use super::{
-        ApolloApp, AppState, MediaInspection, Tool, audio_mix_output_dialog_request,
-        file_intake_enabled, settle_output_file_dialog, shows_audio_mix_lifecycle,
-        shows_upscale_lifecycle,
+        ApolloApp, AppState, MediaInspection, MediaToolsState, Tool,
+        audio_mix_output_dialog_request, file_intake_enabled, settle_output_file_dialog,
+        shows_audio_mix_lifecycle, shows_upscale_lifecycle,
     };
     use crate::file_dialog::{
         DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
@@ -937,10 +1087,11 @@ mod tests {
         media::{
             error::{MediaError, MediaErrorKind},
             execution::MediaExecutionFailure,
+            intake::MediaLoadStart,
             model::{AudioStream, FrameRate, MediaFile, VideoStream},
             probe::MediaProbeError,
             process::MediaProcessFailure,
-            tools::MediaTools,
+            tools::{MediaTools, MediaToolsError},
         },
         ui::{audio_mix::AudioMixSelectionAction, fonts, theme, upscale::UpscaleSelectionAction},
         upscale::{
@@ -1001,35 +1152,129 @@ mod tests {
     }
 
     fn app() -> ApolloApp {
+        let egui_context = egui::Context::default();
         ApolloApp {
             state: AppState::default(),
-            media_tools: Ok(MediaTools {
+            media_tools: MediaToolsState::Ready(MediaTools {
                 ffmpeg: PathBuf::from("missing-ffmpeg"),
                 ffprobe: PathBuf::from("missing-ffprobe"),
             }),
+            media_tools_discovery: None,
             audio_mix_executor: apollo::audio_mix::execution::AudioMixExecutor::new(),
             upscale_executor: apollo::upscale::execution::UpscaleExecutor::new(),
             media_inspection: None,
             file_dialog: FileDialogOwner::default(),
             native_window_owner: Ok(WindowOwner::test_value()),
+            egui_context,
+            next_media_tools_attempt_id: 0,
             next_session_id: 1,
             tools_error_details_open: false,
         }
     }
 
     #[test]
-    fn media_tools_retry_uses_the_shared_discovery_result() {
+    fn media_tool_discovery_starts_in_checking_without_blocking() {
         let mut app = app();
+        app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
+        let (release_sender, release_receiver) = mpsc::channel();
+
+        assert!(
+            app.start_media_tools_discovery_with(egui::Context::default(), move || {
+                release_receiver.recv().unwrap();
+                Err(MediaToolsError::MissingBoth)
+            },)
+        );
+
+        assert!(matches!(app.media_tools, MediaToolsState::Checking { .. }));
+        assert!(app.media_tools_discovery.is_some());
+        release_sender.send(()).unwrap();
+    }
+
+    #[test]
+    fn media_tool_discovery_completion_requests_repaint_and_transitions_to_ready() {
+        let mut app = app();
+        app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
         app.tools_error_details_open = true;
         let expected = MediaTools {
             ffmpeg: PathBuf::from(r"C:\Media Tools\ffmpeg.exe"),
             ffprobe: PathBuf::from(r"C:\Media Tools\ffprobe.exe"),
         };
+        let context = egui::Context::default();
+        let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
+        context.set_request_repaint_callback(move |_| {
+            let _ = repaint_sender.try_send(());
+        });
 
-        app.retry_media_tools_with(|| Ok(expected.clone()));
+        assert!(app.start_media_tools_discovery_with(context, {
+            let expected = expected.clone();
+            move || Ok(expected)
+        }));
+        repaint_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("discovery completion should request repaint");
+        app.poll_media_tools_discovery();
 
-        assert_eq!(app.media_tools, Ok(expected));
+        assert_eq!(app.media_tools, MediaToolsState::Ready(expected));
+        assert!(app.media_tools_discovery.is_none());
         assert!(!app.tools_error_details_open);
+    }
+
+    #[test]
+    fn media_tool_discovery_failure_transitions_to_unavailable() {
+        let mut app = app();
+        app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
+        let context = egui::Context::default();
+        let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
+        context.set_request_repaint_callback(move |_| {
+            let _ = repaint_sender.try_send(());
+        });
+
+        assert!(app.start_media_tools_discovery_with(context, || {
+            Err(MediaToolsError::MissingFfprobe)
+        }));
+        repaint_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("failed discovery completion should request repaint");
+        app.poll_media_tools_discovery();
+
+        assert_eq!(
+            app.media_tools,
+            MediaToolsState::Unavailable(MediaToolsError::MissingFfprobe)
+        );
+    }
+
+    #[test]
+    fn media_tool_retry_is_single_flight() {
+        let mut app = app();
+        app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
+        let (release_sender, release_receiver) = mpsc::channel();
+
+        assert!(
+            app.start_media_tools_discovery_with(egui::Context::default(), move || {
+                release_receiver.recv().unwrap();
+                Err(MediaToolsError::MissingBoth)
+            },)
+        );
+        assert!(
+            !app.start_media_tools_discovery_with(egui::Context::default(), || {
+                panic!("overlapping retry discovery must not start")
+            })
+        );
+
+        release_sender.send(()).unwrap();
+    }
+
+    #[test]
+    fn stale_media_tool_discovery_completion_is_rejected() {
+        let mut app = app();
+        app.media_tools = MediaToolsState::Checking { attempt_id: 7 };
+        let stale = MediaTools {
+            ffmpeg: PathBuf::from("stale-ffmpeg"),
+            ffprobe: PathBuf::from("stale-ffprobe"),
+        };
+
+        assert!(!app.complete_media_tools_discovery(6, Ok(stale)));
+        assert_eq!(app.media_tools, MediaToolsState::Checking { attempt_id: 7 });
     }
 
     fn dropped_file(path: &Path) -> egui::DroppedFileHandle {
@@ -1195,6 +1440,94 @@ mod tests {
         assert_eq!(
             app.state.media_intake.current().map(|media| &media.path),
             Some(&path)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn inspection_completion_requests_repaint_without_fixed_polling() {
+        let (directory, path) = temp_file("inspection-repaint");
+        let mut app = app();
+        let request = app
+            .begin_media_path(&path)
+            .expect("new source should require inspection");
+        let context = egui::Context::default();
+        let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
+        context.set_request_repaint_callback(move |_| {
+            let _ = repaint_sender.try_send(());
+        });
+        let media = media(&path);
+        app.media_inspection = Some(
+            MediaInspection::spawn_with(request, context, move || Ok(media))
+                .expect("inspection worker should start"),
+        );
+
+        repaint_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("inspection completion should request repaint");
+        app.poll_media_inspection();
+
+        assert!(app.media_inspection.is_none());
+        assert_eq!(
+            app.state.media_intake.current().map(|media| &media.path),
+            Some(&path)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn inspection_worker_panic_requests_repaint_and_surfaces_probe_failure() {
+        let (directory, path) = temp_file("inspection-worker-panic");
+        let mut app = app();
+        let request = app
+            .begin_media_path(&path)
+            .expect("new source should require inspection");
+        let context = egui::Context::default();
+        let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
+        context.set_request_repaint_callback(move |_| {
+            let _ = repaint_sender.try_send(());
+        });
+        app.media_inspection = Some(
+            MediaInspection::spawn_with(request, context, || {
+                panic!("simulated inspection worker failure")
+            })
+            .expect("inspection worker should start"),
+        );
+
+        repaint_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("failed inspection worker should request repaint");
+        app.poll_media_inspection();
+
+        assert!(app.media_inspection.is_none());
+        assert_eq!(
+            app.state.intake_error.as_ref().map(MediaError::kind),
+            Some(MediaErrorKind::ProbeFailure)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_inspection_completion_cannot_replace_newer_source() {
+        let (directory, first) = temp_file("stale-inspection");
+        let second = directory.join("replacement.mkv");
+        fs::write(&second, b"replacement").unwrap();
+        let mut app = app();
+        let first_request = app
+            .begin_media_path(&first)
+            .expect("first source should require inspection");
+        let second_request = match app.state.media_intake.begin_load(&second).unwrap() {
+            MediaLoadStart::Probe(request) => request,
+            MediaLoadStart::Reused => panic!("replacement should require inspection"),
+        };
+
+        app.complete_media_probe(first_request, Ok(media(&first)));
+        assert!(app.state.media_intake.current().is_none());
+        app.complete_media_probe(second_request, Ok(media(&second)));
+
+        assert_eq!(
+            app.state.media_intake.current().map(|media| &media.path),
+            Some(&second)
         );
         fs::remove_dir_all(directory).unwrap();
     }
