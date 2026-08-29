@@ -9,6 +9,7 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 
 $stageReleaseScript = Join-Path $projectRoot 'scripts/stage-windows-release.ps1'
 $installerDefinition = Join-Path $projectRoot 'installer/windows/apollo.nsi'
+$applicationIcon = Join-Path $projectRoot 'assets/apollo.ico'
 
 $originalFail = $env:APOLLO_TEST_NSIS_FAIL
 
@@ -21,6 +22,7 @@ function New-ReleaseStagingFixture {
 
     $root = New-TestDirectory -Name $Name
     New-Item -ItemType Directory -Path (Join-Path $root 'installer/windows') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $root 'assets') -Force | Out-Null
 
     $manifest = "[package]`nname = `"apollo`"`nversion = `"$Version`"`nedition = `"2024`"`n"
     [System.IO.File]::WriteAllText((Join-Path $root 'Cargo.toml'), $manifest, [System.Text.UTF8Encoding]::new($false))
@@ -31,6 +33,7 @@ function New-ReleaseStagingFixture {
     'Apollo project license' | Set-Content -LiteralPath (Join-Path $root 'LICENSE') -Encoding utf8
     'Apollo third-party notices' | Set-Content -LiteralPath (Join-Path $root 'THIRD_PARTY_NOTICES.md') -Encoding utf8
     Copy-Item -LiteralPath $installerDefinition -Destination (Join-Path $root 'installer/windows/apollo.nsi')
+    Copy-Item -LiteralPath $applicationIcon -Destination (Join-Path $root 'assets/apollo.ico')
 
     New-TestNsisCompiler -Path (Join-Path $root 'tools/fake-makensis.ps1') | Out-Null
 

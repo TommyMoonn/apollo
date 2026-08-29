@@ -8,6 +8,7 @@ $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 
 $buildInstallerScript = Join-Path $projectRoot 'scripts/build-windows-installer.ps1'
 $installerDefinition = Join-Path $projectRoot 'installer/windows/apollo.nsi'
+$applicationIcon = Join-Path $projectRoot 'assets/apollo.ico'
 
 $originalLog = $env:APOLLO_TEST_NSIS_LOG
 $originalMarker = $env:APOLLO_TEST_NSIS_MARKER
@@ -23,6 +24,7 @@ function New-InstallerFixture {
 
     $root = New-TestDirectory -Name $Name
     New-Item -ItemType Directory -Path (Join-Path $root 'installer/windows') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $root 'assets') -Force | Out-Null
 
     $manifest = "[package]`nname = `"apollo`"`nversion = `"$Version`"`nedition = `"2024`"`n"
     [System.IO.File]::WriteAllText((Join-Path $root 'Cargo.toml'), $manifest, [System.Text.UTF8Encoding]::new($false))
@@ -33,6 +35,7 @@ function New-InstallerFixture {
     'Apollo project license' | Set-Content -LiteralPath (Join-Path $root 'LICENSE') -Encoding utf8
     'Apollo third-party notices' | Set-Content -LiteralPath (Join-Path $root 'THIRD_PARTY_NOTICES.md') -Encoding utf8
     Copy-Item -LiteralPath $installerDefinition -Destination (Join-Path $root 'installer/windows/apollo.nsi')
+    Copy-Item -LiteralPath $applicationIcon -Destination (Join-Path $root 'assets/apollo.ico')
 
     New-TestWindowsExecutable -Path (Join-Path $root 'target/x86_64-pc-windows-msvc/release/apollo.exe') | Out-Null
 
@@ -68,6 +71,7 @@ Invoke-TestCase 'installer build passes Cargo version and repository paths to NS
         Assert-True ($arguments -contains '/DVERSION=1.2.3') 'Installer version must come from Cargo.toml release metadata.'
         Assert-True ($arguments -contains "/DPROJECT_ROOT=$($fixture.Root)") 'Project root must be passed to NSIS explicitly.'
         Assert-True ($arguments -contains "/DAPOLLO_EXE=$($fixture.Executable)") 'Validated Apollo executable must be passed to NSIS explicitly.'
+        Assert-True ($arguments -contains "/DAPP_ICON=$(Join-Path $fixture.Root 'assets/apollo.ico')") 'The repository-owned Apollo icon must be passed to NSIS explicitly.'
         Assert-PathExists (Join-Path $fixture.Root 'artifacts/windows-installer/Apollo-Setup-x64.exe') 'Default installer output should be created.'
     }
     finally {
@@ -92,7 +96,7 @@ Invoke-TestCase 'installer build rejects a missing NSIS compiler clearly' {
 }
 
 Invoke-TestCase 'installer build validates payload files before compiler invocation' {
-    foreach ($missingName in @('apollo.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.md')) {
+    foreach ($missingName in @('apollo.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'assets/apollo.ico')) {
         $fixture = New-InstallerFixture
         try {
             $marker = Join-Path $fixture.Root 'compiler-invoked.txt'
@@ -254,6 +258,8 @@ Invoke-TestCase 'installer definition uses stable per-user install identity and 
     Assert-Contains $content '"DisplayVersion" "${VERSION}"' 'Installed Apps version must use the Cargo-derived NSIS define.'
     Assert-Contains $content 'CreateShortcut "$SMPROGRAMS\Apollo.lnk" "$INSTDIR\Apollo.exe"' 'Installer must create the Apollo Start Menu shortcut.'
     Assert-Contains $content 'LicenseData "${PROJECT_ROOT}\LICENSE"' 'Installer license page must use the root GPLv3 file.'
+    Assert-Contains $content 'Icon "${APP_ICON}"' 'Installer branding must use the repository-owned Apollo icon.'
+    Assert-Contains $content 'UninstallIcon "${APP_ICON}"' 'Uninstaller branding must use the repository-owned Apollo icon.'
     Assert-Contains $content 'File /oname=THIRD_PARTY_NOTICES.md' 'Third-party notices must be installed.'
     Assert-Contains $content 'SetOverwrite on' 'Reinstalling through the stable install path must replace the owned payload.'
     Assert-Contains $content 'WriteUninstaller "$INSTDIR\Uninstall.exe"' 'Uninstaller must be owned by the Apollo install directory.'

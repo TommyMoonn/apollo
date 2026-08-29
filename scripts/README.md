@@ -142,7 +142,7 @@ artifacts/windows-installer/Apollo-Setup-x64.exe
 
 Install [NSIS](https://nsis.sourceforge.io/) so `makensis.exe` is available on `PATH`, or pass its path explicitly with `--makensis`. The wrapper derives the installer version from `Cargo.toml`, validates the release executable through the same PE32+/x64/GUI-subsystem owner used by release staging, and passes the root `LICENSE` and `THIRD_PARTY_NOTICES.md` to the installer definition. Use `--executable` and `--output` to override the build input or destination; the destination filename must remain `Apollo-Setup-x64.exe`.
 
-The installer is per-user, installs under `%LOCALAPPDATA%\Programs\Apollo`, creates an Apollo Start Menu shortcut and Installed Apps entry, and does not bundle FFmpeg/FFprobe or create a desktop shortcut.
+The installer is per-user, installs under `%LOCALAPPDATA%\Programs\Apollo`, creates an Apollo Start Menu shortcut and Installed Apps entry, and does not bundle FFmpeg/FFprobe or create a desktop shortcut. The installer, uninstaller, installed executable, Start Menu shortcut, and Installed Apps entry use the repository-owned Apollo icon.
 
 ## Tests
 

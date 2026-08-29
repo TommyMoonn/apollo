@@ -130,9 +130,11 @@ The output filename must be exactly Apollo-Setup-x64.exe.
 
     $licensePath = Join-Path $projectRoot 'LICENSE'
     $noticesPath = Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md'
+    $iconPath = Join-Path $projectRoot 'assets/apollo.ico'
     $nsiPath = Join-Path $projectRoot 'installer/windows/apollo.nsi'
     Assert-InstallerSourceFile -Path $licensePath -Description 'Project license'
     Assert-InstallerSourceFile -Path $noticesPath -Description 'Third-party notices'
+    Assert-InstallerSourceFile -Path $iconPath -Description 'Apollo application icon'
     Assert-InstallerSourceFile -Path $nsiPath -Description 'NSIS installer definition'
 
     $compilerPath = Resolve-NsisCompilerPath -ProjectRoot $projectRoot -Value $cli['makensis']
@@ -157,6 +159,7 @@ The output filename must be exactly Apollo-Setup-x64.exe.
             "/DVERSION=$($release.Version)",
             "/DPROJECT_ROOT=$projectRoot",
             "/DAPOLLO_EXE=$executablePath",
+            "/DAPP_ICON=$iconPath",
             "/DOUTPUT_FILE=$temporaryInstaller",
             $nsiPath
         )

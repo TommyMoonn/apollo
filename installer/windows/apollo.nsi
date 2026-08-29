@@ -13,6 +13,9 @@ RequestExecutionLevel user
 !ifndef OUTPUT_FILE
     !error "OUTPUT_FILE define is required"
 !endif
+!ifndef APP_ICON
+    !error "APP_ICON define is required"
+!endif
 
 !define APP_NAME "Apollo"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Apollo"
@@ -21,6 +24,8 @@ Name "${APP_NAME}"
 OutFile "${OUTPUT_FILE}"
 InstallDir "$LOCALAPPDATA\Programs\Apollo"
 LicenseData "${PROJECT_ROOT}\LICENSE"
+Icon "${APP_ICON}"
+UninstallIcon "${APP_ICON}"
 
 Page license
 Page instfiles

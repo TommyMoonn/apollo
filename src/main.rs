@@ -8,7 +8,8 @@ fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(layout::REFERENCE_CONTENT_SIZE)
-            .with_min_inner_size(layout::MINIMUM_CONTENT_SIZE),
+            .with_min_inner_size(layout::MINIMUM_CONTENT_SIZE)
+            .with_icon(apollo::ui::icon::application_icon()),
         centered: true,
         ..Default::default()
     };
