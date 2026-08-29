@@ -187,8 +187,8 @@ pub fn show(
     let mut action = AudioMixSelectionAction::None;
     let tracks = track_presentations(media);
     let list_content_height = tracks.len() as f32 * theme::SELECTABLE_ROW_MIN_HEIGHT;
-    let has_validation_feedback = state
-        .validation(media)
+    let validation = state.validation(media);
+    let has_validation_feedback = validation
         .as_ref()
         .err()
         .and_then(audio_mix_ready_feedback)
@@ -221,7 +221,6 @@ pub fn show(
             action = output_action;
         }
 
-        let validation = state.validation(media);
         if let Some(feedback) = validation.as_ref().err().and_then(audio_mix_ready_feedback) {
             ui.add_space(theme::SPACING.tight);
             let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
@@ -404,16 +403,6 @@ fn audio_mix_ready_feedback(error: &AudioMixValidationError) -> Option<&'static 
         }
         AudioMixValidationError::OutputExtensionMismatch { .. } => {
             Some("Output filename must match the selected container.")
-        }
-        AudioMixValidationError::Output(MediaOutputError::SameInputAndOutput(_)) => {
-            Some("Output must be different from the source file.")
-        }
-        AudioMixValidationError::Output(MediaOutputError::OutputParentUnavailable { .. })
-        | AudioMixValidationError::Output(MediaOutputError::OutputParentNotDirectory(_)) => {
-            Some("Choose an available output folder.")
-        }
-        AudioMixValidationError::Output(MediaOutputError::OutputAlreadyExists(_)) => {
-            Some("Choose a different output filename or destination.")
         }
         _ => None,
     }
@@ -686,13 +675,7 @@ mod tests {
         time::Duration,
     };
 
-    use crate::{
-        audio_mix::validation::AudioMixValidationError,
-        media::{
-            model::{AudioStream, MediaFile, VideoStream},
-            output::MediaOutputError,
-        },
-    };
+    use crate::media::model::{AudioStream, MediaFile, VideoStream};
 
     use super::{
         AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height,
@@ -804,53 +787,18 @@ mod tests {
     }
 
     #[test]
-    fn selected_tracks_do_not_override_invalid_output_and_feedback_clears_when_corrected() {
-        let mut media = media();
-        let source_path = std::env::temp_dir().join(format!(
-            "apollo-audio-mix-ready-source-{}.mkv",
-            std::process::id()
-        ));
-        let corrected_stem = format!("apollo-audio-mix-ready-corrected-{}", std::process::id());
-        let _ = std::fs::remove_file(&source_path);
-        std::fs::write(&source_path, b"input").expect("fixture input should be created");
-        media.path = source_path.clone();
+    fn ready_validation_ignores_destination_filesystem_state() {
+        let media = media();
         let mut state = AudioMixSelectionState::new(&media);
         state.set_container(&media, OutputContainer::Mkv);
+
         state.set_custom_output_path(media.path.clone());
-
-        let error = state.validation(&media).unwrap_err();
-        assert!(matches!(
-            &error,
-            AudioMixValidationError::Output(MediaOutputError::SameInputAndOutput(_))
-        ));
-        assert!(!state.can_mix(&media));
-        assert_eq!(
-            audio_mix_ready_feedback(&error),
-            Some("Output must be different from the source file.")
-        );
-
-        state.set_output_filename_stem(OsString::from(corrected_stem));
-
         assert!(state.validation(&media).is_ok());
         assert!(state.can_mix(&media));
 
-        let corrected_output = state.output_path();
-        std::fs::write(&corrected_output, b"occupied").expect("fixture output should be created");
-        let collision = state.validation(&media).unwrap_err();
-        assert!(matches!(
-            &collision,
-            AudioMixValidationError::Output(MediaOutputError::OutputAlreadyExists(_))
-        ));
-        assert!(!state.can_mix(&media));
-        assert_eq!(
-            audio_mix_ready_feedback(&collision),
-            Some("Choose a different output filename or destination.")
-        );
-
-        std::fs::remove_file(corrected_output).expect("fixture output should be removable");
+        state.set_custom_output_path(PathBuf::from("missing-parent/output.mkv"));
+        assert!(state.validation(&media).is_ok());
         assert!(state.can_mix(&media));
-
-        std::fs::remove_file(source_path).expect("fixture input should be removable");
     }
 
     #[test]

@@ -143,8 +143,8 @@ pub fn show(
 ) -> UpscaleSelectionAction {
     let mut action = UpscaleSelectionAction::None;
     let list_content_height = TARGETS.len() as f32 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT;
-    let has_validation_feedback = state
-        .validation(media)
+    let validation = state.validation(media);
+    let has_validation_feedback = validation
         .as_ref()
         .err()
         .and_then(upscale_ready_feedback)
@@ -182,7 +182,6 @@ pub fn show(
             action = UpscaleSelectionAction::BrowseOutput;
         }
 
-        let validation = state.validation(media);
         if let Some(feedback) = validation.as_ref().err().and_then(upscale_ready_feedback) {
             ui.add_space(theme::SPACING.tight);
             let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
@@ -206,16 +205,6 @@ fn upscale_ready_feedback(error: &UpscaleValidationError) -> Option<&'static str
     match error {
         UpscaleValidationError::Output(MediaOutputError::InvalidOutputPath(_)) => {
             Some("Enter a usable output filename.")
-        }
-        UpscaleValidationError::Output(MediaOutputError::SameInputAndOutput(_)) => {
-            Some("Output must be different from the source file.")
-        }
-        UpscaleValidationError::Output(MediaOutputError::OutputParentUnavailable { .. })
-        | UpscaleValidationError::Output(MediaOutputError::OutputParentNotDirectory(_)) => {
-            Some("Choose an available output folder.")
-        }
-        UpscaleValidationError::Output(MediaOutputError::OutputAlreadyExists(_)) => {
-            Some("Choose a different output filename or destination.")
         }
         _ => None,
     }
@@ -592,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn full_request_validity_controls_primary_action() {
+    fn pure_request_validity_controls_primary_action() {
         let source = media(Some(1920), Some(1080));
         let mut state = UpscaleSelectionState::new(&source);
         state.set_custom_output_path(PathBuf::from("recording-4k.mp4"));
@@ -600,50 +589,40 @@ mod tests {
         assert!(state.can_upscale(&source));
 
         state.set_custom_output_path(source.path.clone());
-        assert!(!state.can_upscale(&source));
+        assert!(state.can_upscale(&source));
 
         state.set_custom_output_path(PathBuf::new());
         assert!(!state.can_upscale(&source));
 
         state.set_custom_output_path(PathBuf::from("missing-upscale-ui-parent/output.mp4"));
-        assert!(!state.can_upscale(&source));
+        assert!(state.can_upscale(&source));
     }
 
     #[test]
-    fn output_feedback_clears_when_the_request_is_corrected() {
-        let mut source = media(Some(1920), Some(1080));
-        let source_path = std::env::temp_dir().join(format!(
-            "apollo-upscale-ready-source-{}.mp4",
-            std::process::id()
-        ));
-        let corrected_stem = format!("apollo-upscale-ready-corrected-{}", std::process::id());
-        let _ = std::fs::remove_file(&source_path);
-        std::fs::write(&source_path, b"input").expect("fixture input should be created");
-        source.path = source_path.clone();
+    fn output_feedback_is_limited_to_pure_request_errors() {
+        let source = media(Some(1920), Some(1080));
         let mut state = UpscaleSelectionState::new(&source);
-        state.set_custom_output_path(source.path.clone());
+        state.set_custom_output_path(PathBuf::new());
 
         let error = state.validation(&source).unwrap_err();
         assert!(matches!(
             &error,
-            UpscaleValidationError::Output(MediaOutputError::SameInputAndOutput(_))
+            UpscaleValidationError::Output(MediaOutputError::InvalidOutputPath(_))
         ));
         assert_eq!(
             upscale_ready_feedback(&error),
-            Some("Output must be different from the source file.")
+            Some("Enter a usable output filename.")
         );
         assert!(!state.can_upscale(&source));
 
-        state.set_output_filename_stem(OsString::from(corrected_stem));
+        state.set_custom_output_path(PathBuf::from("missing-parent/output.mp4"));
 
         assert!(state.validation(&source).is_ok());
         assert!(state.can_upscale(&source));
-
-        std::fs::remove_file(source_path).expect("fixture input should be removable");
     }
 
     #[test]
-    fn invalid_target_remains_quiet_while_output_errors_have_feedback() {
+    fn invalid_target_and_destination_preflight_errors_have_no_ready_feedback() {
         let target_error = UpscaleValidationError::TargetNotLarger {
             target: UpscaleTarget::Uhd4k,
             source_width: 3840,
@@ -656,10 +635,7 @@ mod tests {
         ));
 
         assert_eq!(upscale_ready_feedback(&target_error), None);
-        assert_eq!(
-            upscale_ready_feedback(&output_error),
-            Some("Choose a different output filename or destination.")
-        );
+        assert_eq!(upscale_ready_feedback(&output_error), None);
     }
 
     #[test]

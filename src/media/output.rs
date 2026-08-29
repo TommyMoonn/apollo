@@ -114,11 +114,17 @@ struct ValidatedOutputDestination {
     final_path: PathBuf,
 }
 
-/// Validate a requested final output without creating staging state.
-///
-/// Ready-state request validation and [`MediaOutput::prepare`] share this owner so filesystem
-/// safety checks cannot drift between preflight and execution startup.
-pub fn validate_output_destination(input: &Path, output: &Path) -> Result<(), MediaOutputError> {
+/// Validate only the filesystem-independent shape of an output path.
+pub fn validate_output_path(output: &Path) -> Result<(), MediaOutputError> {
+    output
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .map(|_| ())
+        .ok_or_else(|| MediaOutputError::InvalidOutputPath(output.to_path_buf()))
+}
+
+/// Perform the filesystem-backed destination safety preflight without creating staging state.
+pub fn preflight_output_destination(input: &Path, output: &Path) -> Result<(), MediaOutputError> {
     validated_output_destination(input, output).map(|_| ())
 }
 
@@ -126,10 +132,10 @@ fn validated_output_destination(
     input: &Path,
     output: &Path,
 ) -> Result<ValidatedOutputDestination, MediaOutputError> {
+    validate_output_path(output)?;
     let file_name = output
         .file_name()
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| MediaOutputError::InvalidOutputPath(output.to_path_buf()))?
+        .expect("validated output path has a file name")
         .to_os_string();
     let requested_parent = output_parent(output);
     let parent_metadata = fs::metadata(&requested_parent).map_err(|error| {
@@ -506,7 +512,7 @@ mod tests {
 
     use super::{
         MediaOutput, MediaOutputDisposition, MediaOutputError, STAGING_DIRECTORY_PREFIX,
-        staging_directory_candidate, validate_output_destination,
+        preflight_output_destination, staging_directory_candidate, validate_output_path,
     };
     use crate::media::process::{MediaProcessFailure, MediaProcessState};
 
@@ -519,6 +525,31 @@ mod tests {
         fs::write(&input, b"input").unwrap();
 
         let error = MediaOutput::prepare(&input, &input).unwrap_err();
+
+        assert!(matches!(error, MediaOutputError::SameInputAndOutput(_)));
+    }
+
+    #[test]
+    fn output_path_validation_is_filesystem_independent() {
+        let output = PathBuf::from("missing-parent").join("output.mp4");
+
+        assert_eq!(validate_output_path(&output), Ok(()));
+        assert_eq!(
+            validate_output_path(Path::new("")),
+            Err(MediaOutputError::InvalidOutputPath(PathBuf::new()))
+        );
+    }
+
+    #[test]
+    fn canonical_equivalent_input_and_output_are_rejected() {
+        let directory = TestDirectory::new("canonical-same-path");
+        let nested = directory.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        let input = directory.path().join("movie.mp4");
+        fs::write(&input, b"input").unwrap();
+        let output = nested.join("..").join("movie.mp4");
+
+        let error = preflight_output_destination(&input, &output).unwrap_err();
 
         assert!(matches!(error, MediaOutputError::SameInputAndOutput(_)));
     }
@@ -572,6 +603,41 @@ mod tests {
         assert_eq!(fs::read(&output).unwrap(), b"existing");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn dangling_output_symlink_is_treated_as_an_existing_destination() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::new("dangling-output-symlink");
+        let input = directory.path().join("input.mkv");
+        let output = directory.path().join("output.mp4");
+        fs::write(&input, b"input").unwrap();
+        symlink(directory.path().join("missing-target"), &output).unwrap();
+
+        let error = preflight_output_destination(&input, &output).unwrap_err();
+
+        assert!(matches!(error, MediaOutputError::OutputAlreadyExists(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_alias_to_input_is_rejected_as_the_same_file() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::new("symlink-input-alias");
+        let real_parent = directory.path().join("real");
+        let alias_parent = directory.path().join("alias");
+        fs::create_dir(&real_parent).unwrap();
+        symlink(&real_parent, &alias_parent).unwrap();
+        let input = real_parent.join("movie.mp4");
+        let output = alias_parent.join("movie.mp4");
+        fs::write(&input, b"input").unwrap();
+
+        let error = preflight_output_destination(&input, &output).unwrap_err();
+
+        assert!(matches!(error, MediaOutputError::SameInputAndOutput(_)));
+    }
+
     #[test]
     fn destination_preflight_does_not_create_staging_state() {
         let directory = TestDirectory::new("preflight-no-staging");
@@ -579,7 +645,7 @@ mod tests {
         let output = directory.path().join("output.mp4");
         fs::write(&input, b"input").unwrap();
 
-        assert_eq!(validate_output_destination(&input, &output), Ok(()));
+        assert_eq!(preflight_output_destination(&input, &output), Ok(()));
         assert!(!output.exists());
         assert!(
             fs::read_dir(directory.path())

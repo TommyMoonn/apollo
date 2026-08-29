@@ -2,7 +2,7 @@ use std::{collections::HashSet, fmt};
 
 use crate::media::{
     model::MediaFile,
-    output::{MediaOutputError, validate_output_destination},
+    output::{MediaOutputError, validate_output_path},
 };
 
 use super::model::AudioMixRequest;
@@ -53,7 +53,7 @@ impl fmt::Display for AudioMixValidationError {
 
 impl std::error::Error for AudioMixValidationError {}
 
-/// Validate an Audio Mix request against the probed media.
+/// Validate an Audio Mix request against the probed media without filesystem access.
 ///
 /// Duplicate selected stream indexes are rejected rather than silently normalized.
 pub fn validate_audio_mix_request(
@@ -71,8 +71,7 @@ pub fn validate_audio_mix_request(
     reject_duplicate_streams(&request.selected_streams)?;
     validate_selected_streams(&request.selected_streams, media)?;
     validate_output_extension(request)?;
-    validate_output_destination(&request.input, &request.output)
-        .map_err(AudioMixValidationError::Output)?;
+    validate_output_path(&request.output).map_err(AudioMixValidationError::Output)?;
 
     Ok(())
 }

@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::media::{
     model::MediaFile,
-    output::{MediaOutputError, validate_output_destination},
+    output::{MediaOutputError, validate_output_path},
 };
 
 use super::{
@@ -58,7 +58,7 @@ impl fmt::Display for UpscaleValidationError {
 
 impl std::error::Error for UpscaleValidationError {}
 
-/// Validate an Upscale request against the primary probed video stream.
+/// Validate an Upscale request against the primary probed video stream without filesystem access.
 ///
 /// Target eligibility is orientation-independent: the source long and short edges
 /// must both be strictly smaller than the selected target boundary. Exact output
@@ -86,8 +86,7 @@ pub fn validate_upscale_request(
     }
 
     validate_target_is_larger(request.target, width, height)?;
-    validate_output_destination(&request.input, &request.output)
-        .map_err(UpscaleValidationError::Output)?;
+    validate_output_path(&request.output).map_err(UpscaleValidationError::Output)?;
 
     Ok(())
 }

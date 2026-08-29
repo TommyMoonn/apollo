@@ -9,7 +9,7 @@ use std::{
 use apollo::{
     media::{
         model::{AudioStream, MediaFile, VideoStream},
-        output::MediaOutputError,
+        output::{MediaOutputError, preflight_output_destination},
     },
     upscale::{
         command::{UpscaleCommandError, build_upscale_invocation},
@@ -643,17 +643,18 @@ fn zero_source_dimensions_are_rejected() {
 }
 
 #[test]
-fn same_input_and_output_is_rejected() {
+fn same_input_and_output_is_left_to_destination_preflight() {
     let temp = TestDirectory::new();
     let mut request = request(&temp, UpscaleTarget::Uhd4k);
     fs::write(&request.input, b"input").expect("fixture input should be created");
     request.output = request.input.clone();
     let media = media(request.input.clone(), Some(1920), Some(1080));
 
+    assert_eq!(validate_upscale_request(&request, &media), Ok(()));
     assert_eq!(
-        validate_upscale_request(&request, &media),
-        Err(UpscaleValidationError::Output(
-            MediaOutputError::SameInputAndOutput(temp.path().join("input.mp4"))
+        preflight_output_destination(&request.input, &request.output),
+        Err(MediaOutputError::SameInputAndOutput(
+            temp.path().join("input.mp4")
         ))
     );
 }
@@ -717,26 +718,25 @@ fn output_path_requires_a_usable_file_name() {
 }
 
 #[test]
-fn nonexistent_output_parent_is_rejected() {
+fn pure_request_validation_does_not_require_output_parent_to_exist() {
     let temp = TestDirectory::new();
     let mut request = request(&temp, UpscaleTarget::Uhd4k);
     let parent = temp.path().join("missing");
     request.output = parent.join("upscaled.mp4");
     let media = media(request.input.clone(), Some(1920), Some(1080));
 
+    assert_eq!(validate_upscale_request(&request, &media), Ok(()));
     assert_eq!(
-        validate_upscale_request(&request, &media),
-        Err(UpscaleValidationError::Output(
-            MediaOutputError::OutputParentUnavailable {
-                path: parent,
-                kind: std::io::ErrorKind::NotFound,
-            }
-        ))
+        preflight_output_destination(&request.input, &request.output),
+        Err(MediaOutputError::OutputParentUnavailable {
+            path: parent,
+            kind: std::io::ErrorKind::NotFound,
+        })
     );
 }
 
 #[test]
-fn output_parent_must_be_a_directory() {
+fn output_parent_directory_check_is_left_to_destination_preflight() {
     let temp = TestDirectory::new();
     let parent_file = temp.path().join("not-a-directory");
     fs::write(&parent_file, b"occupied").expect("fixture file should be created");
@@ -744,26 +744,24 @@ fn output_parent_must_be_a_directory() {
     request.output = parent_file.join("upscaled.mp4");
     let media = media(request.input.clone(), Some(1920), Some(1080));
 
+    assert_eq!(validate_upscale_request(&request, &media), Ok(()));
     assert_eq!(
-        validate_upscale_request(&request, &media),
-        Err(UpscaleValidationError::Output(
-            MediaOutputError::OutputParentNotDirectory(parent_file)
-        ))
+        preflight_output_destination(&request.input, &request.output),
+        Err(MediaOutputError::OutputParentNotDirectory(parent_file))
     );
 }
 
 #[test]
-fn existing_output_is_rejected_before_execution() {
+fn existing_output_check_is_left_to_destination_preflight() {
     let temp = TestDirectory::new();
     let request = request(&temp, UpscaleTarget::Uhd4k);
     fs::write(&request.output, b"occupied").expect("fixture output should be created");
     let media = media(request.input.clone(), Some(1920), Some(1080));
 
+    assert_eq!(validate_upscale_request(&request, &media), Ok(()));
     assert!(matches!(
-        validate_upscale_request(&request, &media),
-        Err(UpscaleValidationError::Output(
-            MediaOutputError::OutputAlreadyExists(_)
-        ))
+        preflight_output_destination(&request.input, &request.output),
+        Err(MediaOutputError::OutputAlreadyExists(_))
     ));
 }
 

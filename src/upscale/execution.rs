@@ -207,12 +207,13 @@ mod tests {
             error::MediaErrorKind,
             execution::ProcessControl,
             model::{AudioStream, MediaFile, VideoStream},
+            output::MediaOutputError,
             process::{MediaProcessFailure, MediaProcessState},
             tools::MediaTools,
         },
         upscale::{
             model::{UpscaleRequest, UpscaleTarget, VideoCodec},
-            validation::UpscaleValidationError,
+            validation::{UpscaleValidationError, validate_upscale_request},
         },
     };
 
@@ -275,7 +276,7 @@ mod tests {
     fn invalid_request_never_launches_process() {
         let directory = TestDirectory::new("invalid-no-spawn");
         let (mut request, media) = valid_request_and_media(&directory);
-        request.output = request.input.clone();
+        request.output = PathBuf::new();
         let tools = fake_tools(&directory);
         let launches = Arc::new(AtomicUsize::new(0));
         let launch_count = Arc::clone(&launches);
@@ -292,6 +293,33 @@ mod tests {
         assert_eq!(launches.load(Ordering::Relaxed), 0);
         assert_eq!(executor.state(), &UpscaleExecutionState::Idle);
         assert!(!executor.is_running());
+    }
+
+    #[test]
+    fn output_appearing_after_request_validation_is_rejected_before_launch() {
+        let directory = TestDirectory::new("late-output-preflight");
+        let (request, media) = valid_request_and_media(&directory);
+        let tools = fake_tools(&directory);
+        let launches = Arc::new(AtomicUsize::new(0));
+        let launch_count = Arc::clone(&launches);
+        let mut executor = UpscaleExecutor::new();
+
+        assert_eq!(validate_upscale_request(&request, &media), Ok(()));
+        fs::write(&request.output, b"occupied").unwrap();
+
+        let error = executor
+            .start_with_launcher(&tools, &media, &request, move |_| {
+                launch_count.fetch_add(1, Ordering::Relaxed);
+                Ok(FakeProcessControl::running())
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            UpscaleStartError::Output(MediaOutputError::OutputAlreadyExists(_))
+        ));
+        assert_eq!(launches.load(Ordering::Relaxed), 0);
+        assert_eq!(executor.state(), &UpscaleExecutionState::Idle);
     }
 
     #[test]
