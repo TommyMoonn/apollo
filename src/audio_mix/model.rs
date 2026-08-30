@@ -1,5 +1,7 @@
 use std::{fmt, path::PathBuf};
 
+use crate::media::model::AudioStream;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TrackGain {
     tenths_db: i16,
@@ -51,6 +53,115 @@ impl SelectedAudioTrack {
     pub const fn with_default_gain(stream_index: u32) -> Self {
         Self::new(stream_index, TrackGain::ZERO)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MixedAudioLayout {
+    Mono,
+    Stereo,
+}
+
+impl MixedAudioLayout {
+    pub const fn ffmpeg_name(self) -> &'static str {
+        match self {
+            Self::Mono => "mono",
+            Self::Stereo => "stereo",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MixedAudioLayoutError {
+    UnknownStream(u32),
+    Unsupported {
+        stream_index: u32,
+        channels: Option<u32>,
+        channel_layout: Option<String>,
+    },
+}
+
+impl fmt::Display for MixedAudioLayoutError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownStream(stream_index) => {
+                write!(
+                    f,
+                    "audio stream {stream_index} does not exist in the probed media"
+                )
+            }
+            Self::Unsupported {
+                stream_index,
+                channels,
+                channel_layout,
+            } => {
+                let description = channel_layout
+                    .as_deref()
+                    .filter(|layout| !layout.trim().is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| channels.map(|count| format!("{count} channels")))
+                    .unwrap_or_else(|| "unknown layout".to_owned());
+                write!(
+                    f,
+                    "audio stream {stream_index} uses unsupported channel layout {description}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for MixedAudioLayoutError {}
+
+/// Resolve Apollo's deterministic mixed-output layout from the selected probed streams.
+///
+/// Mono and stereo are the explicitly supported layouts. Any stereo input promotes the whole
+/// mix to stereo, independent of request order. Wider or indeterminate layouts are rejected.
+pub fn resolve_mixed_audio_layout(
+    selected_tracks: &[SelectedAudioTrack],
+    audio_streams: &[AudioStream],
+) -> Result<MixedAudioLayout, MixedAudioLayoutError> {
+    let mut mixed_layout = MixedAudioLayout::Mono;
+
+    for selected in selected_tracks {
+        let stream = audio_streams
+            .iter()
+            .find(|stream| stream.stream_index == selected.stream_index)
+            .ok_or(MixedAudioLayoutError::UnknownStream(selected.stream_index))?;
+        let stream_layout = supported_stream_layout(stream)?;
+        if stream_layout == MixedAudioLayout::Stereo {
+            mixed_layout = MixedAudioLayout::Stereo;
+        }
+    }
+
+    Ok(mixed_layout)
+}
+
+fn supported_stream_layout(
+    stream: &AudioStream,
+) -> Result<MixedAudioLayout, MixedAudioLayoutError> {
+    let layout = match stream.channels {
+        Some(1) => Some(MixedAudioLayout::Mono),
+        Some(2) => Some(MixedAudioLayout::Stereo),
+        Some(_) => None,
+        None => stream
+            .channel_layout
+            .as_deref()
+            .map(str::trim)
+            .and_then(|layout| {
+                if layout.eq_ignore_ascii_case("mono") {
+                    Some(MixedAudioLayout::Mono)
+                } else if layout.eq_ignore_ascii_case("stereo") {
+                    Some(MixedAudioLayout::Stereo)
+                } else {
+                    None
+                }
+            }),
+    };
+
+    layout.ok_or_else(|| MixedAudioLayoutError::Unsupported {
+        stream_index: stream.stream_index,
+        channels: stream.channels,
+        channel_layout: stream.channel_layout.clone(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -54,6 +54,7 @@ impl AudioMixStartError {
                 AudioMixValidationError::Output(error) => MediaError::from_output_error(error),
                 AudioMixValidationError::DuplicateSelectedStream(_)
                 | AudioMixValidationError::TrackGainOutOfRange { .. }
+                | AudioMixValidationError::UnsupportedChannelLayout { .. }
                 | AudioMixValidationError::IntegratedLoudnessOutOfRange
                 | AudioMixValidationError::MaximumTruePeakOutOfRange
                 | AudioMixValidationError::LoudnessRangeOutOfRange

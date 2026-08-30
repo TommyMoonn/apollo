@@ -272,6 +272,25 @@ fn numeric_video_stream_index_is_not_accepted_as_audio_selection() {
 }
 
 #[test]
+fn wider_channel_layout_is_rejected_with_stream_specific_feedback() {
+    let temp = TestDirectory::new();
+    let mut request = valid_request(&temp);
+    request.selected_tracks = vec![default_track(1)];
+    let mut media = media(request.input.clone());
+    media.audio_streams[0].channels = Some(6);
+    media.audio_streams[0].channel_layout = Some("5.1".to_owned());
+
+    assert_eq!(
+        validate_audio_mix_request(&request, &media),
+        Err(AudioMixValidationError::UnsupportedChannelLayout {
+            stream_index: 1,
+            channels: Some(6),
+            channel_layout: Some("5.1".to_owned()),
+        })
+    );
+}
+
+#[test]
 fn same_input_and_output_is_left_to_destination_preflight() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
@@ -426,7 +445,7 @@ fn one_selected_stream_builds_single_input_amix_filter() {
     assert_eq!(
         option_values(&args, "-filter_complex"),
         vec![
-            "[0:3]volume=0.0dB[mix_0];[mix_0]amix=inputs=1:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
+            "[0:3]volume=0.0dB,aformat=channel_layouts=mono[mix_0];[mix_0]amix=inputs=1:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
         ]
     );
 }
@@ -441,9 +460,50 @@ fn two_selected_streams_build_two_input_amix_filter() {
     assert_eq!(
         option_values(&args, "-filter_complex"),
         vec![
-            "[0:1]volume=0.0dB[mix_0];[0:7]volume=0.0dB[mix_1];[mix_0][mix_1]amix=inputs=2:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
+            "[0:1]volume=0.0dB,aformat=channel_layouts=stereo[mix_0];[0:7]volume=0.0dB,aformat=channel_layouts=stereo[mix_1];[mix_0][mix_1]amix=inputs=2:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
         ]
     );
+}
+
+#[test]
+fn mono_and_stereo_selection_produces_stereo_independent_of_track_order() {
+    let temp = TestDirectory::new();
+    let mut request = valid_request(&temp);
+    let media = media(request.input.clone());
+
+    request.selected_tracks = vec![default_track(3), default_track(1)];
+    let mono_first =
+        option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
+
+    request.selected_tracks = vec![default_track(1), default_track(3)];
+    let stereo_first =
+        option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
+
+    for filter in [mono_first, stereo_first] {
+        assert_eq!(filter.matches("aformat=channel_layouts=stereo").count(), 2);
+        assert!(!filter.contains("aformat=channel_layouts=mono"));
+    }
+}
+
+#[test]
+fn multiple_mono_tracks_produce_an_explicit_mono_mix() {
+    let temp = TestDirectory::new();
+    let mut request = valid_request(&temp);
+    request.selected_tracks = vec![default_track(3), default_track(9)];
+    let mut media = media(request.input.clone());
+    media.audio_streams.push(AudioStream {
+        stream_index: 9,
+        codec: Some("pcm_s16le".to_owned()),
+        channels: Some(1),
+        channel_layout: Some("mono".to_owned()),
+        title: Some("Commentary".to_owned()),
+        language: None,
+    });
+
+    let filter = option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
+
+    assert_eq!(filter.matches("aformat=channel_layouts=mono").count(), 2);
+    assert!(!filter.contains("aformat=channel_layouts=stereo"));
 }
 
 #[test]
@@ -470,7 +530,7 @@ fn four_selected_streams_build_four_input_amix_filter() {
     assert_eq!(
         option_values(&args, "-filter_complex"),
         vec![
-            "[0:1]volume=0.0dB[mix_0];[0:3]volume=0.0dB[mix_1];[0:7]volume=0.0dB[mix_2];[0:11]volume=0.0dB[mix_3];[mix_0][mix_1][mix_2][mix_3]amix=inputs=4:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
+            "[0:1]volume=0.0dB,aformat=channel_layouts=stereo[mix_0];[0:3]volume=0.0dB,aformat=channel_layouts=stereo[mix_1];[0:7]volume=0.0dB,aformat=channel_layouts=stereo[mix_2];[0:11]volume=0.0dB,aformat=channel_layouts=stereo[mix_3];[mix_0][mix_1][mix_2][mix_3]amix=inputs=4:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
         ]
     );
 }
@@ -486,7 +546,7 @@ fn filter_uses_non_contiguous_absolute_stream_indexes_in_selection_order() {
     assert_eq!(
         option_values(&args, "-filter_complex"),
         vec![
-            "[0:7]volume=0.0dB[mix_0];[0:1]volume=0.0dB[mix_1];[0:3]volume=0.0dB[mix_2];[mix_0][mix_1][mix_2]amix=inputs=3:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
+            "[0:7]volume=0.0dB,aformat=channel_layouts=stereo[mix_0];[0:1]volume=0.0dB,aformat=channel_layouts=stereo[mix_1];[0:3]volume=0.0dB,aformat=channel_layouts=stereo[mix_2];[mix_0][mix_1][mix_2]amix=inputs=3:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
         ]
     );
 }
@@ -502,7 +562,7 @@ fn unequal_track_gains_precede_explicit_unnormalized_mix_and_peak_limiter() {
     assert_eq!(
         option_values(&args, "-filter_complex"),
         vec![
-            "[0:1]volume=-6.0dB[mix_0];[0:3]volume=0.0dB[mix_1];[0:7]volume=12.0dB[mix_2];[mix_0][mix_1][mix_2]amix=inputs=3:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
+            "[0:1]volume=-6.0dB,aformat=channel_layouts=stereo[mix_0];[0:3]volume=0.0dB,aformat=channel_layouts=stereo[mix_1];[0:7]volume=12.0dB,aformat=channel_layouts=stereo[mix_2];[mix_0][mix_1][mix_2]amix=inputs=3:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
         ]
     );
 }
@@ -562,7 +622,7 @@ fn disabled_normalization_omits_loudnorm_and_keeps_the_protected_mix_path() {
 }
 
 #[test]
-fn enabled_normalization_uses_default_targets_after_the_peak_limiter() {
+fn enabled_normalization_uses_default_targets_without_the_generic_limiter() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
     request.normalization = LoudnessNormalization::Enabled(LoudnessTargets::default());
@@ -570,14 +630,13 @@ fn enabled_normalization_uses_default_targets_after_the_peak_limiter() {
     let args = invocation_args(&request, &media);
     let filter = option_values(&args, "-filter_complex")[0];
     let amix_position = filter.find("amix=").expect("amix stage");
-    let limiter_position = filter.find("alimiter=").expect("limiter stage");
     let loudnorm_position = filter.find("loudnorm=").expect("loudnorm stage");
 
     assert_eq!(filter.matches("loudnorm=").count(), 1);
-    assert!(amix_position < limiter_position);
-    assert!(limiter_position < loudnorm_position);
+    assert_eq!(filter.matches("alimiter=").count(), 0);
+    assert!(amix_position < loudnorm_position);
     assert!(filter.contains(
-        "alimiter=limit=0.95:level=0:latency=1[pre_norm];[pre_norm]loudnorm=I=-16.0:TP=-1.5:LRA=11.0[mixed]"
+        "amix=inputs=2:duration=longest:normalize=0[pre_norm];[pre_norm]loudnorm=I=-16.0:TP=-1.5:LRA=11.0:linear=false[mixed]"
     ));
     assert_eq!(option_values(&args, "-map"), vec!["0:0", "[mixed]"]);
 }
@@ -591,14 +650,12 @@ fn enabled_normalization_emits_custom_integer_backed_targets() {
     let args = invocation_args(&request, &media);
     let filter = option_values(&args, "-filter_complex")[0];
 
-    assert!(filter.ends_with(
-        "alimiter=limit=0.95:level=0:latency=1[pre_norm];[pre_norm]loudnorm=I=-23.5:TP=-0.7:LRA=18.5[mixed]"
-    ));
+    assert!(filter.ends_with("loudnorm=I=-23.5:TP=-0.7:LRA=18.5:linear=false[mixed]"));
     assert_eq!(filter.matches("loudnorm=").count(), 1);
 }
 
 #[test]
-fn toggling_normalization_does_not_change_gain_mix_or_limiter_policy() {
+fn toggling_normalization_preserves_gain_and_mix_but_selects_one_final_stage() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
     request.selected_tracks = vec![track(1, -60), track(3, 25)];
@@ -608,11 +665,19 @@ fn toggling_normalization_does_not_change_gain_mix_or_limiter_policy() {
     request.normalization = LoudnessNormalization::Enabled(LoudnessTargets::default());
     let on = option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
 
-    let protected_prefix = "[0:1]volume=-6.0dB[mix_0];[0:3]volume=2.5dB[mix_1];[mix_0][mix_1]amix=inputs=2:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1";
-    assert!(off.starts_with(protected_prefix));
-    assert!(on.starts_with(protected_prefix));
+    for shared_stage in [
+        "[0:1]volume=-6.0dB,aformat=channel_layouts=stereo[mix_0]",
+        "[0:3]volume=2.5dB,aformat=channel_layouts=stereo[mix_1]",
+        "[mix_0][mix_1]amix=inputs=2:duration=longest:normalize=0",
+    ] {
+        assert!(off.contains(shared_stage));
+        assert!(on.contains(shared_stage));
+    }
     assert!(!off.contains("loudnorm="));
+    assert_eq!(off.matches("alimiter=").count(), 1);
     assert_eq!(on.matches("loudnorm=").count(), 1);
+    assert!(!on.contains("alimiter="));
+    assert!(on.contains(":linear=false[mixed]"));
 }
 
 #[test]
@@ -672,18 +737,30 @@ fn mkv_attachment_mapping_remains_safe_when_source_has_no_attachments() {
 }
 
 #[test]
-fn mixed_audio_is_encoded_to_aac_for_both_containers() {
+fn mixed_audio_encoding_and_metadata_policy_is_explicit_for_both_containers() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
     let media = media(request.input.clone());
 
     let mp4_args = invocation_args(&request, &media);
     assert_eq!(option_values(&mp4_args, "-c:a"), vec!["aac"]);
+    assert_eq!(option_values(&mp4_args, "-b:a"), vec!["320k"]);
+    assert_eq!(option_values(&mp4_args, "-ar"), vec!["48000"]);
+    assert_eq!(
+        option_values(&mp4_args, "-metadata:s:a:0"),
+        vec!["title=Mixed Audio"]
+    );
 
     request.container = OutputContainer::Mkv;
     request.output = temp.path().join("mixed.mkv");
     let mkv_args = invocation_args(&request, &media);
     assert_eq!(option_values(&mkv_args, "-c:a"), vec!["aac"]);
+    assert_eq!(option_values(&mkv_args, "-b:a"), vec!["320k"]);
+    assert_eq!(option_values(&mkv_args, "-ar"), vec!["48000"]);
+    assert_eq!(
+        option_values(&mkv_args, "-metadata:s:a:0"),
+        vec!["title=Mixed Audio"]
+    );
 }
 
 #[test]

@@ -721,6 +721,9 @@ fn audio_mix_ready_feedback(error: &AudioMixValidationError) -> Option<&'static 
         AudioMixValidationError::OutputExtensionMismatch { .. } => {
             Some("Output filename must match the selected container.")
         }
+        AudioMixValidationError::UnsupportedChannelLayout { .. } => {
+            Some("Audio Mix currently supports mono and stereo tracks only.")
+        }
         _ => None,
     }
 }
@@ -1002,6 +1005,7 @@ mod tests {
     use crate::audio_mix::model::{
         LoudnessNormalization, LoudnessTargets, OutputContainer, SelectedAudioTrack, TrackGain,
     };
+    use crate::audio_mix::validation::AudioMixValidationError;
     use crate::ui::{layout, theme};
 
     fn media() -> MediaFile {
@@ -1266,6 +1270,20 @@ mod tests {
                 Some("Enter a usable output filename.")
             );
         }
+    }
+
+    #[test]
+    fn unsupported_channel_layout_has_ready_state_feedback() {
+        let error = AudioMixValidationError::UnsupportedChannelLayout {
+            stream_index: 8,
+            channels: Some(6),
+            channel_layout: Some("5.1".to_owned()),
+        };
+
+        assert_eq!(
+            audio_mix_ready_feedback(&error),
+            Some("Audio Mix currently supports mono and stereo tracks only.")
+        );
     }
 
     #[test]

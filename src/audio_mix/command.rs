@@ -3,7 +3,8 @@ use std::{ffi::OsString, fmt};
 use crate::media::model::MediaFile;
 
 use super::model::{
-    AudioMixRequest, LoudnessNormalization, LoudnessTargets, OutputContainer, SelectedAudioTrack,
+    AudioMixRequest, LoudnessNormalization, LoudnessTargets, MixedAudioLayout,
+    MixedAudioLayoutError, OutputContainer, SelectedAudioTrack, resolve_mixed_audio_layout,
 };
 
 const MIXED_AUDIO_LABEL: &str = "mixed";
@@ -15,10 +16,11 @@ pub struct FfmpegInvocation {
     pub args: Vec<OsString>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioMixCommandError {
     MissingVideoStream,
     NoAudioStreamsSelected,
+    MixedAudioLayout(MixedAudioLayoutError),
 }
 
 impl fmt::Display for AudioMixCommandError {
@@ -31,6 +33,7 @@ impl fmt::Display for AudioMixCommandError {
                     "audio mix command requires at least one selected audio stream"
                 )
             }
+            Self::MixedAudioLayout(error) => write!(f, "{error}"),
         }
     }
 }
@@ -55,12 +58,18 @@ pub fn build_audio_mix_invocation(
     if request.selected_tracks.is_empty() {
         return Err(AudioMixCommandError::NoAudioStreamsSelected);
     }
+    let mixed_layout = resolve_mixed_audio_layout(&request.selected_tracks, &media.audio_streams)
+        .map_err(AudioMixCommandError::MixedAudioLayout)?;
 
     let mut args = vec![
         OsString::from("-i"),
         request.input.as_os_str().to_os_string(),
         OsString::from("-filter_complex"),
-        OsString::from(mix_filter(&request.selected_tracks, request.normalization)),
+        OsString::from(mix_filter(
+            &request.selected_tracks,
+            request.normalization,
+            mixed_layout,
+        )),
     ];
 
     match request.container {
@@ -78,6 +87,12 @@ pub fn build_audio_mix_invocation(
         OsString::from("-nostats"),
         OsString::from("-c:a"),
         OsString::from("aac"),
+        OsString::from("-b:a"),
+        OsString::from("320k"),
+        OsString::from("-ar"),
+        OsString::from("48000"),
+        OsString::from("-metadata:s:a:0"),
+        OsString::from("title=Mixed Audio"),
         request.output.as_os_str().to_os_string(),
     ]);
 
@@ -87,14 +102,17 @@ pub fn build_audio_mix_invocation(
 fn mix_filter(
     selected_tracks: &[SelectedAudioTrack],
     normalization: LoudnessNormalization,
+    mixed_layout: MixedAudioLayout,
 ) -> String {
     let volume_stages = selected_tracks
         .iter()
         .enumerate()
         .map(|(position, track)| {
             format!(
-                "[0:{}]volume={}[mix_{position}]",
-                track.stream_index, track.gain
+                "[0:{}]volume={},aformat=channel_layouts={}[mix_{position}]",
+                track.stream_index,
+                track.gain,
+                mixed_layout.ffmpeg_name(),
             )
         })
         .collect::<Vec<_>>()
@@ -105,25 +123,22 @@ fn mix_filter(
         .map(|(position, _)| format!("[mix_{position}]"))
         .collect::<String>();
 
-    let limiter_output = match normalization {
-        LoudnessNormalization::Off => MIXED_AUDIO_LABEL,
-        LoudnessNormalization::Enabled(_) => PRE_NORMALIZATION_LABEL,
-    };
-    let mut filter = format!(
-        "{volume_stages};{mix_inputs}amix=inputs={}:duration=longest:normalize=0[{PRE_LIMIT_LABEL}];[{PRE_LIMIT_LABEL}]alimiter=limit=0.95:level=0:latency=1[{limiter_output}]",
-        selected_tracks.len(),
-    );
-
-    if let LoudnessNormalization::Enabled(targets) = normalization {
-        filter.push_str(&loudness_normalization_stage(targets));
+    match normalization {
+        LoudnessNormalization::Off => format!(
+            "{volume_stages};{mix_inputs}amix=inputs={}:duration=longest:normalize=0[{PRE_LIMIT_LABEL}];[{PRE_LIMIT_LABEL}]alimiter=limit=0.95:level=0:latency=1[{MIXED_AUDIO_LABEL}]",
+            selected_tracks.len(),
+        ),
+        LoudnessNormalization::Enabled(targets) => format!(
+            "{volume_stages};{mix_inputs}amix=inputs={}:duration=longest:normalize=0[{PRE_NORMALIZATION_LABEL}]{}",
+            selected_tracks.len(),
+            loudness_normalization_stage(targets),
+        ),
     }
-
-    filter
 }
 
 fn loudness_normalization_stage(targets: LoudnessTargets) -> String {
     format!(
-        ";[{PRE_NORMALIZATION_LABEL}]loudnorm=I={}:TP={}:LRA={}[{MIXED_AUDIO_LABEL}]",
+        ";[{PRE_NORMALIZATION_LABEL}]loudnorm=I={}:TP={}:LRA={}:linear=false[{MIXED_AUDIO_LABEL}]",
         decimal_tenths(targets.integrated_loudness_tenths()),
         decimal_tenths(targets.maximum_true_peak_tenths()),
         decimal_tenths(targets.loudness_range_tenths()),

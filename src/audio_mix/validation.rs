@@ -6,7 +6,8 @@ use crate::media::{
 };
 
 use super::model::{
-    AudioMixRequest, LoudnessNormalization, LoudnessTargets, SelectedAudioTrack, TrackGain,
+    AudioMixRequest, LoudnessNormalization, LoudnessTargets, MixedAudioLayoutError,
+    SelectedAudioTrack, TrackGain, resolve_mixed_audio_layout,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,11 @@ pub enum AudioMixValidationError {
     NoAudioStreamsSelected,
     DuplicateSelectedStream(u32),
     UnknownAudioStream(u32),
+    UnsupportedChannelLayout {
+        stream_index: u32,
+        channels: Option<u32>,
+        channel_layout: Option<String>,
+    },
     TrackGainOutOfRange {
         stream_index: u32,
         gain: TrackGain,
@@ -45,6 +51,19 @@ impl fmt::Display for AudioMixValidationError {
                     "audio stream {stream_index} does not exist in the probed media"
                 )
             }
+            Self::UnsupportedChannelLayout {
+                stream_index,
+                channels,
+                channel_layout,
+            } => write!(
+                f,
+                "{}",
+                MixedAudioLayoutError::Unsupported {
+                    stream_index: *stream_index,
+                    channels: *channels,
+                    channel_layout: channel_layout.clone(),
+                }
+            ),
             Self::TrackGainOutOfRange { stream_index, gain } => write!(
                 f,
                 "audio stream {stream_index} gain {gain} is outside the supported {} to {} range",
@@ -97,11 +116,30 @@ pub fn validate_audio_mix_request(
 
     reject_duplicate_streams(&request.selected_tracks)?;
     validate_selected_tracks(&request.selected_tracks, media)?;
+    resolve_mixed_audio_layout(&request.selected_tracks, &media.audio_streams)
+        .map_err(map_layout_error)?;
     validate_normalization(request.normalization)?;
     validate_output_extension(request)?;
     validate_output_path(&request.output).map_err(AudioMixValidationError::Output)?;
 
     Ok(())
+}
+
+fn map_layout_error(error: MixedAudioLayoutError) -> AudioMixValidationError {
+    match error {
+        MixedAudioLayoutError::UnknownStream(stream_index) => {
+            AudioMixValidationError::UnknownAudioStream(stream_index)
+        }
+        MixedAudioLayoutError::Unsupported {
+            stream_index,
+            channels,
+            channel_layout,
+        } => AudioMixValidationError::UnsupportedChannelLayout {
+            stream_index,
+            channels,
+            channel_layout,
+        },
+    }
 }
 
 fn validate_normalization(
