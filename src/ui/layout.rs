@@ -33,6 +33,9 @@ pub const FIELD_PAIR_MIN_COLUMN_WIDTH: f32 = 180.0;
 /// Minimum useful inline width for the editable output filename before the row stacks.
 pub const OUTPUT_FILENAME_MIN_INLINE_WIDTH: f32 = 180.0;
 
+/// Minimum title/metadata width retained beside an inline Audio Mix gain control.
+pub const TRACK_TEXT_MIN_INLINE_WIDTH: f32 = 240.0;
+
 /// Narrow focal width used by Audio Mix running and terminal surfaces.
 pub const FOCUS_CONTENT_MAX_WIDTH: f32 = 470.0;
 
@@ -64,6 +67,18 @@ pub enum FieldPairLayout {
 pub enum OutputRowLayout {
     Inline,
     Stacked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackRowLayout {
+    Inline,
+    Stacked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackRowPlan {
+    pub layout: TrackRowLayout,
+    pub row_height: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -487,6 +502,32 @@ pub fn output_row_plan(
     }
 }
 
+/// Keep the gain beside track identity while the title remains useful, then move it below.
+pub fn track_row_plan(available_width: f32, gain_width: f32) -> TrackRowPlan {
+    let available_width = safe_dimension(available_width);
+    let gain_width = safe_dimension(gain_width);
+    let inline_fixed_width = theme::SELECTABLE_ROW_HORIZONTAL_PADDING
+        + theme::SELECTABLE_ROW_INDICATOR_COLUMN
+        + theme::SELECTABLE_ROW_CONTENT_GAP
+        + theme::SPACING.compact
+        + gain_width
+        + theme::SELECTABLE_ROW_HORIZONTAL_PADDING;
+
+    if available_width - inline_fixed_width >= TRACK_TEXT_MIN_INLINE_WIDTH {
+        TrackRowPlan {
+            layout: TrackRowLayout::Inline,
+            row_height: theme::SELECTABLE_ROW_MIN_HEIGHT,
+        }
+    } else {
+        TrackRowPlan {
+            layout: TrackRowLayout::Stacked,
+            row_height: theme::SELECTABLE_ROW_MIN_HEIGHT
+                + theme::SPACING.compact
+                + theme::COMPACT_CONTROL_HEIGHT,
+        }
+    }
+}
+
 /// Reserve flow space after a potentially long list and request scrolling only when needed.
 pub fn list_viewport(
     content_height: f32,
@@ -520,13 +561,12 @@ pub fn task_surface_plan(
     available_height: f32,
     fixed_flow_height: f32,
     list_content_height: f32,
+    minimum_row_height: f32,
 ) -> TaskSurfacePlan {
     let available_height = safe_dimension(available_height);
     let fixed_flow_height = safe_dimension(fixed_flow_height);
     let list_content_height = safe_dimension(list_content_height);
-    let minimum_list_height = theme::SELECTABLE_ROW_MIN_HEIGHT
-        .max(theme::UPSCALE_TARGET_ROW_MIN_HEIGHT)
-        .min(list_content_height);
+    let minimum_list_height = safe_dimension(minimum_row_height).min(list_content_height);
     let list = list_viewport(list_content_height, available_height, fixed_flow_height);
 
     if fixed_flow_height > available_height
@@ -574,10 +614,11 @@ mod tests {
         FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, FieldPairLayout, IntakeLayout,
         ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, OUTPUT_FILENAME_MIN_INLINE_WIDTH,
         OutputRowLayout, PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE,
-        REFERENCE_WINDOW_SIZE, TaskOverflow, TextOverflowPolicy, WINDOW_CHROME_HEIGHT,
-        action_group_size, action_layout, bounded_content_width, centered_action_group,
-        content_frame, field_pair_layout, focus_content, intake_content, intake_layout_plan,
-        list_viewport, output_row_plan, task_surface, task_surface_plan,
+        REFERENCE_WINDOW_SIZE, TRACK_TEXT_MIN_INLINE_WIDTH, TaskOverflow, TextOverflowPolicy,
+        TrackRowLayout, WINDOW_CHROME_HEIGHT, action_group_size, action_layout,
+        bounded_content_width, centered_action_group, content_frame, field_pair_layout,
+        focus_content, intake_content, intake_layout_plan, list_viewport, output_row_plan,
+        task_surface, task_surface_plan, track_row_plan,
     };
     use crate::ui::theme;
 
@@ -1181,6 +1222,65 @@ mod tests {
     }
 
     #[test]
+    fn audio_track_gain_stays_inline_when_identity_has_useful_width() {
+        let plan = track_row_plan(564.0, theme::TRACK_GAIN_CONTROL_WIDTH);
+
+        assert_eq!(plan.layout, TrackRowLayout::Inline);
+        assert_eq!(plan.row_height, theme::SELECTABLE_ROW_MIN_HEIGHT);
+        assert_eq!(TRACK_TEXT_MIN_INLINE_WIDTH, 240.0);
+    }
+
+    #[test]
+    fn narrow_audio_track_moves_gain_below_identity_and_accounts_for_height() {
+        let narrow_width = MINIMUM_CONTENT_SIZE.x - f32::from(CONTENT_PADDING) * 2.0;
+        let plan = track_row_plan(narrow_width, theme::TRACK_GAIN_CONTROL_WIDTH);
+
+        assert_eq!(narrow_width, 344.0);
+        assert_eq!(plan.layout, TrackRowLayout::Stacked);
+        assert_eq!(
+            plan.row_height,
+            theme::SELECTABLE_ROW_MIN_HEIGHT
+                + theme::SPACING.compact
+                + theme::COMPACT_CONTROL_HEIGHT
+        );
+    }
+
+    #[test]
+    fn stacked_audio_row_is_the_minimum_usable_list_viewport() {
+        let row_height = track_row_plan(344.0, theme::TRACK_GAIN_CONTROL_WIDTH).row_height;
+        let fixed_height = 200.0;
+        let content_height = row_height * 3.0;
+
+        let below_one_row = task_surface_plan(
+            fixed_height + row_height - 1.0,
+            fixed_height,
+            content_height,
+            row_height,
+        );
+        assert_eq!(below_one_row.overflow, TaskOverflow::Scroll);
+        assert_eq!(below_one_row.list.max_height, row_height);
+
+        let one_full_row = task_surface_plan(
+            fixed_height + row_height,
+            fixed_height,
+            content_height,
+            row_height,
+        );
+        assert_eq!(one_full_row.overflow, TaskOverflow::Flow);
+        assert_eq!(one_full_row.list.max_height, row_height);
+    }
+
+    #[test]
+    fn inline_audio_row_keeps_its_compact_minimum_viewport() {
+        let row_height = track_row_plan(564.0, theme::TRACK_GAIN_CONTROL_WIDTH).row_height;
+        let plan = task_surface_plan(200.0 + row_height, 200.0, row_height * 3.0, row_height);
+
+        assert_eq!(row_height, theme::SELECTABLE_ROW_MIN_HEIGHT);
+        assert_eq!(plan.overflow, TaskOverflow::Flow);
+        assert_eq!(plan.list.max_height, row_height);
+    }
+
+    #[test]
     fn long_list_chooses_scrolling_and_reserves_following_actions() {
         let viewport = list_viewport(500.0, 320.0, 80.0);
 
@@ -1207,7 +1307,7 @@ mod tests {
 
     #[test]
     fn task_list_uses_all_remaining_height_before_outer_overflow_is_needed() {
-        let plan = task_surface_plan(280.0, 200.0, 108.0);
+        let plan = task_surface_plan(280.0, 200.0, 108.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
 
         assert_eq!(plan.overflow, TaskOverflow::Flow);
         assert_eq!(plan.list.behavior, ListBehavior::Scroll);
@@ -1216,7 +1316,7 @@ mod tests {
 
     #[test]
     fn fixed_controls_still_use_outer_scroll_when_the_option_list_is_empty() {
-        let plan = task_surface_plan(204.0, 220.0, 0.0);
+        let plan = task_surface_plan(204.0, 220.0, 0.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
 
         assert_eq!(plan.overflow, TaskOverflow::Scroll);
         assert_eq!(plan.list.behavior, ListBehavior::Flow);
@@ -1225,7 +1325,7 @@ mod tests {
 
     #[test]
     fn constrained_task_surface_scrolls_before_list_becomes_unusable() {
-        let plan = task_surface_plan(204.0, 205.0, 108.0);
+        let plan = task_surface_plan(204.0, 205.0, 108.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
 
         assert_eq!(plan.overflow, TaskOverflow::Scroll);
         assert_eq!(plan.list.behavior, ListBehavior::Scroll);
@@ -1235,7 +1335,12 @@ mod tests {
     #[test]
     fn reference_height_uses_all_space_left_for_a_long_list() {
         let usable_reference_height = REFERENCE_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
-        let plan = task_surface_plan(usable_reference_height, 205.0, 500.0);
+        let plan = task_surface_plan(
+            usable_reference_height,
+            205.0,
+            500.0,
+            theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
+        );
 
         assert_eq!(usable_reference_height, 323.0);
         assert_eq!(plan.overflow, TaskOverflow::Flow);
@@ -1245,9 +1350,11 @@ mod tests {
 
     #[test]
     fn taller_task_surface_increases_list_viewport_until_content_fits() {
-        let reference = task_surface_plan(323.0, 205.0, 500.0);
-        let tall = task_surface_plan(600.0, 205.0, 500.0);
-        let taller_than_content = task_surface_plan(800.0, 205.0, 500.0);
+        let reference =
+            task_surface_plan(323.0, 205.0, 500.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
+        let tall = task_surface_plan(600.0, 205.0, 500.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
+        let taller_than_content =
+            task_surface_plan(800.0, 205.0, 500.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
 
         assert_eq!(reference.list.max_height, 118.0);
         assert_eq!(tall.list.max_height, 395.0);
@@ -1263,7 +1370,12 @@ mod tests {
         let content_height = theme::UPSCALE_TARGET_ROW_MIN_HEIGHT * 3.0;
         let fixed_flow_height = usable_reference_height - content_height;
 
-        let plan = task_surface_plan(usable_reference_height, fixed_flow_height, content_height);
+        let plan = task_surface_plan(
+            usable_reference_height,
+            fixed_flow_height,
+            content_height,
+            theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
+        );
 
         assert_eq!(plan.overflow, TaskOverflow::Flow);
         assert_eq!(plan.list.behavior, ListBehavior::Flow);
@@ -1273,8 +1385,18 @@ mod tests {
     #[test]
     fn tall_audio_surface_shows_more_tracks_before_nested_scrolling() {
         let content_height = theme::SELECTABLE_ROW_MIN_HEIGHT * 20.0;
-        let reference = task_surface_plan(323.0, 205.0, content_height);
-        let tall = task_surface_plan(700.0, 205.0, content_height);
+        let reference = task_surface_plan(
+            323.0,
+            205.0,
+            content_height,
+            theme::SELECTABLE_ROW_MIN_HEIGHT,
+        );
+        let tall = task_surface_plan(
+            700.0,
+            205.0,
+            content_height,
+            theme::SELECTABLE_ROW_MIN_HEIGHT,
+        );
 
         assert_eq!(reference.list.behavior, ListBehavior::Scroll);
         assert_eq!(tall.list.behavior, ListBehavior::Scroll);

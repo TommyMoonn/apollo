@@ -35,6 +35,7 @@ pub const SELECTION_INDICATOR_SIZE: f32 = 12.0;
 pub const SELECTABLE_ROW_HORIZONTAL_PADDING: f32 = 5.0;
 pub const SELECTABLE_ROW_INDICATOR_COLUMN: f32 = 18.0;
 pub const SELECTABLE_ROW_CONTENT_GAP: f32 = 8.0;
+pub const TRACK_GAIN_CONTROL_WIDTH: f32 = 86.0;
 pub const MODE_BUTTON_HORIZONTAL_PADDING: f32 = 13.0;
 pub const SOURCE_HEADER_GAP: f32 = 14.0;
 pub const INLINE_ACTION_GAP: f32 = 10.0;
@@ -311,8 +312,9 @@ mod tests {
         RESULT_FOOTER_GAP, RUNNING_FOOTER_GAP, SECONDARY, SECONDARY_FAINT,
         SELECTABLE_ROW_CONTENT_GAP, SELECTABLE_ROW_HORIZONTAL_PADDING,
         SELECTABLE_ROW_INDICATOR_COLUMN, SELECTABLE_ROW_MIN_HEIGHT, SELECTION,
-        SELECTION_INDICATOR_SIZE, SEPARATOR, SEPARATOR_WIDTH, SPACING, STATUS_COPY_GAP, ThemeRole,
-        apply_to_style, control_colors, monochrome_visuals, selectable_colors,
+        SELECTION_INDICATOR_SIZE, SEPARATOR, SEPARATOR_WIDTH, SPACING, STATUS_COPY_GAP,
+        TRACK_GAIN_CONTROL_WIDTH, ThemeRole, apply_to_style, control_colors, monochrome_visuals,
+        selectable_colors,
     };
 
     #[test]
@@ -485,6 +487,7 @@ mod tests {
         assert_eq!(std::hint::black_box(SELECTABLE_ROW_HORIZONTAL_PADDING), 5.0);
         assert_eq!(std::hint::black_box(SELECTABLE_ROW_INDICATOR_COLUMN), 18.0);
         assert_eq!(std::hint::black_box(SELECTABLE_ROW_CONTENT_GAP), 8.0);
+        assert_eq!(std::hint::black_box(TRACK_GAIN_CONTROL_WIDTH), 86.0);
         assert_eq!(std::hint::black_box(STATUS_COPY_GAP), 6.0);
         assert_eq!(std::hint::black_box(FOOTER_ACTION_GAP), 8.0);
         assert_eq!(std::hint::black_box(RUNNING_FOOTER_GAP), 44.0);

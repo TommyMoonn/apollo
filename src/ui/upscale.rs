@@ -153,6 +153,7 @@ pub fn show(
         ui.available_height(),
         upscale_fixed_flow_height(ui, media, has_validation_feedback),
         list_content_height,
+        theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
     );
 
     layout::task_surface(ui, plan.overflow, |ui| {
@@ -809,6 +810,7 @@ mod tests {
                 usable_height,
                 fixed_height,
                 3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
+                theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
             );
 
             assert_eq!(usable_height, 204.0);
@@ -839,6 +841,7 @@ mod tests {
                 child.available_height(),
                 fixed_height,
                 3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
+                theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
             );
 
             assert_eq!(
@@ -865,6 +868,7 @@ mod tests {
                 usable_height,
                 fixed_height,
                 3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
+                theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
             );
 
             assert_eq!(usable_height, 323.0);
@@ -892,6 +896,7 @@ mod tests {
                 fixed_height + content_height,
                 fixed_height,
                 content_height,
+                theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
             );
 
             assert_eq!(plan.overflow, layout::TaskOverflow::Flow);

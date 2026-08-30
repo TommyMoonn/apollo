@@ -25,6 +25,12 @@ pub struct OutputFilenameRowResponse {
     pub browse: Response,
 }
 
+pub struct SelectableRowAccessoryResponse<R> {
+    pub selection: Response,
+    pub accessory: R,
+    pub layout: layout::TrackRowLayout,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ButtonKind {
     tone: theme::ControlTone,
@@ -281,31 +287,133 @@ pub fn selectable_row(
     let row_height = finite_nonnegative(minimum_height).max(theme::SELECTABLE_ROW_MIN_HEIGHT);
     let desired_size = vec2(finite_nonnegative(ui.available_width()), row_height);
     let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
-    let state = interaction_state(&response);
+    paint_selectable_row(
+        ui, rect, rect, &response, title, metadata, selected, indicator,
+    );
+    response
+}
+
+/// Selectable row whose trailing control remains independent from the selection hit region.
+///
+/// At narrow widths the shared layout owner moves the accessory beneath track identity while the
+/// selection indicator, title, and metadata retain their normal reading order.
+pub fn selectable_row_with_accessory<R>(
+    ui: &mut Ui,
+    title: &str,
+    metadata: Option<&str>,
+    selected: bool,
+    indicator: SelectionIndicator,
+    accessory_width: f32,
+    add_accessory: impl FnOnce(&mut Ui) -> R,
+) -> SelectableRowAccessoryResponse<R> {
+    let accessory_width = finite_nonnegative(accessory_width);
+    let plan = layout::track_row_plan(ui.available_width(), accessory_width);
+    let desired_size = vec2(finite_nonnegative(ui.available_width()), plan.row_height);
+    let (rect, row_response) = ui.allocate_exact_size(desired_size, Sense::hover());
+    let text_left = rect.left()
+        + theme::SELECTABLE_ROW_HORIZONTAL_PADDING
+        + theme::SELECTABLE_ROW_INDICATOR_COLUMN
+        + theme::SELECTABLE_ROW_CONTENT_GAP;
+    let (selection_rect, accessory_rect) = match plan.layout {
+        layout::TrackRowLayout::Inline => {
+            let accessory_rect = Rect::from_min_size(
+                pos2(
+                    rect.right() - theme::SELECTABLE_ROW_HORIZONTAL_PADDING - accessory_width,
+                    rect.center().y - theme::COMPACT_CONTROL_HEIGHT * 0.5,
+                ),
+                vec2(accessory_width, theme::COMPACT_CONTROL_HEIGHT),
+            );
+            let selection_rect = Rect::from_min_max(
+                rect.min,
+                pos2(
+                    accessory_rect.left() - theme::SPACING.compact,
+                    rect.bottom(),
+                ),
+            );
+            (selection_rect, accessory_rect)
+        }
+        layout::TrackRowLayout::Stacked => {
+            let selection_rect = Rect::from_min_max(
+                rect.min,
+                pos2(rect.right(), rect.top() + theme::SELECTABLE_ROW_MIN_HEIGHT),
+            );
+            let accessory_rect = Rect::from_min_size(
+                pos2(text_left, selection_rect.bottom() + theme::SPACING.compact),
+                vec2(accessory_width, theme::COMPACT_CONTROL_HEIGHT),
+            );
+            (selection_rect, accessory_rect)
+        }
+    };
+    let selection = ui.interact(
+        selection_rect,
+        row_response.id.with("selection"),
+        Sense::click(),
+    );
+
+    paint_selectable_row(
+        ui,
+        rect,
+        selection_rect,
+        &selection,
+        title,
+        metadata,
+        selected,
+        indicator,
+    );
+
+    let accessory = ui
+        .scope_builder(
+            UiBuilder::new()
+                .id_salt(row_response.id.with("accessory"))
+                .max_rect(accessory_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+            add_accessory,
+        )
+        .inner;
+
+    SelectableRowAccessoryResponse {
+        selection,
+        accessory,
+        layout: plan.layout,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_selectable_row(
+    ui: &mut Ui,
+    row_rect: Rect,
+    selection_rect: Rect,
+    response: &Response,
+    title: &str,
+    metadata: Option<&str>,
+    selected: bool,
+    indicator: SelectionIndicator,
+) {
+    let state = interaction_state(response);
     let visuals = selectable_row_visuals(state, selected);
 
-    ui.painter().rect_filled(rect, 0.0, visuals.background);
+    ui.painter().rect_filled(row_rect, 0.0, visuals.background);
     ui.painter().line_segment(
-        [rect.left_bottom(), rect.right_bottom()],
+        [row_rect.left_bottom(), row_rect.right_bottom()],
         Stroke::new(theme::SEPARATOR_WIDTH, theme::SEPARATOR),
     );
 
     let indicator_rect = Rect::from_center_size(
         pos2(
-            rect.left()
+            selection_rect.left()
                 + theme::SELECTABLE_ROW_HORIZONTAL_PADDING
                 + theme::SELECTABLE_ROW_INDICATOR_COLUMN * 0.5,
-            rect.center().y,
+            selection_rect.center().y,
         ),
         Vec2::splat(theme::SELECTION_INDICATOR_SIZE),
     );
     paint_selection_indicator(ui, indicator_rect, indicator, selected, visuals);
 
-    let text_left = rect.left()
+    let text_left = selection_rect.left()
         + theme::SELECTABLE_ROW_HORIZONTAL_PADDING
         + theme::SELECTABLE_ROW_INDICATOR_COLUMN
         + theme::SELECTABLE_ROW_CONTENT_GAP;
-    let text_right = rect.right() - theme::SELECTABLE_ROW_HORIZONTAL_PADDING;
+    let text_right = selection_rect.right() - theme::SELECTABLE_ROW_HORIZONTAL_PADDING;
     let metadata_font = fonts::technical_text_style().resolve(ui.style());
     let metadata_width = metadata
         .map(|text| {
@@ -326,8 +434,8 @@ pub fn selectable_row(
     };
     let title_right = (text_right - metadata_width - metadata_gap).max(text_left);
     let title_rect = Rect::from_min_max(
-        pos2(text_left, rect.top()),
-        pos2(title_right, rect.bottom()),
+        pos2(text_left, selection_rect.top()),
+        pos2(title_right, selection_rect.bottom()),
     );
 
     ui.scope_builder(
@@ -345,7 +453,7 @@ pub fn selectable_row(
 
     if let Some(metadata) = metadata {
         ui.painter().text(
-            pos2(text_right, rect.center().y),
+            pos2(text_right, selection_rect.center().y),
             Align2::RIGHT_CENTER,
             metadata,
             metadata_font,
@@ -353,11 +461,10 @@ pub fn selectable_row(
         );
     }
 
-    paint_keyboard_focus(ui, &response, rect);
+    paint_keyboard_focus(ui, response, selection_rect);
     response.widget_info(|| {
         WidgetInfo::selected(WidgetType::Button, response.enabled(), selected, title)
     });
-    response
 }
 
 /// Editable output filename stem with an authoritative, non-editable extension suffix.
@@ -738,8 +845,8 @@ mod tests {
         mode_button, mode_button_intrinsic_size, output_filename_row,
         output_filename_row_with_leading, plain_button_text_style, primary_button_enabled,
         progress_bar, progress_rail_color, select_button, select_menu_intrinsic_width,
-        select_menu_option, selectable_row, selectable_row_visuals, selector_popup_width,
-        show_selector_popup,
+        select_menu_option, selectable_row, selectable_row_visuals, selectable_row_with_accessory,
+        selector_popup_width, show_selector_popup,
     };
     use crate::ui::{fonts, layout, theme};
 
@@ -1181,6 +1288,56 @@ mod tests {
             );
             assert_eq!(target_minimum.rect.height(), 37.0);
         });
+    }
+
+    #[test]
+    fn track_accessory_is_independent_and_moves_below_identity_at_narrow_width() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        let output = context.run_ui(Default::default(), |ui| {
+            for (width, expected_layout) in [
+                (564.0, layout::TrackRowLayout::Inline),
+                (344.0, layout::TrackRowLayout::Stacked),
+            ] {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 100.0), Sense::hover());
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                );
+                let row = selectable_row_with_accessory(
+                    &mut child,
+                    "Desktop Audio",
+                    Some("Stereo"),
+                    true,
+                    SelectionIndicator::Checkbox,
+                    theme::TRACK_GAIN_CONTROL_WIDTH,
+                    |ui| {
+                        ui.allocate_exact_size(
+                            egui::vec2(
+                                theme::TRACK_GAIN_CONTROL_WIDTH,
+                                theme::COMPACT_CONTROL_HEIGHT,
+                            ),
+                            Sense::click(),
+                        )
+                        .0
+                    },
+                );
+
+                assert_eq!(row.layout, expected_layout);
+                assert_eq!(row.selection.sense, Sense::click());
+                assert!(row.selection.rect.intersect(row.accessory).is_negative());
+                match expected_layout {
+                    layout::TrackRowLayout::Inline => {
+                        assert!(row.selection.rect.right() < row.accessory.left());
+                    }
+                    layout::TrackRowLayout::Stacked => {
+                        assert!(row.selection.rect.bottom() < row.accessory.top());
+                    }
+                }
+            }
+        });
+        output.drop_without_applying_deltas();
     }
 
     #[test]

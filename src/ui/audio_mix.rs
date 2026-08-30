@@ -5,7 +5,10 @@ use std::{
     time::Duration,
 };
 
-use egui::{Align, Label, Layout, RichText, ScrollArea, Sides, TextStyle, Ui};
+use egui::{
+    Align, DragValue, Label, Layout, Response, RichText, ScrollArea, Sides, TextStyle, Ui,
+    WidgetInfo, WidgetType,
+};
 
 use crate::{
     audio_mix::{
@@ -26,6 +29,7 @@ const OUTPUT_LABEL: &str = "Output";
 const BACK_LABEL: &str = "← Back";
 const SELECT_ALL_LABEL: &str = "Select all";
 const CLEAR_LABEL: &str = "Clear";
+const RESET_GAINS_LABEL: &str = "Reset gains";
 const BROWSE_LABEL: &str = "Browse";
 const MIX_LABEL: &str = "Mix selected tracks";
 const CONTAINER_OPTIONS: [&str; 2] = ["MP4", "MKV"];
@@ -124,6 +128,10 @@ impl AudioMixSelectionState {
         self.selected_streams.contains(&stream_index)
     }
 
+    pub fn track_gain(&self, stream_index: u32) -> Option<TrackGain> {
+        self.track_gains.get(&stream_index).copied()
+    }
+
     pub fn can_mix(&self, media: &MediaFile) -> bool {
         self.validation(media).is_ok()
     }
@@ -158,6 +166,32 @@ impl AudioMixSelectionState {
 
     pub fn clear(&mut self) {
         self.selected_streams.clear();
+    }
+
+    /// Change one current stream's gain without affecting its selection or any sibling track.
+    pub fn set_track_gain(
+        &mut self,
+        media: &MediaFile,
+        stream_index: u32,
+        gain: TrackGain,
+    ) -> bool {
+        if !gain.is_valid()
+            || !media
+                .audio_streams
+                .iter()
+                .any(|stream| stream.stream_index == stream_index)
+        {
+            return false;
+        }
+
+        self.track_gains.insert(stream_index, gain);
+        true
+    }
+
+    pub fn reset_track_gains(&mut self) {
+        for gain in self.track_gains.values_mut() {
+            *gain = TrackGain::ZERO;
+        }
     }
 
     /// Change container while preserving a deliberately customized output path.
@@ -214,7 +248,9 @@ pub fn show(
     state: &mut AudioMixSelectionState,
 ) -> AudioMixSelectionAction {
     let mut action = AudioMixSelectionAction::None;
-    let list_content_height = presentation.tracks.len() as f32 * theme::SELECTABLE_ROW_MIN_HEIGHT;
+    let track_row_height =
+        layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH).row_height;
+    let list_content_height = presentation.tracks.len() as f32 * track_row_height;
     let validation = state.validation(media);
     let has_validation_feedback = validation
         .as_ref()
@@ -230,6 +266,7 @@ pub fn show(
             has_validation_feedback,
         ),
         list_content_height,
+        track_row_height,
     );
 
     layout::task_surface(ui, plan.overflow, |ui| {
@@ -337,20 +374,68 @@ fn show_track_list(
         .auto_shrink([false, true])
         .show(ui, |ui| {
             for track in tracks {
-                let response = widgets::selectable_row(
+                let gain = state.track_gain(track.stream_index).unwrap_or_default();
+                let response = widgets::selectable_row_with_accessory(
                     ui,
                     &track.title,
                     track.metadata.as_deref(),
                     state.is_selected(track.stream_index),
                     widgets::SelectionIndicator::Checkbox,
-                    theme::SELECTABLE_ROW_MIN_HEIGHT,
+                    theme::TRACK_GAIN_CONTROL_WIDTH,
+                    |ui| track_gain_control(ui, &track.title, gain),
                 );
 
-                if response.clicked() {
+                if response.selection.clicked() {
                     state.toggle_stream(media, track.stream_index);
+                }
+                if response.accessory.0.changed() {
+                    state.set_track_gain(media, track.stream_index, response.accessory.1);
                 }
             }
         });
+}
+
+fn track_gain_control(ui: &mut Ui, title: &str, gain: TrackGain) -> (Response, TrackGain) {
+    let mut tenths_db = gain.tenths_db();
+    let response = ui.add_sized(
+        [
+            theme::TRACK_GAIN_CONTROL_WIDTH,
+            theme::COMPACT_CONTROL_HEIGHT,
+        ],
+        DragValue::new(&mut tenths_db)
+            .range(TrackGain::MIN.tenths_db()..=TrackGain::MAX.tenths_db())
+            .speed(5.0)
+            .custom_formatter(|value, _| format!("{:.1}", value / 10.0))
+            .custom_parser(|text| {
+                text.trim()
+                    .strip_suffix("dB")
+                    .unwrap_or(text)
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .map(|value| value * 10.0)
+            })
+            .suffix(" dB"),
+    );
+    response.widget_info(|| {
+        WidgetInfo::labeled(
+            WidgetType::DragValue,
+            response.enabled(),
+            format!("{title} gain"),
+        )
+    });
+
+    if response.changed() {
+        tenths_db = stepped_track_gain(tenths_db).tenths_db();
+    }
+
+    (response, TrackGain::from_tenths_db(tenths_db))
+}
+
+fn stepped_track_gain(tenths_db: i16) -> TrackGain {
+    let tenths_db = ((f64::from(tenths_db) / 5.0).round() as i16 * 5)
+        .clamp(TrackGain::MIN.tenths_db(), TrackGain::MAX.tenths_db());
+    TrackGain::from_tenths_db(tenths_db)
 }
 
 fn audio_mix_fixed_flow_height(
@@ -417,6 +502,9 @@ fn show_track_actions(ui: &mut Ui, media: &MediaFile, state: &mut AudioMixSelect
             }
             if widgets::plain_button(ui, CLEAR_LABEL).clicked() {
                 state.clear();
+            }
+            if widgets::plain_button(ui, RESET_GAINS_LABEL).clicked() {
+                state.reset_track_gains();
             }
         },
         |ui| {
@@ -713,7 +801,7 @@ mod tests {
 
     use super::{
         AudioMixPresentation, AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height,
-        audio_mix_ready_feedback, source_metadata, track_presentations,
+        audio_mix_ready_feedback, source_metadata, stepped_track_gain, track_presentations,
     };
     use crate::audio_mix::model::{OutputContainer, SelectedAudioTrack, TrackGain};
     use crate::ui::{layout, theme};
@@ -1095,7 +1183,7 @@ mod tests {
         let mut media = media();
         media.audio_streams.swap(0, 2);
         let mut state = AudioMixSelectionState::new(&media);
-        state.track_gains.insert(9, TrackGain::from_tenths_db(-60));
+        assert!(state.set_track_gain(&media, 9, TrackGain::from_tenths_db(-60)));
         state.toggle_stream(&media, 4);
 
         let request = state.request(&media);
@@ -1130,6 +1218,86 @@ mod tests {
     }
 
     #[test]
+    fn editing_one_track_gain_is_isolated_and_reaches_the_request() {
+        let media = media();
+        let mut state = AudioMixSelectionState::new(&media);
+
+        assert!(state.set_track_gain(&media, 4, TrackGain::from_tenths_db(-55)));
+
+        assert_eq!(state.track_gain(1), Some(TrackGain::ZERO));
+        assert_eq!(state.track_gain(4), Some(TrackGain::from_tenths_db(-55)));
+        assert_eq!(state.track_gain(9), Some(TrackGain::ZERO));
+        assert_eq!(state.selected_count(), 3);
+        assert_eq!(
+            state.request(&media).selected_tracks,
+            vec![
+                SelectedAudioTrack::with_default_gain(1),
+                SelectedAudioTrack::new(4, TrackGain::from_tenths_db(-55)),
+                SelectedAudioTrack::with_default_gain(9),
+            ]
+        );
+    }
+
+    #[test]
+    fn selection_operations_preserve_stored_track_gains() {
+        let media = media();
+        let mut state = AudioMixSelectionState::new(&media);
+        let adjusted = TrackGain::from_tenths_db(35);
+        assert!(state.set_track_gain(&media, 4, adjusted));
+
+        assert!(state.toggle_stream(&media, 4));
+        assert!(!state.is_selected(4));
+        assert_eq!(state.track_gain(4), Some(adjusted));
+        assert!(state.toggle_stream(&media, 4));
+        assert!(state.is_selected(4));
+        assert_eq!(state.track_gain(4), Some(adjusted));
+
+        state.clear();
+        assert_eq!(state.track_gain(4), Some(adjusted));
+        state.select_all(&media);
+        assert_eq!(state.track_gain(4), Some(adjusted));
+    }
+
+    #[test]
+    fn reset_gains_changes_no_track_selection() {
+        let media = media();
+        let mut state = AudioMixSelectionState::new(&media);
+        assert!(state.set_track_gain(&media, 1, TrackGain::from_tenths_db(-100)));
+        assert!(state.set_track_gain(&media, 9, TrackGain::from_tenths_db(120)));
+        assert!(state.toggle_stream(&media, 4));
+        let selected_before = state.selected_streams.clone();
+
+        state.reset_track_gains();
+
+        assert_eq!(state.selected_streams, selected_before);
+        assert!(
+            state
+                .track_gains
+                .values()
+                .all(|gain| *gain == TrackGain::ZERO)
+        );
+    }
+
+    #[test]
+    fn gain_ui_step_rounds_to_half_decibels_within_domain_bounds() {
+        assert_eq!(stepped_track_gain(-63), TrackGain::from_tenths_db(-65));
+        assert_eq!(stepped_track_gain(-62), TrackGain::from_tenths_db(-60));
+        assert_eq!(stepped_track_gain(117), TrackGain::from_tenths_db(115));
+        assert_eq!(stepped_track_gain(123), TrackGain::MAX);
+        assert_eq!(stepped_track_gain(-603), TrackGain::MIN);
+    }
+
+    #[test]
+    fn gain_state_rejects_unknown_streams_and_out_of_range_values() {
+        let media = media();
+        let mut state = AudioMixSelectionState::new(&media);
+
+        assert!(!state.set_track_gain(&media, 99, TrackGain::ZERO));
+        assert!(!state.set_track_gain(&media, 1, TrackGain::from_tenths_db(121)));
+        assert_eq!(state.track_gain(1), Some(TrackGain::ZERO));
+    }
+
+    #[test]
     fn source_metadata_uses_dimensions_and_duration() {
         assert_eq!(
             source_metadata(&media()).as_deref(),
@@ -1148,10 +1316,14 @@ mod tests {
             let usable_height =
                 layout::MINIMUM_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
             let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false);
+            let row_height =
+                layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
+                    .row_height;
             let plan = layout::task_surface_plan(
                 usable_height,
                 fixed_height,
-                12.0 * theme::SELECTABLE_ROW_MIN_HEIGHT,
+                12.0 * row_height,
+                row_height,
             );
 
             assert_eq!(usable_height, 204.0);
@@ -1173,10 +1345,14 @@ mod tests {
             let usable_height =
                 layout::REFERENCE_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
             let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false);
+            let row_height =
+                layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
+                    .row_height;
             let plan = layout::task_surface_plan(
                 usable_height,
                 fixed_height,
-                12.0 * theme::SELECTABLE_ROW_MIN_HEIGHT,
+                12.0 * row_height,
+                row_height,
             );
 
             assert_eq!(usable_height, 323.0);
@@ -1200,14 +1376,59 @@ mod tests {
             let media = media();
             let presentation = AudioMixPresentation::new(&media);
             let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false);
-            let content_height = 20.0 * theme::SELECTABLE_ROW_MIN_HEIGHT;
-            let reference = layout::task_surface_plan(323.0, fixed_height, content_height);
-            let tall = layout::task_surface_plan(700.0, fixed_height, content_height);
+            let row_height =
+                layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
+                    .row_height;
+            let content_height = 20.0 * row_height;
+            let reference =
+                layout::task_surface_plan(323.0, fixed_height, content_height, row_height);
+            let tall = layout::task_surface_plan(700.0, fixed_height, content_height, row_height);
 
             assert_eq!(reference.list.behavior, layout::ListBehavior::Scroll);
             assert_eq!(tall.list.behavior, layout::ListBehavior::Scroll);
             assert!(tall.list.max_height > reference.list.max_height);
             assert_eq!(tall.overflow, layout::TaskOverflow::Flow);
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn narrow_audio_mix_requires_one_full_stacked_row_before_normal_flow() {
+        let context = egui::Context::default();
+        super::fonts::install(&context);
+
+        let output = context.run_ui(Default::default(), |ui| {
+            let media = media();
+            let presentation = AudioMixPresentation::new(&media);
+            let narrow_width =
+                layout::MINIMUM_CONTENT_SIZE.x - f32::from(layout::CONTENT_PADDING) * 2.0;
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(narrow_width, 800.0), egui::Sense::hover());
+            let child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
+            );
+            let row_height =
+                layout::track_row_plan(child.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
+                    .row_height;
+            let fixed_height = audio_mix_fixed_flow_height(&child, &presentation, false, false);
+            let plan = layout::task_surface_plan(
+                fixed_height + row_height - 1.0,
+                fixed_height,
+                12.0 * row_height,
+                row_height,
+            );
+
+            assert_eq!(narrow_width, 344.0);
+            assert_eq!(
+                row_height,
+                theme::SELECTABLE_ROW_MIN_HEIGHT
+                    + theme::SPACING.compact
+                    + theme::COMPACT_CONTROL_HEIGHT
+            );
+            assert_eq!(plan.overflow, layout::TaskOverflow::Scroll);
+            assert_eq!(plan.list.max_height, row_height);
         });
         output.drop_without_applying_deltas();
     }

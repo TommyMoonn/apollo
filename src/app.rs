@@ -1084,7 +1084,10 @@ mod tests {
         FileDialogStartError, OutputFormat, WindowOwner,
     };
     use apollo::{
-        audio_mix::{execution::AudioMixExecutionState, model::OutputContainer},
+        audio_mix::{
+            execution::AudioMixExecutionState,
+            model::{OutputContainer, TrackGain},
+        },
         media::{
             error::{MediaError, MediaErrorKind},
             execution::MediaExecutionFailure,
@@ -2210,6 +2213,11 @@ mod tests {
             .as_mut()
             .expect("audio mix session should exist");
         session.selection.toggle_stream(&session.media, 1);
+        assert!(session.selection.set_track_gain(
+            &session.media,
+            1,
+            TrackGain::from_tenths_db(-55),
+        ));
         session
             .selection
             .set_container(&session.media, OutputContainer::Mkv);
@@ -2236,6 +2244,10 @@ mod tests {
             .expect("same-source Audio Mix session should be restored");
         assert!(!app.state.intake_active);
         assert_eq!(session.selection.selected_count(), 0);
+        assert_eq!(
+            session.selection.track_gain(1),
+            Some(TrackGain::from_tenths_db(-55))
+        );
         assert_eq!(session.selection.container(), OutputContainer::Mkv);
         assert_eq!(session.selection.output_path(), custom_output);
         assert!(session.selection.output_is_customized());
@@ -2323,6 +2335,21 @@ mod tests {
         assert_eq!(
             app.state.media_intake.current().map(|media| &media.path),
             Some(&second)
+        );
+
+        app.select_tool(Tool::AudioMix);
+        let audio_mix = app
+            .state
+            .audio_mix
+            .as_ref()
+            .expect("replacement should create a new Audio Mix session");
+        assert!(
+            audio_mix
+                .selection
+                .request(&audio_mix.media)
+                .selected_tracks
+                .iter()
+                .all(|track| track.gain == TrackGain::ZERO)
         );
         fs::remove_dir_all(directory).unwrap();
     }
