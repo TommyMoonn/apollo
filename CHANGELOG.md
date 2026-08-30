@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-30
+
+Apollo 0.2.0 adds user-controlled Audio Mix processing with per-track gain, optional loudness normalization, stable mix levels, and deterministic mixed-audio output.
+
+### Added
+
+- Every selected Audio Mix track now has an independent gain control from -60.0 dB to +12.0 dB, with stored values preserved when tracks are deselected or reselected.
+- Optional output loudness normalization now exposes configurable integrated loudness, maximum true peak, and loudness range targets.
+- Audio Mix now includes dedicated controls for resetting track gains and normalization targets without changing the selected tracks or output settings.
+
+### Changed
+
+- Audio Mix no longer reduces every selected track based on the number of inputs; configured gains remain stable and non-normalized mixes receive final peak protection.
+- Mixed audio now uses an explicit mono or stereo layout independent of selected-track order, with unsupported wider layouts reported before processing.
+- Mixed tracks are encoded consistently as AAC at 320 kbps and 48 kHz and receive the title `Mixed Audio` in MP4 and MKV outputs.
+- The Audio Mix ready surface now groups track selection, gain, loudness normalization, and output controls into clearer aligned sections.
+
 ## [0.1.2] - 2026-08-29
 
 Apollo 0.1.2 is a corrective Windows release that improves interface responsiveness, removes terminal-backed file selection, and makes installed Apollo builds easier to discover and manage.
@@ -61,7 +78,8 @@ Apollo 0.1.0 is the first public Windows release, bringing focused Audio Mix and
 - Missing optional FFprobe metadata falls back to usable media and track labels instead of preventing intake or selection.
 - Upscale sizing preserves the source aspect ratio within the selected target boundary without default cropping, stretching, or black padding.
 
-[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/TommyMoonn/apollo/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/TommyMoonn/apollo/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/TommyMoonn/apollo/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/TommyMoonn/apollo/releases/tag/v0.1.0
