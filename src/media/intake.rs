@@ -225,6 +225,7 @@ mod tests {
         MediaFile {
             path: path.to_path_buf(),
             duration: None,
+            streams: Vec::new(),
             video_streams: Vec::new(),
             audio_streams: Vec::new(),
         }

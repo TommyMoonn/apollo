@@ -1,7 +1,7 @@
 use std::{path::Path, time::Duration};
 
 use apollo::media::{
-    model::FrameRate,
+    model::{FrameRate, StreamKind},
     probe::{MediaProbeError, parse_ffprobe_json},
 };
 
@@ -17,6 +17,9 @@ fn parse_fixture(name: &str) -> apollo::media::model::MediaFile {
         }
         "video_no_audio" => include_bytes!("fixtures/ffprobe/video_no_audio.json").as_slice(),
         "multiple_video" => include_bytes!("fixtures/ffprobe/multiple_video.json").as_slice(),
+        "complete_inventory" => {
+            include_bytes!("fixtures/ffprobe/complete_inventory.json").as_slice()
+        }
         "unknown_codec" => include_bytes!("fixtures/ffprobe/unknown_codec.json").as_slice(),
         "missing_duration" => include_bytes!("fixtures/ffprobe/missing_duration.json").as_slice(),
         _ => panic!("unknown fixture: {name}"),
@@ -107,6 +110,33 @@ fn multiple_video_streams_are_preserved_and_frame_rate_falls_back_safely() {
 
     assert_eq!(indexes, [0, 4]);
     assert_eq!(media.video_streams[1].frame_rate, FrameRate::new(25, 1));
+    assert_eq!(media.streams[2].kind, StreamKind::Subtitle);
+    assert_eq!(media.streams[2].stream_index, 9);
+}
+
+#[test]
+fn complete_stream_inventory_preserves_probe_order_indexes_kinds_and_codecs() {
+    let media = parse_fixture("complete_inventory");
+    let inventory = media
+        .streams
+        .iter()
+        .map(|stream| (stream.stream_index, stream.kind, stream.codec.as_deref()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        inventory,
+        [
+            (8, StreamKind::Audio, Some("aac")),
+            (2, StreamKind::Video, Some("h264")),
+            (11, StreamKind::Subtitle, Some("subrip")),
+            (4, StreamKind::Data, Some("bin_data")),
+            (15, StreamKind::Attachment, Some("ttf")),
+            (6, StreamKind::Unknown, Some("future_codec")),
+            (20, StreamKind::Unknown, None),
+        ]
+    );
+    assert_eq!(media.video_streams[0].stream_index, 2);
+    assert_eq!(media.audio_streams[0].stream_index, 8);
 }
 
 #[test]

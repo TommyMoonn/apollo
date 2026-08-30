@@ -522,6 +522,7 @@ mod tests {
         let media = MediaFile {
             path: input,
             duration: None,
+            streams: Vec::new(),
             video_streams: vec![VideoStream {
                 stream_index: 0,
                 codec: Some("h264".to_owned()),

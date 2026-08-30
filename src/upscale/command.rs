@@ -1,6 +1,9 @@
 use std::{ffi::OsString, fmt};
 
-use crate::media::model::MediaFile;
+use crate::media::{
+    container::MediaContainer,
+    model::{MediaFile, StreamKind},
+};
 
 use super::{
     model::{UpscaleRequest, VideoCodec},
@@ -89,37 +92,11 @@ fn mp4_audio_codec(media: &MediaFile) -> Option<&'static str> {
     }
 
     if media.audio_streams.iter().all(|stream| {
-        stream
-            .codec
-            .as_deref()
-            .is_some_and(is_mp4_stream_copy_compatible)
+        MediaContainer::Mp4
+            .is_stream_copy_codec_compatible(StreamKind::Audio, stream.codec.as_deref())
     }) {
         Some("copy")
     } else {
         Some("aac")
     }
-}
-
-fn is_mp4_stream_copy_compatible(codec: &str) -> bool {
-    const COMPATIBLE_CODECS: &[&str] = &[
-        "aac",
-        "alac",
-        "ac3",
-        "eac3",
-        "mp3",
-        "opus",
-        "flac",
-        "vorbis",
-        "dts",
-        "pcm_s16le",
-        "pcm_s16be",
-        "pcm_s24le",
-        "pcm_s24be",
-        "pcm_s32le",
-        "pcm_s32be",
-    ];
-
-    COMPATIBLE_CODECS
-        .iter()
-        .any(|compatible| codec.eq_ignore_ascii_case(compatible))
 }

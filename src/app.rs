@@ -1137,6 +1137,7 @@ mod tests {
         MediaFile {
             path: path.to_path_buf(),
             duration: None,
+            streams: Vec::new(),
             video_streams: vec![VideoStream {
                 stream_index: 0,
                 codec: Some("h264".to_owned()),

@@ -8,7 +8,7 @@ use std::{
 use serde::Deserialize;
 
 use super::{
-    model::{AudioStream, FrameRate, MediaFile, VideoStream},
+    model::{AudioStream, FrameRate, MediaFile, MediaStream, StreamKind, VideoStream},
     process::background_command,
     tools::MediaTools,
 };
@@ -145,12 +145,21 @@ fn normalize_probe(path: &Path, raw: RawProbe) -> MediaFile {
 
     let mut video_streams = Vec::new();
     let mut audio_streams = Vec::new();
+    let mut streams = Vec::with_capacity(raw.streams.len());
 
     for stream in raw.streams {
-        match stream.codec_type.as_deref() {
-            Some("video") => video_streams.push(VideoStream {
+        let kind = stream_kind(stream.codec_type.as_deref());
+        let codec = nonempty(stream.codec_name);
+        streams.push(MediaStream {
+            stream_index: stream.index,
+            kind,
+            codec: codec.clone(),
+        });
+
+        match kind {
+            StreamKind::Video => video_streams.push(VideoStream {
                 stream_index: stream.index,
-                codec: nonempty(stream.codec_name),
+                codec,
                 width: stream.width,
                 height: stream.height,
                 frame_rate: stream
@@ -159,11 +168,11 @@ fn normalize_probe(path: &Path, raw: RawProbe) -> MediaFile {
                     .and_then(parse_frame_rate)
                     .or_else(|| stream.r_frame_rate.as_deref().and_then(parse_frame_rate)),
             }),
-            Some("audio") => {
+            StreamKind::Audio => {
                 let tags = stream.tags.unwrap_or_default();
                 audio_streams.push(AudioStream {
                     stream_index: stream.index,
-                    codec: nonempty(stream.codec_name),
+                    codec,
                     channels: stream.channels,
                     channel_layout: nonempty(stream.channel_layout),
                     title: nonempty(tags.title),
@@ -177,8 +186,20 @@ fn normalize_probe(path: &Path, raw: RawProbe) -> MediaFile {
     MediaFile {
         path: path.to_path_buf(),
         duration,
+        streams,
         video_streams,
         audio_streams,
+    }
+}
+
+fn stream_kind(codec_type: Option<&str>) -> StreamKind {
+    match codec_type {
+        Some("video") => StreamKind::Video,
+        Some("audio") => StreamKind::Audio,
+        Some("subtitle") => StreamKind::Subtitle,
+        Some("data") => StreamKind::Data,
+        Some("attachment") => StreamKind::Attachment,
+        _ => StreamKind::Unknown,
     }
 }
 

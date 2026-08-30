@@ -4,8 +4,26 @@ use std::{path::PathBuf, time::Duration};
 pub struct MediaFile {
     pub path: PathBuf,
     pub duration: Option<Duration>,
+    pub streams: Vec<MediaStream>,
     pub video_streams: Vec<VideoStream>,
     pub audio_streams: Vec<AudioStream>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaStream {
+    pub stream_index: u32,
+    pub kind: StreamKind,
+    pub codec: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    Video,
+    Audio,
+    Subtitle,
+    Data,
+    Attachment,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

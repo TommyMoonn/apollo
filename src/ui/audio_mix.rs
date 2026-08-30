@@ -1012,6 +1012,7 @@ mod tests {
         MediaFile {
             path: PathBuf::from("captures/recording.mkv"),
             duration: Some(Duration::from_secs(6136)),
+            streams: Vec::new(),
             video_streams: vec![VideoStream {
                 stream_index: 0,
                 codec: Some("h264".to_owned()),

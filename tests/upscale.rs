@@ -341,6 +341,7 @@ fn command_builder_rejects_missing_primary_video_stream() {
     let media = MediaFile {
         path: request.input.clone(),
         duration: None,
+        streams: Vec::new(),
         video_streams: Vec::new(),
         audio_streams: Vec::new(),
     };
@@ -605,6 +606,7 @@ fn missing_video_stream_is_rejected() {
     let media = MediaFile {
         path: request.input.clone(),
         duration: None,
+        streams: Vec::new(),
         video_streams: Vec::new(),
         audio_streams: Vec::new(),
     };
@@ -868,6 +870,7 @@ fn media(path: PathBuf, width: Option<u32>, height: Option<u32>) -> MediaFile {
     MediaFile {
         path,
         duration: None,
+        streams: Vec::new(),
         video_streams: vec![VideoStream {
             stream_index: 0,
             codec: Some("h264".to_owned()),
