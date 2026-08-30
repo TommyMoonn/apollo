@@ -2,10 +2,13 @@ use std::{ffi::OsString, fmt};
 
 use crate::media::model::MediaFile;
 
-use super::model::{AudioMixRequest, OutputContainer, SelectedAudioTrack};
+use super::model::{
+    AudioMixRequest, LoudnessNormalization, LoudnessTargets, OutputContainer, SelectedAudioTrack,
+};
 
 const MIXED_AUDIO_LABEL: &str = "mixed";
 const PRE_LIMIT_LABEL: &str = "pre_limit";
+const PRE_NORMALIZATION_LABEL: &str = "pre_norm";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegInvocation {
@@ -57,7 +60,7 @@ pub fn build_audio_mix_invocation(
         OsString::from("-i"),
         request.input.as_os_str().to_os_string(),
         OsString::from("-filter_complex"),
-        OsString::from(mix_filter(&request.selected_tracks)),
+        OsString::from(mix_filter(&request.selected_tracks, request.normalization)),
     ];
 
     match request.container {
@@ -81,7 +84,10 @@ pub fn build_audio_mix_invocation(
     Ok(FfmpegInvocation { args })
 }
 
-fn mix_filter(selected_tracks: &[SelectedAudioTrack]) -> String {
+fn mix_filter(
+    selected_tracks: &[SelectedAudioTrack],
+    normalization: LoudnessNormalization,
+) -> String {
     let volume_stages = selected_tracks
         .iter()
         .enumerate()
@@ -99,10 +105,35 @@ fn mix_filter(selected_tracks: &[SelectedAudioTrack]) -> String {
         .map(|(position, _)| format!("[mix_{position}]"))
         .collect::<String>();
 
+    let limiter_output = match normalization {
+        LoudnessNormalization::Off => MIXED_AUDIO_LABEL,
+        LoudnessNormalization::Enabled(_) => PRE_NORMALIZATION_LABEL,
+    };
+    let mut filter = format!(
+        "{volume_stages};{mix_inputs}amix=inputs={}:duration=longest:normalize=0[{PRE_LIMIT_LABEL}];[{PRE_LIMIT_LABEL}]alimiter=limit=0.95:level=0:latency=1[{limiter_output}]",
+        selected_tracks.len(),
+    );
+
+    if let LoudnessNormalization::Enabled(targets) = normalization {
+        filter.push_str(&loudness_normalization_stage(targets));
+    }
+
+    filter
+}
+
+fn loudness_normalization_stage(targets: LoudnessTargets) -> String {
     format!(
-        "{volume_stages};{mix_inputs}amix=inputs={}:duration=longest:normalize=0[{PRE_LIMIT_LABEL}];[{PRE_LIMIT_LABEL}]alimiter=limit=0.95:level=0:latency=1[{MIXED_AUDIO_LABEL}]",
-        selected_tracks.len()
+        ";[{PRE_NORMALIZATION_LABEL}]loudnorm=I={}:TP={}:LRA={}[{MIXED_AUDIO_LABEL}]",
+        decimal_tenths(targets.integrated_loudness_tenths()),
+        decimal_tenths(targets.maximum_true_peak_tenths()),
+        decimal_tenths(targets.loudness_range_tenths()),
     )
+}
+
+fn decimal_tenths(value: i16) -> String {
+    let magnitude = i32::from(value).abs();
+    let sign = if value < 0 { "-" } else { "" };
+    format!("{sign}{}.{:01}", magnitude / 10, magnitude % 10)
 }
 
 fn append_mp4_mapping(args: &mut Vec<OsString>, primary_video_stream: u32) {

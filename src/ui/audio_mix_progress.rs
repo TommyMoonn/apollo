@@ -272,7 +272,7 @@ mod tests {
     use crate::{
         audio_mix::{
             execution::{AudioMixExecutionFailure, AudioMixExecutionState, AudioMixExecutor},
-            model::{AudioMixRequest, OutputContainer, SelectedAudioTrack},
+            model::{AudioMixRequest, LoudnessNormalization, OutputContainer, SelectedAudioTrack},
         },
         media::{
             model::{AudioStream, MediaFile, VideoStream},
@@ -584,6 +584,7 @@ mod tests {
                 SelectedAudioTrack::with_default_gain(1),
                 SelectedAudioTrack::with_default_gain(2),
             ],
+            normalization: LoudnessNormalization::Off,
             container: OutputContainer::Mp4,
         }
     }

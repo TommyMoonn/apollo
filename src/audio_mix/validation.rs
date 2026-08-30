@@ -5,7 +5,9 @@ use crate::media::{
     output::{MediaOutputError, validate_output_path},
 };
 
-use super::model::{AudioMixRequest, SelectedAudioTrack, TrackGain};
+use super::model::{
+    AudioMixRequest, LoudnessNormalization, LoudnessTargets, SelectedAudioTrack, TrackGain,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioMixValidationError {
@@ -17,6 +19,9 @@ pub enum AudioMixValidationError {
         stream_index: u32,
         gain: TrackGain,
     },
+    IntegratedLoudnessOutOfRange,
+    MaximumTruePeakOutOfRange,
+    LoudnessRangeOutOfRange,
     OutputExtensionMismatch {
         expected: &'static str,
         actual: Option<String>,
@@ -45,6 +50,18 @@ impl fmt::Display for AudioMixValidationError {
                 "audio stream {stream_index} gain {gain} is outside the supported {} to {} range",
                 TrackGain::MIN,
                 TrackGain::MAX
+            ),
+            Self::IntegratedLoudnessOutOfRange => write!(
+                f,
+                "integrated loudness target is outside the supported -70.0 to -5.0 LUFS range"
+            ),
+            Self::MaximumTruePeakOutOfRange => write!(
+                f,
+                "maximum true peak target is outside the supported -9.0 to 0.0 dBTP range"
+            ),
+            Self::LoudnessRangeOutOfRange => write!(
+                f,
+                "loudness range target is outside the supported 1.0 to 50.0 LU range"
             ),
             Self::OutputExtensionMismatch { expected, actual } => match actual {
                 Some(actual) => write!(
@@ -80,8 +97,33 @@ pub fn validate_audio_mix_request(
 
     reject_duplicate_streams(&request.selected_tracks)?;
     validate_selected_tracks(&request.selected_tracks, media)?;
+    validate_normalization(request.normalization)?;
     validate_output_extension(request)?;
     validate_output_path(&request.output).map_err(AudioMixValidationError::Output)?;
+
+    Ok(())
+}
+
+fn validate_normalization(
+    normalization: LoudnessNormalization,
+) -> Result<(), AudioMixValidationError> {
+    let LoudnessNormalization::Enabled(targets) = normalization else {
+        return Ok(());
+    };
+
+    validate_loudness_targets(targets)
+}
+
+fn validate_loudness_targets(targets: LoudnessTargets) -> Result<(), AudioMixValidationError> {
+    if !targets.integrated_loudness_is_valid() {
+        return Err(AudioMixValidationError::IntegratedLoudnessOutOfRange);
+    }
+    if !targets.maximum_true_peak_is_valid() {
+        return Err(AudioMixValidationError::MaximumTruePeakOutOfRange);
+    }
+    if !targets.loudness_range_is_valid() {
+        return Err(AudioMixValidationError::LoudnessRangeOutOfRange);
+    }
 
     Ok(())
 }

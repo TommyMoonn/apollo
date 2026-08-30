@@ -54,6 +54,9 @@ impl AudioMixStartError {
                 AudioMixValidationError::Output(error) => MediaError::from_output_error(error),
                 AudioMixValidationError::DuplicateSelectedStream(_)
                 | AudioMixValidationError::TrackGainOutOfRange { .. }
+                | AudioMixValidationError::IntegratedLoudnessOutOfRange
+                | AudioMixValidationError::MaximumTruePeakOutOfRange
+                | AudioMixValidationError::LoudnessRangeOutOfRange
                 | AudioMixValidationError::OutputExtensionMismatch { .. } => {
                     MediaError::invalid_request(error.to_string())
                 }
@@ -191,7 +194,7 @@ mod tests {
         AudioMixExecutionFailure, AudioMixExecutionState, AudioMixExecutor, AudioMixStartError,
     };
     use crate::audio_mix::{
-        model::{AudioMixRequest, OutputContainer, SelectedAudioTrack},
+        model::{AudioMixRequest, LoudnessNormalization, OutputContainer, SelectedAudioTrack},
         validation::{AudioMixValidationError, validate_audio_mix_request},
     };
     use crate::media::execution::ProcessControl;
@@ -512,6 +515,7 @@ mod tests {
                 SelectedAudioTrack::with_default_gain(1),
                 SelectedAudioTrack::with_default_gain(3),
             ],
+            normalization: LoudnessNormalization::Off,
             container: OutputContainer::Mp4,
         };
         let media = MediaFile {

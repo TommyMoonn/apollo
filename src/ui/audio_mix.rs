@@ -12,7 +12,9 @@ use egui::{
 
 use crate::{
     audio_mix::{
-        model::{AudioMixRequest, OutputContainer, SelectedAudioTrack, TrackGain},
+        model::{
+            AudioMixRequest, LoudnessNormalization, OutputContainer, SelectedAudioTrack, TrackGain,
+        },
         validation::{AudioMixValidationError, validate_audio_mix_request},
     },
     media::{
@@ -232,6 +234,7 @@ impl AudioMixSelectionState {
                     )
                 })
                 .collect(),
+            normalization: LoudnessNormalization::Off,
             container: self.container,
         }
     }

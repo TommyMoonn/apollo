@@ -10,7 +10,10 @@ use std::{
 use apollo::{
     audio_mix::{
         command::{AudioMixCommandError, build_audio_mix_invocation},
-        model::{AudioMixRequest, OutputContainer, SelectedAudioTrack, TrackGain},
+        model::{
+            AudioMixRequest, LoudnessNormalization, LoudnessTargets, OutputContainer,
+            SelectedAudioTrack, TrackGain,
+        },
         validation::{AudioMixValidationError, validate_audio_mix_request},
     },
     media::{
@@ -66,6 +69,7 @@ fn valid_request(temp: &TestDirectory) -> AudioMixRequest {
         input: temp.path().join("input.mkv"),
         output: temp.path().join("mixed.mp4"),
         selected_tracks: vec![default_track(1), default_track(7)],
+        normalization: LoudnessNormalization::Off,
         container: OutputContainer::Mp4,
     }
 }
@@ -76,6 +80,10 @@ fn track(stream_index: u32, gain_tenths_db: i16) -> SelectedAudioTrack {
 
 fn default_track(stream_index: u32) -> SelectedAudioTrack {
     SelectedAudioTrack::with_default_gain(stream_index)
+}
+
+fn loudness_targets(integrated: i16, true_peak: i16, range: i16) -> LoudnessTargets {
+    LoudnessTargets::from_tenths(integrated, true_peak, range)
 }
 
 #[test]
@@ -133,6 +141,69 @@ fn track_gain_outside_each_bound_is_rejected() {
             gain: TrackGain::from_tenths_db(121),
         })
     );
+}
+
+#[test]
+fn normalization_and_target_defaults_match_the_domain_policy() {
+    let targets = LoudnessTargets::default();
+
+    assert_eq!(LoudnessNormalization::default(), LoudnessNormalization::Off);
+    assert_eq!(targets.integrated_loudness_tenths(), -160);
+    assert_eq!(targets.maximum_true_peak_tenths(), -15);
+    assert_eq!(targets.loudness_range_tenths(), 110);
+}
+
+#[test]
+fn loudness_target_lower_and_upper_bounds_are_accepted() {
+    let temp = TestDirectory::new();
+    let media_path = temp.path().join("input.mkv");
+    let media = media(media_path);
+    let mut request = valid_request(&temp);
+
+    for targets in [
+        loudness_targets(-700, -90, 10),
+        loudness_targets(-50, 0, 500),
+    ] {
+        request.normalization = LoudnessNormalization::Enabled(targets);
+        assert_eq!(validate_audio_mix_request(&request, &media), Ok(()));
+    }
+}
+
+#[test]
+fn each_loudness_target_rejects_values_outside_its_range() {
+    let temp = TestDirectory::new();
+    let mut request = valid_request(&temp);
+    let media = media(request.input.clone());
+
+    for (targets, expected) in [
+        (
+            loudness_targets(-701, -15, 110),
+            AudioMixValidationError::IntegratedLoudnessOutOfRange,
+        ),
+        (
+            loudness_targets(-49, -15, 110),
+            AudioMixValidationError::IntegratedLoudnessOutOfRange,
+        ),
+        (
+            loudness_targets(-160, -91, 110),
+            AudioMixValidationError::MaximumTruePeakOutOfRange,
+        ),
+        (
+            loudness_targets(-160, 1, 110),
+            AudioMixValidationError::MaximumTruePeakOutOfRange,
+        ),
+        (
+            loudness_targets(-160, -15, 9),
+            AudioMixValidationError::LoudnessRangeOutOfRange,
+        ),
+        (
+            loudness_targets(-160, -15, 501),
+            AudioMixValidationError::LoudnessRangeOutOfRange,
+        ),
+    ] {
+        request.normalization = LoudnessNormalization::Enabled(targets);
+        assert_eq!(validate_audio_mix_request(&request, &media), Err(expected));
+    }
 }
 
 #[test]
@@ -476,6 +547,75 @@ fn protected_mix_contains_exactly_one_limiter_after_amix() {
 }
 
 #[test]
+fn disabled_normalization_omits_loudnorm_and_keeps_the_protected_mix_path() {
+    let temp = TestDirectory::new();
+    let request = valid_request(&temp);
+    let media = media(request.input.clone());
+    let args = invocation_args(&request, &media);
+    let filter = option_values(&args, "-filter_complex")[0];
+
+    assert_eq!(request.normalization, LoudnessNormalization::Off);
+    assert!(!filter.contains("loudnorm="));
+    assert_eq!(filter.matches("normalize=0").count(), 1);
+    assert_eq!(filter.matches("alimiter=").count(), 1);
+    assert!(filter.ends_with("alimiter=limit=0.95:level=0:latency=1[mixed]"));
+}
+
+#[test]
+fn enabled_normalization_uses_default_targets_after_the_peak_limiter() {
+    let temp = TestDirectory::new();
+    let mut request = valid_request(&temp);
+    request.normalization = LoudnessNormalization::Enabled(LoudnessTargets::default());
+    let media = media(request.input.clone());
+    let args = invocation_args(&request, &media);
+    let filter = option_values(&args, "-filter_complex")[0];
+    let amix_position = filter.find("amix=").expect("amix stage");
+    let limiter_position = filter.find("alimiter=").expect("limiter stage");
+    let loudnorm_position = filter.find("loudnorm=").expect("loudnorm stage");
+
+    assert_eq!(filter.matches("loudnorm=").count(), 1);
+    assert!(amix_position < limiter_position);
+    assert!(limiter_position < loudnorm_position);
+    assert!(filter.contains(
+        "alimiter=limit=0.95:level=0:latency=1[pre_norm];[pre_norm]loudnorm=I=-16.0:TP=-1.5:LRA=11.0[mixed]"
+    ));
+    assert_eq!(option_values(&args, "-map"), vec!["0:0", "[mixed]"]);
+}
+
+#[test]
+fn enabled_normalization_emits_custom_integer_backed_targets() {
+    let temp = TestDirectory::new();
+    let mut request = valid_request(&temp);
+    request.normalization = LoudnessNormalization::Enabled(loudness_targets(-235, -7, 185));
+    let media = media(request.input.clone());
+    let args = invocation_args(&request, &media);
+    let filter = option_values(&args, "-filter_complex")[0];
+
+    assert!(filter.ends_with(
+        "alimiter=limit=0.95:level=0:latency=1[pre_norm];[pre_norm]loudnorm=I=-23.5:TP=-0.7:LRA=18.5[mixed]"
+    ));
+    assert_eq!(filter.matches("loudnorm=").count(), 1);
+}
+
+#[test]
+fn toggling_normalization_does_not_change_gain_mix_or_limiter_policy() {
+    let temp = TestDirectory::new();
+    let mut request = valid_request(&temp);
+    request.selected_tracks = vec![track(1, -60), track(3, 25)];
+    let media = media(request.input.clone());
+    let off = option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
+
+    request.normalization = LoudnessNormalization::Enabled(LoudnessTargets::default());
+    let on = option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
+
+    let protected_prefix = "[0:1]volume=-6.0dB[mix_0];[0:3]volume=2.5dB[mix_1];[mix_0][mix_1]amix=inputs=2:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1";
+    assert!(off.starts_with(protected_prefix));
+    assert!(on.starts_with(protected_prefix));
+    assert!(!off.contains("loudnorm="));
+    assert_eq!(on.matches("loudnorm=").count(), 1);
+}
+
+#[test]
 fn mp4_maps_only_primary_video_and_mixed_audio() {
     let temp = TestDirectory::new();
     let request = valid_request(&temp);
@@ -582,6 +722,7 @@ fn input_and_output_paths_with_spaces_remain_individual_arguments() {
         input: temp.path().join("source video with spaces.mkv"),
         output: temp.path().join("mixed output with spaces.mp4"),
         selected_tracks: vec![default_track(1), default_track(3)],
+        normalization: LoudnessNormalization::Off,
         container: OutputContainer::Mp4,
     };
     let media = media(request.input.clone());
