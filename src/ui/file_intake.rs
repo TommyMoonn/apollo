@@ -13,12 +13,14 @@ const INSPECTING_LABEL: &str = "Inspecting media…";
 const AUDIO_MIX_LABEL: &str = "Audio Mix";
 const UPSCALE_LABEL: &str = "Upscale";
 const REMUX_LABEL: &str = "Remux";
+const AUDIO_EXTRACT_LABEL: &str = "Audio Extract";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileIntakeTool {
     AudioMix,
     Upscale,
     Remux,
+    AudioExtract,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -158,6 +160,7 @@ fn show_mode_selector(ui: &mut Ui, selected_tool: FileIntakeTool) -> FileIntakeA
         widgets::mode_button_intrinsic_size(ui, AUDIO_MIX_LABEL),
         widgets::mode_button_intrinsic_size(ui, UPSCALE_LABEL),
         widgets::mode_button_intrinsic_size(ui, REMUX_LABEL),
+        widgets::mode_button_intrinsic_size(ui, AUDIO_EXTRACT_LABEL),
     ];
     let widths = sizes.map(|size| size.x);
     let arrangement = layout::action_layout(ui.available_width(), &widths);
@@ -181,6 +184,15 @@ fn show_mode_selector(ui: &mut Ui, selected_tool: FileIntakeTool) -> FileIntakeA
         if widgets::mode_button(ui, REMUX_LABEL, selected_tool == FileIntakeTool::Remux).clicked() {
             action = FileIntakeAction::SelectTool(FileIntakeTool::Remux);
         }
+        if widgets::mode_button(
+            ui,
+            AUDIO_EXTRACT_LABEL,
+            selected_tool == FileIntakeTool::AudioExtract,
+        )
+        .clicked()
+        {
+            action = FileIntakeAction::SelectTool(FileIntakeTool::AudioExtract);
+        }
     });
 
     action
@@ -198,8 +210,9 @@ mod tests {
     };
 
     use super::{
-        AUDIO_MIX_LABEL, DROP_HINT, FileIntakeTool, INSPECTING_LABEL, OPEN_LABEL, REMUX_LABEL,
-        UPSCALE_LABEL, WORDMARK, intake_region_heights, show_with_layout_plan,
+        AUDIO_EXTRACT_LABEL, AUDIO_MIX_LABEL, DROP_HINT, FileIntakeTool, INSPECTING_LABEL,
+        OPEN_LABEL, REMUX_LABEL, UPSCALE_LABEL, WORDMARK, intake_region_heights,
+        show_with_layout_plan,
     };
 
     #[test]
@@ -211,6 +224,7 @@ mod tests {
         assert_eq!(AUDIO_MIX_LABEL, "Audio Mix");
         assert_eq!(UPSCALE_LABEL, "Upscale");
         assert_eq!(REMUX_LABEL, "Remux");
+        assert_eq!(AUDIO_EXTRACT_LABEL, "Audio Extract");
     }
 
     #[test]

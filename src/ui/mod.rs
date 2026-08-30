@@ -1,3 +1,5 @@
+pub mod audio_extract;
+pub mod audio_extract_progress;
 pub mod audio_mix;
 pub mod audio_mix_progress;
 pub mod file_intake;

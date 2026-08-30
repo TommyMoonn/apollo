@@ -1,0 +1,563 @@
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+};
+
+use egui::{Align, Label, Layout, RichText, ScrollArea, Sides, TextStyle, Ui};
+
+use crate::{
+    audio_extract::{
+        model::{AudioExtractFormat, AudioExtractRequest},
+        validation::{AudioExtractValidationError, validate_audio_extract_request},
+    },
+    media::{model::MediaFile, output::MediaOutputError},
+};
+
+use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
+
+const AUDIO_TRACK_LABEL: &str = "Audio track";
+const FORMAT_LABEL: &str = "Format";
+const OUTPUT_LABEL: &str = "Output";
+const BACK_LABEL: &str = "← Back";
+const BROWSE_LABEL: &str = "Browse";
+const EXTRACT_LABEL: &str = "Extract";
+const FORMAT_OPTIONS: [&str; 3] = ["Original", "AAC", "FLAC"];
+const NO_AUDIO_FEEDBACK: &str = "This source has no audio tracks to extract.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioExtractSelectionState {
+    selected_stream_index: Option<u32>,
+    format: AudioExtractFormat,
+    output_name: OutputNameState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioExtractSelectionAction {
+    #[default]
+    None,
+    Back,
+    BrowseOutput,
+    ExtractRequested,
+}
+
+impl AudioExtractSelectionState {
+    pub fn new(media: &MediaFile) -> Self {
+        Self {
+            selected_stream_index: media
+                .audio_streams
+                .first()
+                .map(|stream| stream.stream_index),
+            format: AudioExtractFormat::Original,
+            output_name: OutputNameState::new(&media.path, default_output_stem(&media.path)),
+        }
+    }
+
+    pub fn selected_stream_index(&self) -> Option<u32> {
+        self.selected_stream_index
+    }
+
+    pub fn select_stream(&mut self, media: &MediaFile, stream_index: u32) -> bool {
+        if !media
+            .audio_streams
+            .iter()
+            .any(|stream| stream.stream_index == stream_index)
+        {
+            return false;
+        }
+        self.selected_stream_index = Some(stream_index);
+        true
+    }
+
+    pub fn format(&self) -> AudioExtractFormat {
+        self.format
+    }
+
+    pub fn set_format(&mut self, format: AudioExtractFormat) {
+        self.format = format;
+    }
+
+    pub fn output_path(&self) -> PathBuf {
+        self.output_name.path(self.format.extension())
+    }
+
+    pub fn output_filename_stem(&self) -> &OsStr {
+        self.output_name.stem()
+    }
+
+    pub fn output_is_customized(&self) -> bool {
+        self.output_name.is_customized()
+    }
+
+    pub fn set_output_filename_stem(&mut self, stem: OsString) {
+        self.output_name.set_stem(stem);
+    }
+
+    pub fn set_custom_output_path(&mut self, output: PathBuf) {
+        self.output_name.set_custom_path(output);
+    }
+
+    pub fn request(&self, media: &MediaFile) -> Option<AudioExtractRequest> {
+        Some(AudioExtractRequest {
+            input: media.path.clone(),
+            output: self.output_path(),
+            audio_stream_index: self.selected_stream_index?,
+            format: self.format,
+        })
+    }
+
+    pub fn can_extract(&self, media: &MediaFile) -> bool {
+        self.validation(media).is_ok()
+    }
+
+    fn validation(&self, media: &MediaFile) -> Result<(), AudioExtractReadyError> {
+        let request = self
+            .request(media)
+            .ok_or(AudioExtractReadyError::NoAudioStreams)?;
+        validate_audio_extract_request(&request, media).map_err(AudioExtractReadyError::Request)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AudioExtractReadyError {
+    NoAudioStreams,
+    Request(AudioExtractValidationError),
+}
+
+pub fn show(
+    ui: &mut Ui,
+    media: &MediaFile,
+    state: &mut AudioExtractSelectionState,
+) -> AudioExtractSelectionAction {
+    let mut action = AudioExtractSelectionAction::None;
+    let validation = state.validation(media);
+    let feedback = validation.as_ref().err().and_then(ready_feedback);
+    let row_height = theme::SELECTABLE_ROW_MIN_HEIGHT;
+    let list_content_height = media.audio_streams.len() as f32 * row_height;
+    let plan = layout::task_surface_plan(
+        ui.available_height(),
+        fixed_flow_height(ui, media, feedback),
+        list_content_height,
+        row_height,
+    );
+
+    layout::task_surface(ui, plan.overflow, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+
+        if show_source_header(ui, media) {
+            action = AudioExtractSelectionAction::Back;
+        }
+        ui.add_space(theme::SPACING.section);
+
+        let _ = widgets::section_label(ui, AUDIO_TRACK_LABEL);
+        ui.add_space(theme::SPACING.compact);
+        show_audio_tracks(ui, media, state, plan.list.max_height);
+
+        ui.add_space(theme::SPACING.focal);
+        let _ = widgets::section_label(ui, FORMAT_LABEL);
+        ui.add_space(theme::SPACING.compact);
+        show_format_selector(ui, state);
+
+        ui.add_space(theme::SPACING.focal);
+        let _ = widgets::section_label(ui, OUTPUT_LABEL);
+        ui.add_space(theme::SPACING.compact);
+        let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
+        let row = widgets::output_filename_row(
+            ui,
+            &mut output_stem,
+            state.format().extension(),
+            BROWSE_LABEL,
+        );
+        if row.filename.changed() {
+            state.set_output_filename_stem(OsString::from(output_stem));
+        }
+        if row.browse.clicked() {
+            action = AudioExtractSelectionAction::BrowseOutput;
+        }
+
+        if let Some(feedback) = feedback {
+            ui.add_space(theme::SPACING.tight);
+            let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
+        }
+
+        ui.add_space(theme::SPACING.related);
+        let response = ui
+            .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                widgets::primary_button_enabled(ui, EXTRACT_LABEL, validation.is_ok())
+            })
+            .inner;
+        if response.clicked() {
+            action = AudioExtractSelectionAction::ExtractRequested;
+        }
+    });
+
+    action
+}
+
+fn show_audio_tracks(
+    ui: &mut Ui,
+    media: &MediaFile,
+    state: &mut AudioExtractSelectionState,
+    list_height: f32,
+) {
+    widgets::separator(ui);
+    if media.audio_streams.is_empty() {
+        widgets::separator(ui);
+        return;
+    }
+
+    ScrollArea::vertical()
+        .max_height(list_height)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for stream in &media.audio_streams {
+                let title = stream
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or("Untitled audio");
+                let metadata = track_metadata(stream);
+                let response = widgets::selectable_row(
+                    ui,
+                    title,
+                    Some(&metadata),
+                    state.selected_stream_index() == Some(stream.stream_index),
+                    widgets::SelectionIndicator::Radio,
+                    theme::SELECTABLE_ROW_MIN_HEIGHT,
+                );
+                if response.clicked() {
+                    let _ = state.select_stream(media, stream.stream_index);
+                }
+            }
+        });
+}
+
+fn track_metadata(stream: &crate::media::model::AudioStream) -> String {
+    let mut parts = vec![format!("stream {}", stream.stream_index)];
+    if let Some(channel) = stream
+        .channel_layout
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(channel.to_owned());
+    } else if let Some(channels) = stream.channels {
+        parts.push(format!("{channels} ch"));
+    }
+    if let Some(language) = stream
+        .language
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(language.to_owned());
+    }
+    if let Some(codec) = stream
+        .codec
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(codec.to_ascii_uppercase());
+    }
+    parts.join(" · ")
+}
+
+fn show_format_selector(ui: &mut Ui, state: &mut AudioExtractSelectionState) {
+    let mut requested = None;
+    widgets::select_menu(ui, format_label(state.format()), &FORMAT_OPTIONS, |ui| {
+        for format in [
+            AudioExtractFormat::Original,
+            AudioExtractFormat::Aac,
+            AudioExtractFormat::Flac,
+        ] {
+            if widgets::select_menu_option(ui, format_label(format), state.format() == format)
+                .clicked()
+            {
+                requested = Some(format);
+                ui.close();
+            }
+        }
+    });
+    if let Some(format) = requested {
+        state.set_format(format);
+    }
+}
+
+fn ready_feedback(error: &AudioExtractReadyError) -> Option<&'static str> {
+    match error {
+        AudioExtractReadyError::NoAudioStreams => Some(NO_AUDIO_FEEDBACK),
+        AudioExtractReadyError::Request(AudioExtractValidationError::OutputExtensionMismatch {
+            actual: None,
+            ..
+        })
+        | AudioExtractReadyError::Request(AudioExtractValidationError::Output(
+            MediaOutputError::InvalidOutputPath(_),
+        )) => Some("Enter a usable output filename."),
+        AudioExtractReadyError::Request(AudioExtractValidationError::OutputExtensionMismatch {
+            ..
+        }) => Some("Output filename must match the selected format."),
+        AudioExtractReadyError::Request(
+            AudioExtractValidationError::UnknownStreamIndex { .. }
+            | AudioExtractValidationError::StreamIsNotAudio { .. },
+        ) => Some("Choose an available audio track."),
+        AudioExtractReadyError::Request(AudioExtractValidationError::Output(_)) => None,
+    }
+}
+
+fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
+    let metadata = audio_summary(media);
+    let header_height = source_header_height(ui, metadata.is_some());
+    let (_, back_response) = Sides::new()
+        .height(header_height.max(theme::COMPACT_CONTROL_HEIGHT))
+        .spacing(theme::SOURCE_HEADER_GAP)
+        .shrink_left()
+        .truncate()
+        .show(
+            ui,
+            |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = theme::SPACING.tight;
+                    ui.add(
+                        Label::new(
+                            RichText::new(source_file_name(&media.path))
+                                .text_style(TextStyle::Body),
+                        )
+                        .truncate()
+                        .selectable(false),
+                    );
+                    if let Some(metadata) = metadata {
+                        ui.add(
+                            Label::new(
+                                RichText::new(metadata)
+                                    .text_style(fonts::technical_text_style())
+                                    .color(theme::SECONDARY_FAINT),
+                            )
+                            .truncate()
+                            .selectable(false),
+                        );
+                    }
+                });
+            },
+            |ui| widgets::plain_button(ui, BACK_LABEL),
+        );
+    back_response.clicked()
+}
+
+fn fixed_flow_height(ui: &Ui, media: &MediaFile, feedback: Option<&str>) -> f32 {
+    let section_label_height = ui.text_style_height(&TextStyle::Small);
+    let output_row_height = widgets::output_filename_row_plan(ui, None, BROWSE_LABEL).flow_height();
+    let feedback_height = feedback.map_or(0.0, |feedback| {
+        theme::SPACING.tight + widgets::inline_status_height(ui, feedback, ui.available_width())
+    });
+    let list_chrome = if media.audio_streams.is_empty() {
+        theme::SEPARATOR_WIDTH * 2.0
+    } else {
+        theme::SEPARATOR_WIDTH
+    };
+
+    source_header_height(ui, audio_summary(media).is_some())
+        + theme::SPACING.section
+        + section_label_height
+        + theme::SPACING.compact
+        + list_chrome
+        + theme::SPACING.focal
+        + section_label_height
+        + theme::SPACING.compact
+        + theme::COMPACT_CONTROL_HEIGHT
+        + theme::SPACING.focal
+        + section_label_height
+        + theme::SPACING.compact
+        + output_row_height
+        + feedback_height
+        + theme::SPACING.related
+        + theme::PRIMARY_CONTROL_HEIGHT
+}
+
+fn source_header_height(ui: &Ui, has_metadata: bool) -> f32 {
+    let metadata_height = if has_metadata {
+        theme::SPACING.tight + ui.text_style_height(&fonts::technical_text_style())
+    } else {
+        0.0
+    };
+    (ui.text_style_height(&TextStyle::Body) + metadata_height).max(theme::COMPACT_CONTROL_HEIGHT)
+}
+
+fn source_file_name(path: &Path) -> String {
+    path.file_name()
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+fn audio_summary(media: &MediaFile) -> Option<String> {
+    (!media.audio_streams.is_empty()).then(|| {
+        let count = media.audio_streams.len();
+        format!(
+            "{count} audio {}",
+            if count == 1 { "track" } else { "tracks" }
+        )
+    })
+}
+
+fn default_output_stem(input: &Path) -> OsString {
+    let stem = input
+        .file_stem()
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| OsStr::new("output"));
+    let mut output = OsString::from(stem);
+    output.push("-audio");
+    output
+}
+
+pub(super) fn format_label(format: AudioExtractFormat) -> &'static str {
+    match format {
+        AudioExtractFormat::Original => "Original",
+        AudioExtractFormat::Aac => "AAC",
+        AudioExtractFormat::Flac => "FLAC",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{ffi::OsString, path::PathBuf};
+
+    use crate::{
+        audio_extract::model::AudioExtractFormat,
+        media::model::{AudioStream, MediaFile, MediaStream, StreamKind},
+        ui::{fonts, layout, theme},
+    };
+
+    use super::{AudioExtractSelectionState, NO_AUDIO_FEEDBACK, fixed_flow_height, ready_feedback};
+
+    fn media() -> MediaFile {
+        MediaFile {
+            path: PathBuf::from("captures/recording.mkv"),
+            duration: None,
+            streams: vec![
+                MediaStream {
+                    stream_index: 0,
+                    kind: StreamKind::Video,
+                    codec: Some("h264".into()),
+                },
+                MediaStream {
+                    stream_index: 3,
+                    kind: StreamKind::Audio,
+                    codec: Some("aac".into()),
+                },
+                MediaStream {
+                    stream_index: 7,
+                    kind: StreamKind::Audio,
+                    codec: Some("opus".into()),
+                },
+            ],
+            video_streams: Vec::new(),
+            audio_streams: vec![
+                AudioStream {
+                    stream_index: 3,
+                    codec: Some("aac".into()),
+                    channels: Some(2),
+                    channel_layout: Some("stereo".into()),
+                    title: Some("Program".into()),
+                    language: None,
+                },
+                AudioStream {
+                    stream_index: 7,
+                    codec: Some("opus".into()),
+                    channels: Some(2),
+                    channel_layout: Some("stereo".into()),
+                    title: Some("Commentary".into()),
+                    language: Some("eng".into()),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn defaults_to_first_absolute_audio_index_original_and_audio_suffix() {
+        let media = media();
+        let state = AudioExtractSelectionState::new(&media);
+        assert_eq!(state.selected_stream_index(), Some(3));
+        assert_eq!(state.format(), AudioExtractFormat::Original);
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("captures/recording-audio.mka")
+        );
+        assert!(state.can_extract(&media));
+        assert_eq!(state.request(&media).unwrap().audio_stream_index, 3);
+    }
+
+    #[test]
+    fn selection_uses_only_probed_absolute_audio_indexes() {
+        let media = media();
+        let mut state = AudioExtractSelectionState::new(&media);
+        assert!(state.select_stream(&media, 7));
+        assert_eq!(state.request(&media).unwrap().audio_stream_index, 7);
+        assert!(!state.select_stream(&media, 0));
+        assert!(!state.select_stream(&media, 99));
+        assert_eq!(state.selected_stream_index(), Some(7));
+    }
+
+    #[test]
+    fn format_changes_authoritative_extension_and_preserves_custom_stem() {
+        let media = media();
+        let mut state = AudioExtractSelectionState::new(&media);
+        state.set_output_filename_stem(OsString::from("dialogue final"));
+        for (format, expected) in [
+            (AudioExtractFormat::Aac, "captures/dialogue final.m4a"),
+            (AudioExtractFormat::Flac, "captures/dialogue final.flac"),
+            (AudioExtractFormat::Original, "captures/dialogue final.mka"),
+        ] {
+            state.set_format(format);
+            assert_eq!(state.output_path(), PathBuf::from(expected));
+        }
+        assert!(state.output_is_customized());
+    }
+
+    #[test]
+    fn browse_path_preserves_directory_while_format_owns_extension() {
+        let media = media();
+        let mut state = AudioExtractSelectionState::new(&media);
+        state.set_custom_output_path(PathBuf::from("exports/voice.flac"));
+        assert_eq!(state.output_path(), PathBuf::from("exports/voice.mka"));
+        state.set_format(AudioExtractFormat::Flac);
+        assert_eq!(state.output_path(), PathBuf::from("exports/voice.flac"));
+    }
+
+    #[test]
+    fn no_audio_source_is_non_runnable_with_clear_feedback() {
+        let mut media = media();
+        media.audio_streams.clear();
+        media
+            .streams
+            .retain(|stream| stream.kind != StreamKind::Audio);
+        let state = AudioExtractSelectionState::new(&media);
+        assert_eq!(state.selected_stream_index(), None);
+        assert!(!state.can_extract(&media));
+        assert_eq!(
+            ready_feedback(&state.validation(&media).unwrap_err()),
+            Some(NO_AUDIO_FEEDBACK)
+        );
+    }
+
+    #[test]
+    fn responsive_list_grows_before_scrolling_and_preserves_one_row() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let output = context.run_ui(Default::default(), |ui| {
+            let media = media();
+            let fixed = fixed_flow_height(ui, &media, None);
+            let row = theme::SELECTABLE_ROW_MIN_HEIGHT;
+            let content = row * media.audio_streams.len() as f32;
+            let short = layout::task_surface_plan(fixed + row - 1.0, fixed, content, row);
+            assert_eq!(short.overflow, layout::TaskOverflow::Scroll);
+            assert_eq!(short.list.max_height, row);
+            let one_row = layout::task_surface_plan(fixed + row, fixed, content, row);
+            assert_eq!(one_row.overflow, layout::TaskOverflow::Flow);
+            let tall = layout::task_surface_plan(fixed + content, fixed, content, row);
+            assert_eq!(tall.list.max_height, content);
+        });
+        output.drop_without_applying_deltas();
+    }
+}

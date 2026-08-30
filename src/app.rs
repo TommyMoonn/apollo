@@ -15,6 +15,10 @@ use crate::file_dialog::{
 };
 
 use apollo::{
+    audio_extract::{
+        execution::{AudioExtractExecutionState, AudioExtractExecutor, AudioExtractStartError},
+        model::AudioExtractFormat,
+    },
     audio_mix::{
         execution::{AudioMixExecutionState, AudioMixExecutor, AudioMixStartError},
         model::OutputContainer,
@@ -29,6 +33,9 @@ use apollo::{
     },
     remux::execution::{RemuxExecutionState, RemuxExecutor, RemuxStartError},
     ui::{
+        audio_extract as audio_extract_ui,
+        audio_extract::{AudioExtractSelectionAction, AudioExtractSelectionState},
+        audio_extract_progress::{self, AudioExtractLifecycleAction, AudioExtractLifecycleUiState},
         audio_mix as audio_mix_ui,
         audio_mix::{AudioMixPresentation, AudioMixSelectionAction, AudioMixSelectionState},
         audio_mix_progress::{self, AudioMixLifecycleAction, AudioMixLifecycleUiState},
@@ -50,11 +57,13 @@ fn file_intake_enabled(
     audio_state: &AudioMixExecutionState,
     upscale_state: &UpscaleExecutionState,
     remux_state: &RemuxExecutionState,
+    audio_extract_state: &AudioExtractExecutionState,
 ) -> bool {
     // Done/Back owns terminal settlement. Intake resumes only after every executor returns to Idle.
     matches!(audio_state, AudioMixExecutionState::Idle)
         && matches!(upscale_state, UpscaleExecutionState::Idle)
         && matches!(remux_state, RemuxExecutionState::Idle)
+        && matches!(audio_extract_state, AudioExtractExecutionState::Idle)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +71,7 @@ enum Tool {
     AudioMix,
     VideoUpscale,
     Remux,
+    AudioExtract,
 }
 
 impl Tool {
@@ -70,6 +80,7 @@ impl Tool {
             Self::AudioMix => FileIntakeTool::AudioMix,
             Self::VideoUpscale => FileIntakeTool::Upscale,
             Self::Remux => FileIntakeTool::Remux,
+            Self::AudioExtract => FileIntakeTool::AudioExtract,
         }
     }
 
@@ -78,6 +89,7 @@ impl Tool {
             FileIntakeTool::AudioMix => Self::AudioMix,
             FileIntakeTool::Upscale => Self::VideoUpscale,
             FileIntakeTool::Remux => Self::Remux,
+            FileIntakeTool::AudioExtract => Self::AudioExtract,
         }
     }
 }
@@ -114,6 +126,16 @@ struct RemuxToolState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioExtractToolState {
+    session_id: u64,
+    media: MediaFile,
+    selection: AudioExtractSelectionState,
+    lifecycle_ui: AudioExtractLifecycleUiState,
+    start_error: Option<MediaError>,
+    start_error_details_open: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AppState {
     current_tool: Tool,
     intake_active: bool,
@@ -123,6 +145,7 @@ struct AppState {
     audio_mix: Option<AudioMixToolState>,
     upscale: Option<UpscaleToolState>,
     remux: Option<RemuxToolState>,
+    audio_extract: Option<AudioExtractToolState>,
 }
 
 impl Default for AppState {
@@ -136,6 +159,7 @@ impl Default for AppState {
             audio_mix: None,
             upscale: None,
             remux: None,
+            audio_extract: None,
         }
     }
 }
@@ -226,6 +250,7 @@ impl AppState {
         self.audio_mix = None;
         self.upscale = None;
         self.remux = None;
+        self.audio_extract = None;
     }
 }
 
@@ -236,6 +261,7 @@ pub(crate) struct ApolloApp {
     audio_mix_executor: AudioMixExecutor,
     upscale_executor: UpscaleExecutor,
     remux_executor: RemuxExecutor,
+    audio_extract_executor: AudioExtractExecutor,
     media_inspection: Option<MediaInspection>,
     file_dialog: FileDialogOwner,
     native_window_owner: Result<WindowOwner, String>,
@@ -260,6 +286,7 @@ impl ApolloApp {
             audio_mix_executor: AudioMixExecutor::new(),
             upscale_executor: UpscaleExecutor::new(),
             remux_executor: RemuxExecutor::new(),
+            audio_extract_executor: AudioExtractExecutor::new(),
             media_inspection: None,
             file_dialog: FileDialogOwner::default(),
             native_window_owner: WindowOwner::from_window(creation_context),
@@ -286,6 +313,7 @@ impl ApolloApp {
                 self.audio_mix_executor.state(),
                 self.upscale_executor.state(),
                 self.remux_executor.state(),
+                self.audio_extract_executor.state(),
             )
     }
 
@@ -354,6 +382,24 @@ impl ApolloApp {
                         session_id,
                         selection: RemuxSelectionState::new(&media),
                         lifecycle_ui: RemuxLifecycleUiState::default(),
+                        start_error: None,
+                        start_error_details_open: false,
+                        media,
+                    });
+                }
+            }
+            Tool::AudioExtract => {
+                if !self
+                    .state
+                    .audio_extract
+                    .as_ref()
+                    .is_some_and(|session| session.media == media)
+                {
+                    let session_id = self.take_session_id();
+                    self.state.audio_extract = Some(AudioExtractToolState {
+                        session_id,
+                        selection: AudioExtractSelectionState::new(&media),
+                        lifecycle_ui: AudioExtractLifecycleUiState::default(),
                         start_error: None,
                         start_error_details_open: false,
                         media,
@@ -495,6 +541,9 @@ impl ApolloApp {
             Tool::AudioMix if self.state.audio_mix.is_some() => self.show_audio_mix_tool(ui),
             Tool::VideoUpscale if self.state.upscale.is_some() => self.show_upscale_tool(ui),
             Tool::Remux if self.state.remux.is_some() => self.show_remux_tool(ui),
+            Tool::AudioExtract if self.state.audio_extract.is_some() => {
+                self.show_audio_extract_tool(ui)
+            }
             _ => self.show_file_intake(ui, tool),
         }
     }
@@ -1010,6 +1059,127 @@ impl ApolloApp {
         }
     }
 
+    fn show_audio_extract_tool(&mut self, ui: &mut Ui) {
+        if shows_audio_extract_lifecycle(self.audio_extract_executor.state()) {
+            let action = {
+                let session = self
+                    .state
+                    .audio_extract
+                    .as_mut()
+                    .expect("audio extract source exists while lifecycle surface is shown");
+                let request = session
+                    .selection
+                    .request(&session.media)
+                    .expect("running audio extract session owns a selected audio stream");
+                audio_extract_progress::show(
+                    ui,
+                    &request,
+                    &mut self.audio_extract_executor,
+                    &mut session.lifecycle_ui,
+                )
+            };
+            if self.audio_extract_executor.is_running() {
+                ui.ctx().request_repaint_after(EXECUTION_REPAINT_INTERVAL);
+            }
+            self.handle_audio_extract_lifecycle_action(action);
+            return;
+        }
+
+        if self.show_audio_extract_start_error(ui) {
+            return;
+        }
+
+        let action = ui
+            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+                let session = self
+                    .state
+                    .audio_extract
+                    .as_mut()
+                    .expect("audio extract source exists while ready surface is shown");
+                audio_extract_ui::show(ui, &session.media, &mut session.selection)
+            })
+            .inner;
+        if let Err(error) = self.handle_audio_extract_action(action, ui.ctx().clone())
+            && let Some(session) = self.state.audio_extract.as_mut()
+        {
+            session.start_error = Some(error.user_error());
+            session.start_error_details_open = false;
+        }
+    }
+
+    fn show_audio_extract_start_error(&mut self, ui: &mut Ui) -> bool {
+        let Some(session) = self.state.audio_extract.as_mut() else {
+            return false;
+        };
+        let Some(error) = session.start_error.as_ref() else {
+            return false;
+        };
+
+        let title = if error.kind() == MediaErrorKind::OutputPickerUnavailable {
+            "Output picker unavailable"
+        } else {
+            "Audio extraction could not start"
+        };
+        let response = layout::focus_content(ui, |ui| {
+            let mut sizing_details_open = session.start_error_details_open;
+            let details_open = if ui.is_sizing_pass() {
+                &mut sizing_details_open
+            } else {
+                &mut session.start_error_details_open
+            };
+            media_error::show_failure_content(ui, title, error, details_open, "Back")
+        });
+        if response.inner.clicked() {
+            session.start_error = None;
+            session.start_error_details_open = false;
+        }
+        true
+    }
+
+    fn handle_audio_extract_action(
+        &mut self,
+        action: AudioExtractSelectionAction,
+        context: Context,
+    ) -> Result<(), AudioExtractStartError> {
+        if self.file_dialog.is_pending() {
+            return Ok(());
+        }
+        match action {
+            AudioExtractSelectionAction::Back if self.file_intake_enabled() => {
+                self.state.return_to_file_intake(Tool::AudioExtract);
+            }
+            AudioExtractSelectionAction::BrowseOutput => {
+                let Some(session) = self.state.audio_extract.as_ref() else {
+                    return Ok(());
+                };
+                self.start_file_dialog(audio_extract_output_dialog_request(session), context);
+            }
+            AudioExtractSelectionAction::ExtractRequested => {
+                let Some(session) = self.state.audio_extract.as_ref() else {
+                    return Ok(());
+                };
+                let Some(request) = session.selection.request(&session.media) else {
+                    return Ok(());
+                };
+                let Some(tools) = self.ready_media_tools().cloned() else {
+                    return Ok(());
+                };
+                self.audio_extract_executor
+                    .start(&tools, &session.media, &request)?;
+            }
+            AudioExtractSelectionAction::None | AudioExtractSelectionAction::Back => {}
+        }
+        Ok(())
+    }
+
+    fn handle_audio_extract_lifecycle_action(&self, action: AudioExtractLifecycleAction) {
+        if let AudioExtractLifecycleAction::OpenFolder(path) = action
+            && let Err(error) = open_folder(&path)
+        {
+            eprintln!("Audio Extract output folder could not be opened: {error}");
+        }
+    }
+
     fn start_file_dialog(&mut self, request: FileDialogRequest, context: Context) {
         let target = request.target();
         if let Err(error) =
@@ -1045,6 +1215,7 @@ impl ApolloApp {
                 self.audio_mix_executor.state(),
                 self.upscale_executor.state(),
                 self.remux_executor.state(),
+                self.audio_extract_executor.state(),
                 target,
                 outcome,
             ),
@@ -1057,6 +1228,7 @@ fn settle_output_file_dialog(
     audio_execution: &AudioMixExecutionState,
     upscale_execution: &UpscaleExecutionState,
     remux_execution: &RemuxExecutionState,
+    audio_extract_execution: &AudioExtractExecutionState,
     target: DialogTarget,
     outcome: DialogOutcome,
 ) {
@@ -1136,6 +1308,31 @@ fn settle_output_file_dialog(
                 session.start_error_details_open = false;
             }
         }
+        (DialogTarget::AudioExtractOutput { session_id }, DialogOutcome::Selected(path))
+            if matches!(audio_extract_execution, AudioExtractExecutionState::Idle) =>
+        {
+            if let Some(session) = state
+                .audio_extract
+                .as_mut()
+                .filter(|session| session.session_id == session_id)
+            {
+                session.selection.set_custom_output_path(path);
+                session.start_error = None;
+                session.start_error_details_open = false;
+            }
+        }
+        (DialogTarget::AudioExtractOutput { session_id }, DialogOutcome::Failed(diagnostic))
+            if matches!(audio_extract_execution, AudioExtractExecutionState::Idle) =>
+        {
+            if let Some(session) = state
+                .audio_extract
+                .as_mut()
+                .filter(|session| session.session_id == session_id)
+            {
+                session.start_error = Some(MediaError::output_picker_unavailable(diagnostic));
+                session.start_error_details_open = false;
+            }
+        }
         _ => {}
     }
 }
@@ -1203,6 +1400,21 @@ fn remux_output_dialog_request(session: &RemuxToolState) -> FileDialogRequest {
     )
 }
 
+fn audio_extract_output_dialog_request(session: &AudioExtractToolState) -> FileDialogRequest {
+    let format = match session.selection.format() {
+        AudioExtractFormat::Original => OutputFormat::Mka,
+        AudioExtractFormat::Aac => OutputFormat::M4a,
+        AudioExtractFormat::Flac => OutputFormat::Flac,
+    };
+    output_dialog_request(
+        DialogTarget::AudioExtractOutput {
+            session_id: session.session_id,
+        },
+        &session.selection.output_path(),
+        format,
+    )
+}
+
 fn shows_audio_mix_lifecycle(state: &AudioMixExecutionState) -> bool {
     !matches!(state, AudioMixExecutionState::Idle)
 }
@@ -1213,6 +1425,10 @@ fn shows_upscale_lifecycle(state: &UpscaleExecutionState) -> bool {
 
 fn shows_remux_lifecycle(state: &RemuxExecutionState) -> bool {
     !matches!(state, RemuxExecutionState::Idle)
+}
+
+fn shows_audio_extract_lifecycle(state: &AudioExtractExecutionState) -> bool {
+    !matches!(state, AudioExtractExecutionState::Idle)
 }
 
 fn open_folder(path: &Path) -> io::Result<()> {
@@ -1281,15 +1497,16 @@ mod tests {
 
     use super::{
         ApolloApp, AppState, MediaInspection, MediaToolsState, Tool,
-        audio_mix_output_dialog_request, file_intake_enabled, remux_output_dialog_request,
-        settle_output_file_dialog, shows_audio_mix_lifecycle, shows_remux_lifecycle,
-        shows_upscale_lifecycle,
+        audio_extract_output_dialog_request, audio_mix_output_dialog_request, file_intake_enabled,
+        remux_output_dialog_request, settle_output_file_dialog, shows_audio_extract_lifecycle,
+        shows_audio_mix_lifecycle, shows_remux_lifecycle, shows_upscale_lifecycle,
     };
     use crate::file_dialog::{
         DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
         FileDialogStartError, OutputFormat, WindowOwner,
     };
     use apollo::{
+        audio_extract::{execution::AudioExtractExecutionState, model::AudioExtractFormat},
         audio_mix::{
             execution::AudioMixExecutionState,
             model::{LoudnessNormalization, LoudnessTargets, OutputContainer, TrackGain},
@@ -1306,8 +1523,8 @@ mod tests {
         },
         remux::execution::RemuxExecutionState,
         ui::{
-            audio_mix::AudioMixSelectionAction, fonts, remux::RemuxSelectionAction, theme,
-            upscale::UpscaleSelectionAction,
+            audio_extract::AudioExtractSelectionAction, audio_mix::AudioMixSelectionAction, fonts,
+            remux::RemuxSelectionAction, theme, upscale::UpscaleSelectionAction,
         },
         upscale::{
             execution::UpscaleExecutionState,
@@ -1390,6 +1607,7 @@ mod tests {
             audio_mix_executor: apollo::audio_mix::execution::AudioMixExecutor::new(),
             upscale_executor: apollo::upscale::execution::UpscaleExecutor::new(),
             remux_executor: apollo::remux::execution::RemuxExecutor::new(),
+            audio_extract_executor: apollo::audio_extract::execution::AudioExtractExecutor::new(),
             media_inspection: None,
             file_dialog: FileDialogOwner::default(),
             native_window_owner: Ok(WindowOwner::test_value()),
@@ -1609,6 +1827,8 @@ mod tests {
         assert!(state.intake_active);
         assert!(state.audio_mix.is_none());
         assert!(state.upscale.is_none());
+        assert!(state.remux.is_none());
+        assert!(state.audio_extract.is_none());
     }
 
     #[test]
@@ -1619,6 +1839,8 @@ mod tests {
         assert!(app.state.intake_active);
         assert!(!app.audio_mix_executor.is_running());
         assert!(!app.upscale_executor.is_running());
+        assert!(!app.remux_executor.is_running());
+        assert!(!app.audio_extract_executor.is_running());
     }
 
     #[test]
@@ -1636,6 +1858,8 @@ mod tests {
         assert!(output_contains_text(&output, "Open files"));
         assert!(output_contains_text(&output, "Audio Mix"));
         assert!(output_contains_text(&output, "Upscale"));
+        assert!(output_contains_text(&output, "Remux"));
+        assert!(output_contains_text(&output, "Audio Extract"));
         output.textures_delta.clear();
     }
 
@@ -1659,6 +1883,8 @@ mod tests {
         assert!(output_contains_text(&output, "Inspecting media…"));
         assert!(output_contains_text(&output, "Audio Mix"));
         assert!(output_contains_text(&output, "Upscale"));
+        assert!(output_contains_text(&output, "Remux"));
+        assert!(output_contains_text(&output, "Audio Extract"));
         assert!(!output_contains_text(&output, "Open files"));
         assert!(!output_contains_text(&output, "or drop a video anywhere"));
         output.textures_delta.clear();
@@ -1834,6 +2060,25 @@ mod tests {
     }
 
     #[test]
+    fn selecting_audio_extract_routes_next_source_to_audio_extract_ready_state() {
+        let (directory, path) = temp_file("audio-extract-mode-switch");
+        let mut app = app();
+        app.select_tool(Tool::AudioExtract);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+
+        assert!(!app.state.intake_active);
+        assert!(app.state.audio_mix.is_none());
+        assert_eq!(
+            app.state
+                .audio_extract
+                .as_ref()
+                .map(|session| &session.media.path),
+            Some(&path)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn open_valid_file_routes_audio_mix_to_ready_state() {
         let (directory, path) = temp_file("open");
         let mut app = app();
@@ -1858,6 +2103,7 @@ mod tests {
             app.audio_mix_executor.state(),
             app.upscale_executor.state(),
             app.remux_executor.state(),
+            app.audio_extract_executor.state(),
         ));
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
 
@@ -1991,6 +2237,37 @@ mod tests {
             "MKV",
             "Output",
             "Remux",
+            "← Back",
+        ] {
+            assert!(output_contains_text(&output, text), "missing {text:?}");
+        }
+        output.textures_delta.clear();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn opening_audio_extract_source_renders_ready_surface() {
+        let (directory, path) = temp_file("audio-extract-ready-render");
+        let mut app = app();
+        app.select_tool(Tool::AudioExtract);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+
+        let mut output = context.run_ui(Default::default(), |ui| {
+            app.show_tool(ui, Tool::AudioExtract);
+        });
+        for text in [
+            "recording.mkv",
+            "1 audio track",
+            "Audio track",
+            "Desktop Audio",
+            "stream 1",
+            "Format",
+            "Original",
+            "Output",
+            "Extract",
             "← Back",
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
@@ -2154,6 +2431,54 @@ mod tests {
     }
 
     #[test]
+    fn audio_extract_output_dialog_request_follows_current_format() {
+        let (directory, path) = temp_file("audio-extract-browse");
+        let mut app = app();
+        app.select_tool(Tool::AudioExtract);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+
+        let session = app.state.audio_extract.as_ref().unwrap();
+        let FileDialogRequest::SaveOutput { target, options } =
+            audio_extract_output_dialog_request(session)
+        else {
+            panic!("audio extract Browse must create a save request");
+        };
+        assert_eq!(
+            target,
+            DialogTarget::AudioExtractOutput {
+                session_id: session.session_id,
+            }
+        );
+        assert_eq!(options.initial_directory, directory);
+        assert_eq!(options.file_name, "recording-audio.mka");
+        assert_eq!(options.format, OutputFormat::Mka);
+
+        let session = app.state.audio_extract.as_mut().unwrap();
+        for (format, name, dialog_format) in [
+            (
+                AudioExtractFormat::Aac,
+                "recording-audio.m4a",
+                OutputFormat::M4a,
+            ),
+            (
+                AudioExtractFormat::Flac,
+                "recording-audio.flac",
+                OutputFormat::Flac,
+            ),
+        ] {
+            session.selection.set_format(format);
+            let FileDialogRequest::SaveOutput { options, .. } =
+                audio_extract_output_dialog_request(session)
+            else {
+                unreachable!();
+            };
+            assert_eq!(options.file_name, name);
+            assert_eq!(options.format, dialog_format);
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn selected_output_paths_route_to_the_owning_tool() {
         let (directory, path) = temp_file("upscale-browse");
         let mut app = app();
@@ -2204,6 +2529,62 @@ mod tests {
         assert_eq!(
             app.state.remux.as_ref().unwrap().selection.output_path(),
             remux_destination
+        );
+
+        app.select_tool(Tool::AudioExtract);
+        let extract_session_id = app.state.audio_extract.as_ref().unwrap().session_id;
+        let extract_destination = directory.join("chosen audio.mka");
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::AudioExtractOutput {
+                session_id: extract_session_id,
+            },
+            outcome: DialogOutcome::Selected(extract_destination.clone()),
+        });
+        assert_eq!(
+            app.state
+                .audio_extract
+                .as_ref()
+                .unwrap()
+                .selection
+                .output_path(),
+            extract_destination
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_audio_extract_completion_cannot_mutate_replacement_session() {
+        let (directory, first) = temp_file("stale-audio-extract");
+        let second = directory.join("replacement.mkv");
+        fs::write(&second, b"replacement").unwrap();
+        let mut app = app();
+        app.select_tool(Tool::AudioExtract);
+        app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        let stale_session_id = app.state.audio_extract.as_ref().unwrap().session_id;
+
+        app.state.return_to_file_intake(Tool::AudioExtract);
+        app.load_media_path_with_probe(&second, |path| Ok(media(path)));
+        let replacement_before = app
+            .state
+            .audio_extract
+            .as_ref()
+            .unwrap()
+            .selection
+            .output_path();
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::AudioExtractOutput {
+                session_id: stale_session_id,
+            },
+            outcome: DialogOutcome::Selected(directory.join("stale.mka")),
+        });
+        assert_eq!(
+            app.state
+                .audio_extract
+                .as_ref()
+                .unwrap()
+                .selection
+                .output_path(),
+            replacement_before
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2369,6 +2750,7 @@ mod tests {
             &AudioMixExecutionState::Running,
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Idle,
+            &AudioExtractExecutionState::Idle,
             DialogTarget::AudioMixOutput {
                 session_id: audio_id,
             },
@@ -2392,6 +2774,7 @@ mod tests {
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Running,
             &RemuxExecutionState::Idle,
+            &AudioExtractExecutionState::Idle,
             DialogTarget::UpscaleOutput {
                 session_id: upscale_id,
             },
@@ -2400,6 +2783,36 @@ mod tests {
         assert_eq!(
             app.state.upscale.as_ref().unwrap().selection.output_path(),
             upscale_output
+        );
+
+        app.select_tool(Tool::AudioExtract);
+        let extract_id = app.state.audio_extract.as_ref().unwrap().session_id;
+        let extract_output = app
+            .state
+            .audio_extract
+            .as_ref()
+            .unwrap()
+            .selection
+            .output_path();
+        settle_output_file_dialog(
+            &mut app.state,
+            &AudioMixExecutionState::Idle,
+            &UpscaleExecutionState::Idle,
+            &RemuxExecutionState::Idle,
+            &AudioExtractExecutionState::Running,
+            DialogTarget::AudioExtractOutput {
+                session_id: extract_id,
+            },
+            DialogOutcome::Selected(directory.join("late-audio.mka")),
+        );
+        assert_eq!(
+            app.state
+                .audio_extract
+                .as_ref()
+                .unwrap()
+                .selection
+                .output_path(),
+            extract_output
         );
 
         fs::remove_dir_all(directory).unwrap();
@@ -2549,6 +2962,30 @@ mod tests {
     }
 
     #[test]
+    fn audio_extract_intent_reaches_executor() {
+        let (directory, path) = temp_file("audio-extract-execute");
+        let mut app = app();
+        app.select_tool(Tool::AudioExtract);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+
+        let error = app
+            .handle_audio_extract_action(
+                AudioExtractSelectionAction::ExtractRequested,
+                egui::Context::default(),
+            )
+            .expect_err("missing test FFmpeg should prove the execution path was attempted");
+        assert!(matches!(
+            error,
+            apollo::audio_extract::execution::AudioExtractStartError::Process(
+                apollo::media::process::MediaProcessStartError::ProcessLaunchFailed(
+                    std::io::ErrorKind::NotFound
+                )
+            )
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn upscale_execution_state_routes_running_and_terminal_surfaces_to_lifecycle_ui() {
         use apollo::media::{execution::MediaExecutionFailure, process::MediaProcessFailure};
 
@@ -2580,6 +3017,30 @@ mod tests {
             }
         )));
         assert!(shows_remux_lifecycle(&RemuxExecutionState::Cancelled));
+    }
+
+    #[test]
+    fn audio_extract_execution_state_routes_running_and_terminal_surfaces_to_lifecycle_ui() {
+        assert!(!shows_audio_extract_lifecycle(
+            &AudioExtractExecutionState::Idle
+        ));
+        assert!(shows_audio_extract_lifecycle(
+            &AudioExtractExecutionState::Running
+        ));
+        assert!(shows_audio_extract_lifecycle(
+            &AudioExtractExecutionState::Completed {
+                output: PathBuf::from("recording-audio.mka"),
+            }
+        ));
+        assert!(shows_audio_extract_lifecycle(
+            &AudioExtractExecutionState::Failed(MediaExecutionFailure::Process {
+                reason: MediaProcessFailure::Exit(Some(1)),
+                diagnostic: String::new(),
+            })
+        ));
+        assert!(shows_audio_extract_lifecycle(
+            &AudioExtractExecutionState::Cancelled
+        ));
     }
 
     #[test]
@@ -2778,6 +3239,47 @@ mod tests {
     }
 
     #[test]
+    fn audio_extract_back_returns_to_intake_and_same_source_restores_ready_state() {
+        let (directory, path) = temp_file("audio-extract-back");
+        let mut app = app();
+        app.select_tool(Tool::AudioExtract);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let session = app
+            .state
+            .audio_extract
+            .as_mut()
+            .expect("audio extract session should exist");
+        session.selection.set_format(AudioExtractFormat::Flac);
+        let custom_output = directory.join("dialogue.flac");
+        session
+            .selection
+            .set_custom_output_path(custom_output.clone());
+
+        app.handle_audio_extract_action(
+            AudioExtractSelectionAction::Back,
+            egui::Context::default(),
+        )
+        .unwrap();
+        assert!(app.state.intake_active);
+        assert_eq!(app.state.current_tool, Tool::AudioExtract);
+
+        app.load_media_path_with_probe(&path, |_| -> Result<MediaFile, MediaProbeError> {
+            panic!("unchanged cached source must not be probed again")
+        });
+        let session = app
+            .state
+            .audio_extract
+            .as_ref()
+            .expect("same-source Audio Extract session should be restored");
+        assert!(!app.state.intake_active);
+        assert_eq!(session.selection.selected_stream_index(), Some(1));
+        assert_eq!(session.selection.format(), AudioExtractFormat::Flac);
+        assert_eq!(session.selection.output_path(), custom_output);
+        assert!(session.selection.output_is_customized());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn replacement_source_retires_preserved_ready_sessions() {
         let (directory, first) = temp_file("replace-after-back");
         let second = directory.join("replacement.mkv");
@@ -2875,21 +3377,31 @@ mod tests {
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Idle,
+            &AudioExtractExecutionState::Idle,
         ));
         assert!(!file_intake_enabled(
             &AudioMixExecutionState::Running,
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Idle,
+            &AudioExtractExecutionState::Idle,
         ));
         assert!(!file_intake_enabled(
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Running,
             &RemuxExecutionState::Idle,
+            &AudioExtractExecutionState::Idle,
         ));
         assert!(!file_intake_enabled(
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Running,
+            &AudioExtractExecutionState::Idle,
+        ));
+        assert!(!file_intake_enabled(
+            &AudioMixExecutionState::Idle,
+            &UpscaleExecutionState::Idle,
+            &RemuxExecutionState::Idle,
+            &AudioExtractExecutionState::Running,
         ));
     }
 
@@ -2916,6 +3428,7 @@ mod tests {
                 &state,
                 &UpscaleExecutionState::Idle,
                 &RemuxExecutionState::Idle,
+                &AudioExtractExecutionState::Idle,
             ));
         }
     }
@@ -2927,6 +3440,7 @@ mod tests {
                 &AudioMixExecutionState::Idle,
                 &state,
                 &RemuxExecutionState::Idle,
+                &AudioExtractExecutionState::Idle,
             ));
         }
     }
@@ -2940,12 +3454,14 @@ mod tests {
             &completed,
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Idle,
+            &AudioExtractExecutionState::Idle,
         ));
 
         assert!(file_intake_enabled(
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Idle,
+            &AudioExtractExecutionState::Idle,
         ));
     }
 }

@@ -15,6 +15,7 @@ const NO_DIAGNOSTIC: &str = "No diagnostic details were reported.";
 pub enum MediaOutputContainer {
     Mp4,
     Mkv,
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +65,7 @@ impl MediaError {
             MediaErrorKind::SourceUnavailable => "This source file is unavailable.",
             MediaErrorKind::MissingStream => "A required media stream is missing or unsupported.",
             MediaErrorKind::Mp4Incompatibility => "A source stream cannot be written into MP4.",
-            MediaErrorKind::EncoderUnavailable => "The selected video encoder is unavailable.",
+            MediaErrorKind::EncoderUnavailable => "The required encoder is unavailable.",
             MediaErrorKind::OutputExists => "The output file already exists.",
             MediaErrorKind::OutputNotWritable => "The output location is not writable.",
             MediaErrorKind::FilePickerUnavailable => "The file picker could not be opened.",
@@ -108,7 +109,7 @@ impl MediaError {
                 Some("Use MKV or choose a source with MP4-compatible streams.")
             }
             MediaErrorKind::EncoderUnavailable => {
-                Some("Use an FFmpeg build that includes the selected H.264 or H.265 encoder.")
+                Some("Use an FFmpeg build that includes the required encoder.")
             }
             MediaErrorKind::OutputExists => {
                 Some("Choose another output path or move the existing file.")
@@ -442,12 +443,18 @@ mod tests {
 
     #[test]
     fn unavailable_encoder_is_recognized_from_ffmpeg_diagnostic() {
-        for container in [MediaOutputContainer::Mp4, MediaOutputContainer::Mkv] {
-            let error = MediaError::from_execution_failure(
-                &process_failure("Unknown encoder 'libx265'"),
-                container,
-            );
+        for (container, diagnostic) in [
+            (MediaOutputContainer::Mp4, "Unknown encoder 'libx265'"),
+            (MediaOutputContainer::Mp4, "Unknown encoder 'aac'"),
+            (MediaOutputContainer::Other, "Unknown encoder 'flac'"),
+        ] {
+            let error = MediaError::from_execution_failure(&process_failure(diagnostic), container);
             assert_eq!(error.kind(), MediaErrorKind::EncoderUnavailable);
+            assert_eq!(error.message(), "The required encoder is unavailable.");
+            assert_eq!(
+                error.guidance(),
+                Some("Use an FFmpeg build that includes the required encoder.")
+            );
         }
     }
 

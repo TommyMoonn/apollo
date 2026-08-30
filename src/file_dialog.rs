@@ -20,6 +20,7 @@ pub(crate) enum DialogTarget {
     AudioMixOutput { session_id: u64 },
     UpscaleOutput { session_id: u64 },
     RemuxOutput { session_id: u64 },
+    AudioExtractOutput { session_id: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,9 @@ impl WindowOwner {
 pub(crate) enum OutputFormat {
     Mp4,
     Mkv,
+    Mka,
+    M4a,
+    Flac,
 }
 
 impl OutputFormat {
@@ -60,6 +64,9 @@ impl OutputFormat {
         match self {
             Self::Mp4 => "mp4",
             Self::Mkv => "mkv",
+            Self::Mka => "mka",
+            Self::M4a => "m4a",
+            Self::Flac => "flac",
         }
     }
 
@@ -67,6 +74,9 @@ impl OutputFormat {
         match self {
             Self::Mp4 => "MP4 video (*.mp4)",
             Self::Mkv => "Matroska video (*.mkv)",
+            Self::Mka => "Matroska audio (*.mka)",
+            Self::M4a => "MPEG-4 audio (*.m4a)",
+            Self::Flac => "FLAC audio (*.flac)",
         }
     }
 
@@ -74,6 +84,9 @@ impl OutputFormat {
         match self {
             Self::Mp4 => "*.mp4",
             Self::Mkv => "*.mkv",
+            Self::Mka => "*.mka",
+            Self::M4a => "*.m4a",
+            Self::Flac => "*.flac",
         }
     }
 }
@@ -467,6 +480,19 @@ mod tests {
             wait_for_completion(&mut owner).outcome,
             DialogOutcome::Cancelled
         );
+    }
+
+    #[test]
+    fn audio_extract_formats_own_save_extensions_and_filters() {
+        for (format, extension, name, pattern) in [
+            (OutputFormat::Mka, "mka", "Matroska audio (*.mka)", "*.mka"),
+            (OutputFormat::M4a, "m4a", "MPEG-4 audio (*.m4a)", "*.m4a"),
+            (OutputFormat::Flac, "flac", "FLAC audio (*.flac)", "*.flac"),
+        ] {
+            assert_eq!(format.extension(), extension);
+            assert_eq!(format.filter_name(), name);
+            assert_eq!(format.filter_pattern(), pattern);
+        }
     }
 
     #[test]
