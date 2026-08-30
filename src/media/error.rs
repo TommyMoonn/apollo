@@ -102,10 +102,10 @@ impl MediaError {
                 Some("Choose an existing readable media file and try again.")
             }
             MediaErrorKind::MissingStream => {
-                Some("Choose a source containing the required video and audio streams.")
+                Some("Choose a source containing the required media streams.")
             }
             MediaErrorKind::Mp4Incompatibility => {
-                Some("Use MKV for Audio Mix or choose a source with MP4-compatible streams.")
+                Some("Use MKV or choose a source with MP4-compatible streams.")
             }
             MediaErrorKind::EncoderUnavailable => {
                 Some("Use an FFmpeg build that includes the selected H.264 or H.265 encoder.")
@@ -145,6 +145,10 @@ impl MediaError {
 
     pub fn invalid_request(diagnostic: impl Into<String>) -> Self {
         Self::with_diagnostic(MediaErrorKind::InvalidRequest, diagnostic)
+    }
+
+    pub fn mp4_incompatibility(diagnostic: impl Into<String>) -> Self {
+        Self::with_diagnostic(MediaErrorKind::Mp4Incompatibility, diagnostic)
     }
 
     pub fn probe_failure(diagnostic: impl Into<String>) -> Self {
@@ -403,10 +407,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_stream_has_shared_classification() {
+    fn missing_stream_has_shared_classification_and_operation_neutral_guidance() {
+        let error = MediaError::missing_stream("no streams");
+
+        assert_eq!(error.kind(), MediaErrorKind::MissingStream);
         assert_eq!(
-            MediaError::missing_stream("no video stream").kind(),
-            MediaErrorKind::MissingStream
+            error.guidance(),
+            Some("Choose a source containing the required media streams.")
         );
     }
 

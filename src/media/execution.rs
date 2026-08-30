@@ -254,12 +254,12 @@ mod ownership_tests {
     }
 
     #[test]
-    fn audio_mix_and_upscale_cannot_share_media_process_handle() {
+    fn feature_executors_cannot_share_media_process_handle() {
         fn assert_process_control<T: ProcessControl>() {}
 
-        // Both feature executors hand the owned `MediaProcess` returned by `MediaProcess::start`
-        // into this shared execution owner. Keep that handle unique: it must not become cloneable,
-        // and shared pointer aliases must not satisfy the process-control boundary.
+        // Feature executors hand the owned `MediaProcess` returned by `MediaProcess::start` into
+        // this shared execution owner. Keep that handle unique: it must not become cloneable, and
+        // shared pointer aliases must not satisfy the process-control boundary.
         assert_process_control::<MediaProcess>();
         assert_not_impl!(MediaProcess: Clone);
         assert_not_impl!(Arc<MediaProcess>: ProcessControl);
