@@ -34,6 +34,7 @@ const SELECT_ALL_LABEL: &str = "Select all";
 const CLEAR_LABEL: &str = "Clear";
 const RESET_GAINS_LABEL: &str = "Reset gains";
 const NORMALIZE_LABEL: &str = "Normalize output loudness";
+const LOUDNESS_NORMALIZATION_LABEL: &str = "Loudness normalization";
 const INTEGRATED_LOUDNESS_LABEL: &str = "Integrated loudness";
 const MAXIMUM_TRUE_PEAK_LABEL: &str = "Maximum true peak";
 const LOUDNESS_RANGE_LABEL: &str = "Loudness range";
@@ -323,18 +324,23 @@ pub fn show(
         }
         ui.add_space(theme::SPACING.section);
 
-        let _ = widgets::section_label(ui, AUDIO_TRACKS_LABEL);
+        show_track_header(ui, media, state);
         ui.add_space(theme::SPACING.compact);
         show_track_list(ui, media, state, &presentation.tracks, plan.list.max_height);
         ui.add_space(theme::INLINE_ACTION_GAP);
-        show_track_actions(ui, media, state);
-        ui.add_space(theme::SPACING.section);
+        show_track_footer(ui, state);
+        ui.add_space(theme::SPACING.related);
 
-        show_output_header(ui, state);
+        show_loudness_header(ui, state);
+        ui.add_space(theme::SPACING.compact);
+        widgets::separator(ui);
         if state.normalization_enabled() {
             ui.add_space(theme::SPACING.compact);
             show_normalization_targets(ui, state);
         }
+        ui.add_space(theme::SPACING.section);
+
+        let _ = widgets::section_label(ui, OUTPUT_LABEL);
         ui.add_space(theme::SPACING.compact);
         let output_action = show_output_row(ui, media, state);
         if output_action != AudioMixSelectionAction::None {
@@ -516,14 +522,18 @@ fn audio_mix_fixed_flow_height(
 
     source_header_height
         + theme::SPACING.section
-        + section_label_height
+        + theme::COMPACT_CONTROL_HEIGHT.max(section_label_height)
         + theme::SPACING.compact
         + track_list_chrome
         + theme::INLINE_ACTION_GAP
         + theme::COMPACT_CONTROL_HEIGHT
-        + theme::SPACING.section
+        + theme::SPACING.related
         + theme::COMPACT_CONTROL_HEIGHT.max(section_label_height)
+        + theme::SPACING.compact
+        + theme::SEPARATOR_WIDTH
         + normalization_targets_height(normalization_enabled)
+        + theme::SPACING.section
+        + section_label_height
         + theme::SPACING.compact
         + output_row_height
         + feedback_height
@@ -550,23 +560,31 @@ fn source_header_height(ui: &Ui, has_metadata: bool) -> f32 {
     (body_height + metadata_height).max(theme::COMPACT_CONTROL_HEIGHT)
 }
 
-fn show_track_actions(ui: &mut Ui, media: &MediaFile, state: &mut AudioMixSelectionState) {
+fn show_track_header(ui: &mut Ui, media: &MediaFile, state: &mut AudioMixSelectionState) {
+    Sides::new().height(theme::COMPACT_CONTROL_HEIGHT).show(
+        ui,
+        |ui| widgets::section_label(ui, AUDIO_TRACKS_LABEL),
+        |ui| {
+            widgets::trailing_control(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::INLINE_ACTION_GAP;
+                    if widgets::plain_button(ui, SELECT_ALL_LABEL).clicked() {
+                        state.select_all(media);
+                    }
+                    if widgets::plain_button(ui, CLEAR_LABEL).clicked() {
+                        state.clear();
+                    }
+                });
+            });
+        },
+    );
+}
+
+fn show_track_footer(ui: &mut Ui, state: &mut AudioMixSelectionState) {
     let selected_count = state.selected_count();
 
     Sides::new().height(theme::COMPACT_CONTROL_HEIGHT).show(
         ui,
-        |ui| {
-            ui.spacing_mut().item_spacing.x = theme::INLINE_ACTION_GAP;
-            if widgets::plain_button(ui, SELECT_ALL_LABEL).clicked() {
-                state.select_all(media);
-            }
-            if widgets::plain_button(ui, CLEAR_LABEL).clicked() {
-                state.clear();
-            }
-            if widgets::plain_button(ui, RESET_GAINS_LABEL).clicked() {
-                state.reset_track_gains();
-            }
-        },
         |ui| {
             ui.label(
                 RichText::new(format!("{selected_count} selected"))
@@ -574,10 +592,17 @@ fn show_track_actions(ui: &mut Ui, media: &MediaFile, state: &mut AudioMixSelect
                     .color(theme::SECONDARY_FAINT),
             );
         },
+        |ui| {
+            widgets::trailing_control(ui, |ui| {
+                if widgets::plain_button(ui, RESET_GAINS_LABEL).clicked() {
+                    state.reset_track_gains();
+                }
+            });
+        },
     );
 }
 
-fn show_output_header(ui: &mut Ui, state: &mut AudioMixSelectionState) {
+fn show_loudness_header(ui: &mut Ui, state: &mut AudioMixSelectionState) {
     let mut enabled = state.normalization_enabled();
     let (_, response) = Sides::new()
         .height(theme::COMPACT_CONTROL_HEIGHT)
@@ -586,8 +611,12 @@ fn show_output_header(ui: &mut Ui, state: &mut AudioMixSelectionState) {
         .truncate()
         .show(
             ui,
-            |ui| widgets::section_label(ui, OUTPUT_LABEL),
-            |ui| widgets::checkbox_control(ui, NORMALIZE_LABEL, &mut enabled),
+            |ui| widgets::section_label(ui, LOUDNESS_NORMALIZATION_LABEL),
+            |ui| {
+                widgets::trailing_control(ui, |ui| {
+                    widgets::switch_control(ui, NORMALIZE_LABEL, &mut enabled)
+                })
+            },
         );
 
     if response.changed() {
@@ -1596,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_height_keeps_long_track_list_nested_and_task_surface_in_flow() {
+    fn reference_height_preserves_a_full_track_row_with_distinct_normalization_section() {
         let context = egui::Context::default();
         super::fonts::install(&context);
 
@@ -1617,13 +1646,9 @@ mod tests {
             );
 
             assert_eq!(usable_height, 323.0);
-            assert_eq!(plan.overflow, layout::TaskOverflow::Flow);
+            assert_eq!(plan.overflow, layout::TaskOverflow::Scroll);
             assert_eq!(plan.list.behavior, layout::ListBehavior::Scroll);
-            assert_eq!(
-                plan.list.max_height,
-                (usable_height - fixed_height).max(0.0)
-            );
-            assert!(plan.list.max_height >= theme::SELECTABLE_ROW_MIN_HEIGHT);
+            assert_eq!(plan.list.max_height, row_height);
         });
         output.drop_without_applying_deltas();
     }

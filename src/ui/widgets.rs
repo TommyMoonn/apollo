@@ -1,7 +1,7 @@
 use egui::{
-    Align, Align2, Checkbox, Color32, CornerRadius, Frame, InnerResponse, Label, Layout, Popup,
-    Rect, Response, RichText, Sense, Sides, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder,
-    Vec2, WidgetInfo, WidgetType, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, Frame, InnerResponse, Label, Layout, Popup, Rect,
+    Response, RichText, Sense, Sides, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder, Vec2,
+    WidgetInfo, WidgetType, pos2, vec2,
 };
 
 use super::{fonts, layout, theme};
@@ -200,29 +200,54 @@ pub fn labeled_control<R>(ui: &mut Ui, label: &str, add_control: impl FnOnce(&mu
         .spacing(theme::SPACING.related)
         .shrink_left()
         .truncate()
-        .show(ui, |ui| ui.label(label), add_control);
+        .show(
+            ui,
+            |ui| ui.label(label),
+            |ui| trailing_control(ui, add_control),
+        );
     control
 }
 
-/// A labeled boolean control that keeps the visible label and checkbox in one hit-target row.
-#[must_use]
-pub fn checkbox_control(ui: &mut Ui, label: &str, checked: &mut bool) -> Response {
-    let (label_response, mut checkbox_response) = Sides::new()
-        .height(theme::COMPACT_CONTROL_HEIGHT)
-        .spacing(theme::SPACING.related)
-        .shrink_left()
-        .truncate()
-        .show(
-            ui,
-            |ui| ui.add(Label::new(label).sense(Sense::click())),
-            |ui| ui.add(Checkbox::without_text(checked)),
-        );
+/// Apply the shared ready-surface inset to a trailing control or action group.
+pub fn trailing_control<R>(ui: &mut Ui, add_control: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.add_space(theme::READY_TRAILING_INSET);
+    add_control(ui)
+}
 
-    if label_response.clicked() {
+/// Compact Apollo-styled switch with native checkbox accessibility semantics.
+#[must_use]
+pub fn switch_control(ui: &mut Ui, label: &str, checked: &mut bool) -> Response {
+    let desired_size = vec2(theme::TOGGLE_SWITCH_WIDTH, theme::TOGGLE_SWITCH_HEIGHT);
+    let (rect, mut response) = ui.allocate_exact_size(desired_size, Sense::click());
+    if response.clicked() {
         *checked = !*checked;
-        checkbox_response.mark_changed();
+        response.mark_changed();
     }
-    let response = checkbox_response.union(label_response);
+
+    let state = interaction_state(&response);
+    let colors = theme::selectable_colors(state, *checked);
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(theme::CONTROL_RADIUS),
+        colors.background,
+        Stroke::new(theme::SEPARATOR_WIDTH, colors.border),
+        StrokeKind::Inside,
+    );
+    let knob_x = if *checked {
+        rect.right() - theme::SPACING.tight - theme::TOGGLE_SWITCH_KNOB_SIZE * 0.5
+    } else {
+        rect.left() + theme::SPACING.tight + theme::TOGGLE_SWITCH_KNOB_SIZE * 0.5
+    };
+    let knob = Rect::from_center_size(
+        pos2(knob_x, rect.center().y),
+        Vec2::splat(theme::TOGGLE_SWITCH_KNOB_SIZE),
+    );
+    ui.painter().rect_filled(
+        knob,
+        CornerRadius::same(theme::CONTROL_RADIUS.saturating_sub(1)),
+        colors.foreground,
+    );
+    paint_keyboard_focus(ui, &response, rect);
     response.widget_info(|| {
         WidgetInfo::selected(WidgetType::Checkbox, response.enabled(), *checked, label)
     });
@@ -877,12 +902,12 @@ mod tests {
 
     use super::{
         BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
-        button_text_style, checkbox_control, displayed_progress_fraction, filename_field,
-        inline_status_color, labeled_control, mode_button, mode_button_intrinsic_size,
-        output_filename_row, output_filename_row_with_leading, plain_button_text_style,
-        primary_button_enabled, progress_bar, progress_rail_color, select_button,
-        select_menu_intrinsic_width, select_menu_option, selectable_row, selectable_row_visuals,
-        selectable_row_with_accessory, selector_popup_width, show_selector_popup,
+        button_text_style, displayed_progress_fraction, filename_field, inline_status_color,
+        labeled_control, mode_button, mode_button_intrinsic_size, output_filename_row,
+        output_filename_row_with_leading, plain_button_text_style, primary_button_enabled,
+        progress_bar, progress_rail_color, select_button, select_menu_intrinsic_width,
+        select_menu_option, selectable_row, selectable_row_visuals, selectable_row_with_accessory,
+        selector_popup_width, show_selector_popup, switch_control,
     };
     use crate::ui::{fonts, layout, theme};
 
@@ -914,20 +939,21 @@ mod tests {
             });
 
             assert_eq!(control_rect.width(), 86.0);
-            assert_eq!(control_rect.right(), 320.0);
+            assert_eq!(control_rect.right(), 320.0 - theme::READY_TRAILING_INSET);
         });
     }
 
     #[test]
-    fn checkbox_control_uses_a_compact_boolean_hit_target() {
+    fn switch_control_uses_shared_geometry_and_checkbox_semantics() {
         egui::__run_test_ui(|ui| {
             ui.set_width(320.0);
             let mut checked = false;
-            let response = checkbox_control(ui, "Normalize output loudness", &mut checked);
+            let response = switch_control(ui, "Normalize output loudness", &mut checked);
 
             assert!(response.sense.senses_click());
             assert!(response.sense.is_focusable());
-            assert!(response.rect.height() <= theme::COMPACT_CONTROL_HEIGHT);
+            assert_eq!(response.rect.width(), theme::TOGGLE_SWITCH_WIDTH);
+            assert_eq!(response.rect.height(), theme::TOGGLE_SWITCH_HEIGHT);
             assert!(!checked);
         });
     }
@@ -1394,6 +1420,10 @@ mod tests {
                 match expected_layout {
                     layout::TrackRowLayout::Inline => {
                         assert!(row.selection.rect.right() < row.accessory.left());
+                        assert_eq!(
+                            row.accessory.right(),
+                            rect.right() - theme::READY_TRAILING_INSET
+                        );
                     }
                     layout::TrackRowLayout::Stacked => {
                         assert!(row.selection.rect.bottom() < row.accessory.top());

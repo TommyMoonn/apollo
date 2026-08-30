@@ -36,6 +36,10 @@ pub const SELECTABLE_ROW_HORIZONTAL_PADDING: f32 = 5.0;
 pub const SELECTABLE_ROW_INDICATOR_COLUMN: f32 = 18.0;
 pub const SELECTABLE_ROW_CONTENT_GAP: f32 = 8.0;
 pub const TRACK_GAIN_CONTROL_WIDTH: f32 = 86.0;
+pub const READY_TRAILING_INSET: f32 = SELECTABLE_ROW_HORIZONTAL_PADDING;
+pub const TOGGLE_SWITCH_WIDTH: f32 = 34.0;
+pub const TOGGLE_SWITCH_HEIGHT: f32 = 18.0;
+pub const TOGGLE_SWITCH_KNOB_SIZE: f32 = 12.0;
 pub const MODE_BUTTON_HORIZONTAL_PADDING: f32 = 13.0;
 pub const SOURCE_HEADER_GAP: f32 = 14.0;
 pub const INLINE_ACTION_GAP: f32 = 10.0;
@@ -309,10 +313,11 @@ mod tests {
         DIAGNOSTIC_TOP_GAP, DISABLED, FOCUS, FOCUS_OFFSET, FOCUS_STROKE_WIDTH, FOOTER_ACTION_GAP,
         FOREGROUND, HOVER, InteractionState, MODE_BUTTON_HORIZONTAL_PADDING, PRESSED,
         PRIMARY_CONTROL_HEIGHT, PRIMARY_HOVER, PRIMARY_PRESSED, PROGRESS, PROGRESS_RADIUS,
-        RESULT_FOOTER_GAP, RUNNING_FOOTER_GAP, SECONDARY, SECONDARY_FAINT,
+        READY_TRAILING_INSET, RESULT_FOOTER_GAP, RUNNING_FOOTER_GAP, SECONDARY, SECONDARY_FAINT,
         SELECTABLE_ROW_CONTENT_GAP, SELECTABLE_ROW_HORIZONTAL_PADDING,
         SELECTABLE_ROW_INDICATOR_COLUMN, SELECTABLE_ROW_MIN_HEIGHT, SELECTION,
         SELECTION_INDICATOR_SIZE, SEPARATOR, SEPARATOR_WIDTH, SPACING, STATUS_COPY_GAP,
+        TOGGLE_SWITCH_HEIGHT, TOGGLE_SWITCH_KNOB_SIZE, TOGGLE_SWITCH_WIDTH,
         TRACK_GAIN_CONTROL_WIDTH, ThemeRole, apply_to_style, control_colors, monochrome_visuals,
         selectable_colors,
     };
@@ -488,6 +493,10 @@ mod tests {
         assert_eq!(std::hint::black_box(SELECTABLE_ROW_INDICATOR_COLUMN), 18.0);
         assert_eq!(std::hint::black_box(SELECTABLE_ROW_CONTENT_GAP), 8.0);
         assert_eq!(std::hint::black_box(TRACK_GAIN_CONTROL_WIDTH), 86.0);
+        assert_eq!(std::hint::black_box(READY_TRAILING_INSET), 5.0);
+        assert_eq!(std::hint::black_box(TOGGLE_SWITCH_WIDTH), 34.0);
+        assert_eq!(std::hint::black_box(TOGGLE_SWITCH_HEIGHT), 18.0);
+        assert_eq!(std::hint::black_box(TOGGLE_SWITCH_KNOB_SIZE), 12.0);
         assert_eq!(std::hint::black_box(STATUS_COPY_GAP), 6.0);
         assert_eq!(std::hint::black_box(FOOTER_ACTION_GAP), 8.0);
         assert_eq!(std::hint::black_box(RUNNING_FOOTER_GAP), 44.0);

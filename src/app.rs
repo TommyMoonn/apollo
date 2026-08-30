@@ -1344,6 +1344,26 @@ mod tests {
             .any(|clipped| shape_contains_text(&clipped.shape, needle))
     }
 
+    fn shape_text_rect(shape: &egui::Shape, text: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::Shape::Text(shape) if shape.galley.job.text == text => {
+                Some(egui::Rect::from_min_size(shape.pos, shape.galley.size()))
+            }
+            egui::Shape::Vec(shapes) => {
+                shapes.iter().find_map(|shape| shape_text_rect(shape, text))
+            }
+            _ => None,
+        }
+    }
+
+    fn output_text_rect(output: &egui::FullOutput, text: &str) -> egui::Rect {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| shape_text_rect(&clipped.shape, text))
+            .unwrap_or_else(|| panic!("missing rendered text {text:?}"))
+    }
+
     fn terminal_execution_states() -> [AudioMixExecutionState; 3] {
         [
             AudioMixExecutionState::Completed {
@@ -1740,11 +1760,22 @@ mod tests {
         });
 
         assert!(output_contains_text(&output, "Audio tracks"));
-        assert!(output_contains_text(&output, "Normalize output loudness"));
+        assert!(output_contains_text(&output, "Loudness normalization"));
         assert!(!output_contains_text(&output, "Integrated loudness"));
         assert!(output_contains_text(&output, "Mix selected tracks"));
         assert!(output_contains_text(&output, "← Back"));
         assert!(!output_contains_text(&output, "Change"));
+        let audio_tracks = output_text_rect(&output, "Audio tracks");
+        let select_all = output_text_rect(&output, "Select all");
+        let clear = output_text_rect(&output, "Clear");
+        let selected = output_text_rect(&output, "1 selected");
+        let reset_gains = output_text_rect(&output, "Reset gains");
+        let loudness = output_text_rect(&output, "Loudness normalization");
+        assert!((audio_tracks.center().y - select_all.center().y).abs() <= 1.0);
+        assert!((audio_tracks.center().y - clear.center().y).abs() <= 1.0);
+        assert!((selected.center().y - reset_gains.center().y).abs() <= 1.0);
+        assert!(selected.top() > audio_tracks.bottom());
+        assert!(loudness.top() > selected.bottom());
         output.textures_delta.clear();
 
         app.state
