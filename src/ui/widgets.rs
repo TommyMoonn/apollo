@@ -1,7 +1,7 @@
 use egui::{
-    Align, Align2, Color32, CornerRadius, Frame, InnerResponse, Label, Layout, Popup, Rect,
-    Response, RichText, Sense, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder, Vec2,
-    WidgetInfo, WidgetType, pos2, vec2,
+    Align, Align2, Checkbox, Color32, CornerRadius, Frame, InnerResponse, Label, Layout, Popup,
+    Rect, Response, RichText, Sense, Sides, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder,
+    Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 
 use super::{fonts, layout, theme};
@@ -190,6 +190,42 @@ pub fn plain_button(ui: &mut Ui, label: &str) -> Response {
     );
     paint_keyboard_focus(ui, &response, rect);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, response.enabled(), label));
+    response
+}
+
+/// A full-width label paired with one compact control on the trailing edge.
+pub fn labeled_control<R>(ui: &mut Ui, label: &str, add_control: impl FnOnce(&mut Ui) -> R) -> R {
+    let (_, control) = Sides::new()
+        .height(theme::COMPACT_CONTROL_HEIGHT)
+        .spacing(theme::SPACING.related)
+        .shrink_left()
+        .truncate()
+        .show(ui, |ui| ui.label(label), add_control);
+    control
+}
+
+/// A labeled boolean control that keeps the visible label and checkbox in one hit-target row.
+#[must_use]
+pub fn checkbox_control(ui: &mut Ui, label: &str, checked: &mut bool) -> Response {
+    let (label_response, mut checkbox_response) = Sides::new()
+        .height(theme::COMPACT_CONTROL_HEIGHT)
+        .spacing(theme::SPACING.related)
+        .shrink_left()
+        .truncate()
+        .show(
+            ui,
+            |ui| ui.add(Label::new(label).sense(Sense::click())),
+            |ui| ui.add(Checkbox::without_text(checked)),
+        );
+
+    if label_response.clicked() {
+        *checked = !*checked;
+        checkbox_response.mark_changed();
+    }
+    let response = checkbox_response.union(label_response);
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::Checkbox, response.enabled(), *checked, label)
+    });
     response
 }
 
@@ -841,12 +877,12 @@ mod tests {
 
     use super::{
         BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
-        button_text_style, displayed_progress_fraction, filename_field, inline_status_color,
-        mode_button, mode_button_intrinsic_size, output_filename_row,
-        output_filename_row_with_leading, plain_button_text_style, primary_button_enabled,
-        progress_bar, progress_rail_color, select_button, select_menu_intrinsic_width,
-        select_menu_option, selectable_row, selectable_row_visuals, selectable_row_with_accessory,
-        selector_popup_width, show_selector_popup,
+        button_text_style, checkbox_control, displayed_progress_fraction, filename_field,
+        inline_status_color, labeled_control, mode_button, mode_button_intrinsic_size,
+        output_filename_row, output_filename_row_with_leading, plain_button_text_style,
+        primary_button_enabled, progress_bar, progress_rail_color, select_button,
+        select_menu_intrinsic_width, select_menu_option, selectable_row, selectable_row_visuals,
+        selectable_row_with_accessory, selector_popup_width, show_selector_popup,
     };
     use crate::ui::{fonts, layout, theme};
 
@@ -866,6 +902,34 @@ mod tests {
         output.drop_without_applying_deltas();
 
         assert_eq!(stem, original);
+    }
+
+    #[test]
+    fn labeled_controls_keep_the_control_on_the_trailing_edge() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(320.0);
+            let control_rect = labeled_control(ui, "Integrated loudness", |ui| {
+                ui.allocate_exact_size(egui::vec2(86.0, 30.0), Sense::click())
+                    .0
+            });
+
+            assert_eq!(control_rect.width(), 86.0);
+            assert_eq!(control_rect.right(), 320.0);
+        });
+    }
+
+    #[test]
+    fn checkbox_control_uses_a_compact_boolean_hit_target() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(320.0);
+            let mut checked = false;
+            let response = checkbox_control(ui, "Normalize output loudness", &mut checked);
+
+            assert!(response.sense.senses_click());
+            assert!(response.sense.is_focusable());
+            assert!(response.rect.height() <= theme::COMPACT_CONTROL_HEIGHT);
+            assert!(!checked);
+        });
     }
 
     #[test]

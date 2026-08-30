@@ -1086,7 +1086,7 @@ mod tests {
     use apollo::{
         audio_mix::{
             execution::AudioMixExecutionState,
-            model::{OutputContainer, TrackGain},
+            model::{LoudnessNormalization, LoudnessTargets, OutputContainer, TrackGain},
         },
         media::{
             error::{MediaError, MediaErrorKind},
@@ -1740,9 +1740,30 @@ mod tests {
         });
 
         assert!(output_contains_text(&output, "Audio tracks"));
+        assert!(output_contains_text(&output, "Normalize output loudness"));
+        assert!(!output_contains_text(&output, "Integrated loudness"));
         assert!(output_contains_text(&output, "Mix selected tracks"));
         assert!(output_contains_text(&output, "← Back"));
         assert!(!output_contains_text(&output, "Change"));
+        output.textures_delta.clear();
+
+        app.state
+            .audio_mix
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_normalization_enabled(true);
+        let mut output = context.run_ui(Default::default(), |ui| {
+            app.show_tool(ui, Tool::AudioMix);
+        });
+        for label in [
+            "Integrated loudness",
+            "Maximum true peak",
+            "Loudness range",
+            "Reset normalization targets",
+        ] {
+            assert!(output_contains_text(&output, label), "missing {label}");
+        }
         output.textures_delta.clear();
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2225,6 +2246,13 @@ mod tests {
         session
             .selection
             .set_custom_output_path(custom_output.clone());
+        let normalization_targets = LoudnessTargets::from_tenths(-205, -8, 145);
+        assert!(
+            session
+                .selection
+                .set_normalization_targets(normalization_targets)
+        );
+        session.selection.set_normalization_enabled(true);
 
         app.handle_audio_mix_action(AudioMixSelectionAction::Back, egui::Context::default())
             .unwrap();
@@ -2251,6 +2279,15 @@ mod tests {
         assert_eq!(session.selection.container(), OutputContainer::Mkv);
         assert_eq!(session.selection.output_path(), custom_output);
         assert!(session.selection.output_is_customized());
+        assert!(session.selection.normalization_enabled());
+        assert_eq!(
+            session.selection.normalization_targets(),
+            normalization_targets
+        );
+        assert_eq!(
+            session.selection.request(&session.media).normalization,
+            LoudnessNormalization::Enabled(normalization_targets)
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2308,6 +2345,13 @@ mod tests {
         app.load_media_path_with_probe(&first, |path| Ok(media(path)));
         app.select_tool(Tool::AudioMix);
         assert!(app.state.audio_mix.is_some());
+        let old_audio_mix = app.state.audio_mix.as_mut().unwrap();
+        old_audio_mix.selection.set_normalization_enabled(true);
+        assert!(
+            old_audio_mix
+                .selection
+                .set_normalization_targets(LoudnessTargets::from_tenths(-220, -9, 135))
+        );
         app.select_tool(Tool::VideoUpscale);
         let old_output = directory.join("old-custom.mp4");
         app.state
@@ -2350,6 +2394,11 @@ mod tests {
                 .selected_tracks
                 .iter()
                 .all(|track| track.gain == TrackGain::ZERO)
+        );
+        assert!(!audio_mix.selection.normalization_enabled());
+        assert_eq!(
+            audio_mix.selection.normalization_targets(),
+            LoudnessTargets::default()
         );
         fs::remove_dir_all(directory).unwrap();
     }

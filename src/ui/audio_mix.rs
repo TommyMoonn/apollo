@@ -13,7 +13,8 @@ use egui::{
 use crate::{
     audio_mix::{
         model::{
-            AudioMixRequest, LoudnessNormalization, OutputContainer, SelectedAudioTrack, TrackGain,
+            AudioMixRequest, LoudnessNormalization, LoudnessTargets, OutputContainer,
+            SelectedAudioTrack, TrackGain,
         },
         validation::{AudioMixValidationError, validate_audio_mix_request},
     },
@@ -32,6 +33,11 @@ const BACK_LABEL: &str = "← Back";
 const SELECT_ALL_LABEL: &str = "Select all";
 const CLEAR_LABEL: &str = "Clear";
 const RESET_GAINS_LABEL: &str = "Reset gains";
+const NORMALIZE_LABEL: &str = "Normalize output loudness";
+const INTEGRATED_LOUDNESS_LABEL: &str = "Integrated loudness";
+const MAXIMUM_TRUE_PEAK_LABEL: &str = "Maximum true peak";
+const LOUDNESS_RANGE_LABEL: &str = "Loudness range";
+const RESET_NORMALIZATION_LABEL: &str = "Reset normalization targets";
 const BROWSE_LABEL: &str = "Browse";
 const MIX_LABEL: &str = "Mix selected tracks";
 const CONTAINER_OPTIONS: [&str; 2] = ["MP4", "MKV"];
@@ -41,6 +47,8 @@ const CONTAINER_OPTIONS: [&str; 2] = ["MP4", "MKV"];
 pub struct AudioMixSelectionState {
     selected_streams: BTreeSet<u32>,
     track_gains: BTreeMap<u32, TrackGain>,
+    normalization_enabled: bool,
+    normalization_targets: LoudnessTargets,
     container: OutputContainer,
     output_name: OutputNameState,
 }
@@ -101,6 +109,8 @@ impl AudioMixSelectionState {
                 .iter()
                 .map(|stream| (stream.stream_index, TrackGain::default()))
                 .collect(),
+            normalization_enabled: false,
+            normalization_targets: LoudnessTargets::default(),
             container: OutputContainer::Mp4,
             output_name: OutputNameState::new(&media.path, default_output_stem(&media.path)),
         }
@@ -132,6 +142,34 @@ impl AudioMixSelectionState {
 
     pub fn track_gain(&self, stream_index: u32) -> Option<TrackGain> {
         self.track_gains.get(&stream_index).copied()
+    }
+
+    pub fn normalization_enabled(&self) -> bool {
+        self.normalization_enabled
+    }
+
+    pub fn normalization_targets(&self) -> LoudnessTargets {
+        self.normalization_targets
+    }
+
+    pub fn set_normalization_enabled(&mut self, enabled: bool) {
+        self.normalization_enabled = enabled;
+    }
+
+    pub fn set_normalization_targets(&mut self, targets: LoudnessTargets) -> bool {
+        if !targets.integrated_loudness_is_valid()
+            || !targets.maximum_true_peak_is_valid()
+            || !targets.loudness_range_is_valid()
+        {
+            return false;
+        }
+
+        self.normalization_targets = targets;
+        true
+    }
+
+    pub fn reset_normalization_targets(&mut self) {
+        self.normalization_targets = LoudnessTargets::default();
     }
 
     pub fn can_mix(&self, media: &MediaFile) -> bool {
@@ -234,7 +272,11 @@ impl AudioMixSelectionState {
                     )
                 })
                 .collect(),
-            normalization: LoudnessNormalization::Off,
+            normalization: if self.normalization_enabled {
+                LoudnessNormalization::Enabled(self.normalization_targets)
+            } else {
+                LoudnessNormalization::Off
+            },
             container: self.container,
         }
     }
@@ -267,6 +309,7 @@ pub fn show(
             presentation,
             presentation.tracks.is_empty(),
             has_validation_feedback,
+            state.normalization_enabled(),
         ),
         list_content_height,
         track_row_height,
@@ -287,7 +330,11 @@ pub fn show(
         show_track_actions(ui, media, state);
         ui.add_space(theme::SPACING.section);
 
-        let _ = widgets::section_label(ui, OUTPUT_LABEL);
+        show_output_header(ui, state);
+        if state.normalization_enabled() {
+            ui.add_space(theme::SPACING.compact);
+            show_normalization_targets(ui, state);
+        }
         ui.add_space(theme::SPACING.compact);
         let output_action = show_output_row(ui, media, state);
         if output_action != AudioMixSelectionAction::None {
@@ -446,6 +493,7 @@ fn audio_mix_fixed_flow_height(
     presentation: &AudioMixPresentation,
     track_list_empty: bool,
     has_validation_feedback: bool,
+    normalization_enabled: bool,
 ) -> f32 {
     let section_label_height = ui.text_style_height(&TextStyle::Small);
     let source_header_height = source_header_height(ui, presentation.source_metadata.is_some());
@@ -474,12 +522,21 @@ fn audio_mix_fixed_flow_height(
         + theme::INLINE_ACTION_GAP
         + theme::COMPACT_CONTROL_HEIGHT
         + theme::SPACING.section
-        + section_label_height
+        + theme::COMPACT_CONTROL_HEIGHT.max(section_label_height)
+        + normalization_targets_height(normalization_enabled)
         + theme::SPACING.compact
         + output_row_height
         + feedback_height
         + theme::SPACING.related
         + theme::PRIMARY_CONTROL_HEIGHT
+}
+
+fn normalization_targets_height(enabled: bool) -> f32 {
+    if enabled {
+        theme::SPACING.compact + theme::COMPACT_CONTROL_HEIGHT * 4.0 + theme::SPACING.tight * 3.0
+    } else {
+        0.0
+    }
 }
 
 fn source_header_height(ui: &Ui, has_metadata: bool) -> f32 {
@@ -518,6 +575,112 @@ fn show_track_actions(ui: &mut Ui, media: &MediaFile, state: &mut AudioMixSelect
             );
         },
     );
+}
+
+fn show_output_header(ui: &mut Ui, state: &mut AudioMixSelectionState) {
+    let mut enabled = state.normalization_enabled();
+    let (_, response) = Sides::new()
+        .height(theme::COMPACT_CONTROL_HEIGHT)
+        .spacing(theme::SPACING.related)
+        .shrink_left()
+        .truncate()
+        .show(
+            ui,
+            |ui| widgets::section_label(ui, OUTPUT_LABEL),
+            |ui| widgets::checkbox_control(ui, NORMALIZE_LABEL, &mut enabled),
+        );
+
+    if response.changed() {
+        state.set_normalization_enabled(enabled);
+    }
+}
+
+fn show_normalization_targets(ui: &mut Ui, state: &mut AudioMixSelectionState) {
+    let targets = state.normalization_targets();
+    let (integrated_response, integrated) = normalization_target_control(
+        ui,
+        INTEGRATED_LOUDNESS_LABEL,
+        targets.integrated_loudness_tenths(),
+        LoudnessTargets::MIN_INTEGRATED_LOUDNESS_TENTHS,
+        LoudnessTargets::MAX_INTEGRATED_LOUDNESS_TENTHS,
+        5,
+        " LUFS",
+    );
+    ui.add_space(theme::SPACING.tight);
+    let (true_peak_response, true_peak) = normalization_target_control(
+        ui,
+        MAXIMUM_TRUE_PEAK_LABEL,
+        targets.maximum_true_peak_tenths(),
+        LoudnessTargets::MIN_MAXIMUM_TRUE_PEAK_TENTHS,
+        LoudnessTargets::MAX_MAXIMUM_TRUE_PEAK_TENTHS,
+        1,
+        " dBTP",
+    );
+    ui.add_space(theme::SPACING.tight);
+    let (range_response, range) = normalization_target_control(
+        ui,
+        LOUDNESS_RANGE_LABEL,
+        targets.loudness_range_tenths(),
+        LoudnessTargets::MIN_LOUDNESS_RANGE_TENTHS,
+        LoudnessTargets::MAX_LOUDNESS_RANGE_TENTHS,
+        5,
+        " LU",
+    );
+
+    if integrated_response.changed() || true_peak_response.changed() || range_response.changed() {
+        let _ = state
+            .set_normalization_targets(LoudnessTargets::from_tenths(integrated, true_peak, range));
+    }
+
+    ui.add_space(theme::SPACING.tight);
+    if widgets::plain_button(ui, RESET_NORMALIZATION_LABEL).clicked() {
+        state.reset_normalization_targets();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalization_target_control(
+    ui: &mut Ui,
+    label: &str,
+    mut tenths: i16,
+    minimum: i16,
+    maximum: i16,
+    step: i16,
+    suffix: &'static str,
+) -> (Response, i16) {
+    let response = widgets::labeled_control(ui, label, |ui| {
+        ui.add_sized(
+            [
+                theme::TRACK_GAIN_CONTROL_WIDTH,
+                theme::COMPACT_CONTROL_HEIGHT,
+            ],
+            DragValue::new(&mut tenths)
+                .range(minimum..=maximum)
+                .speed(f64::from(step))
+                .custom_formatter(|value, _| format!("{:.1}", value / 10.0))
+                .custom_parser(move |text| {
+                    text.trim()
+                        .strip_suffix(suffix.trim())
+                        .unwrap_or(text)
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .map(|value| value * 10.0)
+                })
+                .suffix(suffix),
+        )
+    });
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::DragValue, response.enabled(), label));
+
+    if response.changed() {
+        tenths = stepped_tenths(tenths, step, minimum, maximum);
+    }
+
+    (response, tenths)
+}
+
+fn stepped_tenths(value: i16, step: i16, minimum: i16, maximum: i16) -> i16 {
+    ((f64::from(value) / f64::from(step)).round() as i16 * step).clamp(minimum, maximum)
 }
 
 fn audio_mix_ready_feedback(error: &AudioMixValidationError) -> Option<&'static str> {
@@ -804,9 +967,12 @@ mod tests {
 
     use super::{
         AudioMixPresentation, AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height,
-        audio_mix_ready_feedback, source_metadata, stepped_track_gain, track_presentations,
+        audio_mix_ready_feedback, source_metadata, stepped_tenths, stepped_track_gain,
+        track_presentations,
     };
-    use crate::audio_mix::model::{OutputContainer, SelectedAudioTrack, TrackGain};
+    use crate::audio_mix::model::{
+        LoudnessNormalization, LoudnessTargets, OutputContainer, SelectedAudioTrack, TrackGain,
+    };
     use crate::ui::{layout, theme};
 
     fn media() -> MediaFile {
@@ -1301,6 +1467,98 @@ mod tests {
     }
 
     #[test]
+    fn new_session_starts_with_normalization_off_and_default_targets() {
+        let state = AudioMixSelectionState::new(&media());
+
+        assert!(!state.normalization_enabled());
+        assert_eq!(state.normalization_targets(), LoudnessTargets::default());
+    }
+
+    #[test]
+    fn normalization_toggle_preserves_edited_targets() {
+        let mut state = AudioMixSelectionState::new(&media());
+        let targets = LoudnessTargets::from_tenths(-235, -7, 185);
+        assert!(state.set_normalization_targets(targets));
+
+        state.set_normalization_enabled(true);
+        state.set_normalization_enabled(false);
+        state.set_normalization_enabled(true);
+
+        assert!(state.normalization_enabled());
+        assert_eq!(state.normalization_targets(), targets);
+    }
+
+    #[test]
+    fn normalization_request_matches_visible_enabled_targets() {
+        let media = media();
+        let mut state = AudioMixSelectionState::new(&media);
+        let targets = LoudnessTargets::from_tenths(-205, -12, 75);
+        assert!(state.set_normalization_targets(targets));
+
+        assert_eq!(
+            state.request(&media).normalization,
+            LoudnessNormalization::Off
+        );
+        state.set_normalization_enabled(true);
+        assert_eq!(
+            state.request(&media).normalization,
+            LoudnessNormalization::Enabled(targets)
+        );
+    }
+
+    #[test]
+    fn normalization_edits_and_reset_leave_unrelated_audio_mix_state_unchanged() {
+        let media = media();
+        let mut state = AudioMixSelectionState::new(&media);
+        state.toggle_stream(&media, 4);
+        assert!(state.set_track_gain(&media, 1, TrackGain::from_tenths_db(-55)));
+        state.set_container(&media, OutputContainer::Mkv);
+        state.set_output_filename_stem(OsString::from("custom mix"));
+        let unrelated_before = (
+            state.selected_streams.clone(),
+            state.track_gains.clone(),
+            state.container,
+            state.output_name.clone(),
+        );
+
+        state.set_normalization_enabled(true);
+        assert!(state.set_normalization_targets(LoudnessTargets::from_tenths(-220, -8, 145)));
+        state.reset_normalization_targets();
+
+        assert_eq!(state.normalization_targets(), LoudnessTargets::default());
+        assert!(state.normalization_enabled());
+        assert_eq!(
+            (
+                state.selected_streams,
+                state.track_gains,
+                state.container,
+                state.output_name,
+            ),
+            unrelated_before
+        );
+    }
+
+    #[test]
+    fn normalization_state_rejects_targets_outside_domain_bounds() {
+        let mut state = AudioMixSelectionState::new(&media());
+
+        assert!(!state.set_normalization_targets(LoudnessTargets::from_tenths(-701, -15, 110)));
+        assert!(!state.set_normalization_targets(LoudnessTargets::from_tenths(-160, 1, 110)));
+        assert!(!state.set_normalization_targets(LoudnessTargets::from_tenths(-160, -15, 501)));
+        assert_eq!(state.normalization_targets(), LoudnessTargets::default());
+    }
+
+    #[test]
+    fn normalization_ui_steps_and_clamps_each_target_range() {
+        assert_eq!(stepped_tenths(-703, 5, -700, -50), -700);
+        assert_eq!(stepped_tenths(-52, 5, -700, -50), -50);
+        assert_eq!(stepped_tenths(-16, 1, -90, 0), -16);
+        assert_eq!(stepped_tenths(1, 1, -90, 0), 0);
+        assert_eq!(stepped_tenths(12, 5, 10, 500), 10);
+        assert_eq!(stepped_tenths(498, 5, 10, 500), 500);
+    }
+
+    #[test]
     fn source_metadata_uses_dimensions_and_duration() {
         assert_eq!(
             source_metadata(&media()).as_deref(),
@@ -1318,7 +1576,7 @@ mod tests {
             let presentation = AudioMixPresentation::new(&media);
             let usable_height =
                 layout::MINIMUM_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false);
+            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false, false);
             let row_height =
                 layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
                     .row_height;
@@ -1347,7 +1605,7 @@ mod tests {
             let presentation = AudioMixPresentation::new(&media);
             let usable_height =
                 layout::REFERENCE_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false);
+            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false, false);
             let row_height =
                 layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
                     .row_height;
@@ -1378,7 +1636,7 @@ mod tests {
         let output = context.run_ui(Default::default(), |ui| {
             let media = media();
             let presentation = AudioMixPresentation::new(&media);
-            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false);
+            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false, false);
             let row_height =
                 layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
                     .row_height;
@@ -1391,6 +1649,38 @@ mod tests {
             assert_eq!(tall.list.behavior, layout::ListBehavior::Scroll);
             assert!(tall.list.max_height > reference.list.max_height);
             assert_eq!(tall.overflow, layout::TaskOverflow::Flow);
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn enabled_normalization_targets_participate_in_task_surface_height() {
+        let context = egui::Context::default();
+        super::fonts::install(&context);
+
+        let output = context.run_ui(Default::default(), |ui| {
+            let media = media();
+            let presentation = AudioMixPresentation::new(&media);
+            let row_height =
+                layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
+                    .row_height;
+            let off_height = audio_mix_fixed_flow_height(ui, &presentation, false, false, false);
+            let enabled_height = audio_mix_fixed_flow_height(ui, &presentation, false, false, true);
+            let plan = layout::task_surface_plan(
+                off_height + row_height,
+                enabled_height,
+                12.0 * row_height,
+                row_height,
+            );
+
+            assert_eq!(
+                enabled_height - off_height,
+                theme::SPACING.compact
+                    + theme::COMPACT_CONTROL_HEIGHT * 4.0
+                    + theme::SPACING.tight * 3.0
+            );
+            assert_eq!(plan.overflow, layout::TaskOverflow::Scroll);
+            assert!(plan.list.max_height >= row_height);
         });
         output.drop_without_applying_deltas();
     }
@@ -1415,7 +1705,8 @@ mod tests {
             let row_height =
                 layout::track_row_plan(child.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
                     .row_height;
-            let fixed_height = audio_mix_fixed_flow_height(&child, &presentation, false, false);
+            let fixed_height =
+                audio_mix_fixed_flow_height(&child, &presentation, false, false, false);
             let plan = layout::task_surface_plan(
                 fixed_height + row_height - 1.0,
                 fixed_height,
