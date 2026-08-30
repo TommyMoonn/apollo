@@ -20,18 +20,23 @@ use apollo::{
         model::OutputContainer,
     },
     media::{
+        container::MediaContainer,
         error::{MediaError, MediaErrorKind},
         intake::{MediaIntake, MediaIntakeRequest, MediaLoadStart, MediaProbeDisposition},
         model::MediaFile,
         probe::{MediaProbeError, probe_media},
         tools::{MediaTools, MediaToolsError, discover_media_tools},
     },
+    remux::execution::{RemuxExecutionState, RemuxExecutor, RemuxStartError},
     ui::{
         audio_mix as audio_mix_ui,
         audio_mix::{AudioMixPresentation, AudioMixSelectionAction, AudioMixSelectionState},
         audio_mix_progress::{self, AudioMixLifecycleAction, AudioMixLifecycleUiState},
         file_intake::{self, FileIntakeAction, FileIntakeTool},
-        fonts, layout, media_error, theme, upscale as upscale_ui,
+        fonts, layout, media_error, remux as remux_ui,
+        remux::{RemuxSelectionAction, RemuxSelectionState},
+        remux_progress::{self, RemuxLifecycleAction, RemuxLifecycleUiState},
+        theme, upscale as upscale_ui,
         upscale::{UpscaleSelectionAction, UpscaleSelectionState},
         upscale_progress::{self, UpscaleLifecycleAction, UpscaleLifecycleUiState},
         widgets,
@@ -44,16 +49,19 @@ const EXECUTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 fn file_intake_enabled(
     audio_state: &AudioMixExecutionState,
     upscale_state: &UpscaleExecutionState,
+    remux_state: &RemuxExecutionState,
 ) -> bool {
-    // Done/Back owns terminal settlement. Intake resumes only after both executors return to Idle.
+    // Done/Back owns terminal settlement. Intake resumes only after every executor returns to Idle.
     matches!(audio_state, AudioMixExecutionState::Idle)
         && matches!(upscale_state, UpscaleExecutionState::Idle)
+        && matches!(remux_state, RemuxExecutionState::Idle)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {
     AudioMix,
     VideoUpscale,
+    Remux,
 }
 
 impl Tool {
@@ -61,6 +69,7 @@ impl Tool {
         match self {
             Self::AudioMix => FileIntakeTool::AudioMix,
             Self::VideoUpscale => FileIntakeTool::Upscale,
+            Self::Remux => FileIntakeTool::Remux,
         }
     }
 
@@ -68,6 +77,7 @@ impl Tool {
         match tool {
             FileIntakeTool::AudioMix => Self::AudioMix,
             FileIntakeTool::Upscale => Self::VideoUpscale,
+            FileIntakeTool::Remux => Self::Remux,
         }
     }
 }
@@ -94,6 +104,16 @@ struct UpscaleToolState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct RemuxToolState {
+    session_id: u64,
+    media: MediaFile,
+    selection: RemuxSelectionState,
+    lifecycle_ui: RemuxLifecycleUiState,
+    start_error: Option<MediaError>,
+    start_error_details_open: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AppState {
     current_tool: Tool,
     intake_active: bool,
@@ -102,6 +122,7 @@ struct AppState {
     media_intake: MediaIntake,
     audio_mix: Option<AudioMixToolState>,
     upscale: Option<UpscaleToolState>,
+    remux: Option<RemuxToolState>,
 }
 
 impl Default for AppState {
@@ -114,6 +135,7 @@ impl Default for AppState {
             media_intake: MediaIntake::default(),
             audio_mix: None,
             upscale: None,
+            remux: None,
         }
     }
 }
@@ -203,6 +225,7 @@ impl AppState {
     fn retire_tool_sessions(&mut self) {
         self.audio_mix = None;
         self.upscale = None;
+        self.remux = None;
     }
 }
 
@@ -212,6 +235,7 @@ pub(crate) struct ApolloApp {
     media_tools_discovery: Option<MediaToolsDiscovery>,
     audio_mix_executor: AudioMixExecutor,
     upscale_executor: UpscaleExecutor,
+    remux_executor: RemuxExecutor,
     media_inspection: Option<MediaInspection>,
     file_dialog: FileDialogOwner,
     native_window_owner: Result<WindowOwner, String>,
@@ -235,6 +259,7 @@ impl ApolloApp {
             media_tools_discovery: None,
             audio_mix_executor: AudioMixExecutor::new(),
             upscale_executor: UpscaleExecutor::new(),
+            remux_executor: RemuxExecutor::new(),
             media_inspection: None,
             file_dialog: FileDialogOwner::default(),
             native_window_owner: WindowOwner::from_window(creation_context),
@@ -260,6 +285,7 @@ impl ApolloApp {
             && file_intake_enabled(
                 self.audio_mix_executor.state(),
                 self.upscale_executor.state(),
+                self.remux_executor.state(),
             )
     }
 
@@ -310,6 +336,24 @@ impl ApolloApp {
                         session_id,
                         selection: UpscaleSelectionState::new(&media),
                         lifecycle_ui: UpscaleLifecycleUiState::default(),
+                        start_error: None,
+                        start_error_details_open: false,
+                        media,
+                    });
+                }
+            }
+            Tool::Remux => {
+                if !self
+                    .state
+                    .remux
+                    .as_ref()
+                    .is_some_and(|session| session.media == media)
+                {
+                    let session_id = self.take_session_id();
+                    self.state.remux = Some(RemuxToolState {
+                        session_id,
+                        selection: RemuxSelectionState::new(&media),
+                        lifecycle_ui: RemuxLifecycleUiState::default(),
                         start_error: None,
                         start_error_details_open: false,
                         media,
@@ -450,6 +494,7 @@ impl ApolloApp {
         match tool {
             Tool::AudioMix if self.state.audio_mix.is_some() => self.show_audio_mix_tool(ui),
             Tool::VideoUpscale if self.state.upscale.is_some() => self.show_upscale_tool(ui),
+            Tool::Remux if self.state.remux.is_some() => self.show_remux_tool(ui),
             _ => self.show_file_intake(ui, tool),
         }
     }
@@ -850,6 +895,121 @@ impl ApolloApp {
         }
     }
 
+    fn show_remux_tool(&mut self, ui: &mut Ui) {
+        if shows_remux_lifecycle(self.remux_executor.state()) {
+            let action = {
+                let remux = self
+                    .state
+                    .remux
+                    .as_mut()
+                    .expect("remux source exists while lifecycle surface is shown");
+                let request = remux.selection.request(&remux.media);
+                remux_progress::show(
+                    ui,
+                    &request,
+                    &mut self.remux_executor,
+                    &mut remux.lifecycle_ui,
+                )
+            };
+            if self.remux_executor.is_running() {
+                ui.ctx().request_repaint_after(EXECUTION_REPAINT_INTERVAL);
+            }
+            self.handle_remux_lifecycle_action(action);
+            return;
+        }
+
+        if self.show_remux_start_error(ui) {
+            return;
+        }
+
+        let action = ui
+            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+                let remux = self
+                    .state
+                    .remux
+                    .as_mut()
+                    .expect("remux source exists while ready surface is shown");
+                remux_ui::show(ui, &remux.media, &mut remux.selection)
+            })
+            .inner;
+        if let Err(error) = self.handle_remux_action(action, ui.ctx().clone())
+            && let Some(session) = self.state.remux.as_mut()
+        {
+            session.start_error = Some(error.user_error());
+            session.start_error_details_open = false;
+        }
+    }
+
+    fn show_remux_start_error(&mut self, ui: &mut Ui) -> bool {
+        let Some(session) = self.state.remux.as_mut() else {
+            return false;
+        };
+        let Some(error) = session.start_error.as_ref() else {
+            return false;
+        };
+
+        let title = if error.kind() == MediaErrorKind::OutputPickerUnavailable {
+            "Output picker unavailable"
+        } else {
+            "Remux could not start"
+        };
+        let response = layout::focus_content(ui, |ui| {
+            let mut sizing_details_open = session.start_error_details_open;
+            let details_open = if ui.is_sizing_pass() {
+                &mut sizing_details_open
+            } else {
+                &mut session.start_error_details_open
+            };
+            media_error::show_failure_content(ui, title, error, details_open, "Back")
+        });
+        if response.inner.clicked() {
+            session.start_error = None;
+            session.start_error_details_open = false;
+        }
+        true
+    }
+
+    fn handle_remux_action(
+        &mut self,
+        action: RemuxSelectionAction,
+        context: Context,
+    ) -> Result<(), RemuxStartError> {
+        if self.file_dialog.is_pending() {
+            return Ok(());
+        }
+        match action {
+            RemuxSelectionAction::Back if self.file_intake_enabled() => {
+                self.state.return_to_file_intake(Tool::Remux);
+            }
+            RemuxSelectionAction::BrowseOutput => {
+                let Some(session) = self.state.remux.as_ref() else {
+                    return Ok(());
+                };
+                self.start_file_dialog(remux_output_dialog_request(session), context);
+            }
+            RemuxSelectionAction::RemuxRequested => {
+                let Some(remux) = self.state.remux.as_ref() else {
+                    return Ok(());
+                };
+                let Some(tools) = self.ready_media_tools().cloned() else {
+                    return Ok(());
+                };
+                let request = remux.selection.request(&remux.media);
+                self.remux_executor.start(&tools, &remux.media, &request)?;
+            }
+            RemuxSelectionAction::None | RemuxSelectionAction::Back => {}
+        }
+        Ok(())
+    }
+
+    fn handle_remux_lifecycle_action(&self, action: RemuxLifecycleAction) {
+        if let RemuxLifecycleAction::OpenFolder(path) = action
+            && let Err(error) = open_folder(&path)
+        {
+            eprintln!("Remux output folder could not be opened: {error}");
+        }
+    }
+
     fn start_file_dialog(&mut self, request: FileDialogRequest, context: Context) {
         let target = request.target();
         if let Err(error) =
@@ -884,6 +1044,7 @@ impl ApolloApp {
                 &mut self.state,
                 self.audio_mix_executor.state(),
                 self.upscale_executor.state(),
+                self.remux_executor.state(),
                 target,
                 outcome,
             ),
@@ -895,6 +1056,7 @@ fn settle_output_file_dialog(
     state: &mut AppState,
     audio_execution: &AudioMixExecutionState,
     upscale_execution: &UpscaleExecutionState,
+    remux_execution: &RemuxExecutionState,
     target: DialogTarget,
     outcome: DialogOutcome,
 ) {
@@ -942,6 +1104,31 @@ fn settle_output_file_dialog(
         {
             if let Some(session) = state
                 .upscale
+                .as_mut()
+                .filter(|session| session.session_id == session_id)
+            {
+                session.start_error = Some(MediaError::output_picker_unavailable(diagnostic));
+                session.start_error_details_open = false;
+            }
+        }
+        (DialogTarget::RemuxOutput { session_id }, DialogOutcome::Selected(path))
+            if matches!(remux_execution, RemuxExecutionState::Idle) =>
+        {
+            if let Some(session) = state
+                .remux
+                .as_mut()
+                .filter(|session| session.session_id == session_id)
+            {
+                session.selection.set_custom_output_path(path);
+                session.start_error = None;
+                session.start_error_details_open = false;
+            }
+        }
+        (DialogTarget::RemuxOutput { session_id }, DialogOutcome::Failed(diagnostic))
+            if matches!(remux_execution, RemuxExecutionState::Idle) =>
+        {
+            if let Some(session) = state
+                .remux
                 .as_mut()
                 .filter(|session| session.session_id == session_id)
             {
@@ -1002,12 +1189,30 @@ fn upscale_output_dialog_request(session: &UpscaleToolState) -> FileDialogReques
     )
 }
 
+fn remux_output_dialog_request(session: &RemuxToolState) -> FileDialogRequest {
+    let format = match session.selection.container() {
+        MediaContainer::Mp4 => OutputFormat::Mp4,
+        MediaContainer::Matroska => OutputFormat::Mkv,
+    };
+    output_dialog_request(
+        DialogTarget::RemuxOutput {
+            session_id: session.session_id,
+        },
+        &session.selection.output_path(),
+        format,
+    )
+}
+
 fn shows_audio_mix_lifecycle(state: &AudioMixExecutionState) -> bool {
     !matches!(state, AudioMixExecutionState::Idle)
 }
 
 fn shows_upscale_lifecycle(state: &UpscaleExecutionState) -> bool {
     !matches!(state, UpscaleExecutionState::Idle)
+}
+
+fn shows_remux_lifecycle(state: &RemuxExecutionState) -> bool {
+    !matches!(state, RemuxExecutionState::Idle)
 }
 
 fn open_folder(path: &Path) -> io::Result<()> {
@@ -1076,8 +1281,9 @@ mod tests {
 
     use super::{
         ApolloApp, AppState, MediaInspection, MediaToolsState, Tool,
-        audio_mix_output_dialog_request, file_intake_enabled, settle_output_file_dialog,
-        shows_audio_mix_lifecycle, shows_upscale_lifecycle,
+        audio_mix_output_dialog_request, file_intake_enabled, remux_output_dialog_request,
+        settle_output_file_dialog, shows_audio_mix_lifecycle, shows_remux_lifecycle,
+        shows_upscale_lifecycle,
     };
     use crate::file_dialog::{
         DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
@@ -1089,15 +1295,20 @@ mod tests {
             model::{LoudnessNormalization, LoudnessTargets, OutputContainer, TrackGain},
         },
         media::{
+            container::MediaContainer,
             error::{MediaError, MediaErrorKind},
             execution::MediaExecutionFailure,
             intake::MediaLoadStart,
-            model::{AudioStream, FrameRate, MediaFile, VideoStream},
+            model::{AudioStream, FrameRate, MediaFile, MediaStream, StreamKind, VideoStream},
             probe::MediaProbeError,
             process::MediaProcessFailure,
             tools::{MediaTools, MediaToolsError},
         },
-        ui::{audio_mix::AudioMixSelectionAction, fonts, theme, upscale::UpscaleSelectionAction},
+        remux::execution::RemuxExecutionState,
+        ui::{
+            audio_mix::AudioMixSelectionAction, fonts, remux::RemuxSelectionAction, theme,
+            upscale::UpscaleSelectionAction,
+        },
         upscale::{
             execution::UpscaleExecutionState,
             model::{UpscaleTarget, VideoCodec},
@@ -1137,7 +1348,18 @@ mod tests {
         MediaFile {
             path: path.to_path_buf(),
             duration: None,
-            streams: Vec::new(),
+            streams: vec![
+                MediaStream {
+                    stream_index: 0,
+                    kind: StreamKind::Video,
+                    codec: Some("h264".to_owned()),
+                },
+                MediaStream {
+                    stream_index: 1,
+                    kind: StreamKind::Audio,
+                    codec: Some("aac".to_owned()),
+                },
+            ],
             video_streams: vec![VideoStream {
                 stream_index: 0,
                 codec: Some("h264".to_owned()),
@@ -1167,6 +1389,7 @@ mod tests {
             media_tools_discovery: None,
             audio_mix_executor: apollo::audio_mix::execution::AudioMixExecutor::new(),
             upscale_executor: apollo::upscale::execution::UpscaleExecutor::new(),
+            remux_executor: apollo::remux::execution::RemuxExecutor::new(),
             media_inspection: None,
             file_dialog: FileDialogOwner::default(),
             native_window_owner: Ok(WindowOwner::test_value()),
@@ -1634,6 +1857,7 @@ mod tests {
         assert!(file_intake_enabled(
             app.audio_mix_executor.state(),
             app.upscale_executor.state(),
+            app.remux_executor.state(),
         ));
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
 
@@ -1742,6 +1966,35 @@ mod tests {
         assert!(output_contains_text(&output, "Actual output"));
         assert!(output_contains_text(&output, "← Back"));
         assert!(!output_contains_text(&output, "Change"));
+        output.textures_delta.clear();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn opening_remux_source_renders_ready_surface() {
+        let (directory, path) = temp_file("remux-ready-render");
+        let mut app = app();
+        app.select_tool(Tool::Remux);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+
+        let mut output = context.run_ui(Default::default(), |ui| {
+            app.show_tool(ui, Tool::Remux);
+        });
+
+        for text in [
+            "recording.mkv",
+            "2 streams",
+            "Container",
+            "MKV",
+            "Output",
+            "Remux",
+            "← Back",
+        ] {
+            assert!(output_contains_text(&output, text), "missing {text:?}");
+        }
         output.textures_delta.clear();
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1866,6 +2119,41 @@ mod tests {
     }
 
     #[test]
+    fn remux_output_dialog_request_follows_current_container() {
+        let (directory, path) = temp_file("remux-browse");
+        let mut app = app();
+        app.select_tool(Tool::Remux);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+
+        let session = app.state.remux.as_ref().unwrap();
+        let FileDialogRequest::SaveOutput { target, options } =
+            remux_output_dialog_request(session)
+        else {
+            panic!("remux browse must create a save request");
+        };
+        assert_eq!(
+            target,
+            DialogTarget::RemuxOutput {
+                session_id: session.session_id,
+            }
+        );
+        assert_eq!(options.initial_directory, directory);
+        assert_eq!(options.file_name, "recording-remuxed.mkv");
+        assert_eq!(options.format, OutputFormat::Mkv);
+
+        let session = app.state.remux.as_mut().unwrap();
+        session.selection.set_container(MediaContainer::Mp4);
+        let FileDialogRequest::SaveOutput { options, .. } = remux_output_dialog_request(session)
+        else {
+            unreachable!();
+        };
+        assert_eq!(options.file_name, "recording-remuxed.mp4");
+        assert_eq!(options.format, OutputFormat::Mp4);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn selected_output_paths_route_to_the_owning_tool() {
         let (directory, path) = temp_file("upscale-browse");
         let mut app = app();
@@ -1903,6 +2191,47 @@ mod tests {
                 .output_path(),
             audio_destination
         );
+
+        app.select_tool(Tool::Remux);
+        let remux_session_id = app.state.remux.as_ref().unwrap().session_id;
+        let remux_destination = directory.join("chosen remux.mkv");
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::RemuxOutput {
+                session_id: remux_session_id,
+            },
+            outcome: DialogOutcome::Selected(remux_destination.clone()),
+        });
+        assert_eq!(
+            app.state.remux.as_ref().unwrap().selection.output_path(),
+            remux_destination
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_remux_output_completion_cannot_mutate_replacement_session() {
+        let (directory, first) = temp_file("stale-remux");
+        let second = directory.join("replacement.mkv");
+        fs::write(&second, b"replacement").unwrap();
+        let mut app = app();
+        app.select_tool(Tool::Remux);
+        app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        let stale_session_id = app.state.remux.as_ref().unwrap().session_id;
+
+        app.state.return_to_file_intake(Tool::Remux);
+        app.load_media_path_with_probe(&second, |path| Ok(media(path)));
+        let replacement_before = app.state.remux.as_ref().unwrap().selection.output_path();
+
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::RemuxOutput {
+                session_id: stale_session_id,
+            },
+            outcome: DialogOutcome::Selected(directory.join("stale-result.mkv")),
+        });
+
+        let replacement = app.state.remux.as_ref().unwrap();
+        assert_ne!(replacement.session_id, stale_session_id);
+        assert_eq!(replacement.selection.output_path(), replacement_before);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2039,6 +2368,7 @@ mod tests {
             &mut app.state,
             &AudioMixExecutionState::Running,
             &UpscaleExecutionState::Idle,
+            &RemuxExecutionState::Idle,
             DialogTarget::AudioMixOutput {
                 session_id: audio_id,
             },
@@ -2061,6 +2391,7 @@ mod tests {
             &mut app.state,
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Running,
+            &RemuxExecutionState::Idle,
             DialogTarget::UpscaleOutput {
                 session_id: upscale_id,
             },
@@ -2193,6 +2524,31 @@ mod tests {
     }
 
     #[test]
+    fn remux_intent_reaches_executor() {
+        let (directory, path) = temp_file("remux-execute");
+        let mut app = app();
+        app.select_tool(Tool::Remux);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+
+        let error = app
+            .handle_remux_action(
+                RemuxSelectionAction::RemuxRequested,
+                egui::Context::default(),
+            )
+            .expect_err("missing test FFmpeg should prove the execution path was attempted");
+
+        assert!(matches!(
+            error,
+            apollo::remux::execution::RemuxStartError::Process(
+                apollo::media::process::MediaProcessStartError::ProcessLaunchFailed(
+                    std::io::ErrorKind::NotFound
+                )
+            )
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn upscale_execution_state_routes_running_and_terminal_surfaces_to_lifecycle_ui() {
         use apollo::media::{execution::MediaExecutionFailure, process::MediaProcessFailure};
 
@@ -2208,6 +2564,22 @@ mod tests {
             }
         )));
         assert!(shows_upscale_lifecycle(&UpscaleExecutionState::Cancelled));
+    }
+
+    #[test]
+    fn remux_execution_state_routes_running_and_terminal_surfaces_to_lifecycle_ui() {
+        assert!(!shows_remux_lifecycle(&RemuxExecutionState::Idle));
+        assert!(shows_remux_lifecycle(&RemuxExecutionState::Running));
+        assert!(shows_remux_lifecycle(&RemuxExecutionState::Completed {
+            output: PathBuf::from("recording-remuxed.mkv"),
+        }));
+        assert!(shows_remux_lifecycle(&RemuxExecutionState::Failed(
+            MediaExecutionFailure::Process {
+                reason: MediaProcessFailure::Exit(Some(1)),
+                diagnostic: String::new(),
+            }
+        )));
+        assert!(shows_remux_lifecycle(&RemuxExecutionState::Cancelled));
     }
 
     #[test]
@@ -2368,6 +2740,44 @@ mod tests {
     }
 
     #[test]
+    fn remux_back_returns_to_intake_and_same_source_restores_ready_state() {
+        let (directory, path) = temp_file("remux-back");
+        let mut app = app();
+        app.select_tool(Tool::Remux);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let session = app
+            .state
+            .remux
+            .as_mut()
+            .expect("remux session should exist");
+        session.selection.set_container(MediaContainer::Mp4);
+        let custom_output = directory.join("custom-remux.mp4");
+        session
+            .selection
+            .set_custom_output_path(custom_output.clone());
+
+        app.handle_remux_action(RemuxSelectionAction::Back, egui::Context::default())
+            .unwrap();
+        assert!(app.state.intake_active);
+        assert_eq!(app.state.current_tool, Tool::Remux);
+
+        app.load_media_path_with_probe(&path, |_| -> Result<MediaFile, MediaProbeError> {
+            panic!("unchanged cached source must not be probed again")
+        });
+
+        let session = app
+            .state
+            .remux
+            .as_ref()
+            .expect("same-source Remux session should be restored");
+        assert!(!app.state.intake_active);
+        assert_eq!(session.selection.container(), MediaContainer::Mp4);
+        assert_eq!(session.selection.output_path(), custom_output);
+        assert!(session.selection.output_is_customized());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn replacement_source_retires_preserved_ready_sessions() {
         let (directory, first) = temp_file("replace-after-back");
         let second = directory.join("replacement.mkv");
@@ -2456,21 +2866,30 @@ mod tests {
     fn lifecycle_routing_remains_operation_specific() {
         assert!(!shows_audio_mix_lifecycle(&AudioMixExecutionState::Idle));
         assert!(!shows_upscale_lifecycle(&UpscaleExecutionState::Idle));
+        assert!(!shows_remux_lifecycle(&RemuxExecutionState::Idle));
     }
 
     #[test]
-    fn file_drop_policy_disables_replacement_while_either_operation_runs() {
+    fn file_drop_policy_disables_replacement_while_any_operation_runs() {
         assert!(file_intake_enabled(
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Idle,
+            &RemuxExecutionState::Idle,
         ));
         assert!(!file_intake_enabled(
             &AudioMixExecutionState::Running,
             &UpscaleExecutionState::Idle,
+            &RemuxExecutionState::Idle,
         ));
         assert!(!file_intake_enabled(
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Running,
+            &RemuxExecutionState::Idle,
+        ));
+        assert!(!file_intake_enabled(
+            &AudioMixExecutionState::Idle,
+            &UpscaleExecutionState::Idle,
+            &RemuxExecutionState::Running,
         ));
     }
 
@@ -2493,14 +2912,22 @@ mod tests {
     #[test]
     fn audio_mix_terminal_states_reject_source_replacement() {
         for state in terminal_execution_states() {
-            assert!(!file_intake_enabled(&state, &UpscaleExecutionState::Idle,));
+            assert!(!file_intake_enabled(
+                &state,
+                &UpscaleExecutionState::Idle,
+                &RemuxExecutionState::Idle,
+            ));
         }
     }
 
     #[test]
     fn upscale_terminal_states_reject_source_replacement() {
         for state in terminal_execution_states() {
-            assert!(!file_intake_enabled(&AudioMixExecutionState::Idle, &state,));
+            assert!(!file_intake_enabled(
+                &AudioMixExecutionState::Idle,
+                &state,
+                &RemuxExecutionState::Idle,
+            ));
         }
     }
 
@@ -2512,11 +2939,13 @@ mod tests {
         assert!(!file_intake_enabled(
             &completed,
             &UpscaleExecutionState::Idle,
+            &RemuxExecutionState::Idle,
         ));
 
         assert!(file_intake_enabled(
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Idle,
+            &RemuxExecutionState::Idle,
         ));
     }
 }

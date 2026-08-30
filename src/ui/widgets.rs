@@ -673,6 +673,18 @@ pub fn inline_status(ui: &mut Ui, text: &str, kind: InlineStatusKind) -> Respons
     ui.add(Label::new(RichText::new(text).text_style(TextStyle::Body).color(color)).wrap())
 }
 
+pub fn inline_status_height(ui: &Ui, text: &str, wrap_width: f32) -> f32 {
+    ui.painter()
+        .layout(
+            text.to_owned(),
+            TextStyle::Body.resolve(ui.style()),
+            theme::FOREGROUND,
+            wrap_width.max(0.0),
+        )
+        .size()
+        .y
+}
+
 fn inline_status_color(kind: InlineStatusKind) -> Color32 {
     match kind {
         InlineStatusKind::Status => theme::SECONDARY,
@@ -902,12 +914,13 @@ mod tests {
 
     use super::{
         BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
-        button_text_style, displayed_progress_fraction, filename_field, inline_status_color,
-        labeled_control, mode_button, mode_button_intrinsic_size, output_filename_row,
-        output_filename_row_with_leading, plain_button_text_style, primary_button_enabled,
-        progress_bar, progress_rail_color, select_button, select_menu_intrinsic_width,
-        select_menu_option, selectable_row, selectable_row_visuals, selectable_row_with_accessory,
-        selector_popup_width, show_selector_popup, switch_control,
+        button_text_style, displayed_progress_fraction, filename_field, inline_status,
+        inline_status_color, inline_status_height, labeled_control, mode_button,
+        mode_button_intrinsic_size, output_filename_row, output_filename_row_with_leading,
+        plain_button_text_style, primary_button_enabled, progress_bar, progress_rail_color,
+        select_button, select_menu_intrinsic_width, select_menu_option, selectable_row,
+        selectable_row_visuals, selectable_row_with_accessory, selector_popup_width,
+        show_selector_popup, switch_control,
     };
     use crate::ui::{fonts, layout, theme};
 
@@ -1448,6 +1461,35 @@ mod tests {
             inline_status_color(InlineStatusKind::Error),
             theme::DANGER_INTERACTIVE
         );
+    }
+
+    #[test]
+    fn inline_status_height_matches_wrapped_label_at_current_width() {
+        let context = egui::Context::default();
+        super::fonts::install(&context);
+        theme::install(&context);
+        let text = "A source stream cannot be copied into MP4. Use MKV instead.";
+
+        let output = context.run_ui(Default::default(), |ui| {
+            for width in [344.0, 800.0] {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(width, 200.0), egui::Sense::hover());
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                );
+                let measured = inline_status_height(&child, text, child.available_width());
+                let rendered = inline_status(&mut child, text, InlineStatusKind::Error)
+                    .rect
+                    .height();
+                assert!(
+                    (measured - rendered).abs() <= 0.5,
+                    "width={width}, measured={measured}, rendered={rendered}"
+                );
+            }
+        });
+        output.drop_without_applying_deltas();
     }
 
     fn install_test_technical_style(ui: &mut egui::Ui) {

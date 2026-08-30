@@ -19,6 +19,7 @@ pub(crate) enum DialogTarget {
     MediaInput,
     AudioMixOutput { session_id: u64 },
     UpscaleOutput { session_id: u64 },
+    RemuxOutput { session_id: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

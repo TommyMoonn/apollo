@@ -7,6 +7,8 @@ pub mod layout;
 pub mod media_error;
 mod media_lifecycle;
 mod output_name;
+pub mod remux;
+pub mod remux_progress;
 pub mod theme;
 pub mod upscale;
 pub mod upscale_progress;

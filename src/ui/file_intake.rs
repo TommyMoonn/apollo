@@ -12,11 +12,13 @@ const DROP_HINT: &str = "or drop a video anywhere";
 const INSPECTING_LABEL: &str = "Inspecting media…";
 const AUDIO_MIX_LABEL: &str = "Audio Mix";
 const UPSCALE_LABEL: &str = "Upscale";
+const REMUX_LABEL: &str = "Remux";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileIntakeTool {
     AudioMix,
     Upscale,
+    Remux,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -155,6 +157,7 @@ fn show_mode_selector(ui: &mut Ui, selected_tool: FileIntakeTool) -> FileIntakeA
     let sizes = [
         widgets::mode_button_intrinsic_size(ui, AUDIO_MIX_LABEL),
         widgets::mode_button_intrinsic_size(ui, UPSCALE_LABEL),
+        widgets::mode_button_intrinsic_size(ui, REMUX_LABEL),
     ];
     let widths = sizes.map(|size| size.x);
     let arrangement = layout::action_layout(ui.available_width(), &widths);
@@ -175,6 +178,9 @@ fn show_mode_selector(ui: &mut Ui, selected_tool: FileIntakeTool) -> FileIntakeA
         {
             action = FileIntakeAction::SelectTool(FileIntakeTool::Upscale);
         }
+        if widgets::mode_button(ui, REMUX_LABEL, selected_tool == FileIntakeTool::Remux).clicked() {
+            action = FileIntakeAction::SelectTool(FileIntakeTool::Remux);
+        }
     });
 
     action
@@ -192,8 +198,8 @@ mod tests {
     };
 
     use super::{
-        AUDIO_MIX_LABEL, DROP_HINT, FileIntakeTool, INSPECTING_LABEL, OPEN_LABEL, UPSCALE_LABEL,
-        WORDMARK, intake_region_heights, show_with_layout_plan,
+        AUDIO_MIX_LABEL, DROP_HINT, FileIntakeTool, INSPECTING_LABEL, OPEN_LABEL, REMUX_LABEL,
+        UPSCALE_LABEL, WORDMARK, intake_region_heights, show_with_layout_plan,
     };
 
     #[test]
@@ -204,6 +210,7 @@ mod tests {
         assert_eq!(INSPECTING_LABEL, "Inspecting media…");
         assert_eq!(AUDIO_MIX_LABEL, "Audio Mix");
         assert_eq!(UPSCALE_LABEL, "Upscale");
+        assert_eq!(REMUX_LABEL, "Remux");
     }
 
     #[test]
