@@ -53,6 +53,7 @@ impl AudioMixStartError {
                 }
                 AudioMixValidationError::Output(error) => MediaError::from_output_error(error),
                 AudioMixValidationError::DuplicateSelectedStream(_)
+                | AudioMixValidationError::TrackGainOutOfRange { .. }
                 | AudioMixValidationError::OutputExtensionMismatch { .. } => {
                     MediaError::invalid_request(error.to_string())
                 }
@@ -190,7 +191,7 @@ mod tests {
         AudioMixExecutionFailure, AudioMixExecutionState, AudioMixExecutor, AudioMixStartError,
     };
     use crate::audio_mix::{
-        model::{AudioMixRequest, OutputContainer},
+        model::{AudioMixRequest, OutputContainer, SelectedAudioTrack},
         validation::{AudioMixValidationError, validate_audio_mix_request},
     };
     use crate::media::execution::ProcessControl;
@@ -251,7 +252,7 @@ mod tests {
     fn invalid_request_never_launches_process() {
         let directory = TestDirectory::new("invalid-no-spawn");
         let (mut request, media) = valid_request_and_media(&directory);
-        request.selected_streams.clear();
+        request.selected_tracks.clear();
         let tools = fake_tools(&directory);
         let launches = Arc::new(AtomicUsize::new(0));
         let launch_count = Arc::clone(&launches);
@@ -507,7 +508,10 @@ mod tests {
         let request = AudioMixRequest {
             input: input.clone(),
             output: directory.path().join("mixed.mp4"),
-            selected_streams: vec![1, 3],
+            selected_tracks: vec![
+                SelectedAudioTrack::with_default_gain(1),
+                SelectedAudioTrack::with_default_gain(3),
+            ],
             container: OutputContainer::Mp4,
         };
         let media = MediaFile {

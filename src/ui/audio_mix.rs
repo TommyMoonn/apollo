@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     time::Duration,
@@ -9,7 +9,7 @@ use egui::{Align, Label, Layout, RichText, ScrollArea, Sides, TextStyle, Ui};
 
 use crate::{
     audio_mix::{
-        model::{AudioMixRequest, OutputContainer},
+        model::{AudioMixRequest, OutputContainer, SelectedAudioTrack, TrackGain},
         validation::{AudioMixValidationError, validate_audio_mix_request},
     },
     media::{
@@ -34,6 +34,7 @@ const CONTAINER_OPTIONS: [&str; 2] = ["MP4", "MKV"];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioMixSelectionState {
     selected_streams: BTreeSet<u32>,
+    track_gains: BTreeMap<u32, TrackGain>,
     container: OutputContainer,
     output_name: OutputNameState,
 }
@@ -88,6 +89,11 @@ impl AudioMixSelectionState {
                 .audio_streams
                 .iter()
                 .map(|stream| stream.stream_index)
+                .collect(),
+            track_gains: media
+                .audio_streams
+                .iter()
+                .map(|stream| (stream.stream_index, TrackGain::default()))
                 .collect(),
             container: OutputContainer::Mp4,
             output_name: OutputNameState::new(&media.path, default_output_stem(&media.path)),
@@ -178,13 +184,18 @@ impl AudioMixSelectionState {
         AudioMixRequest {
             input: media.path.clone(),
             output: self.output_path(),
-            selected_streams: media
+            selected_tracks: media
                 .audio_streams
                 .iter()
-                .filter_map(|stream| {
-                    self.selected_streams
-                        .contains(&stream.stream_index)
-                        .then_some(stream.stream_index)
+                .filter(|stream| self.selected_streams.contains(&stream.stream_index))
+                .map(|stream| {
+                    SelectedAudioTrack::new(
+                        stream.stream_index,
+                        self.track_gains
+                            .get(&stream.stream_index)
+                            .copied()
+                            .unwrap_or_default(),
+                    )
                 })
                 .collect(),
             container: self.container,
@@ -704,7 +715,7 @@ mod tests {
         AudioMixPresentation, AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height,
         audio_mix_ready_feedback, source_metadata, track_presentations,
     };
-    use crate::audio_mix::model::OutputContainer;
+    use crate::audio_mix::model::{OutputContainer, SelectedAudioTrack, TrackGain};
     use crate::ui::{layout, theme};
 
     fn media() -> MediaFile {
@@ -1084,16 +1095,38 @@ mod tests {
         let mut media = media();
         media.audio_streams.swap(0, 2);
         let mut state = AudioMixSelectionState::new(&media);
+        state.track_gains.insert(9, TrackGain::from_tenths_db(-60));
         state.toggle_stream(&media, 4);
 
         let request = state.request(&media);
 
-        assert_eq!(request.selected_streams, vec![9, 1]);
+        assert_eq!(
+            request.selected_tracks,
+            vec![
+                SelectedAudioTrack::new(9, TrackGain::from_tenths_db(-60)),
+                SelectedAudioTrack::with_default_gain(1),
+            ]
+        );
         assert_eq!(request.input, media.path);
         assert_eq!(
             request.output,
             PathBuf::from("captures/recording-mixed.mp4")
         );
+    }
+
+    #[test]
+    fn every_probed_track_starts_at_zero_gain_independent_of_selection() {
+        let media = media();
+        let mut state = AudioMixSelectionState::new(&media);
+        let initial_gains = state.track_gains.clone();
+
+        assert_eq!(initial_gains.len(), media.audio_streams.len());
+        assert!(initial_gains.values().all(|gain| *gain == TrackGain::ZERO));
+
+        state.clear();
+        assert_eq!(state.track_gains, initial_gains);
+        state.select_all(&media);
+        assert_eq!(state.track_gains, initial_gains);
     }
 
     #[test]

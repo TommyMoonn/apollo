@@ -10,7 +10,7 @@ use std::{
 use apollo::{
     audio_mix::{
         command::{AudioMixCommandError, build_audio_mix_invocation},
-        model::{AudioMixRequest, OutputContainer},
+        model::{AudioMixRequest, OutputContainer, SelectedAudioTrack, TrackGain},
         validation::{AudioMixValidationError, validate_audio_mix_request},
     },
     media::{
@@ -65,9 +65,17 @@ fn valid_request(temp: &TestDirectory) -> AudioMixRequest {
     AudioMixRequest {
         input: temp.path().join("input.mkv"),
         output: temp.path().join("mixed.mp4"),
-        selected_streams: vec![1, 7],
+        selected_tracks: vec![default_track(1), default_track(7)],
         container: OutputContainer::Mp4,
     }
+}
+
+fn track(stream_index: u32, gain_tenths_db: i16) -> SelectedAudioTrack {
+    SelectedAudioTrack::new(stream_index, TrackGain::from_tenths_db(gain_tenths_db))
+}
+
+fn default_track(stream_index: u32) -> SelectedAudioTrack {
+    SelectedAudioTrack::with_default_gain(stream_index)
 }
 
 #[test]
@@ -77,6 +85,54 @@ fn valid_request_accepts_probed_non_contiguous_audio_stream_indexes() {
     let media = media(request.input.clone());
 
     assert_eq!(validate_audio_mix_request(&request, &media), Ok(()));
+}
+
+#[test]
+fn track_gain_defaults_to_zero_and_formats_integer_tenths() {
+    assert_eq!(TrackGain::default(), TrackGain::ZERO);
+    assert_eq!(TrackGain::default().tenths_db(), 0);
+    assert_eq!(TrackGain::from_tenths_db(-600).to_string(), "-60.0dB");
+    assert_eq!(TrackGain::from_tenths_db(-5).to_string(), "-0.5dB");
+    assert_eq!(TrackGain::ZERO.to_string(), "0.0dB");
+    assert_eq!(TrackGain::from_tenths_db(120).to_string(), "12.0dB");
+}
+
+#[test]
+fn lower_and_upper_track_gain_bounds_are_accepted() {
+    let temp = TestDirectory::new();
+    let mut request = valid_request(&temp);
+    request.selected_tracks = vec![
+        SelectedAudioTrack::new(1, TrackGain::MIN),
+        SelectedAudioTrack::new(7, TrackGain::MAX),
+    ];
+    let media = media(request.input.clone());
+
+    assert_eq!(validate_audio_mix_request(&request, &media), Ok(()));
+}
+
+#[test]
+fn track_gain_outside_each_bound_is_rejected() {
+    let temp = TestDirectory::new();
+    let mut request = valid_request(&temp);
+    let media = media(request.input.clone());
+
+    request.selected_tracks = vec![track(1, -601)];
+    assert_eq!(
+        validate_audio_mix_request(&request, &media),
+        Err(AudioMixValidationError::TrackGainOutOfRange {
+            stream_index: 1,
+            gain: TrackGain::from_tenths_db(-601),
+        })
+    );
+
+    request.selected_tracks = vec![track(1, 121)];
+    assert_eq!(
+        validate_audio_mix_request(&request, &media),
+        Err(AudioMixValidationError::TrackGainOutOfRange {
+            stream_index: 1,
+            gain: TrackGain::from_tenths_db(121),
+        })
+    );
 }
 
 #[test]
@@ -96,7 +152,7 @@ fn media_without_video_stream_is_rejected() {
 fn empty_audio_selection_is_rejected() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
-    request.selected_streams.clear();
+    request.selected_tracks.clear();
     let media = media(request.input.clone());
 
     assert_eq!(
@@ -109,7 +165,7 @@ fn empty_audio_selection_is_rejected() {
 fn duplicate_selected_stream_is_rejected() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
-    request.selected_streams = vec![3, 3];
+    request.selected_tracks = vec![default_track(3), default_track(3)];
     let media = media(request.input.clone());
 
     assert_eq!(
@@ -122,7 +178,7 @@ fn duplicate_selected_stream_is_rejected() {
 fn unknown_audio_stream_is_rejected() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
-    request.selected_streams = vec![99];
+    request.selected_tracks = vec![default_track(99)];
     let media = media(request.input.clone());
 
     assert_eq!(
@@ -135,7 +191,7 @@ fn unknown_audio_stream_is_rejected() {
 fn numeric_video_stream_index_is_not_accepted_as_audio_selection() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
-    request.selected_streams = vec![0];
+    request.selected_tracks = vec![default_track(0)];
     let media = media(request.input.clone());
 
     assert_eq!(
@@ -292,13 +348,15 @@ fn option_values<'a>(args: &'a [String], option: &str) -> Vec<&'a str> {
 fn one_selected_stream_builds_single_input_amix_filter() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
-    request.selected_streams = vec![3];
+    request.selected_tracks = vec![default_track(3)];
     let media = media(request.input.clone());
     let args = invocation_args(&request, &media);
 
     assert_eq!(
         option_values(&args, "-filter_complex"),
-        vec!["[0:3]amix=inputs=1:duration=longest[mixed]"]
+        vec![
+            "[0:3]volume=0.0dB[mix_0];[mix_0]amix=inputs=1:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
+        ]
     );
 }
 
@@ -311,7 +369,9 @@ fn two_selected_streams_build_two_input_amix_filter() {
 
     assert_eq!(
         option_values(&args, "-filter_complex"),
-        vec!["[0:1][0:7]amix=inputs=2:duration=longest[mixed]"]
+        vec![
+            "[0:1]volume=0.0dB[mix_0];[0:7]volume=0.0dB[mix_1];[mix_0][mix_1]amix=inputs=2:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
+        ]
     );
 }
 
@@ -319,7 +379,12 @@ fn two_selected_streams_build_two_input_amix_filter() {
 fn four_selected_streams_build_four_input_amix_filter() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
-    request.selected_streams = vec![1, 3, 7, 11];
+    request.selected_tracks = vec![
+        default_track(1),
+        default_track(3),
+        default_track(7),
+        default_track(11),
+    ];
     let mut media = media(request.input.clone());
     media.audio_streams.push(AudioStream {
         stream_index: 11,
@@ -333,7 +398,9 @@ fn four_selected_streams_build_four_input_amix_filter() {
 
     assert_eq!(
         option_values(&args, "-filter_complex"),
-        vec!["[0:1][0:3][0:7][0:11]amix=inputs=4:duration=longest[mixed]"]
+        vec![
+            "[0:1]volume=0.0dB[mix_0];[0:3]volume=0.0dB[mix_1];[0:7]volume=0.0dB[mix_2];[0:11]volume=0.0dB[mix_3];[mix_0][mix_1][mix_2][mix_3]amix=inputs=4:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
+        ]
     );
 }
 
@@ -341,14 +408,71 @@ fn four_selected_streams_build_four_input_amix_filter() {
 fn filter_uses_non_contiguous_absolute_stream_indexes_in_selection_order() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
-    request.selected_streams = vec![7, 1, 3];
+    request.selected_tracks = vec![default_track(7), default_track(1), default_track(3)];
     let media = media(request.input.clone());
     let args = invocation_args(&request, &media);
 
     assert_eq!(
         option_values(&args, "-filter_complex"),
-        vec!["[0:7][0:1][0:3]amix=inputs=3:duration=longest[mixed]"]
+        vec![
+            "[0:7]volume=0.0dB[mix_0];[0:1]volume=0.0dB[mix_1];[0:3]volume=0.0dB[mix_2];[mix_0][mix_1][mix_2]amix=inputs=3:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
+        ]
     );
+}
+
+#[test]
+fn unequal_track_gains_precede_explicit_unnormalized_mix_and_peak_limiter() {
+    let temp = TestDirectory::new();
+    let mut request = valid_request(&temp);
+    request.selected_tracks = vec![track(1, -60), track(3, 0), track(7, 120)];
+    let media = media(request.input.clone());
+    let args = invocation_args(&request, &media);
+
+    assert_eq!(
+        option_values(&args, "-filter_complex"),
+        vec![
+            "[0:1]volume=-6.0dB[mix_0];[0:3]volume=0.0dB[mix_1];[0:7]volume=12.0dB[mix_2];[mix_0][mix_1][mix_2]amix=inputs=3:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
+        ]
+    );
+}
+
+#[test]
+fn selected_track_count_does_not_change_another_tracks_gain() {
+    let temp = TestDirectory::new();
+    let mut request = valid_request(&temp);
+    let media = media(request.input.clone());
+
+    request.selected_tracks = vec![track(1, -60)];
+    let one_track =
+        option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
+
+    request.selected_tracks = vec![track(1, -60), track(3, 25), track(7, 0)];
+    let three_tracks =
+        option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
+
+    assert_eq!(one_track.matches("[0:1]volume=-6.0dB").count(), 1);
+    assert_eq!(three_tracks.matches("[0:1]volume=-6.0dB").count(), 1);
+}
+
+#[test]
+fn protected_mix_contains_exactly_one_limiter_after_amix() {
+    let temp = TestDirectory::new();
+    let request = valid_request(&temp);
+    let media = media(request.input.clone());
+    let args = invocation_args(&request, &media);
+    let filter = option_values(&args, "-filter_complex")[0];
+    let amix_position = filter.find("amix=").expect("amix stage");
+    let limiter_position = filter.find("alimiter=").expect("limiter stage");
+
+    assert_eq!(
+        filter.matches("volume=").count(),
+        request.selected_tracks.len()
+    );
+    assert_eq!(filter.matches("amix=").count(), 1);
+    assert_eq!(filter.matches("normalize=0").count(), 1);
+    assert_eq!(filter.matches("alimiter=").count(), 1);
+    assert!(amix_position < limiter_position);
+    assert!(filter.ends_with("alimiter=limit=0.95:level=0:latency=1[mixed]"));
 }
 
 #[test]
@@ -457,7 +581,7 @@ fn input_and_output_paths_with_spaces_remain_individual_arguments() {
     let request = AudioMixRequest {
         input: temp.path().join("source video with spaces.mkv"),
         output: temp.path().join("mixed output with spaces.mp4"),
-        selected_streams: vec![1, 3],
+        selected_tracks: vec![default_track(1), default_track(3)],
         container: OutputContainer::Mp4,
     };
     let media = media(request.input.clone());
@@ -515,7 +639,7 @@ fn command_builder_rejects_missing_structural_inputs_without_revalidating_reques
         Err(AudioMixCommandError::MissingVideoStream)
     );
 
-    request.selected_streams.clear();
+    request.selected_tracks.clear();
     media.video_streams.push(VideoStream {
         stream_index: 0,
         codec: Some("h264".to_owned()),

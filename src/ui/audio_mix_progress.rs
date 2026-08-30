@@ -272,7 +272,7 @@ mod tests {
     use crate::{
         audio_mix::{
             execution::{AudioMixExecutionFailure, AudioMixExecutionState, AudioMixExecutor},
-            model::{AudioMixRequest, OutputContainer},
+            model::{AudioMixRequest, OutputContainer, SelectedAudioTrack},
         },
         media::{
             model::{AudioStream, MediaFile, VideoStream},
@@ -580,7 +580,10 @@ mod tests {
         AudioMixRequest {
             input: PathBuf::from("C:/media/recording.mkv"),
             output: PathBuf::from("C:/media/recording-mixed.mp4"),
-            selected_streams: vec![1, 2],
+            selected_tracks: vec![
+                SelectedAudioTrack::with_default_gain(1),
+                SelectedAudioTrack::with_default_gain(2),
+            ],
             container: OutputContainer::Mp4,
         }
     }

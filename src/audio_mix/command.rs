@@ -2,9 +2,10 @@ use std::{ffi::OsString, fmt};
 
 use crate::media::model::MediaFile;
 
-use super::model::{AudioMixRequest, OutputContainer};
+use super::model::{AudioMixRequest, OutputContainer, SelectedAudioTrack};
 
 const MIXED_AUDIO_LABEL: &str = "mixed";
+const PRE_LIMIT_LABEL: &str = "pre_limit";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegInvocation {
@@ -48,7 +49,7 @@ pub fn build_audio_mix_invocation(
         .ok_or(AudioMixCommandError::MissingVideoStream)?
         .stream_index;
 
-    if request.selected_streams.is_empty() {
+    if request.selected_tracks.is_empty() {
         return Err(AudioMixCommandError::NoAudioStreamsSelected);
     }
 
@@ -56,7 +57,7 @@ pub fn build_audio_mix_invocation(
         OsString::from("-i"),
         request.input.as_os_str().to_os_string(),
         OsString::from("-filter_complex"),
-        OsString::from(mix_filter(&request.selected_streams)),
+        OsString::from(mix_filter(&request.selected_tracks)),
     ];
 
     match request.container {
@@ -80,15 +81,27 @@ pub fn build_audio_mix_invocation(
     Ok(FfmpegInvocation { args })
 }
 
-fn mix_filter(selected_streams: &[u32]) -> String {
-    let inputs = selected_streams
+fn mix_filter(selected_tracks: &[SelectedAudioTrack]) -> String {
+    let volume_stages = selected_tracks
         .iter()
-        .map(|stream_index| format!("[0:{stream_index}]"))
+        .enumerate()
+        .map(|(position, track)| {
+            format!(
+                "[0:{}]volume={}[mix_{position}]",
+                track.stream_index, track.gain
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    let mix_inputs = selected_tracks
+        .iter()
+        .enumerate()
+        .map(|(position, _)| format!("[mix_{position}]"))
         .collect::<String>();
 
     format!(
-        "{inputs}amix=inputs={}:duration=longest[{MIXED_AUDIO_LABEL}]",
-        selected_streams.len()
+        "{volume_stages};{mix_inputs}amix=inputs={}:duration=longest:normalize=0[{PRE_LIMIT_LABEL}];[{PRE_LIMIT_LABEL}]alimiter=limit=0.95:level=0:latency=1[{MIXED_AUDIO_LABEL}]",
+        selected_tracks.len()
     )
 }
 

@@ -5,7 +5,7 @@ use crate::media::{
     output::{MediaOutputError, validate_output_path},
 };
 
-use super::model::AudioMixRequest;
+use super::model::{AudioMixRequest, SelectedAudioTrack, TrackGain};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioMixValidationError {
@@ -13,6 +13,10 @@ pub enum AudioMixValidationError {
     NoAudioStreamsSelected,
     DuplicateSelectedStream(u32),
     UnknownAudioStream(u32),
+    TrackGainOutOfRange {
+        stream_index: u32,
+        gain: TrackGain,
+    },
     OutputExtensionMismatch {
         expected: &'static str,
         actual: Option<String>,
@@ -36,6 +40,12 @@ impl fmt::Display for AudioMixValidationError {
                     "audio stream {stream_index} does not exist in the probed media"
                 )
             }
+            Self::TrackGainOutOfRange { stream_index, gain } => write!(
+                f,
+                "audio stream {stream_index} gain {gain} is outside the supported {} to {} range",
+                TrackGain::MIN,
+                TrackGain::MAX
+            ),
             Self::OutputExtensionMismatch { expected, actual } => match actual {
                 Some(actual) => write!(
                     f,
@@ -64,24 +74,26 @@ pub fn validate_audio_mix_request(
         return Err(AudioMixValidationError::MissingVideoStream);
     }
 
-    if request.selected_streams.is_empty() {
+    if request.selected_tracks.is_empty() {
         return Err(AudioMixValidationError::NoAudioStreamsSelected);
     }
 
-    reject_duplicate_streams(&request.selected_streams)?;
-    validate_selected_streams(&request.selected_streams, media)?;
+    reject_duplicate_streams(&request.selected_tracks)?;
+    validate_selected_tracks(&request.selected_tracks, media)?;
     validate_output_extension(request)?;
     validate_output_path(&request.output).map_err(AudioMixValidationError::Output)?;
 
     Ok(())
 }
 
-fn reject_duplicate_streams(selected_streams: &[u32]) -> Result<(), AudioMixValidationError> {
-    let mut seen = HashSet::with_capacity(selected_streams.len());
-    for &stream_index in selected_streams {
-        if !seen.insert(stream_index) {
+fn reject_duplicate_streams(
+    selected_tracks: &[SelectedAudioTrack],
+) -> Result<(), AudioMixValidationError> {
+    let mut seen = HashSet::with_capacity(selected_tracks.len());
+    for track in selected_tracks {
+        if !seen.insert(track.stream_index) {
             return Err(AudioMixValidationError::DuplicateSelectedStream(
-                stream_index,
+                track.stream_index,
             ));
         }
     }
@@ -89,8 +101,8 @@ fn reject_duplicate_streams(selected_streams: &[u32]) -> Result<(), AudioMixVali
     Ok(())
 }
 
-fn validate_selected_streams(
-    selected_streams: &[u32],
+fn validate_selected_tracks(
+    selected_tracks: &[SelectedAudioTrack],
     media: &MediaFile,
 ) -> Result<(), AudioMixValidationError> {
     let audio_streams = media
@@ -99,9 +111,17 @@ fn validate_selected_streams(
         .map(|stream| stream.stream_index)
         .collect::<HashSet<_>>();
 
-    for &stream_index in selected_streams {
-        if !audio_streams.contains(&stream_index) {
-            return Err(AudioMixValidationError::UnknownAudioStream(stream_index));
+    for track in selected_tracks {
+        if !audio_streams.contains(&track.stream_index) {
+            return Err(AudioMixValidationError::UnknownAudioStream(
+                track.stream_index,
+            ));
+        }
+        if !track.gain.is_valid() {
+            return Err(AudioMixValidationError::TrackGainOutOfRange {
+                stream_index: track.stream_index,
+                gain: track.gain,
+            });
         }
     }
 
