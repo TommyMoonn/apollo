@@ -2,12 +2,11 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use egui::{
-    Align, DragValue, Label, Layout, Response, RichText, ScrollArea, Sides, TextStyle, Ui,
-    WidgetInfo, WidgetType,
+    Align, DragValue, Layout, Response, RichText, ScrollArea, Sides, TextStyle, Ui, WidgetInfo,
+    WidgetType,
 };
 
 use crate::{
@@ -63,16 +62,12 @@ pub enum AudioMixSelectionAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioMixPresentation {
-    source_file_name: String,
-    source_metadata: Option<String>,
     tracks: Vec<TrackPresentation>,
 }
 
 impl AudioMixPresentation {
     pub fn new(media: &MediaFile) -> Self {
         Self {
-            source_file_name: source_file_name(&media.path),
-            source_metadata: source_metadata(media),
             tracks: track_presentations(media),
         }
     }
@@ -305,7 +300,6 @@ pub fn show(
         ui.available_height(),
         audio_mix_fixed_flow_height(
             ui,
-            presentation,
             presentation.tracks.is_empty(),
             has_validation_feedback,
             state.normalization_enabled(),
@@ -316,9 +310,6 @@ pub fn show(
 
     layout::task_surface(ui, plan.overflow, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-
-        show_source_header(ui, presentation);
-        ui.add_space(theme::SPACING.section);
 
         show_track_header(ui, media, state);
         ui.add_space(theme::SPACING.compact);
@@ -360,49 +351,6 @@ pub fn show(
     });
 
     action
-}
-
-fn show_source_header(ui: &mut Ui, presentation: &AudioMixPresentation) {
-    let metadata_gap = if presentation.source_metadata.is_some() {
-        theme::SPACING.tight
-    } else {
-        0.0
-    };
-    let header_height = source_header_height(ui, presentation.source_metadata.is_some());
-
-    Sides::new()
-        .height(header_height.max(theme::COMPACT_CONTROL_HEIGHT))
-        .spacing(theme::SOURCE_HEADER_GAP)
-        .shrink_left()
-        .truncate()
-        .show(
-            ui,
-            |ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = metadata_gap;
-                    ui.add(
-                        Label::new(
-                            RichText::new(&presentation.source_file_name)
-                                .text_style(TextStyle::Body),
-                        )
-                        .truncate()
-                        .selectable(false),
-                    );
-                    if let Some(metadata) = &presentation.source_metadata {
-                        ui.add(
-                            Label::new(
-                                RichText::new(metadata)
-                                    .text_style(fonts::technical_text_style())
-                                    .color(theme::SECONDARY_FAINT),
-                            )
-                            .truncate()
-                            .selectable(false),
-                        );
-                    }
-                });
-            },
-            |_| {},
-        );
 }
 
 fn show_track_list(
@@ -490,13 +438,11 @@ fn stepped_track_gain(tenths_db: i16) -> TrackGain {
 
 fn audio_mix_fixed_flow_height(
     ui: &Ui,
-    presentation: &AudioMixPresentation,
     track_list_empty: bool,
     has_validation_feedback: bool,
     normalization_enabled: bool,
 ) -> f32 {
     let section_label_height = ui.text_style_height(&TextStyle::Small);
-    let source_header_height = source_header_height(ui, presentation.source_metadata.is_some());
     let output_row_height = widgets::output_filename_row_plan(
         ui,
         Some(widgets::select_menu_intrinsic_width(ui, &CONTAINER_OPTIONS)),
@@ -514,9 +460,7 @@ fn audio_mix_fixed_flow_height(
         0.0
     };
 
-    source_header_height
-        + theme::SPACING.section
-        + theme::COMPACT_CONTROL_HEIGHT.max(section_label_height)
+    theme::COMPACT_CONTROL_HEIGHT.max(section_label_height)
         + theme::SPACING.compact
         + track_list_chrome
         + theme::INLINE_ACTION_GAP
@@ -541,17 +485,6 @@ fn normalization_targets_height(enabled: bool) -> f32 {
     } else {
         0.0
     }
-}
-
-fn source_header_height(ui: &Ui, has_metadata: bool) -> f32 {
-    let body_height = ui.text_style_height(&TextStyle::Body);
-    let metadata_height = if has_metadata {
-        theme::SPACING.tight + ui.text_style_height(&fonts::technical_text_style())
-    } else {
-        0.0
-    };
-
-    (body_height + metadata_height).max(theme::COMPACT_CONTROL_HEIGHT)
 }
 
 fn show_track_header(ui: &mut Ui, media: &MediaFile, state: &mut AudioMixSelectionState) {
@@ -782,42 +715,6 @@ fn show_output_row(
     }
 }
 
-fn source_file_name(path: &Path) -> String {
-    path.file_name()
-        .filter(|name| !name.is_empty())
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
-}
-
-fn source_metadata(media: &MediaFile) -> Option<String> {
-    let mut parts = Vec::new();
-
-    if let Some(video) = media.video_streams.first()
-        && let (Some(width), Some(height)) = (video.width, video.height)
-    {
-        parts.push(format!("{width}×{height}"));
-    }
-
-    if let Some(duration) = media.duration {
-        parts.push(format_duration(duration));
-    }
-
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-fn format_duration(duration: Duration) -> String {
-    let total_seconds = duration.as_secs();
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
-
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes:02}:{seconds:02}")
-    }
-}
-
 fn track_presentations(media: &MediaFile) -> Vec<TrackPresentation> {
     let identities = media
         .audio_streams
@@ -993,8 +890,7 @@ mod tests {
 
     use super::{
         AudioMixPresentation, AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height,
-        audio_mix_ready_feedback, source_metadata, stepped_tenths, stepped_track_gain,
-        track_presentations,
+        audio_mix_ready_feedback, stepped_tenths, stepped_track_gain, track_presentations,
     };
     use crate::audio_mix::model::{
         LoudnessNormalization, LoudnessTargets, OutputContainer, SelectedAudioTrack, TrackGain,
@@ -1601,24 +1497,14 @@ mod tests {
     }
 
     #[test]
-    fn source_metadata_uses_dimensions_and_duration() {
-        assert_eq!(
-            source_metadata(&media()).as_deref(),
-            Some("3840×2160 · 01:42:16")
-        );
-    }
-
-    #[test]
     fn minimum_height_uses_outer_task_scroll_when_fixed_audio_mix_flow_cannot_fit() {
         let context = egui::Context::default();
         super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let media = media();
-            let presentation = AudioMixPresentation::new(&media);
             let usable_height =
                 layout::MINIMUM_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false, false);
+            let fixed_height = audio_mix_fixed_flow_height(ui, false, false, false);
             let row_height =
                 layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
                     .row_height;
@@ -1643,11 +1529,9 @@ mod tests {
         super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let media = media();
-            let presentation = AudioMixPresentation::new(&media);
             let usable_height =
                 layout::REFERENCE_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false, false);
+            let fixed_height = audio_mix_fixed_flow_height(ui, false, false, false);
             let row_height =
                 layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
                     .row_height;
@@ -1659,9 +1543,9 @@ mod tests {
             );
 
             assert_eq!(usable_height, 323.0);
-            assert_eq!(plan.overflow, layout::TaskOverflow::Scroll);
+            assert_eq!(plan.overflow, layout::TaskOverflow::Flow);
             assert_eq!(plan.list.behavior, layout::ListBehavior::Scroll);
-            assert_eq!(plan.list.max_height, row_height);
+            assert!(plan.list.max_height >= row_height);
         });
         output.drop_without_applying_deltas();
     }
@@ -1672,9 +1556,7 @@ mod tests {
         super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let media = media();
-            let presentation = AudioMixPresentation::new(&media);
-            let fixed_height = audio_mix_fixed_flow_height(ui, &presentation, false, false, false);
+            let fixed_height = audio_mix_fixed_flow_height(ui, false, false, false);
             let row_height =
                 layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
                     .row_height;
@@ -1697,13 +1579,11 @@ mod tests {
         super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let media = media();
-            let presentation = AudioMixPresentation::new(&media);
             let row_height =
                 layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
                     .row_height;
-            let off_height = audio_mix_fixed_flow_height(ui, &presentation, false, false, false);
-            let enabled_height = audio_mix_fixed_flow_height(ui, &presentation, false, false, true);
+            let off_height = audio_mix_fixed_flow_height(ui, false, false, false);
+            let enabled_height = audio_mix_fixed_flow_height(ui, false, false, true);
             let plan = layout::task_surface_plan(
                 off_height + row_height,
                 enabled_height,
@@ -1729,8 +1609,6 @@ mod tests {
         super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let media = media();
-            let presentation = AudioMixPresentation::new(&media);
             let narrow_width =
                 layout::MINIMUM_CONTENT_SIZE.x - f32::from(layout::CONTENT_PADDING) * 2.0;
             let (rect, _) =
@@ -1743,8 +1621,7 @@ mod tests {
             let row_height =
                 layout::track_row_plan(child.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
                     .row_height;
-            let fixed_height =
-                audio_mix_fixed_flow_height(&child, &presentation, false, false, false);
+            let fixed_height = audio_mix_fixed_flow_height(&child, false, false, false);
             let plan = layout::task_surface_plan(
                 fixed_height + row_height - 1.0,
                 fixed_height,

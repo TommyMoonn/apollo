@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use egui::{Align, Label, Layout, RichText, ScrollArea, Sides, TextStyle, Ui};
+use egui::{Align, Label, Layout, RichText, ScrollArea, TextStyle, Ui};
 
 use crate::{
     audio_extract::{
@@ -153,9 +153,6 @@ pub fn show(
 
     layout::task_surface(ui, plan.overflow, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-
-        show_source_header(ui, media);
-        ui.add_space(theme::SPACING.section);
 
         let _ = widgets::section_label(ui, AUDIO_TRACK_LABEL);
         ui.add_space(theme::SPACING.compact);
@@ -323,44 +320,6 @@ fn ready_feedback(error: &AudioExtractReadyError) -> Option<&'static str> {
     }
 }
 
-fn show_source_header(ui: &mut Ui, media: &MediaFile) {
-    let metadata = audio_summary(media);
-    let header_height = source_header_height(ui, metadata.is_some());
-    Sides::new()
-        .height(header_height.max(theme::COMPACT_CONTROL_HEIGHT))
-        .spacing(theme::SOURCE_HEADER_GAP)
-        .shrink_left()
-        .truncate()
-        .show(
-            ui,
-            |ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = theme::SPACING.tight;
-                    ui.add(
-                        Label::new(
-                            RichText::new(source_file_name(&media.path))
-                                .text_style(TextStyle::Body),
-                        )
-                        .truncate()
-                        .selectable(false),
-                    );
-                    if let Some(metadata) = metadata {
-                        ui.add(
-                            Label::new(
-                                RichText::new(metadata)
-                                    .text_style(fonts::technical_text_style())
-                                    .color(theme::SECONDARY_FAINT),
-                            )
-                            .truncate()
-                            .selectable(false),
-                        );
-                    }
-                });
-            },
-            |_| {},
-        );
-}
-
 fn fixed_flow_height(ui: &Ui, media: &MediaFile, feedback: Option<&str>) -> f32 {
     let section_label_height = ui.text_style_height(&TextStyle::Small);
     let output_row_height = widgets::output_filename_row_plan(ui, None, BROWSE_LABEL).flow_height();
@@ -373,9 +332,7 @@ fn fixed_flow_height(ui: &Ui, media: &MediaFile, feedback: Option<&str>) -> f32 
         theme::SEPARATOR_WIDTH
     };
 
-    source_header_height(ui, audio_summary(media).is_some())
-        + theme::SPACING.section
-        + section_label_height
+    section_label_height
         + theme::SPACING.compact
         + list_chrome
         + theme::SPACING.focal
@@ -391,32 +348,6 @@ fn fixed_flow_height(ui: &Ui, media: &MediaFile, feedback: Option<&str>) -> f32 
         + feedback_height
         + theme::SPACING.related
         + theme::PRIMARY_CONTROL_HEIGHT
-}
-
-fn source_header_height(ui: &Ui, has_metadata: bool) -> f32 {
-    let metadata_height = if has_metadata {
-        theme::SPACING.tight + ui.text_style_height(&fonts::technical_text_style())
-    } else {
-        0.0
-    };
-    (ui.text_style_height(&TextStyle::Body) + metadata_height).max(theme::COMPACT_CONTROL_HEIGHT)
-}
-
-fn source_file_name(path: &Path) -> String {
-    path.file_name()
-        .filter(|name| !name.is_empty())
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
-}
-
-fn audio_summary(media: &MediaFile) -> Option<String> {
-    (!media.audio_streams.is_empty()).then(|| {
-        let count = media.audio_streams.len();
-        format!(
-            "{count} audio {}",
-            if count == 1 { "track" } else { "tracks" }
-        )
-    })
 }
 
 fn default_output_stem(

@@ -3,13 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use egui::{Align, Label, Layout, RichText, ScrollArea, Sides, TextStyle, Ui};
+use egui::{Align, Layout, RichText, ScrollArea, TextStyle, Ui};
 
 use crate::{
-    media::{
-        model::{FrameRate, MediaFile},
-        output::MediaOutputError,
-    },
+    media::{model::MediaFile, output::MediaOutputError},
     upscale::{
         model::{UpscaleRequest, UpscaleTarget, VideoCodec},
         sizing::{OutputDimensions, calculate_output_dimensions},
@@ -149,16 +146,13 @@ pub fn show(
         .is_some();
     let plan = layout::task_surface_plan(
         ui.available_height(),
-        upscale_fixed_flow_height(ui, media, has_validation_feedback),
+        upscale_fixed_flow_height(ui, has_validation_feedback),
         list_content_height,
         theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
     );
 
     layout::task_surface(ui, plan.overflow, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-
-        show_source_header(ui, media);
-        ui.add_space(theme::SPACING.section);
 
         let _ = widgets::section_label(ui, UPSCALE_TO_LABEL);
         ui.add_space(theme::SPACING.compact);
@@ -205,48 +199,6 @@ fn upscale_ready_feedback(error: &UpscaleValidationError) -> Option<&'static str
         }
         _ => None,
     }
-}
-
-fn show_source_header(ui: &mut Ui, media: &MediaFile) {
-    let file_name = source_file_name(&media.path);
-    let metadata = source_metadata(media);
-    let metadata_gap = if metadata.is_some() {
-        theme::SPACING.tight
-    } else {
-        0.0
-    };
-    let header_height = source_header_height(ui, metadata.is_some());
-
-    Sides::new()
-        .height(header_height.max(theme::COMPACT_CONTROL_HEIGHT))
-        .spacing(theme::SOURCE_HEADER_GAP)
-        .shrink_left()
-        .truncate()
-        .show(
-            ui,
-            |ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = metadata_gap;
-                    ui.add(
-                        Label::new(RichText::new(file_name).text_style(TextStyle::Body))
-                            .truncate()
-                            .selectable(false),
-                    );
-                    if let Some(metadata) = metadata {
-                        ui.add(
-                            Label::new(
-                                RichText::new(metadata)
-                                    .text_style(fonts::technical_text_style())
-                                    .color(theme::SECONDARY_FAINT),
-                            )
-                            .truncate()
-                            .selectable(false),
-                        );
-                    }
-                });
-            },
-            |_| {},
-        );
 }
 
 fn show_target_list(
@@ -331,10 +283,9 @@ fn show_actual_output_field(ui: &mut Ui, actual_output: &str) {
     );
 }
 
-fn upscale_fixed_flow_height(ui: &Ui, media: &MediaFile, has_validation_feedback: bool) -> f32 {
+fn upscale_fixed_flow_height(ui: &Ui, has_validation_feedback: bool) -> f32 {
     let section_label_height = ui.text_style_height(&TextStyle::Small);
     let technical_height = ui.text_style_height(&fonts::technical_text_style());
-    let source_header_height = source_header_height(ui, source_metadata(media).is_some());
     let output_row_height = widgets::output_filename_row_plan(ui, None, BROWSE_LABEL).flow_height();
     let field_height = section_label_height
         + theme::SPACING.compact
@@ -349,9 +300,7 @@ fn upscale_fixed_flow_height(ui: &Ui, media: &MediaFile, has_validation_feedback
         0.0
     };
 
-    source_header_height
-        + theme::SPACING.section
-        + section_label_height
+    section_label_height
         + theme::SPACING.compact
         + theme::SEPARATOR_WIDTH
         + theme::SPACING.section
@@ -363,17 +312,6 @@ fn upscale_fixed_flow_height(ui: &Ui, media: &MediaFile, has_validation_feedback
         + feedback_height
         + theme::SPACING.related
         + theme::PRIMARY_CONTROL_HEIGHT
-}
-
-fn source_header_height(ui: &Ui, has_metadata: bool) -> f32 {
-    let body_height = ui.text_style_height(&TextStyle::Body);
-    let metadata_height = if has_metadata {
-        theme::SPACING.tight + ui.text_style_height(&fonts::technical_text_style())
-    } else {
-        0.0
-    };
-
-    (body_height + metadata_height).max(theme::COMPACT_CONTROL_HEIGHT)
 }
 
 fn source_dimensions(media: &MediaFile) -> Option<(u32, u32)> {
@@ -389,65 +327,6 @@ fn actual_output_text(state: &UpscaleSelectionState, media: &MediaFile) -> Strin
         .output_dimensions(media)
         .map(|dimensions| format!("{} × {}", dimensions.width, dimensions.height))
         .unwrap_or_else(|| UNAVAILABLE_OUTPUT.to_owned())
-}
-
-fn source_file_name(path: &Path) -> String {
-    path.file_name()
-        .filter(|name| !name.is_empty())
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
-}
-
-fn source_metadata(media: &MediaFile) -> Option<String> {
-    let video = media.video_streams.first()?;
-    let mut parts = Vec::new();
-
-    if let (Some(width), Some(height)) = (video.width, video.height)
-        && width > 0
-        && height > 0
-    {
-        parts.push(format!("{width}×{height}"));
-    }
-
-    if let Some(codec) = nonempty(video.codec.as_deref()) {
-        parts.push(display_codec(codec));
-    }
-
-    if let Some(frame_rate) = video.frame_rate.and_then(display_frame_rate) {
-        parts.push(frame_rate);
-    }
-
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-fn display_codec(codec: &str) -> String {
-    match codec.to_ascii_lowercase().as_str() {
-        "h264" | "avc" => "H.264".to_owned(),
-        "h265" | "hevc" => "H.265".to_owned(),
-        _ => codec.to_ascii_uppercase(),
-    }
-}
-
-fn display_frame_rate(frame_rate: FrameRate) -> Option<String> {
-    if frame_rate.numerator == 0 || frame_rate.denominator == 0 {
-        return None;
-    }
-
-    if frame_rate.numerator.is_multiple_of(frame_rate.denominator) {
-        return Some(format!(
-            "{} FPS",
-            frame_rate.numerator / frame_rate.denominator
-        ));
-    }
-
-    Some(format!(
-        "{:.2} FPS",
-        f64::from(frame_rate.numerator) / f64::from(frame_rate.denominator)
-    ))
-}
-
-fn nonempty(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 fn default_output_stem(input: &Path, target: UpscaleTarget) -> OsString {
@@ -510,7 +389,7 @@ mod tests {
     };
 
     use super::{
-        UpscaleSelectionState, actual_output_text, source_metadata, upscale_fixed_flow_height,
+        UpscaleSelectionState, actual_output_text, upscale_fixed_flow_height,
         upscale_ready_feedback,
     };
 
@@ -760,47 +639,14 @@ mod tests {
     }
 
     #[test]
-    fn source_metadata_uses_dimensions_codec_and_frame_rate() {
-        assert_eq!(
-            source_metadata(&media(Some(1920), Some(1080))).as_deref(),
-            Some("1920×1080 · H.264 · 60 FPS")
-        );
-    }
-
-    #[test]
-    fn source_metadata_falls_back_to_available_fields() {
-        let mut media = media(Some(1920), Some(1080));
-        media.video_streams[0].codec = None;
-        media.video_streams[0].frame_rate = None;
-
-        assert_eq!(source_metadata(&media).as_deref(), Some("1920×1080"));
-
-        media.video_streams[0].width = None;
-        media.video_streams[0].height = None;
-        assert_eq!(source_metadata(&media), None);
-    }
-
-    #[test]
-    fn fractional_frame_rate_is_presented_without_assuming_integer_fps() {
-        let mut media = media(Some(1920), Some(1080));
-        media.video_streams[0].frame_rate = FrameRate::new(60_000, 1001);
-
-        assert_eq!(
-            source_metadata(&media).as_deref(),
-            Some("1920×1080 · H.264 · 59.94 FPS")
-        );
-    }
-
-    #[test]
     fn minimum_height_uses_outer_task_scroll_before_shrinking_target_rows() {
         let context = egui::Context::default();
         super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let media = media(Some(1920), Some(1080));
             let usable_height =
                 layout::MINIMUM_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = upscale_fixed_flow_height(ui, &media, false);
+            let fixed_height = upscale_fixed_flow_height(ui, false);
             let plan = layout::task_surface_plan(
                 usable_height,
                 fixed_height,
@@ -821,7 +667,6 @@ mod tests {
         super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let media = media(Some(1920), Some(1080));
             let narrow_width =
                 layout::MINIMUM_CONTENT_SIZE.x - f32::from(layout::CONTENT_PADDING) * 2.0;
             let (rect, _) =
@@ -831,7 +676,7 @@ mod tests {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
-            let fixed_height = upscale_fixed_flow_height(&child, &media, false);
+            let fixed_height = upscale_fixed_flow_height(&child, false);
             let plan = layout::task_surface_plan(
                 child.available_height(),
                 fixed_height,
@@ -855,10 +700,9 @@ mod tests {
         super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let media = media(Some(1920), Some(1080));
             let usable_height =
                 layout::REFERENCE_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = upscale_fixed_flow_height(ui, &media, false);
+            let fixed_height = upscale_fixed_flow_height(ui, false);
             let plan = layout::task_surface_plan(
                 usable_height,
                 fixed_height,
@@ -884,8 +728,7 @@ mod tests {
         super::fonts::install(&context);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let media = media(Some(1920), Some(1080));
-            let fixed_height = upscale_fixed_flow_height(ui, &media, false);
+            let fixed_height = upscale_fixed_flow_height(ui, false);
             let content_height = 3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT;
             let plan = layout::task_surface_plan(
                 fixed_height + content_height,

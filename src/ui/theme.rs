@@ -198,6 +198,30 @@ pub const fn selectable_colors(state: InteractionState, selected: bool) -> Contr
     }
 }
 
+pub const fn operation_mode_colors(state: InteractionState, selected: bool) -> ControlColors {
+    if !selected {
+        return control_colors(ControlTone::Standard, state);
+    }
+
+    match state {
+        InteractionState::Disabled => ControlColors {
+            background: HOVER,
+            foreground: FOREGROUND,
+            border: FOREGROUND,
+        },
+        InteractionState::Pressed => ControlColors {
+            background: PRESSED,
+            foreground: FOREGROUND,
+            border: FOREGROUND,
+        },
+        InteractionState::Idle | InteractionState::Hovered => ControlColors {
+            background: HOVER,
+            foreground: FOREGROUND,
+            border: FOREGROUND,
+        },
+    }
+}
+
 pub fn install(context: &Context) {
     context.all_styles_mut(apply_to_style);
 }
@@ -319,7 +343,7 @@ mod tests {
         SELECTION_INDICATOR_SIZE, SEPARATOR, SEPARATOR_WIDTH, SPACING, STATUS_COPY_GAP,
         TOGGLE_SWITCH_HEIGHT, TOGGLE_SWITCH_KNOB_SIZE, TOGGLE_SWITCH_WIDTH,
         TRACK_GAIN_CONTROL_WIDTH, ThemeRole, apply_to_style, control_colors, monochrome_visuals,
-        selectable_colors,
+        operation_mode_colors, selectable_colors,
     };
 
     #[test]
@@ -444,6 +468,28 @@ mod tests {
         assert_eq!(disabled_selected.background, BACKGROUND);
         assert_eq!(disabled_selected.foreground, DISABLED);
         assert_eq!(disabled_selected.border, DISABLED);
+    }
+
+    #[test]
+    fn selected_operation_uses_neutral_fill_light_text_and_stronger_border() {
+        let selected = operation_mode_colors(InteractionState::Idle, true);
+        let selected_hover = operation_mode_colors(InteractionState::Hovered, true);
+        let selected_pressed = operation_mode_colors(InteractionState::Pressed, true);
+        let selected_disabled = operation_mode_colors(InteractionState::Disabled, true);
+        let unselected_disabled = operation_mode_colors(InteractionState::Disabled, false);
+        let unselected_hover = operation_mode_colors(InteractionState::Hovered, false);
+
+        assert_eq!(selected.background, HOVER);
+        assert_eq!(selected.foreground, FOREGROUND);
+        assert_eq!(selected.border, FOREGROUND);
+        assert_eq!(selected_hover, selected);
+        assert_eq!(selected_pressed.background, PRESSED);
+        assert_eq!(selected_pressed.foreground, FOREGROUND);
+        assert_eq!(selected_pressed.border, FOREGROUND);
+        assert_eq!(selected_disabled, selected);
+        assert_ne!(selected_disabled, unselected_disabled);
+        assert_eq!(unselected_hover.border, BORDER_STRONG);
+        assert_ne!(selected.background, FOREGROUND);
     }
 
     #[test]

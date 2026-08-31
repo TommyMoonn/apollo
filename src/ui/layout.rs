@@ -36,6 +36,10 @@ pub const OUTPUT_FILENAME_MIN_INLINE_WIDTH: f32 = 180.0;
 /// Minimum title/metadata width retained beside an inline Audio Mix gain control.
 pub const TRACK_TEXT_MIN_INLINE_WIDTH: f32 = 240.0;
 
+/// Useful source identity width retained beside workspace source actions before compact metadata
+/// is omitted at narrow widths.
+pub const WORKSPACE_METADATA_MIN_WIDTH: f32 = 220.0;
+
 /// Narrow focal width used by Audio Mix running and terminal surfaces.
 pub const FOCUS_CONTENT_MAX_WIDTH: f32 = 470.0;
 
@@ -387,6 +391,24 @@ pub fn action_layout(available_width: f32, action_widths: &[f32]) -> ActionLayou
     }
 }
 
+pub fn workspace_header_shows_metadata(available_width: f32, source_action_widths: &[f32]) -> bool {
+    let action_width = source_action_widths
+        .iter()
+        .copied()
+        .map(safe_dimension)
+        .sum::<f32>()
+        + source_action_widths.len().saturating_sub(1) as f32 * theme::INLINE_ACTION_GAP;
+    safe_dimension(available_width)
+        >= action_width + theme::SOURCE_HEADER_GAP + WORKSPACE_METADATA_MIN_WIDTH
+}
+
+pub fn workspace_switcher_fits_one_line(available_width: f32, control_widths: &[f32]) -> bool {
+    matches!(
+        action_layout(available_width, control_widths),
+        ActionLayout::Horizontal
+    )
+}
+
 /// Keep paired task fields in columns only while both retain a comfortable readable width.
 pub fn field_pair_layout(available_width: f32) -> FieldPairLayout {
     let available_width = safe_dimension(available_width);
@@ -615,10 +637,11 @@ mod tests {
         ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, OUTPUT_FILENAME_MIN_INLINE_WIDTH,
         OutputRowLayout, PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE,
         REFERENCE_WINDOW_SIZE, TRACK_TEXT_MIN_INLINE_WIDTH, TaskOverflow, TextOverflowPolicy,
-        TrackRowLayout, WINDOW_CHROME_HEIGHT, action_group_size, action_layout,
-        bounded_content_width, centered_action_group, content_frame, field_pair_layout,
-        focus_content, intake_content, intake_layout_plan, list_viewport, output_row_plan,
-        task_surface, task_surface_plan, track_row_plan,
+        TrackRowLayout, WINDOW_CHROME_HEIGHT, WORKSPACE_METADATA_MIN_WIDTH, action_group_size,
+        action_layout, bounded_content_width, centered_action_group, content_frame,
+        field_pair_layout, focus_content, intake_content, intake_layout_plan, list_viewport,
+        output_row_plan, task_surface, task_surface_plan, track_row_plan,
+        workspace_header_shows_metadata, workspace_switcher_fits_one_line,
     };
     use crate::ui::theme;
 
@@ -632,6 +655,7 @@ mod tests {
         assert_eq!(MAX_CONTENT_WIDTH, 564.0);
         assert_eq!(FIELD_PAIR_MIN_COLUMN_WIDTH, 180.0);
         assert_eq!(OUTPUT_FILENAME_MIN_INLINE_WIDTH, 180.0);
+        assert_eq!(WORKSPACE_METADATA_MIN_WIDTH, 220.0);
         assert_eq!(FOCUS_CONTENT_MAX_WIDTH, 470.0);
         assert_eq!(FOCUS_CONTENT_MIN_HEIGHT, 230.0);
         assert_eq!(DIAGNOSTIC_MAX_HEIGHT, 80.0);
@@ -645,6 +669,28 @@ mod tests {
         assert_eq!(theme::SOURCE_HEADER_GAP, 14.0);
         assert_eq!(theme::INLINE_ACTION_GAP, 10.0);
         assert_eq!(PROGRESS_TRACK_HEIGHT, 4.0);
+    }
+
+    #[test]
+    fn workspace_header_drops_metadata_before_source_actions_cramp() {
+        let source_action_widths = [72.0, 85.0];
+
+        assert!(workspace_header_shows_metadata(
+            564.0,
+            &source_action_widths
+        ));
+        assert!(!workspace_header_shows_metadata(
+            344.0,
+            &source_action_widths
+        ));
+    }
+
+    #[test]
+    fn workspace_switcher_uses_one_line_only_when_intrinsic_controls_fit() {
+        let operation_widths = [84.0, 72.0, 65.0, 104.0, 118.0];
+
+        assert!(workspace_switcher_fits_one_line(564.0, &operation_widths));
+        assert!(!workspace_switcher_fits_one_line(344.0, &operation_widths));
     }
 
     #[test]

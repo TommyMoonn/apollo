@@ -54,6 +54,7 @@ use apollo::{
         upscale::{UpscaleSelectionAction, UpscaleSelectionState},
         upscale_progress::{self, UpscaleLifecycleAction, UpscaleLifecycleUiState},
         widgets,
+        workspace::{self, Operation as Tool, WorkspaceAction},
     },
     upscale::execution::{UpscaleExecutionState, UpscaleExecutor, UpscaleStartError},
 };
@@ -73,22 +74,6 @@ fn file_intake_enabled(
         && matches!(remux_state, RemuxExecutionState::Idle)
         && matches!(audio_extract_state, AudioExtractExecutionState::Idle)
         && matches!(frame_capture_state, FrameCaptureExecutionState::Idle)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Phase 0.3.1.2 connects every operation to the workspace switcher"
-    )
-)]
-enum Tool {
-    AudioMix,
-    VideoUpscale,
-    Remux,
-    AudioExtract,
-    FrameCapture,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -363,13 +348,6 @@ impl ApolloApp {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase 0.3.1.2 connects operation selection to the workspace switcher"
-        )
-    )]
     fn select_tool(&mut self, tool: Tool) {
         if !self.file_intake_enabled()
             || !matches!(
@@ -611,6 +589,25 @@ impl ApolloApp {
 
     fn show_navigation(&mut self, ui: &mut Ui) {
         let NavigationState::SourceWorkspace { active_operation } = self.state.navigation else {
+            self.show_file_intake(ui);
+            return;
+        };
+
+        let Some(media) = self.state.media_intake.current().cloned() else {
+            self.state.close_source();
+            self.show_file_intake(ui);
+            return;
+        };
+
+        let workspace_action =
+            workspace::show(ui, &media, active_operation, self.file_intake_enabled());
+        match workspace_action {
+            WorkspaceAction::Source(action) => self.handle_source_action(action, ui.ctx().clone()),
+            WorkspaceAction::SelectOperation(operation) => self.select_tool(operation),
+            WorkspaceAction::None => {}
+        }
+
+        let Some(active_operation) = self.state.active_operation() else {
             self.show_file_intake(ui);
             return;
         };
@@ -2047,6 +2044,25 @@ mod tests {
             .any(|clipped| shape_contains_text(&clipped.shape, needle))
     }
 
+    fn shape_text_count(shape: &egui::Shape, needle: &str) -> usize {
+        match shape {
+            egui::Shape::Text(text) => usize::from(text.galley.job.text == needle),
+            egui::Shape::Vec(shapes) => shapes
+                .iter()
+                .map(|shape| shape_text_count(shape, needle))
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    fn output_text_count(output: &egui::FullOutput, needle: &str) -> usize {
+        output
+            .shapes
+            .iter()
+            .map(|shape| shape_text_count(&shape.shape, needle))
+            .sum()
+    }
+
     fn shape_text_rect(shape: &egui::Shape, text: &str) -> Option<egui::Rect> {
         match shape {
             egui::Shape::Text(shape) if shape.galley.job.text == text => {
@@ -2292,12 +2308,12 @@ mod tests {
         let mut output = context.run_ui(Default::default(), |ui| {
             app.show_navigation(ui);
         });
+        output.textures_delta.clear();
         assert!(output_contains_text(
             &output,
             "This file could not be inspected."
         ));
         assert!(output_contains_text(&output, "Open files"));
-        output.textures_delta.clear();
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2542,13 +2558,14 @@ mod tests {
         let mut output = context.run_ui(Default::default(), |ui| {
             app.show_tool(ui, Tool::VideoUpscale);
         });
+        output.textures_delta.clear();
 
         assert!(output_contains_text(&output, "Upscale to"));
         assert!(output_contains_text(&output, "Video codec"));
         assert!(output_contains_text(&output, "Actual output"));
         assert!(!output_contains_text(&output, "← Back"));
-        assert!(!output_contains_text(&output, "Change"));
-        output.textures_delta.clear();
+        assert!(output_contains_text(&output, "Change file"));
+        assert!(output_contains_text(&output, "Close source"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2565,10 +2582,11 @@ mod tests {
         let mut output = context.run_ui(Default::default(), |ui| {
             app.show_tool(ui, Tool::Remux);
         });
+        output.textures_delta.clear();
 
         for text in [
             "recording.mkv",
-            "1 video · 1 audio",
+            "1920×1080",
             "Container",
             "MKV",
             "Output",
@@ -2576,7 +2594,6 @@ mod tests {
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
-        output.textures_delta.clear();
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2593,9 +2610,10 @@ mod tests {
         let mut output = context.run_ui(Default::default(), |ui| {
             app.show_tool(ui, Tool::AudioExtract);
         });
+        output.textures_delta.clear();
         for text in [
             "recording.mkv",
-            "1 audio track",
+            "1920×1080",
             "Audio track",
             "Desktop Audio",
             "stream 1",
@@ -2607,7 +2625,6 @@ mod tests {
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
-        output.textures_delta.clear();
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2624,6 +2641,7 @@ mod tests {
         let mut output = context.run_ui(Default::default(), |ui| {
             app.show_tool(ui, Tool::FrameCapture);
         });
+        output.textures_delta.clear();
         for text in [
             "recording.mkv",
             "1920×1080",
@@ -2637,7 +2655,6 @@ mod tests {
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
-        output.textures_delta.clear();
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2654,13 +2671,14 @@ mod tests {
         let mut output = context.run_ui(Default::default(), |ui| {
             app.show_tool(ui, Tool::AudioMix);
         });
+        output.textures_delta.clear();
 
         assert!(output_contains_text(&output, "Audio tracks"));
         assert!(output_contains_text(&output, "Loudness normalization"));
         assert!(!output_contains_text(&output, "Integrated loudness"));
         assert!(output_contains_text(&output, "Mix selected tracks"));
         assert!(!output_contains_text(&output, "← Back"));
-        assert!(!output_contains_text(&output, "Change"));
+        assert!(output_contains_text(&output, "Change file"));
         let audio_tracks = output_text_rect(&output, "Audio tracks");
         let select_all = output_text_rect(&output, "Select all");
         let clear = output_text_rect(&output, "Clear");
@@ -2672,7 +2690,6 @@ mod tests {
         assert!((selected.center().y - reset_gains.center().y).abs() <= 1.0);
         assert!(selected.top() > audio_tracks.bottom());
         assert!(loudness.top() > selected.bottom());
-        output.textures_delta.clear();
 
         app.state
             .audio_mix
@@ -2683,6 +2700,7 @@ mod tests {
         let mut output = context.run_ui(Default::default(), |ui| {
             app.show_tool(ui, Tool::AudioMix);
         });
+        output.textures_delta.clear();
         for label in [
             "Integrated loudness",
             "Maximum true peak",
@@ -2691,7 +2709,43 @@ mod tests {
         ] {
             assert!(output_contains_text(&output, label), "missing {label}");
         }
-        output.textures_delta.clear();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn shared_workspace_chrome_is_identical_across_all_ready_operations() {
+        let (directory, path) = temp_file("shared-workspace-chrome");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+
+        for operation in Tool::ALL {
+            let mut output = context.run_ui(Default::default(), |ui| {
+                app.show_tool(ui, operation);
+            });
+            output.textures_delta.clear();
+
+            assert_eq!(output_text_count(&output, "recording.mkv"), 1);
+            for label in [
+                "1920×1080",
+                "Change file",
+                "Close source",
+                "Audio Mix",
+                "Upscale",
+                "Remux",
+                "Audio Extract",
+                "Frame Capture",
+            ] {
+                assert!(
+                    output_contains_text(&output, label),
+                    "{operation:?} missing workspace label {label:?}"
+                );
+            }
+            assert!(!output_contains_text(&output, "← Back"));
+        }
+
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -3617,6 +3671,7 @@ mod tests {
         let mut output = context.run_ui(Default::default(), |ui| {
             app.show_navigation(ui);
         });
+        output.textures_delta.clear();
         assert!(output_contains_text(
             &output,
             "This file could not be inspected."
@@ -3626,9 +3681,8 @@ mod tests {
             "Check that the source is a readable media file and try again."
         ));
         assert!(output_contains_text(&output, "Upscale to"));
-        assert!(!output_contains_text(&output, "Change file"));
-        assert!(!output_contains_text(&output, "Audio Mix"));
-        output.textures_delta.clear();
+        assert!(output_contains_text(&output, "Change file"));
+        assert!(output_contains_text(&output, "Audio Mix"));
 
         app.select_tool(Tool::Remux);
 
@@ -3641,13 +3695,13 @@ mod tests {
         let mut output = context.run_ui(Default::default(), |ui| {
             app.show_navigation(ui);
         });
+        output.textures_delta.clear();
         assert!(output_contains_text(
             &output,
             "This file could not be inspected."
         ));
         assert!(output_contains_text(&output, "Remux"));
-        assert!(!output_contains_text(&output, "Change file"));
-        output.textures_delta.clear();
+        assert!(output_contains_text(&output, "Change file"));
         fs::remove_dir_all(directory).unwrap();
     }
 

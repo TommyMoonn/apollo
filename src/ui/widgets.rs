@@ -116,6 +116,18 @@ pub fn mode_button_intrinsic_size(ui: &Ui, label: &str) -> Vec2 {
     button_intrinsic_size(ui, label, false, theme::MODE_BUTTON_HORIZONTAL_PADDING)
 }
 
+pub fn plain_button_intrinsic_size(ui: &Ui, label: &str) -> Vec2 {
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        plain_button_text_style().resolve(ui.style()),
+        theme::SECONDARY,
+    );
+    vec2(
+        galley.size().x,
+        theme::COMPACT_CONTROL_HEIGHT.max(galley.size().y),
+    )
+}
+
 /// Compact selector trigger used by simple container/codec dropdowns.
 #[must_use]
 pub fn select_button(ui: &mut Ui, label: &str) -> Response {
@@ -739,7 +751,7 @@ fn button_with_horizontal_padding(
         let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
         let state = interaction_state(&response);
         let colors = if kind.selected {
-            theme::selectable_colors(state, true)
+            theme::operation_mode_colors(state, true)
         } else {
             theme::control_colors(kind.tone, state)
         };
@@ -923,6 +935,49 @@ mod tests {
         show_selector_popup, switch_control,
     };
     use crate::ui::{fonts, layout, theme};
+
+    fn shape_rect_fill(shape: &egui::Shape, rect: egui::Rect) -> Option<egui::Color32> {
+        match shape {
+            egui::Shape::Rect(shape)
+                if shape.rect == rect && shape.fill != egui::Color32::TRANSPARENT =>
+            {
+                Some(shape.fill)
+            }
+            egui::Shape::Vec(shapes) => {
+                shapes.iter().find_map(|shape| shape_rect_fill(shape, rect))
+            }
+            _ => None,
+        }
+    }
+
+    fn shape_rect_stroke(shape: &egui::Shape, rect: egui::Rect) -> Option<egui::Color32> {
+        match shape {
+            egui::Shape::Rect(shape)
+                if shape.rect == rect && shape.stroke != egui::Stroke::NONE =>
+            {
+                Some(shape.stroke.color)
+            }
+            egui::Shape::Vec(shapes) => shapes
+                .iter()
+                .find_map(|shape| shape_rect_stroke(shape, rect)),
+            _ => None,
+        }
+    }
+
+    fn shape_text_color(shape: &egui::Shape, text: &str) -> Option<egui::Color32> {
+        match shape {
+            egui::Shape::Text(shape) if shape.galley.job.text == text => shape
+                .galley
+                .job
+                .sections
+                .first()
+                .map(|section| section.format.color),
+            egui::Shape::Vec(shapes) => shapes
+                .iter()
+                .find_map(|shape| shape_text_color(shape, text)),
+            _ => None,
+        }
+    }
 
     #[test]
     fn editable_filename_field_stays_bounded_with_long_text() {
@@ -1289,6 +1344,67 @@ mod tests {
                 galley.size().x + theme::MODE_BUTTON_HORIZONTAL_PADDING * 2.0
             );
         });
+    }
+
+    #[test]
+    fn selected_operation_keeps_unselected_control_geometry() {
+        egui::__run_test_ui(|ui| {
+            let unselected = mode_button(ui, "Audio Mix", false);
+            let selected = mode_button(ui, "Audio Mix", true);
+
+            assert_eq!(unselected.rect.size(), selected.rect.size());
+        });
+    }
+
+    #[test]
+    fn disabled_selected_operation_keeps_geometry_and_rejects_interaction() {
+        egui::__run_test_ui(|ui| {
+            ui.disable();
+            let unselected = mode_button(ui, "Audio Mix", false);
+            let selected = mode_button(ui, "Audio Mix", true);
+
+            assert_eq!(unselected.rect.size(), selected.rect.size());
+            assert!(!selected.enabled());
+            assert!(!selected.clicked());
+        });
+    }
+
+    #[test]
+    fn disabled_selected_operation_paints_the_selected_palette() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let mut unselected_rect = egui::Rect::NOTHING;
+        let mut selected_rect = egui::Rect::NOTHING;
+        let mut output = context.run_ui(Default::default(), |ui| {
+            ui.disable();
+            unselected_rect = mode_button(ui, "Upscale", false).rect;
+            selected_rect = mode_button(ui, "Audio Mix", true).rect;
+        });
+        output.textures_delta.clear();
+
+        let find_fill = |rect| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| shape_rect_fill(&shape.shape, rect))
+        };
+        let find_stroke = |rect| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| shape_rect_stroke(&shape.shape, rect))
+        };
+        let find_text = |text| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| shape_text_color(&shape.shape, text))
+        };
+
+        assert_ne!(find_fill(selected_rect), find_fill(unselected_rect));
+        assert_ne!(find_stroke(selected_rect), find_stroke(unselected_rect));
+        assert_ne!(find_text("Audio Mix"), find_text("Upscale"));
     }
 
     #[test]
