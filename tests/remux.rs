@@ -50,6 +50,7 @@ fn compatible_mp4_inventory_is_valid() {
     ]);
 
     assert_eq!(validate_remux_request(&request, &media), Ok(()));
+    assert!(MediaContainer::Mp4.is_inventory_stream_copy_compatible(&media.streams));
 }
 
 #[test]
@@ -69,6 +70,13 @@ fn incompatible_mp4_inventory_is_rejected_with_absolute_stream_identity() {
             codec: Some("subrip".to_owned()),
         })
     );
+    assert_eq!(
+        MediaContainer::Mp4
+            .first_incompatible_stream(&media.streams)
+            .map(|stream| stream.stream_index),
+        Some(9)
+    );
+    assert!(MediaContainer::Matroska.is_inventory_stream_copy_compatible(&media.streams));
 }
 
 #[test]
@@ -174,14 +182,28 @@ fn command_maps_all_streams_copies_codecs_and_preserves_metadata_and_chapters() 
             "-c:v" | "-c:a" | "-c:s" | "-codec:v" | "-codec:a" | "-codec:s"
         )
     }));
+    assert!(!args.iter().any(|argument| argument == "-movflags"));
 }
 
 #[test]
-fn mp4_command_uses_mp4_muxer_and_keeps_paths_as_single_arguments() {
+fn mp4_command_uses_faststart_muxer_and_keeps_paths_as_single_arguments() {
     let request = request(MediaContainer::Mp4);
     let invocation = build_remux_invocation(&request);
 
     assert_eq!(invocation.args[1], request.input);
     assert_eq!(invocation.args.last().unwrap(), request.output.as_os_str());
     assert!(invocation.args.windows(2).any(|pair| pair == ["-f", "mp4"]));
+    assert!(
+        invocation
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-movflags", "+faststart"])
+    );
+    assert!(invocation.args.windows(2).any(|pair| pair == ["-map", "0"]));
+    assert!(
+        invocation
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-c", "copy"])
+    );
 }

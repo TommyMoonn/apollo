@@ -6,7 +6,11 @@ use std::{
 use egui::{Align, Label, Layout, RichText, Sides, TextStyle, Ui};
 
 use crate::{
-    media::{container::MediaContainer, model::MediaFile, output::MediaOutputError},
+    media::{
+        container::MediaContainer,
+        model::{MediaFile, StreamKind},
+        output::MediaOutputError,
+    },
     remux::{
         model::RemuxRequest,
         validation::{RemuxValidationError, validate_remux_request},
@@ -21,8 +25,6 @@ const BACK_LABEL: &str = "← Back";
 const BROWSE_LABEL: &str = "Browse";
 const REMUX_LABEL: &str = "Remux";
 const CONTAINER_OPTIONS: [&str; 2] = ["MP4", "MKV"];
-const MP4_INCOMPATIBLE_FEEDBACK: &str =
-    "A source stream cannot be copied into MP4. Use MKV instead.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemuxSelectionState {
@@ -99,10 +101,13 @@ pub fn show(
 ) -> RemuxSelectionAction {
     let mut action = RemuxSelectionAction::None;
     let validation = state.validation(media);
-    let feedback = validation.as_ref().err().and_then(remux_ready_feedback);
+    let feedback = validation
+        .as_ref()
+        .err()
+        .and_then(|error| remux_ready_feedback(error, media));
     let plan = layout::task_surface_plan(
         ui.available_height(),
-        remux_fixed_flow_height(ui, media, feedback),
+        remux_fixed_flow_height(ui, media, feedback.as_deref()),
         0.0,
         0.0,
     );
@@ -136,7 +141,7 @@ pub fn show(
             action = RemuxSelectionAction::BrowseOutput;
         }
 
-        if let Some(feedback) = feedback {
+        if let Some(feedback) = feedback.as_deref() {
             ui.add_space(theme::SPACING.tight);
             let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
         }
@@ -181,25 +186,64 @@ fn show_container_selector(ui: &mut Ui, state: &mut RemuxSelectionState) {
     }
 }
 
-fn remux_ready_feedback(error: &RemuxValidationError) -> Option<&'static str> {
+fn remux_ready_feedback(error: &RemuxValidationError, media: &MediaFile) -> Option<String> {
     match error {
-        RemuxValidationError::NoStreams => Some("This source has no media streams to remux."),
+        RemuxValidationError::NoStreams => {
+            Some("This source has no media streams to remux.".to_owned())
+        }
         RemuxValidationError::IncompatibleStream {
-            container: MediaContainer::Mp4,
-            ..
-        } => Some(MP4_INCOMPATIBLE_FEEDBACK),
-        RemuxValidationError::IncompatibleStream {
-            container: MediaContainer::Matroska,
-            ..
-        } => Some("A source stream cannot be copied into MKV."),
+            container,
+            stream_index,
+            kind,
+            codec,
+        } => {
+            let selected = container_label(*container);
+            let other = match container {
+                MediaContainer::Mp4 => MediaContainer::Matroska,
+                MediaContainer::Matroska => MediaContainer::Mp4,
+            };
+            let stream = stream_description(*stream_index, *kind, codec.as_deref());
+            if other.is_inventory_stream_copy_compatible(&media.streams) {
+                Some(format!(
+                    "{stream} cannot be copied into {selected}. Use {} instead.",
+                    container_label(other)
+                ))
+            } else {
+                Some(format!(
+                    "{stream} cannot be copied into {selected}. Neither MP4 nor MKV can copy every source stream."
+                ))
+            }
+        }
         RemuxValidationError::OutputExtensionMismatch { actual: None, .. }
         | RemuxValidationError::Output(MediaOutputError::InvalidOutputPath(_)) => {
-            Some("Enter a usable output filename.")
+            Some("Enter a usable output filename.".to_owned())
         }
         RemuxValidationError::OutputExtensionMismatch { .. } => {
-            Some("Output filename must match the selected container.")
+            Some("Output filename must match the selected container.".to_owned())
         }
         RemuxValidationError::Output(_) => None,
+    }
+}
+
+fn stream_description(stream_index: u32, kind: StreamKind, codec: Option<&str>) -> String {
+    let codec = codec
+        .filter(|codec| !codec.trim().is_empty())
+        .map(|codec| codec.to_ascii_uppercase())
+        .unwrap_or_else(|| "codec unknown".to_owned());
+    format!(
+        "Stream {stream_index} ({}, {codec})",
+        stream_kind_label(kind)
+    )
+}
+
+fn stream_kind_label(kind: StreamKind) -> &'static str {
+    match kind {
+        StreamKind::Video => "video",
+        StreamKind::Audio => "audio",
+        StreamKind::Subtitle => "subtitle",
+        StreamKind::Data => "data",
+        StreamKind::Attachment => "attachment",
+        StreamKind::Unknown => "unknown",
     }
 }
 
@@ -287,10 +331,35 @@ fn source_file_name(path: &Path) -> String {
 }
 
 fn inventory_summary(media: &MediaFile) -> Option<String> {
-    (!media.streams.is_empty()).then(|| {
-        let count = media.streams.len();
-        format!("{count} {}", if count == 1 { "stream" } else { "streams" })
-    })
+    let mut counts = [0_usize; 6];
+    for stream in &media.streams {
+        counts[match stream.kind {
+            StreamKind::Video => 0,
+            StreamKind::Audio => 1,
+            StreamKind::Subtitle => 2,
+            StreamKind::Data => 3,
+            StreamKind::Attachment => 4,
+            StreamKind::Unknown => 5,
+        }] += 1;
+    }
+
+    let mut parts = Vec::new();
+    for (count, singular, plural) in [
+        (counts[0], "video", "video"),
+        (counts[1], "audio", "audio"),
+        (counts[2], "subtitle", "subtitles"),
+        (counts[3], "data", "data"),
+        (counts[4], "attachment", "attachments"),
+        (counts[5], "unknown stream", "unknown streams"),
+    ] {
+        if count > 0 {
+            parts.push(format!(
+                "{count} {}",
+                if count == 1 { singular } else { plural }
+            ));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 fn default_output_stem(input: &Path) -> OsString {
@@ -324,8 +393,7 @@ mod tests {
     };
 
     use super::{
-        MP4_INCOMPATIBLE_FEEDBACK, RemuxSelectionState, remux_fixed_flow_height,
-        remux_ready_feedback,
+        RemuxSelectionState, inventory_summary, remux_fixed_flow_height, remux_ready_feedback,
     };
 
     fn media() -> MediaFile {
@@ -405,14 +473,89 @@ mod tests {
 
     #[test]
     fn incompatible_mp4_feedback_is_visible_before_execution() {
-        assert_eq!(
-            remux_ready_feedback(&RemuxValidationError::IncompatibleStream {
-                container: MediaContainer::Mp4,
+        let media = media_with_streams(vec![
+            MediaStream {
+                stream_index: 0,
+                kind: StreamKind::Video,
+                codec: Some("h264".to_owned()),
+            },
+            MediaStream {
                 stream_index: 4,
                 kind: StreamKind::Audio,
                 codec: Some("wmav2".to_owned()),
-            }),
-            Some(MP4_INCOMPATIBLE_FEEDBACK)
+            },
+        ]);
+        assert_eq!(
+            remux_ready_feedback(
+                &RemuxValidationError::IncompatibleStream {
+                    container: MediaContainer::Mp4,
+                    stream_index: 4,
+                    kind: StreamKind::Audio,
+                    codec: Some("wmav2".to_owned()),
+                },
+                &media,
+            ),
+            Some("Stream 4 (audio, WMAV2) cannot be copied into MP4. Use MKV instead.".to_owned())
+        );
+    }
+
+    #[test]
+    fn inventory_incompatible_with_both_containers_does_not_recommend_mkv() {
+        let media = media_with_streams(vec![MediaStream {
+            stream_index: 15,
+            kind: StreamKind::Data,
+            codec: Some("bin_data".to_owned()),
+        }]);
+        let feedback = remux_ready_feedback(
+            &RemuxValidationError::IncompatibleStream {
+                container: MediaContainer::Mp4,
+                stream_index: 15,
+                kind: StreamKind::Data,
+                codec: Some("bin_data".to_owned()),
+            },
+            &media,
+        )
+        .unwrap();
+
+        assert_eq!(
+            feedback,
+            "Stream 15 (data, BIN_DATA) cannot be copied into MP4. Neither MP4 nor MKV can copy every source stream."
+        );
+        assert!(!feedback.contains("Use MKV instead"));
+    }
+
+    #[test]
+    fn compact_inventory_summary_counts_each_retained_kind() {
+        let media = media_with_streams(vec![
+            MediaStream {
+                stream_index: 0,
+                kind: StreamKind::Video,
+                codec: Some("h264".to_owned()),
+            },
+            MediaStream {
+                stream_index: 2,
+                kind: StreamKind::Audio,
+                codec: Some("aac".to_owned()),
+            },
+            MediaStream {
+                stream_index: 3,
+                kind: StreamKind::Audio,
+                codec: Some("opus".to_owned()),
+            },
+            MediaStream {
+                stream_index: 8,
+                kind: StreamKind::Subtitle,
+                codec: Some("subrip".to_owned()),
+            },
+            MediaStream {
+                stream_index: 9,
+                kind: StreamKind::Attachment,
+                codec: Some("ttf".to_owned()),
+            },
+        ]);
+        assert_eq!(
+            inventory_summary(&media).as_deref(),
+            Some("1 video · 2 audio · 1 subtitle · 1 attachment")
         );
     }
 
@@ -450,21 +593,34 @@ mod tests {
         fonts::install(&context);
         theme::install(&context);
         let output = context.run_ui(Default::default(), |ui| {
-            let media = media();
+            let media = media_with_streams(vec![MediaStream {
+                stream_index: 4,
+                kind: StreamKind::Audio,
+                codec: Some("wmav2".to_owned()),
+            }]);
+            let feedback = remux_ready_feedback(
+                &RemuxValidationError::IncompatibleStream {
+                    container: MediaContainer::Mp4,
+                    stream_index: 4,
+                    kind: StreamKind::Audio,
+                    codec: Some("wmav2".to_owned()),
+                },
+                &media,
+            )
+            .unwrap();
             let narrow = fixed_height_ui(ui, 344.0);
             assert_eq!(narrow.available_width(), 344.0);
             let body_line = narrow.text_style_height(&egui::TextStyle::Body);
             let measured_feedback = crate::ui::widgets::inline_status_height(
                 &narrow,
-                MP4_INCOMPATIBLE_FEEDBACK,
+                &feedback,
                 narrow.available_width(),
             );
             assert!(measured_feedback > body_line);
 
             let without_feedback = remux_fixed_flow_height(&narrow, &media, None);
             let old_one_line_estimate = without_feedback + theme::SPACING.tight + body_line;
-            let with_feedback =
-                remux_fixed_flow_height(&narrow, &media, Some(MP4_INCOMPATIBLE_FEEDBACK));
+            let with_feedback = remux_fixed_flow_height(&narrow, &media, Some(&feedback));
             assert!(with_feedback > old_one_line_estimate);
             assert_eq!(
                 layout::task_surface_plan(old_one_line_estimate, with_feedback, 0.0, 0.0).overflow,
@@ -486,12 +642,18 @@ mod tests {
 
             let wide = fixed_height_ui(ui, 800.0);
             let wide_without = remux_fixed_flow_height(&wide, &media, None);
-            let wide_with = remux_fixed_flow_height(&wide, &media, Some(MP4_INCOMPATIBLE_FEEDBACK));
+            let wide_with = remux_fixed_flow_height(&wide, &media, Some(&feedback));
             let expected_wide_delta =
                 theme::SPACING.tight + wide.text_style_height(&egui::TextStyle::Body);
             assert!((wide_with - wide_without - expected_wide_delta).abs() <= 0.5);
         });
         output.drop_without_applying_deltas();
+    }
+
+    fn media_with_streams(streams: Vec<MediaStream>) -> MediaFile {
+        let mut media = media();
+        media.streams = streams;
+        media
     }
 
     fn fixed_height_ui(parent: &mut egui::Ui, width: f32) -> egui::Ui {

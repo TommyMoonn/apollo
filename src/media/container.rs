@@ -25,6 +25,16 @@ impl MediaContainer {
         self.is_stream_copy_codec_compatible(stream.kind, stream.codec.as_deref())
     }
 
+    pub fn first_incompatible_stream(self, streams: &[MediaStream]) -> Option<&MediaStream> {
+        streams
+            .iter()
+            .find(|stream| !self.is_stream_copy_compatible(stream))
+    }
+
+    pub fn is_inventory_stream_copy_compatible(self, streams: &[MediaStream]) -> bool {
+        self.first_incompatible_stream(streams).is_none()
+    }
+
     pub fn is_stream_copy_codec_compatible(self, kind: StreamKind, codec: Option<&str>) -> bool {
         let Some(codec) = codec.filter(|codec| !codec.is_empty()) else {
             return false;
@@ -152,5 +162,35 @@ mod tests {
         assert!(
             !MediaContainer::Matroska.is_stream_copy_compatible(&stream(StreamKind::Video, None))
         );
+    }
+
+    #[test]
+    fn inventory_query_returns_the_first_incompatible_absolute_stream() {
+        let streams = vec![
+            stream(StreamKind::Video, Some("h264")),
+            MediaStream {
+                stream_index: 11,
+                kind: StreamKind::Subtitle,
+                codec: Some("subrip".to_owned()),
+            },
+            MediaStream {
+                stream_index: 14,
+                kind: StreamKind::Data,
+                codec: Some("bin_data".to_owned()),
+            },
+        ];
+
+        assert_eq!(
+            MediaContainer::Mp4
+                .first_incompatible_stream(&streams)
+                .map(|stream| stream.stream_index),
+            Some(11)
+        );
+        assert!(!MediaContainer::Mp4.is_inventory_stream_copy_compatible(&streams));
+        assert!(!MediaContainer::Matroska.is_inventory_stream_copy_compatible(&streams));
+
+        let copyable = &streams[..1];
+        assert!(MediaContainer::Mp4.is_inventory_stream_copy_compatible(copyable));
+        assert!(MediaContainer::Matroska.is_inventory_stream_copy_compatible(copyable));
     }
 }

@@ -67,11 +67,7 @@ pub fn validate_remux_request(
         return Err(RemuxValidationError::NoStreams);
     }
 
-    if let Some(stream) = media
-        .streams
-        .iter()
-        .find(|stream| !request.container.is_stream_copy_compatible(stream))
-    {
+    if let Some(stream) = request.container.first_incompatible_stream(&media.streams) {
         return Err(RemuxValidationError::IncompatibleStream {
             container: request.container,
             stream_index: stream.stream_index,

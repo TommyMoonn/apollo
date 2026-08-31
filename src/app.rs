@@ -2477,7 +2477,7 @@ mod tests {
 
         for text in [
             "recording.mkv",
-            "2 streams",
+            "1 video · 1 audio",
             "Container",
             "MKV",
             "Output",
