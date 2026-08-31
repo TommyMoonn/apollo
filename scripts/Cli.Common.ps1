@@ -115,7 +115,7 @@ function ConvertFrom-CliArguments {
 
     foreach ($nameObject in $OptionSpecs.Keys) {
         $name = [string]$nameObject
-        if ($name -notmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') {
+        if ($name -cnotmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') {
             throw "Canonical CLI option name '$name' must use lowercase kebab-case."
         }
 

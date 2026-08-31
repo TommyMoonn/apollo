@@ -2,18 +2,18 @@
 
 ## Prerequisites
 
-Apollo v0.1.0 targets Windows as its primary development and validation platform.
+Apollo targets Windows as its primary development and validation platform.
 
 Required development tools:
 
 - Git
 - Rust toolchain pinned by `rust-toolchain.toml`
-- PowerShell 7 for repository scripts as they are introduced
-- FFmpeg and FFprobe for media functionality once the media phases begin
+- PowerShell 7 for repository scripts
+- FFmpeg and FFprobe for media inspection, processing, and runtime smoke tests
 
 Rustup is the recommended way to install the pinned Rust toolchain. From the repository root, the toolchain file should select the required version automatically.
 
-FFmpeg and FFprobe are external runtime tools. Bootstrap and early foundation phases do not require them to run, but later media phases will discover and validate them through one shared application owner rather than ad hoc feature-specific checks.
+FFmpeg and FFprobe are external runtime tools. Apollo discovers and validates them through one shared application owner rather than feature-specific checks.
 
 ## Releases
 
@@ -101,7 +101,7 @@ Missing or invalid required font assets are startup configuration errors. Apollo
 
 ## FFmpeg Expectations
 
-Apollo uses FFmpeg and FFprobe as external media engines instead of reimplementing codecs or linking libav during v0.1.0.
+Apollo uses FFmpeg and FFprobe as external media engines instead of reimplementing codecs or linking libav.
 
 Repository rules for media execution:
 
@@ -113,7 +113,19 @@ Repository rules for media execution:
 - cancellation must terminate only the owned child process
 - failed or cancelled jobs must not publish misleading partial outputs
 
-`src/media/tools.rs` owns FFmpeg/FFprobe discovery and bounded version validation. `src/media/probe.rs` owns FFprobe invocation, JSON deserialization, and normalization into the shared types in `src/media/model.rs`. `src/media/process.rs` owns long-running child-process spawning, cancellation, lifecycle settlement, bounded diagnostic stderr capture, and nonblocking output/progress channels. `src/media/output.rs` owns validation, operation-owned temporary paths, success-only publication, and failed/cancelled cleanup. `src/media/progress.rs` owns parsing machine-readable FFmpeg progress records into shared progress state; process exit remains the success/failure authority. FFmpeg command construction receives its own shared owner in later phases.
+`src/media/tools.rs` owns FFmpeg/FFprobe discovery and bounded version validation. `src/media/probe.rs` owns FFprobe invocation, JSON deserialization, and normalization into the shared types in `src/media/model.rs`. `src/media/container.rs` owns shared MP4 and Matroska stream-copy compatibility. `src/media/process.rs` owns long-running child-process spawning, cancellation, lifecycle settlement, bounded diagnostic stderr capture, and nonblocking output/progress channels. `src/media/output.rs` owns validation, operation-owned temporary paths, success-only publication, and failed/cancelled cleanup. `src/media/progress.rs` owns parsing machine-readable FFmpeg progress records into shared progress state; process exit remains the success/failure authority.
+
+Each workflow keeps its request model, validation, structured FFmpeg command construction, and execution policy under its feature module:
+
+```text
+src/audio_mix/
+src/upscale/
+src/remux/
+src/audio_extract/
+src/frame_capture/
+```
+
+The corresponding ready and lifecycle surfaces live under `src/ui/`. Remux remains stream copy only, Audio Extract maps one selected audio stream, and Frame Capture maps one video stream for one still image. Do not broaden these focused workflows into conversion, stream-editing, or timeline tools without an explicit release plan.
 
 ## Repository Scripts
 

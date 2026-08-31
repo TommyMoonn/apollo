@@ -258,7 +258,7 @@ Relative executable, compiler, and output paths resolve from the project root.
         throw "Project license does not exist: $licensePath"
     }
     if (-not (Test-Path -LiteralPath $noticesPath -PathType Leaf)) {
-        throw "Third-party notices do not exist: $noticesPath"
+        throw "Third-party notices file does not exist: $noticesPath"
     }
 
     $outputParent = Split-Path $outputPath -Parent

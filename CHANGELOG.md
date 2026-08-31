@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-31
+
+Apollo 0.3.0 adds Remux, Audio Extract, and Frame Capture as focused media utilities alongside Audio Mix and Video Upscale.
+
+### Added
+
+- Remux can copy every compatible source stream into MKV or MP4 without re-encoding, while preserving source metadata and chapters.
+- Audio Extract can save one selected audio track as an original MKA copy, 256 kbps AAC, or lossless FLAC.
+- Frame Capture can save one timestamped still image as lossless PNG or high-quality JPEG.
+
+### Changed
+
+- Remux now identifies the first incompatible stream before processing and recommends another supported container only when the complete source is compatible with it.
+- Audio Extract preserves known track titles and languages, and generated names identify the selected stream when a source has multiple audio tracks.
+- Frame Capture generated names include the selected timestamp, known source duration is shown beside the timestamp field, and captures at or beyond the source end are rejected.
+
+### Fixed
+
+- Frame Capture now treats an empty FFmpeg result as a failure instead of publishing a misleading successful output.
+
 ## [0.2.0] - 2026-08-30
 
 Apollo 0.2.0 adds user-controlled Audio Mix processing with per-track gain, optional loudness normalization, stable mix levels, and deterministic mixed-audio output.
@@ -78,7 +98,8 @@ Apollo 0.1.0 is the first public Windows release, bringing focused Audio Mix and
 - Missing optional FFprobe metadata falls back to usable media and track labels instead of preventing intake or selection.
 - Upscale sizing preserves the source aspect ratio within the selected target boundary without default cropping, stretching, or black padding.
 
-[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/TommyMoonn/apollo/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TommyMoonn/apollo/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/TommyMoonn/apollo/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/TommyMoonn/apollo/compare/v0.1.0...v0.1.1

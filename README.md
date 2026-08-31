@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  A native Windows utility for focused audio mixing and video upscaling.
+  A native Windows utility for focused media workflows.
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 ## About Apollo
 
-Apollo is a small native desktop media utility built around two focused workflows: mixing selected audio tracks from a video and upscaling video while preserving its aspect ratio.
+Apollo is a small native desktop media utility for audio mixing, video upscaling, stream-copy remuxing, audio extraction, and timestamped frame capture.
 
 ## Download Apollo
 
@@ -39,7 +39,10 @@ See the [latest release notes](https://github.com/TommyMoonn/apollo/releases/lat
 
 - **Audio Mix** - choose the embedded audio tracks to keep, mix them into one AAC stream, and write MP4 or MKV output without re-encoding the video.
 - **Video Upscale** - upscale to 1440p, 4K, or 8K boundaries with Lanczos scaling and H.264 or H.265 output while preserving the source aspect ratio.
-- **Output control** - edit the output filename and choose the destination before starting either workflow.
+- **Remux** - copy all compatible streams into MKV or MP4 without re-encoding, with incompatibilities reported before processing.
+- **Audio Extract** - save one selected audio track as an original MKA copy, 256 kbps AAC, or lossless FLAC.
+- **Frame Capture** - save one timestamped frame as lossless PNG or high-quality JPEG.
+- **Output control** - edit the output filename and choose the destination before starting any workflow.
 - **Safe publication** - work is written to an owned temporary location and published only after successful completion; failed or cancelled work does not leave a misleading final file.
 - **Responsive native interface** - the compact egui interface adapts across narrow, normal, wide, tall, and fullscreen windows.
 

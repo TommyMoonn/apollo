@@ -57,14 +57,16 @@ Invoke-TestCase 'zip-project derives slug, respects zipignore, and retains local
         Set-Content -LiteralPath (Join-Path $repo '.project/review.md') -Value 'included' -Encoding utf8
 
         $scriptCopy = Join-Path $repo 'scripts/zip-project.ps1'
-        $beforeTemps = @(Get-ChildItem ([System.IO.Path]::GetTempPath()) -Filter 'apollo-sample-zip-filelist-*' -ErrorAction SilentlyContinue).FullName
+        $beforeTemps = @(Get-ChildItem ([System.IO.Path]::GetTempPath()) -Filter 'apollo-sample-zip-filelist-*' -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName })
         Invoke-ScriptCapture -ScriptPath $scriptCopy | Out-Null
-        $afterTemps = @(Get-ChildItem ([System.IO.Path]::GetTempPath()) -Filter 'apollo-sample-zip-filelist-*' -ErrorAction SilentlyContinue).FullName
+        $afterTemps = @(Get-ChildItem ([System.IO.Path]::GetTempPath()) -Filter 'apollo-sample-zip-filelist-*' -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName })
         Assert-Equal $beforeTemps $afterTemps 'Temporary file list should be cleaned up.'
 
         $archives = @(Get-ChildItem -LiteralPath $parent -File -Filter 'apollo-sample(*).zip')
         Assert-Equal 1 $archives.Count 'Expected one project snapshot.'
-        Assert-True ($archives[0].Name -match '^apollo-sample\(\d{12}\)\.zip$') 'Snapshot filename should use slug and yyMMddHHmm timestamp.'
+        Assert-True ($archives[0].Name -match '^apollo-sample\(\d{10}\)\.zip$') 'Snapshot filename should use slug and yyMMddHHmm timestamp.'
         $entries = @(Get-ZipEntryNames -Path $archives[0].FullName)
         Assert-True ($entries -contains 'README.md') 'Ordinary project file should be included.'
         Assert-True ($entries -contains '.planning/plan.md') '.planning should be included by default.'
@@ -93,6 +95,7 @@ Invoke-TestCase 'review-changes reports clean and rejects non-Git directories' {
     $repo = New-TestGitRepository
     $nonGit = New-TestDirectory
     try {
+        Set-Content -LiteralPath (Join-Path $nonGit '.git') -Value 'not-a-gitfile' -Encoding utf8
         $output = Invoke-ScriptCapture -ScriptPath $reviewScript -Arguments @('--project', $repo)
         Assert-Contains $output 'Working tree is clean.' 'Clean repository should be reported.'
         Assert-Throws { Invoke-ScriptCapture -ScriptPath $reviewScript -Arguments @('--project', $nonGit) } '*not inside a Git working tree*'
