@@ -38,6 +38,10 @@ impl FrameTimestamp {
     pub const fn milliseconds(self) -> i64 {
         self.milliseconds
     }
+
+    pub fn filename_component(self) -> String {
+        self.to_string().replace([':', '.'], "-")
+    }
 }
 
 impl fmt::Display for FrameTimestamp {
@@ -204,5 +208,11 @@ mod tests {
             FrameTimestamp::from_str("999999999999999999999:00:00.000"),
             Err(FrameTimestampParseError::Overflow)
         );
+    }
+
+    #[test]
+    fn timestamp_filename_component_is_windows_safe_and_keeps_milliseconds() {
+        let timestamp = FrameTimestamp::from_str("01:02:03.004").unwrap();
+        assert_eq!(timestamp.filename_component(), "01-02-03-004");
     }
 }

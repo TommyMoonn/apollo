@@ -2542,6 +2542,7 @@ mod tests {
             "00:00:00.000",
             "Format",
             "PNG",
+            "lossless",
             "Output",
             "Capture frame",
             "← Back",
@@ -2774,7 +2775,7 @@ mod tests {
             }
         );
         assert_eq!(options.initial_directory, directory);
-        assert_eq!(options.file_name, "recording-frame.png");
+        assert_eq!(options.file_name, "recording-frame-00-00-00-000.png");
         assert_eq!(options.format, OutputFormat::Png);
 
         let session = app.state.frame_capture.as_mut().unwrap();
@@ -2784,7 +2785,7 @@ mod tests {
         else {
             unreachable!();
         };
-        assert_eq!(options.file_name, "recording-frame.jpg");
+        assert_eq!(options.file_name, "recording-frame-00-00-00-000.jpg");
         assert_eq!(options.format, OutputFormat::Jpeg);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3747,7 +3748,10 @@ mod tests {
             .frame_capture
             .as_mut()
             .expect("frame capture session should exist");
-        session.selection.set_timestamp_text("00:00:03.250".into());
+        let inspected_media = media(&path);
+        session
+            .selection
+            .set_timestamp_text(&inspected_media, "00:00:03.250".into());
         session.selection.set_format(FrameCaptureFormat::Jpeg);
         let custom_output = directory.join("chosen-frame.jpg");
         session

@@ -55,7 +55,7 @@ impl FrameCaptureStartError {
                     MediaError::missing_stream(error.to_string())
                 }
                 FrameCaptureValidationError::NegativeTimestamp
-                | FrameCaptureValidationError::TimestampExceedsDuration { .. }
+                | FrameCaptureValidationError::TimestampAtOrBeyondDuration { .. }
                 | FrameCaptureValidationError::OutputExtensionMismatch { .. } => {
                     MediaError::invalid_request(error.to_string())
                 }
@@ -246,6 +246,10 @@ mod tests {
         assert_eq!(executor.state(), &FrameCaptureExecutionState::Running);
         let args = observed_args.lock().unwrap();
         assert!(args.windows(2).any(|pair| pair == ["-map", "0:7"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-abort_on", "empty_output"])
+        );
         let staged_output = PathBuf::from(args.last().unwrap());
         assert_ne!(staged_output, request.output);
         assert_eq!(staged_output.file_name(), request.output.file_name());
@@ -286,6 +290,33 @@ mod tests {
             assert_eq!(launches.load(Ordering::Relaxed), 0);
             assert_eq!(executor.state(), &FrameCaptureExecutionState::Idle);
         }
+    }
+
+    #[test]
+    fn exact_duration_timestamp_is_rejected_before_launch() {
+        let directory = TestDirectory::new("duration-boundary-no-launch");
+        let (mut request, media) = valid_request_and_media(&directory);
+        request.timestamp = FrameTimestamp::from_milliseconds(10_000);
+        let tools = fake_tools(&directory);
+        let launches = Arc::new(AtomicUsize::new(0));
+        let launch_count = Arc::clone(&launches);
+        let mut executor = FrameCaptureExecutor::new();
+
+        let error = executor
+            .start_with_launcher(&tools, &media, &request, move |_| {
+                launch_count.fetch_add(1, Ordering::Relaxed);
+                Ok(FakeProcessControl::running())
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FrameCaptureStartError::Validation(
+                FrameCaptureValidationError::TimestampAtOrBeyondDuration { .. }
+            )
+        ));
+        assert_eq!(launches.load(Ordering::Relaxed), 0);
+        assert_eq!(executor.state(), &FrameCaptureExecutionState::Idle);
     }
 
     #[test]

@@ -81,7 +81,7 @@ fn missing_video_and_negative_timestamps_are_rejected() {
 }
 
 #[test]
-fn known_duration_accepts_boundary_and_rejects_later_timestamp() {
+fn known_duration_rejects_equal_and_later_timestamps() {
     let media = media(Some(Duration::from_millis(10_500)));
     assert_eq!(
         validate_frame_capture_request(
@@ -91,7 +91,10 @@ fn known_duration_accepts_boundary_and_rejects_later_timestamp() {
             ),
             &media
         ),
-        Ok(())
+        Err(FrameCaptureValidationError::TimestampAtOrBeyondDuration {
+            timestamp_milliseconds: 10_500,
+            duration_milliseconds: 10_500,
+        })
     );
     assert_eq!(
         validate_frame_capture_request(
@@ -101,10 +104,28 @@ fn known_duration_accepts_boundary_and_rejects_later_timestamp() {
             ),
             &media
         ),
-        Err(FrameCaptureValidationError::TimestampExceedsDuration {
+        Err(FrameCaptureValidationError::TimestampAtOrBeyondDuration {
             timestamp_milliseconds: 10_501,
             duration_milliseconds: 10_500,
         })
+    );
+}
+
+#[test]
+fn sub_millisecond_duration_precision_does_not_shrink_the_valid_boundary() {
+    let media = media(Some(
+        Duration::from_millis(10_500) + Duration::from_micros(500),
+    ));
+
+    assert_eq!(
+        validate_frame_capture_request(
+            &request(
+                FrameCaptureFormat::Png,
+                FrameTimestamp::from_milliseconds(10_500)
+            ),
+            &media
+        ),
+        Ok(())
     );
 }
 
@@ -151,6 +172,7 @@ fn command_maps_sparse_absolute_video_index_and_outputs_exactly_one_frame_withou
     assert!(has_pair(&args, "-frames:v", "1"));
     assert_eq!(args.iter().filter(|arg| *arg == "-frames:v").count(), 1);
     assert!(args.iter().any(|arg| arg == "-an"));
+    assert!(has_pair(&args, "-abort_on", "empty_output"));
     assert!(
         !args
             .iter()

@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use crate::media::{
     model::MediaFile,
@@ -11,7 +11,7 @@ use super::model::FrameCaptureRequest;
 pub enum FrameCaptureValidationError {
     MissingVideoStream,
     NegativeTimestamp,
-    TimestampExceedsDuration {
+    TimestampAtOrBeyondDuration {
         timestamp_milliseconds: i64,
         duration_milliseconds: u128,
     },
@@ -27,12 +27,12 @@ impl fmt::Display for FrameCaptureValidationError {
         match self {
             Self::MissingVideoStream => formatter.write_str("source has no video stream"),
             Self::NegativeTimestamp => formatter.write_str("frame timestamp cannot be negative"),
-            Self::TimestampExceedsDuration {
+            Self::TimestampAtOrBeyondDuration {
                 timestamp_milliseconds,
                 duration_milliseconds,
             } => write!(
                 formatter,
-                "frame timestamp {timestamp_milliseconds} ms exceeds source duration {duration_milliseconds} ms"
+                "frame timestamp {timestamp_milliseconds} ms is at or beyond source duration {duration_milliseconds} ms"
             ),
             Self::OutputExtensionMismatch { expected, actual } => match actual {
                 Some(actual) => write!(
@@ -62,21 +62,29 @@ pub fn validate_frame_capture_request(
     if media.video_streams.is_empty() {
         return Err(FrameCaptureValidationError::MissingVideoStream);
     }
-    if request.timestamp.milliseconds() < 0 {
+    validate_frame_timestamp(request.timestamp, media.duration)?;
+
+    validate_output_extension(request)?;
+    validate_output_path(&request.output).map_err(FrameCaptureValidationError::Output)
+}
+
+pub fn validate_frame_timestamp(
+    timestamp: super::model::FrameTimestamp,
+    duration: Option<Duration>,
+) -> Result<(), FrameCaptureValidationError> {
+    if timestamp.milliseconds() < 0 {
         return Err(FrameCaptureValidationError::NegativeTimestamp);
     }
-    if let Some(duration) = media.duration {
+    if let Some(duration) = duration {
         let duration_milliseconds = duration.as_millis();
-        if request.timestamp.milliseconds() as u128 > duration_milliseconds {
-            return Err(FrameCaptureValidationError::TimestampExceedsDuration {
-                timestamp_milliseconds: request.timestamp.milliseconds(),
+        if Duration::from_millis(timestamp.milliseconds() as u64) >= duration {
+            return Err(FrameCaptureValidationError::TimestampAtOrBeyondDuration {
+                timestamp_milliseconds: timestamp.milliseconds(),
                 duration_milliseconds,
             });
         }
     }
-
-    validate_output_extension(request)?;
-    validate_output_path(&request.output).map_err(FrameCaptureValidationError::Output)
+    Ok(())
 }
 
 fn validate_output_extension(

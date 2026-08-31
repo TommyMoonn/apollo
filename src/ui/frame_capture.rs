@@ -2,6 +2,7 @@ use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
 use egui::{Align, Label, Layout, RichText, Sides, TextEdit, TextStyle, Ui};
@@ -11,7 +12,9 @@ use crate::{
         model::{
             FrameCaptureFormat, FrameCaptureRequest, FrameTimestamp, FrameTimestampParseError,
         },
-        validation::{FrameCaptureValidationError, validate_frame_capture_request},
+        validation::{
+            FrameCaptureValidationError, validate_frame_capture_request, validate_frame_timestamp,
+        },
     },
     media::{model::MediaFile, output::MediaOutputError},
 };
@@ -47,7 +50,10 @@ impl FrameCaptureSelectionState {
         Self {
             timestamp_text: FrameTimestamp::ZERO.to_string(),
             format: FrameCaptureFormat::Png,
-            output_name: OutputNameState::new(&media.path, default_output_stem(&media.path)),
+            output_name: OutputNameState::new(
+                &media.path,
+                default_output_stem(&media.path, FrameTimestamp::ZERO),
+            ),
         }
     }
 
@@ -55,8 +61,14 @@ impl FrameCaptureSelectionState {
         &self.timestamp_text
     }
 
-    pub fn set_timestamp_text(&mut self, timestamp: String) {
+    pub fn set_timestamp_text(&mut self, media: &MediaFile, timestamp: String) {
         self.timestamp_text = timestamp;
+        if let Ok(timestamp) = FrameTimestamp::from_str(&self.timestamp_text)
+            && validate_frame_timestamp(timestamp, media.duration).is_ok()
+        {
+            self.output_name
+                .set_generated_stem(default_output_stem(&media.path, timestamp));
+        }
     }
 
     pub fn format(&self) -> FrameCaptureFormat {
@@ -144,20 +156,30 @@ pub fn show(
 
         let _ = widgets::section_label(ui, TIMESTAMP_LABEL);
         ui.add_space(theme::SPACING.compact);
+        let mut timestamp_text = state.timestamp_text().to_owned();
         let timestamp = ui.add_sized(
             [ui.available_width(), theme::COMPACT_CONTROL_HEIGHT],
-            TextEdit::singleline(&mut state.timestamp_text)
+            TextEdit::singleline(&mut timestamp_text)
                 .hint_text("HH:MM:SS.mmm")
                 .vertical_align(Align::Center),
         );
+        if timestamp.changed() {
+            state.set_timestamp_text(media, timestamp_text);
+        }
         if timestamp.lost_focus() {
             ui.ctx().request_repaint();
+        }
+        if let Some(duration) = media.duration {
+            ui.add_space(theme::SPACING.tight);
+            technical_context(ui, &format!("Duration {}", format_duration(duration)));
         }
 
         ui.add_space(theme::SPACING.focal);
         let _ = widgets::section_label(ui, FORMAT_LABEL);
         ui.add_space(theme::SPACING.compact);
         show_format_selector(ui, state);
+        ui.add_space(theme::SPACING.tight);
+        technical_context(ui, format_detail(state.format()));
 
         ui.add_space(theme::SPACING.focal);
         let _ = widgets::section_label(ui, OUTPUT_LABEL);
@@ -222,8 +244,8 @@ fn ready_feedback(error: &FrameCaptureReadyError) -> Option<&'static str> {
             Some("Timestamp cannot be negative.")
         }
         FrameCaptureReadyError::Request(
-            FrameCaptureValidationError::TimestampExceedsDuration { .. },
-        ) => Some("Timestamp exceeds the source duration."),
+            FrameCaptureValidationError::TimestampAtOrBeyondDuration { .. },
+        ) => Some("Timestamp must be before the source duration."),
         FrameCaptureReadyError::Request(
             FrameCaptureValidationError::OutputExtensionMismatch { actual: None, .. }
             | FrameCaptureValidationError::Output(MediaOutputError::InvalidOutputPath(_)),
@@ -280,16 +302,23 @@ fn fixed_flow_height(ui: &Ui, media: &MediaFile, feedback: Option<&str>) -> f32 
     let feedback_height = feedback.map_or(0.0, |feedback| {
         theme::SPACING.tight + widgets::inline_status_height(ui, feedback, ui.available_width())
     });
+    let duration_height = media.duration.map_or(0.0, |_| {
+        theme::SPACING.tight + ui.text_style_height(&fonts::technical_text_style())
+    });
+    let format_detail_height =
+        theme::SPACING.tight + ui.text_style_height(&fonts::technical_text_style());
 
     source_header_height(ui, video_summary(media).is_some())
         + theme::SPACING.section
         + section_label_height
         + theme::SPACING.compact
         + theme::COMPACT_CONTROL_HEIGHT
+        + duration_height
         + theme::SPACING.focal
         + section_label_height
         + theme::SPACING.compact
         + theme::COMPACT_CONTROL_HEIGHT
+        + format_detail_height
         + theme::SPACING.focal
         + section_label_height
         + theme::SPACING.compact
@@ -323,13 +352,15 @@ fn video_summary(media: &MediaFile) -> Option<String> {
     }
 }
 
-fn default_output_stem(input: &Path) -> OsString {
+fn default_output_stem(input: &Path, timestamp: FrameTimestamp) -> OsString {
     let stem = input
         .file_stem()
         .filter(|stem| !stem.is_empty())
         .unwrap_or_else(|| OsStr::new("output"));
     let mut output = OsString::from(stem);
     output.push("-frame");
+    output.push("-");
+    output.push(timestamp.filename_component());
     output
 }
 
@@ -338,6 +369,33 @@ pub(super) fn format_label(format: FrameCaptureFormat) -> &'static str {
         FrameCaptureFormat::Png => "PNG",
         FrameCaptureFormat::Jpeg => "JPEG",
     }
+}
+
+fn format_detail(format: FrameCaptureFormat) -> &'static str {
+    match format {
+        FrameCaptureFormat::Png => "lossless",
+        FrameCaptureFormat::Jpeg => "high quality",
+    }
+}
+
+fn technical_context(ui: &mut Ui, text: &str) {
+    ui.add(
+        Label::new(
+            RichText::new(text)
+                .text_style(fonts::technical_text_style())
+                .color(theme::SECONDARY_FAINT),
+        )
+        .selectable(false),
+    );
+}
+
+fn format_duration(duration: Duration) -> String {
+    let total_milliseconds = duration.as_millis();
+    let hours = total_milliseconds / 3_600_000;
+    let minutes = total_milliseconds % 3_600_000 / 60_000;
+    let seconds = total_milliseconds % 60_000 / 1_000;
+    let milliseconds = total_milliseconds % 1_000;
+    format!("{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:03}")
 }
 
 #[cfg(test)]
@@ -350,7 +408,10 @@ mod tests {
         ui::{fonts, layout, theme},
     };
 
-    use super::{FrameCaptureSelectionState, fixed_flow_height, ready_feedback};
+    use super::{
+        FrameCaptureSelectionState, fixed_flow_height, format_detail, format_duration,
+        ready_feedback,
+    };
 
     fn media(duration: Option<Duration>) -> MediaFile {
         MediaFile {
@@ -373,14 +434,14 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_zero_png_and_frame_suffix() {
+    fn defaults_to_zero_png_and_timestamped_frame_suffix() {
         let media = media(Some(Duration::from_secs(10)));
         let state = FrameCaptureSelectionState::new(&media);
         assert_eq!(state.timestamp_text(), "00:00:00.000");
         assert_eq!(state.format(), FrameCaptureFormat::Png);
         assert_eq!(
             state.output_path(),
-            PathBuf::from("captures/recording-frame.png")
+            PathBuf::from("captures/recording-frame-00-00-00-000.png")
         );
         assert!(state.can_capture(&media));
         assert_eq!(state.request(&media).unwrap().timestamp.milliseconds(), 0);
@@ -390,19 +451,27 @@ mod tests {
     fn timestamp_edits_drive_request_and_invalid_feedback() {
         let media = media(Some(Duration::from_secs(10)));
         let mut state = FrameCaptureSelectionState::new(&media);
-        state.set_timestamp_text("00:00:01.250".into());
+        state.set_timestamp_text(&media, "00:00:01.250".into());
         assert_eq!(
             state.request(&media).unwrap().timestamp.milliseconds(),
             1_250
         );
         assert!(state.can_capture(&media));
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("captures/recording-frame-00-00-01-250.png")
+        );
 
-        state.set_timestamp_text("one second".into());
+        state.set_timestamp_text(&media, "one second".into());
         assert!(state.request(&media).is_none());
         assert!(!state.can_capture(&media));
         assert_eq!(
             ready_feedback(&state.validation(&media).unwrap_err()),
             Some("Enter a timestamp using HH:MM:SS.mmm.")
+        );
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("captures/recording-frame-00-00-01-250.png")
         );
     }
 
@@ -412,10 +481,11 @@ mod tests {
         fonts::install(&context);
         theme::install(&context);
         let mut state = FrameCaptureSelectionState::new(&media(None));
-        state.set_timestamp_text("not a timestamp".into());
+        let media = media(None);
+        state.set_timestamp_text(&media, "not a timestamp".into());
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media(None), &mut state);
+            let _ = super::show(ui, &media, &mut state);
         });
         assert!(output.shapes.iter().any(|shape| {
             shape_contains(&shape.shape, "Enter a timestamp using HH:MM:SS.mmm.")
@@ -428,6 +498,7 @@ mod tests {
         let media = media(None);
         let mut state = FrameCaptureSelectionState::new(&media);
         state.set_output_filename_stem(OsString::from("chosen frame"));
+        state.set_timestamp_text(&media, "00:00:04.250".into());
         state.set_format(FrameCaptureFormat::Jpeg);
         assert_eq!(
             state.output_path(),
@@ -439,6 +510,56 @@ mod tests {
             PathBuf::from("captures/chosen frame.png")
         );
         assert!(state.output_is_customized());
+    }
+
+    #[test]
+    fn out_of_duration_timestamp_preserves_the_last_valid_generated_name() {
+        let media = media(Some(Duration::from_secs(2)));
+        let mut state = FrameCaptureSelectionState::new(&media);
+        state.set_timestamp_text(&media, "00:00:01.500".into());
+        let valid_output = state.output_path();
+
+        state.set_timestamp_text(&media, "00:00:02.000".into());
+
+        assert!(!state.can_capture(&media));
+        assert_eq!(state.output_path(), valid_output);
+    }
+
+    #[test]
+    fn known_duration_and_format_detail_render_as_compact_context() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let media = media(Some(Duration::from_millis(754_567)));
+        let mut state = FrameCaptureSelectionState::new(&media);
+
+        let output = context.run_ui(Default::default(), |ui| {
+            let _ = super::show(ui, &media, &mut state);
+        });
+
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|shape| { shape_contains(&shape.shape, "Duration 00:12:34.567") })
+        );
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|shape| shape_contains(&shape.shape, "lossless"))
+        );
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn duration_and_format_copy_match_fixed_policies() {
+        assert_eq!(
+            format_duration(Duration::from_millis(3_723_004)),
+            "01:02:03.004"
+        );
+        assert_eq!(format_detail(FrameCaptureFormat::Png), "lossless");
+        assert_eq!(format_detail(FrameCaptureFormat::Jpeg), "high quality");
     }
 
     #[test]
@@ -455,10 +576,10 @@ mod tests {
     fn duration_and_missing_video_validation_control_primary_action() {
         let mut media = media(Some(Duration::from_millis(500)));
         let mut state = FrameCaptureSelectionState::new(&media);
-        state.set_timestamp_text("00:00:00.501".into());
+        state.set_timestamp_text(&media, "00:00:00.501".into());
         assert!(!state.can_capture(&media));
 
-        state.set_timestamp_text("00:00:00.000".into());
+        state.set_timestamp_text(&media, "00:00:00.000".into());
         media.video_streams.clear();
         assert!(!state.can_capture(&media));
     }

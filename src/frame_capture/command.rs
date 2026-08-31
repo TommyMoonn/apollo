@@ -23,6 +23,8 @@ pub fn build_frame_capture_invocation(
         OsString::from(format!("0:{primary_video_stream_index}")),
         OsString::from("-frames:v"),
         OsString::from("1"),
+        OsString::from("-abort_on"),
+        OsString::from("empty_output"),
         OsString::from("-an"),
         OsString::from("-c:v"),
         OsString::from(match request.format {
