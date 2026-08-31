@@ -21,7 +21,7 @@ const OUTPUT_LABEL: &str = "Output";
 const BACK_LABEL: &str = "← Back";
 const BROWSE_LABEL: &str = "Browse";
 const EXTRACT_LABEL: &str = "Extract";
-const FORMAT_OPTIONS: [&str; 3] = ["Original", "AAC", "FLAC"];
+const FORMAT_OPTIONS: [&str; 3] = ["Original (copy)", "AAC", "FLAC"];
 const NO_AUDIO_FEEDBACK: &str = "This source has no audio tracks to extract.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,13 +42,21 @@ pub enum AudioExtractSelectionAction {
 
 impl AudioExtractSelectionState {
     pub fn new(media: &MediaFile) -> Self {
+        let selected_stream_index = media
+            .audio_streams
+            .first()
+            .map(|stream| stream.stream_index);
         Self {
-            selected_stream_index: media
-                .audio_streams
-                .first()
-                .map(|stream| stream.stream_index),
+            selected_stream_index,
             format: AudioExtractFormat::Original,
-            output_name: OutputNameState::new(&media.path, default_output_stem(&media.path)),
+            output_name: OutputNameState::new(
+                &media.path,
+                default_output_stem(
+                    &media.path,
+                    media.audio_streams.len(),
+                    selected_stream_index,
+                ),
+            ),
         }
     }
 
@@ -65,6 +73,11 @@ impl AudioExtractSelectionState {
             return false;
         }
         self.selected_stream_index = Some(stream_index);
+        self.output_name.set_generated_stem(default_output_stem(
+            &media.path,
+            media.audio_streams.len(),
+            self.selected_stream_index,
+        ));
         true
     }
 
@@ -156,6 +169,15 @@ pub fn show(
         let _ = widgets::section_label(ui, FORMAT_LABEL);
         ui.add_space(theme::SPACING.compact);
         show_format_selector(ui, state);
+        ui.add_space(theme::SPACING.tight);
+        ui.add(
+            Label::new(
+                RichText::new(format_detail(state.format()))
+                    .text_style(fonts::technical_text_style())
+                    .color(theme::SECONDARY_FAINT),
+            )
+            .selectable(false),
+        );
 
         ui.add_space(theme::SPACING.focal);
         let _ = widgets::section_label(ui, OUTPUT_LABEL);
@@ -365,6 +387,8 @@ fn fixed_flow_height(ui: &Ui, media: &MediaFile, feedback: Option<&str>) -> f32 
         + section_label_height
         + theme::SPACING.compact
         + theme::COMPACT_CONTROL_HEIGHT
+        + theme::SPACING.tight
+        + ui.text_style_height(&fonts::technical_text_style())
         + theme::SPACING.focal
         + section_label_height
         + theme::SPACING.compact
@@ -400,21 +424,38 @@ fn audio_summary(media: &MediaFile) -> Option<String> {
     })
 }
 
-fn default_output_stem(input: &Path) -> OsString {
+fn default_output_stem(
+    input: &Path,
+    audio_stream_count: usize,
+    selected_stream_index: Option<u32>,
+) -> OsString {
     let stem = input
         .file_stem()
         .filter(|stem| !stem.is_empty())
         .unwrap_or_else(|| OsStr::new("output"));
     let mut output = OsString::from(stem);
     output.push("-audio");
+    if audio_stream_count > 1
+        && let Some(stream_index) = selected_stream_index
+    {
+        output.push(format!("-{stream_index}"));
+    }
     output
 }
 
 pub(super) fn format_label(format: AudioExtractFormat) -> &'static str {
     match format {
-        AudioExtractFormat::Original => "Original",
+        AudioExtractFormat::Original => "Original (copy)",
         AudioExtractFormat::Aac => "AAC",
         AudioExtractFormat::Flac => "FLAC",
+    }
+}
+
+fn format_detail(format: AudioExtractFormat) -> &'static str {
+    match format {
+        AudioExtractFormat::Original => "no re-encode · MKA",
+        AudioExtractFormat::Aac => "256 kbps · M4A",
+        AudioExtractFormat::Flac => "lossless · FLAC",
     }
 }
 
@@ -428,7 +469,10 @@ mod tests {
         ui::{fonts, layout, theme},
     };
 
-    use super::{AudioExtractSelectionState, NO_AUDIO_FEEDBACK, fixed_flow_height, ready_feedback};
+    use super::{
+        AudioExtractSelectionState, NO_AUDIO_FEEDBACK, fixed_flow_height, format_detail,
+        format_label, ready_feedback,
+    };
 
     fn media() -> MediaFile {
         MediaFile {
@@ -474,17 +518,39 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_first_absolute_audio_index_original_and_audio_suffix() {
+    fn multi_track_source_defaults_to_first_absolute_index_and_indexed_audio_suffix() {
         let media = media();
-        let state = AudioExtractSelectionState::new(&media);
+        let mut state = AudioExtractSelectionState::new(&media);
         assert_eq!(state.selected_stream_index(), Some(3));
         assert_eq!(state.format(), AudioExtractFormat::Original);
         assert_eq!(
             state.output_path(),
-            PathBuf::from("captures/recording-audio.mka")
+            PathBuf::from("captures/recording-audio-3.mka")
         );
         assert!(state.can_extract(&media));
         assert_eq!(state.request(&media).unwrap().audio_stream_index, 3);
+
+        state.set_format(AudioExtractFormat::Aac);
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("captures/recording-audio-3.m4a")
+        );
+    }
+
+    #[test]
+    fn single_track_source_keeps_the_simple_audio_suffix() {
+        let mut media = media();
+        media.audio_streams.truncate(1);
+        media
+            .streams
+            .retain(|stream| stream.kind != StreamKind::Audio || stream.stream_index == 3);
+
+        let state = AudioExtractSelectionState::new(&media);
+
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("captures/recording-audio.mka")
+        );
     }
 
     #[test]
@@ -496,6 +562,42 @@ mod tests {
         assert!(!state.select_stream(&media, 0));
         assert!(!state.select_stream(&media, 99));
         assert_eq!(state.selected_stream_index(), Some(7));
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("captures/recording-audio-7.mka")
+        );
+    }
+
+    #[test]
+    fn customized_output_stem_survives_later_track_and_format_changes() {
+        let media = media();
+        let mut state = AudioExtractSelectionState::new(&media);
+        state.set_output_filename_stem(OsString::from("chosen commentary"));
+
+        assert!(state.select_stream(&media, 7));
+        state.set_format(AudioExtractFormat::Flac);
+
+        assert_eq!(
+            state.output_path(),
+            PathBuf::from("captures/chosen commentary.flac")
+        );
+        assert!(state.output_is_customized());
+    }
+
+    #[test]
+    fn format_labels_and_details_match_the_command_policy() {
+        assert_eq!(
+            format_label(AudioExtractFormat::Original),
+            "Original (copy)"
+        );
+        assert_eq!(
+            format_detail(AudioExtractFormat::Original),
+            "no re-encode · MKA"
+        );
+        assert_eq!(format_label(AudioExtractFormat::Aac), "AAC");
+        assert_eq!(format_detail(AudioExtractFormat::Aac), "256 kbps · M4A");
+        assert_eq!(format_label(AudioExtractFormat::Flac), "FLAC");
+        assert_eq!(format_detail(AudioExtractFormat::Flac), "lossless · FLAC");
     }
 
     #[test]

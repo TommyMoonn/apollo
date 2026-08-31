@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::media::model::AudioStream;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AudioExtractFormat {
     Original,
@@ -31,4 +33,19 @@ pub struct AudioExtractRequest {
     pub output: PathBuf,
     pub audio_stream_index: u32,
     pub format: AudioExtractFormat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AudioExtractMetadata {
+    pub title: Option<String>,
+    pub language: Option<String>,
+}
+
+impl From<&AudioStream> for AudioExtractMetadata {
+    fn from(stream: &AudioStream) -> Self {
+        Self {
+            title: stream.title.clone(),
+            language: stream.language.clone(),
+        }
+    }
 }

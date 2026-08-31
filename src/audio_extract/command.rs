@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 
-use super::model::{AudioExtractFormat, AudioExtractRequest};
+use super::model::{AudioExtractFormat, AudioExtractMetadata, AudioExtractRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegInvocation {
@@ -8,7 +8,10 @@ pub struct FfmpegInvocation {
 }
 
 /// Build structured FFmpeg arguments from an already validated Audio Extract request.
-pub fn build_audio_extract_invocation(request: &AudioExtractRequest) -> FfmpegInvocation {
+pub fn build_audio_extract_invocation(
+    request: &AudioExtractRequest,
+    metadata: &AudioExtractMetadata,
+) -> FfmpegInvocation {
     let mut args = vec![
         OsString::from("-i"),
         request.input.as_os_str().to_os_string(),
@@ -26,6 +29,9 @@ pub fn build_audio_extract_invocation(request: &AudioExtractRequest) -> FfmpegIn
         args.extend([OsString::from("-b:a"), OsString::from("256k")]);
     }
 
+    args.extend([OsString::from("-map_metadata"), OsString::from("-1")]);
+    append_selected_track_metadata(&mut args, request.format, metadata);
+
     args.extend([
         OsString::from("-progress"),
         OsString::from("pipe:1"),
@@ -36,4 +42,44 @@ pub fn build_audio_extract_invocation(request: &AudioExtractRequest) -> FfmpegIn
     ]);
 
     FfmpegInvocation { args }
+}
+
+fn append_selected_track_metadata(
+    args: &mut Vec<OsString>,
+    format: AudioExtractFormat,
+    metadata: &AudioExtractMetadata,
+) {
+    match format {
+        AudioExtractFormat::Original => {
+            append_metadata(args, "-metadata:s:a:0", "title", metadata.title.as_deref());
+            append_metadata(
+                args,
+                "-metadata:s:a:0",
+                "language",
+                metadata.language.as_deref(),
+            );
+        }
+        AudioExtractFormat::Aac => {
+            append_metadata(args, "-metadata", "title", metadata.title.as_deref());
+            append_metadata(
+                args,
+                "-metadata:s:a:0",
+                "language",
+                metadata.language.as_deref(),
+            );
+        }
+        AudioExtractFormat::Flac => {
+            append_metadata(args, "-metadata", "title", metadata.title.as_deref());
+            append_metadata(args, "-metadata", "language", metadata.language.as_deref());
+        }
+    }
+}
+
+fn append_metadata(args: &mut Vec<OsString>, option: &str, key: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        args.extend([
+            OsString::from(option),
+            OsString::from(format!("{key}={value}")),
+        ]);
+    }
 }

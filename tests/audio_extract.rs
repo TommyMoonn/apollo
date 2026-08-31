@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use apollo::{
     audio_extract::{
         command::build_audio_extract_invocation,
-        model::{AudioExtractFormat, AudioExtractRequest},
+        model::{AudioExtractFormat, AudioExtractMetadata, AudioExtractRequest},
         validation::{AudioExtractValidationError, validate_audio_extract_request},
     },
-    media::model::{MediaFile, MediaStream, StreamKind},
+    media::model::{AudioStream, MediaFile, MediaStream, StreamKind},
 };
 
 fn request(format: AudioExtractFormat, stream_index: u32) -> AudioExtractRequest {
@@ -48,7 +48,14 @@ fn media() -> MediaFile {
             },
         ],
         video_streams: Vec::new(),
-        audio_streams: Vec::new(),
+        audio_streams: vec![AudioStream {
+            stream_index: 7,
+            codec: Some("opus".to_owned()),
+            channels: Some(2),
+            channel_layout: Some("stereo".to_owned()),
+            title: Some("Commentary".to_owned()),
+            language: Some("eng".to_owned()),
+        }],
     }
 }
 
@@ -138,14 +145,76 @@ fn flac_format_encodes_flac_and_maps_only_selected_audio() {
     assert_invocation(AudioExtractFormat::Flac, &["-c:a", "flac", "-f", "flac"]);
 }
 
+#[test]
+fn original_mka_preserves_selected_title_and_language_on_the_audio_stream() {
+    let args = invocation_args(
+        AudioExtractFormat::Original,
+        &AudioExtractMetadata {
+            title: Some("Director commentary".to_owned()),
+            language: Some("eng".to_owned()),
+        },
+    );
+
+    assert_metadata_pair(&args, "-metadata:s:a:0", "title=Director commentary");
+    assert_metadata_pair(&args, "-metadata:s:a:0", "language=eng");
+    assert!(
+        !args
+            .windows(2)
+            .any(|pair| pair == ["-metadata", "title=Director commentary"])
+    );
+}
+
+#[test]
+fn aac_m4a_uses_standalone_title_and_stream_language() {
+    let args = invocation_args(
+        AudioExtractFormat::Aac,
+        &AudioExtractMetadata {
+            title: Some("Main program".to_owned()),
+            language: Some("jpn".to_owned()),
+        },
+    );
+
+    assert_metadata_pair(&args, "-metadata", "title=Main program");
+    assert_metadata_pair(&args, "-metadata:s:a:0", "language=jpn");
+    assert!(
+        !args
+            .windows(2)
+            .any(|pair| pair == ["-metadata:s:a:0", "title=Main program"])
+    );
+}
+
+#[test]
+fn flac_uses_title_and_language_vorbis_comments() {
+    let args = invocation_args(
+        AudioExtractFormat::Flac,
+        &AudioExtractMetadata {
+            title: Some("Music".to_owned()),
+            language: Some("deu".to_owned()),
+        },
+    );
+
+    assert_metadata_pair(&args, "-metadata", "title=Music");
+    assert_metadata_pair(&args, "-metadata", "language=deu");
+}
+
+#[test]
+fn missing_selected_metadata_is_not_fabricated_or_copied_from_the_container() {
+    let args = invocation_args(
+        AudioExtractFormat::Original,
+        &AudioExtractMetadata::default(),
+    );
+
+    assert!(args.windows(2).any(|pair| pair == ["-map_metadata", "-1"]));
+    assert!(
+        !args.iter().any(|argument| {
+            argument.starts_with("title=") || argument.starts_with("language=")
+        })
+    );
+}
+
 fn assert_invocation(format: AudioExtractFormat, required_pairs: &[&str]) {
     let request = request(format, 7);
-    let invocation = build_audio_extract_invocation(&request);
-    let args = invocation
-        .args
-        .iter()
-        .map(|argument| argument.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
+    let args = invocation_args(format, &AudioExtractMetadata::default());
 
     assert_eq!(args[0], "-i");
     assert_eq!(args[1], "C:/media/source recording.mkv");
@@ -170,6 +239,22 @@ fn assert_invocation(format: AudioExtractFormat, required_pairs: &[&str]) {
         assert!(!args.iter().any(|argument| argument == "-b:a"));
     }
     assert!(args.windows(2).any(|pair| pair == ["-progress", "pipe:1"]));
+    assert!(args.windows(2).any(|pair| pair == ["-map_metadata", "-1"]));
     assert!(args.iter().any(|argument| argument == "-nostats"));
     assert_eq!(args.last().unwrap(), &request.output.to_string_lossy());
+}
+
+fn invocation_args(format: AudioExtractFormat, metadata: &AudioExtractMetadata) -> Vec<String> {
+    build_audio_extract_invocation(&request(format, 7), metadata)
+        .args
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn assert_metadata_pair(args: &[String], option: &str, value: &str) {
+    assert!(
+        args.windows(2).any(|pair| pair == [option, value]),
+        "missing {option} {value:?} from {args:?}"
+    );
 }

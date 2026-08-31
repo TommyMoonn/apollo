@@ -15,7 +15,7 @@ use crate::media::{
 
 use super::{
     command::build_audio_extract_invocation,
-    model::AudioExtractRequest,
+    model::{AudioExtractMetadata, AudioExtractRequest},
     validation::{AudioExtractValidationError, validate_audio_extract_request},
 };
 
@@ -147,11 +147,18 @@ impl AudioExtractExecutor {
         validate_audio_extract_request(request, media)
             .map_err(AudioExtractStartError::Validation)?;
 
+        let metadata = media
+            .audio_streams
+            .iter()
+            .find(|stream| stream.stream_index == request.audio_stream_index)
+            .map(AudioExtractMetadata::from)
+            .unwrap_or_default();
+
         let output = MediaOutput::prepare(&request.input, &request.output)
             .map_err(AudioExtractStartError::Output)?;
         let mut staged_request = request.clone();
         staged_request.output = output.temporary_path().to_path_buf();
-        let invocation = build_audio_extract_invocation(&staged_request);
+        let invocation = build_audio_extract_invocation(&staged_request, &metadata);
         let command = MediaProcessCommand::new(&tools.ffmpeg)
             .args(invocation.args)
             .progress_source(ProcessProgressSource::Stdout);
@@ -186,7 +193,7 @@ mod tests {
         media::{
             error::MediaErrorKind,
             execution::ProcessControl,
-            model::{MediaFile, MediaStream, StreamKind},
+            model::{AudioStream, MediaFile, MediaStream, StreamKind},
             process::{MediaProcessFailure, MediaProcessState},
             tools::MediaTools,
         },
@@ -238,6 +245,14 @@ mod tests {
         assert_eq!(executor.state(), &AudioExtractExecutionState::Running);
         let args = observed_args.lock().unwrap();
         assert!(args.windows(2).any(|pair| pair == ["-map", "0:3"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-metadata", "title=Program"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-metadata:s:a:0", "language=eng"])
+        );
         let staged_output = PathBuf::from(args.last().unwrap());
         assert_ne!(staged_output, request.output);
         assert_eq!(staged_output.file_name(), request.output.file_name());
@@ -376,7 +391,14 @@ mod tests {
                     codec: Some("opus".to_owned()),
                 }],
                 video_streams: Vec::new(),
-                audio_streams: Vec::new(),
+                audio_streams: vec![AudioStream {
+                    stream_index: 3,
+                    codec: Some("opus".to_owned()),
+                    channels: Some(2),
+                    channel_layout: Some("stereo".to_owned()),
+                    title: Some("Program".to_owned()),
+                    language: Some("eng".to_owned()),
+                }],
             },
         )
     }
