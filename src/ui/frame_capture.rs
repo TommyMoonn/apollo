@@ -24,7 +24,6 @@ use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
 const TIMESTAMP_LABEL: &str = "Timestamp";
 const FORMAT_LABEL: &str = "Format";
 const OUTPUT_LABEL: &str = "Output";
-const BACK_LABEL: &str = "← Back";
 const BROWSE_LABEL: &str = "Browse";
 const CAPTURE_LABEL: &str = "Capture frame";
 const FORMAT_OPTIONS: [&str; 2] = ["PNG", "JPEG"];
@@ -40,7 +39,6 @@ pub struct FrameCaptureSelectionState {
 pub enum FrameCaptureSelectionAction {
     #[default]
     None,
-    Back,
     BrowseOutput,
     CaptureRequested,
 }
@@ -149,9 +147,7 @@ pub fn show(
     layout::task_surface(ui, plan.overflow, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
 
-        if show_source_header(ui, media) {
-            action = FrameCaptureSelectionAction::Back;
-        }
+        show_source_header(ui, media);
         ui.add_space(theme::SPACING.section);
 
         let _ = widgets::section_label(ui, TIMESTAMP_LABEL);
@@ -257,10 +253,10 @@ fn ready_feedback(error: &FrameCaptureReadyError) -> Option<&'static str> {
     }
 }
 
-fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
+fn show_source_header(ui: &mut Ui, media: &MediaFile) {
     let metadata = video_summary(media);
     let header_height = source_header_height(ui, metadata.is_some());
-    let (_, back_response) = Sides::new()
+    Sides::new()
         .height(header_height.max(theme::COMPACT_CONTROL_HEIGHT))
         .spacing(theme::SOURCE_HEADER_GAP)
         .shrink_left()
@@ -291,9 +287,8 @@ fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
                     }
                 });
             },
-            |ui| widgets::plain_button(ui, BACK_LABEL),
+            |_| {},
         );
-    back_response.clicked()
 }
 
 fn fixed_flow_height(ui: &Ui, media: &MediaFile, feedback: Option<&str>) -> f32 {

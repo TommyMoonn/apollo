@@ -29,7 +29,6 @@ use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
 const UNTITLED_AUDIO: &str = "Untitled audio";
 const AUDIO_TRACKS_LABEL: &str = "Audio tracks";
 const OUTPUT_LABEL: &str = "Output";
-const BACK_LABEL: &str = "← Back";
 const SELECT_ALL_LABEL: &str = "Select all";
 const CLEAR_LABEL: &str = "Clear";
 const RESET_GAINS_LABEL: &str = "Reset gains";
@@ -58,7 +57,6 @@ pub struct AudioMixSelectionState {
 pub enum AudioMixSelectionAction {
     #[default]
     None,
-    Back,
     BrowseOutput,
     MixRequested,
 }
@@ -319,9 +317,7 @@ pub fn show(
     layout::task_surface(ui, plan.overflow, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
 
-        if show_source_header(ui, presentation) {
-            action = AudioMixSelectionAction::Back;
-        }
+        show_source_header(ui, presentation);
         ui.add_space(theme::SPACING.section);
 
         show_track_header(ui, media, state);
@@ -366,7 +362,7 @@ pub fn show(
     action
 }
 
-fn show_source_header(ui: &mut Ui, presentation: &AudioMixPresentation) -> bool {
+fn show_source_header(ui: &mut Ui, presentation: &AudioMixPresentation) {
     let metadata_gap = if presentation.source_metadata.is_some() {
         theme::SPACING.tight
     } else {
@@ -374,7 +370,7 @@ fn show_source_header(ui: &mut Ui, presentation: &AudioMixPresentation) -> bool 
     };
     let header_height = source_header_height(ui, presentation.source_metadata.is_some());
 
-    let (_, back_response) = Sides::new()
+    Sides::new()
         .height(header_height.max(theme::COMPACT_CONTROL_HEIGHT))
         .spacing(theme::SOURCE_HEADER_GAP)
         .shrink_left()
@@ -405,10 +401,8 @@ fn show_source_header(ui: &mut Ui, presentation: &AudioMixPresentation) -> bool 
                     }
                 });
             },
-            |ui| widgets::plain_button(ui, BACK_LABEL),
+            |_| {},
         );
-
-    back_response.clicked()
 }
 
 fn show_track_list(

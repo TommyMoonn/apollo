@@ -17,3 +17,9 @@ pub mod theme;
 pub mod upscale;
 pub mod upscale_progress;
 pub mod widgets;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceAction {
+    ChangeFile,
+    CloseSource,
+}

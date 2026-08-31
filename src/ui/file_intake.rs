@@ -10,27 +10,11 @@ const WORDMARK: &str = "apollo";
 const OPEN_LABEL: &str = "Open files";
 const DROP_HINT: &str = "or drop a video anywhere";
 const INSPECTING_LABEL: &str = "Inspecting media…";
-const AUDIO_MIX_LABEL: &str = "Audio Mix";
-const UPSCALE_LABEL: &str = "Upscale";
-const REMUX_LABEL: &str = "Remux";
-const AUDIO_EXTRACT_LABEL: &str = "Audio Extract";
-const FRAME_CAPTURE_LABEL: &str = "Frame Capture";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileIntakeTool {
-    AudioMix,
-    Upscale,
-    Remux,
-    AudioExtract,
-    FrameCapture,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FileIntakeAction {
     #[default]
     None,
     OpenFile,
-    SelectTool(FileIntakeTool),
 }
 
 pub fn show_drag_hover(ui: &Ui) {
@@ -44,17 +28,15 @@ pub fn show_drag_hover(ui: &Ui) {
 
 pub fn show(
     ui: &mut Ui,
-    selected_tool: FileIntakeTool,
     inspecting: bool,
     error: Option<&MediaError>,
     error_details_open: &mut bool,
 ) -> FileIntakeAction {
-    show_with_layout_plan(ui, selected_tool, inspecting, error, error_details_open).0
+    show_with_layout_plan(ui, inspecting, error, error_details_open).0
 }
 
 fn show_with_layout_plan(
     ui: &mut Ui,
-    selected_tool: FileIntakeTool,
     inspecting: bool,
     error: Option<&MediaError>,
     error_details_open: &mut bool,
@@ -77,12 +59,7 @@ fn show_with_layout_plan(
                 action.set(next);
             }
         },
-        |ui| {
-            let next = show_mode_selector(ui, selected_tool);
-            if next != FileIntakeAction::None {
-                action.set(next);
-            }
-        },
+        |_| {},
     );
 
     (action.get(), plan)
@@ -96,7 +73,7 @@ fn intake_region_heights(
     error_details_open: bool,
 ) -> [f32; 3] {
     let top = ui.text_style_height(&fonts::wordmark_text_style());
-    let bottom = theme::COMPACT_CONTROL_HEIGHT;
+    let bottom = 0.0;
     let middle = if inspecting {
         ui.text_style_height(&TextStyle::Body)
     } else {
@@ -157,59 +134,6 @@ fn show_intake_area(
     action
 }
 
-fn show_mode_selector(ui: &mut Ui, selected_tool: FileIntakeTool) -> FileIntakeAction {
-    let sizes = [
-        widgets::mode_button_intrinsic_size(ui, AUDIO_MIX_LABEL),
-        widgets::mode_button_intrinsic_size(ui, UPSCALE_LABEL),
-        widgets::mode_button_intrinsic_size(ui, REMUX_LABEL),
-        widgets::mode_button_intrinsic_size(ui, AUDIO_EXTRACT_LABEL),
-        widgets::mode_button_intrinsic_size(ui, FRAME_CAPTURE_LABEL),
-    ];
-    let widths = sizes.map(|size| size.x);
-    let arrangement = layout::action_layout(ui.available_width(), &widths);
-    let mut action = FileIntakeAction::None;
-
-    layout::centered_action_group(ui, &sizes, arrangement, theme::SPACING.compact, |ui| {
-        if widgets::mode_button(
-            ui,
-            AUDIO_MIX_LABEL,
-            selected_tool == FileIntakeTool::AudioMix,
-        )
-        .clicked()
-        {
-            action = FileIntakeAction::SelectTool(FileIntakeTool::AudioMix);
-        }
-        if widgets::mode_button(ui, UPSCALE_LABEL, selected_tool == FileIntakeTool::Upscale)
-            .clicked()
-        {
-            action = FileIntakeAction::SelectTool(FileIntakeTool::Upscale);
-        }
-        if widgets::mode_button(ui, REMUX_LABEL, selected_tool == FileIntakeTool::Remux).clicked() {
-            action = FileIntakeAction::SelectTool(FileIntakeTool::Remux);
-        }
-        if widgets::mode_button(
-            ui,
-            AUDIO_EXTRACT_LABEL,
-            selected_tool == FileIntakeTool::AudioExtract,
-        )
-        .clicked()
-        {
-            action = FileIntakeAction::SelectTool(FileIntakeTool::AudioExtract);
-        }
-        if widgets::mode_button(
-            ui,
-            FRAME_CAPTURE_LABEL,
-            selected_tool == FileIntakeTool::FrameCapture,
-        )
-        .clicked()
-        {
-            action = FileIntakeAction::SelectTool(FileIntakeTool::FrameCapture);
-        }
-    });
-
-    action
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -222,8 +146,7 @@ mod tests {
     };
 
     use super::{
-        AUDIO_EXTRACT_LABEL, AUDIO_MIX_LABEL, DROP_HINT, FRAME_CAPTURE_LABEL, FileIntakeTool,
-        INSPECTING_LABEL, OPEN_LABEL, REMUX_LABEL, UPSCALE_LABEL, WORDMARK, intake_region_heights,
+        DROP_HINT, INSPECTING_LABEL, OPEN_LABEL, WORDMARK, intake_region_heights,
         show_with_layout_plan,
     };
 
@@ -233,11 +156,6 @@ mod tests {
         assert_eq!(OPEN_LABEL, "Open files");
         assert_eq!(DROP_HINT, "or drop a video anywhere");
         assert_eq!(INSPECTING_LABEL, "Inspecting media…");
-        assert_eq!(AUDIO_MIX_LABEL, "Audio Mix");
-        assert_eq!(UPSCALE_LABEL, "Upscale");
-        assert_eq!(REMUX_LABEL, "Remux");
-        assert_eq!(AUDIO_EXTRACT_LABEL, "Audio Extract");
-        assert_eq!(FRAME_CAPTURE_LABEL, "Frame Capture");
     }
 
     #[test]
@@ -332,15 +250,9 @@ mod tests {
                         .max_rect(rect)
                         .layout(egui::Layout::top_down(egui::Align::Center)),
                     |ui| {
-                        show_with_layout_plan(
-                            ui,
-                            FileIntakeTool::AudioMix,
-                            false,
-                            error,
-                            &mut details_open,
-                        )
-                        .1
-                        .layout
+                        show_with_layout_plan(ui, false, error, &mut details_open)
+                            .1
+                            .layout
                     },
                 )
                 .inner,

@@ -18,7 +18,6 @@ use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
 const AUDIO_TRACK_LABEL: &str = "Audio track";
 const FORMAT_LABEL: &str = "Format";
 const OUTPUT_LABEL: &str = "Output";
-const BACK_LABEL: &str = "← Back";
 const BROWSE_LABEL: &str = "Browse";
 const EXTRACT_LABEL: &str = "Extract";
 const FORMAT_OPTIONS: [&str; 3] = ["Original (copy)", "AAC", "FLAC"];
@@ -35,7 +34,6 @@ pub struct AudioExtractSelectionState {
 pub enum AudioExtractSelectionAction {
     #[default]
     None,
-    Back,
     BrowseOutput,
     ExtractRequested,
 }
@@ -156,9 +154,7 @@ pub fn show(
     layout::task_surface(ui, plan.overflow, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
 
-        if show_source_header(ui, media) {
-            action = AudioExtractSelectionAction::Back;
-        }
+        show_source_header(ui, media);
         ui.add_space(theme::SPACING.section);
 
         let _ = widgets::section_label(ui, AUDIO_TRACK_LABEL);
@@ -327,10 +323,10 @@ fn ready_feedback(error: &AudioExtractReadyError) -> Option<&'static str> {
     }
 }
 
-fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
+fn show_source_header(ui: &mut Ui, media: &MediaFile) {
     let metadata = audio_summary(media);
     let header_height = source_header_height(ui, metadata.is_some());
-    let (_, back_response) = Sides::new()
+    Sides::new()
         .height(header_height.max(theme::COMPACT_CONTROL_HEIGHT))
         .spacing(theme::SOURCE_HEADER_GAP)
         .shrink_left()
@@ -361,9 +357,8 @@ fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
                     }
                 });
             },
-            |ui| widgets::plain_button(ui, BACK_LABEL),
+            |_| {},
         );
-    back_response.clicked()
 }
 
 fn fixed_flow_height(ui: &Ui, media: &MediaFile, feedback: Option<&str>) -> f32 {

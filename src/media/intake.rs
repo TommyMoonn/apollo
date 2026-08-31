@@ -128,16 +128,11 @@ impl MediaIntake {
     }
 
     /// Validate a selected source and either reuse the unchanged cache or create the one
-    /// authoritative probe request. Beginning a replacement retires prior metadata immediately.
+    /// authoritative probe request. A replacement remains pending until its probe succeeds, so
+    /// the current source stays authoritative if validation or inspection fails.
     pub fn begin_load(&mut self, path: &Path) -> Result<MediaLoadStart, MediaIntakeError> {
         self.pending_probe = None;
-        let identity = match FileIdentity::read(path) {
-            Ok(identity) => identity,
-            Err(error) => {
-                self.clear_current();
-                return Err(error);
-            }
-        };
+        let identity = FileIdentity::read(path)?;
 
         if self
             .current
@@ -147,7 +142,6 @@ impl MediaIntake {
             return Ok(MediaLoadStart::Reused);
         }
 
-        self.clear_current();
         let id = self.next_request_id;
         self.next_request_id = self.next_request_id.wrapping_add(1);
         self.pending_probe = Some(PendingProbe { id, identity });
@@ -191,6 +185,11 @@ impl MediaIntake {
         {
             self.pending_probe = None;
         }
+    }
+
+    pub fn close_source(&mut self) {
+        self.pending_probe = None;
+        self.clear_current();
     }
 
     fn clear_current(&mut self) {
@@ -279,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_failure_retires_previous_metadata() {
+    fn probe_failure_preserves_previous_metadata() {
         let directory = temp_directory("probe-failure");
         let first = directory.join("first.mkv");
         let second = directory.join("second.mkv");
@@ -301,7 +300,47 @@ mod tests {
         );
 
         assert!(matches!(result, Err(MediaIntakeError::Probe(_))));
+        assert_eq!(intake.current().map(|media| &media.path), Some(&first));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn invalid_replacement_preserves_previous_metadata() {
+        let directory = temp_directory("invalid-replacement");
+        let first = directory.join("first.mkv");
+        fs::write(&first, b"first").unwrap();
+        let mut intake = MediaIntake::default();
+        inspect_successfully(&mut intake, &first);
+
+        assert_eq!(
+            intake.begin_load(&directory.join("missing.mkv")),
+            Err(MediaIntakeError::Missing)
+        );
+        assert_eq!(intake.current().map(|media| &media.path), Some(&first));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn close_source_retires_current_metadata_and_pending_probe() {
+        let directory = temp_directory("close-source");
+        let first = directory.join("first.mkv");
+        let second = directory.join("second.mkv");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        let mut intake = MediaIntake::default();
+        inspect_successfully(&mut intake, &first);
+        let request = match intake.begin_load(&second).unwrap() {
+            MediaLoadStart::Probe(request) => request,
+            MediaLoadStart::Reused => panic!("replacement should require inspection"),
+        };
+
+        intake.close_source();
+
         assert!(intake.current().is_none());
+        assert_eq!(
+            intake.complete_probe(request, Ok(media(&second))),
+            Ok(MediaProbeDisposition::Retired)
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

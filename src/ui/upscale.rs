@@ -29,7 +29,6 @@ const UPSCALE_TO_LABEL: &str = "Upscale to";
 const VIDEO_CODEC_LABEL: &str = "Video codec";
 const ACTUAL_OUTPUT_LABEL: &str = "Actual output";
 const OUTPUT_LABEL: &str = "Output";
-const BACK_LABEL: &str = "← Back";
 const BROWSE_LABEL: &str = "Browse";
 const UPSCALE_LABEL: &str = "Upscale";
 const UNAVAILABLE_OUTPUT: &str = "Unavailable";
@@ -47,7 +46,6 @@ pub struct UpscaleSelectionState {
 pub enum UpscaleSelectionAction {
     #[default]
     None,
-    Back,
     BrowseOutput,
     UpscaleRequested,
 }
@@ -159,9 +157,7 @@ pub fn show(
     layout::task_surface(ui, plan.overflow, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
 
-        if show_source_header(ui, media) {
-            action = UpscaleSelectionAction::Back;
-        }
+        show_source_header(ui, media);
         ui.add_space(theme::SPACING.section);
 
         let _ = widgets::section_label(ui, UPSCALE_TO_LABEL);
@@ -211,7 +207,7 @@ fn upscale_ready_feedback(error: &UpscaleValidationError) -> Option<&'static str
     }
 }
 
-fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
+fn show_source_header(ui: &mut Ui, media: &MediaFile) {
     let file_name = source_file_name(&media.path);
     let metadata = source_metadata(media);
     let metadata_gap = if metadata.is_some() {
@@ -221,7 +217,7 @@ fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
     };
     let header_height = source_header_height(ui, metadata.is_some());
 
-    let (_, back_response) = Sides::new()
+    Sides::new()
         .height(header_height.max(theme::COMPACT_CONTROL_HEIGHT))
         .spacing(theme::SOURCE_HEADER_GAP)
         .shrink_left()
@@ -249,10 +245,8 @@ fn show_source_header(ui: &mut Ui, media: &MediaFile) -> bool {
                     }
                 });
             },
-            |ui| widgets::plain_button(ui, BACK_LABEL),
+            |_| {},
         );
-
-    back_response.clicked()
 }
 
 fn show_target_list(

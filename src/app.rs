@@ -37,13 +37,13 @@ use apollo::{
     },
     remux::execution::{RemuxExecutionState, RemuxExecutor, RemuxStartError},
     ui::{
-        audio_extract as audio_extract_ui,
+        SourceAction, audio_extract as audio_extract_ui,
         audio_extract::{AudioExtractSelectionAction, AudioExtractSelectionState},
         audio_extract_progress::{self, AudioExtractLifecycleAction, AudioExtractLifecycleUiState},
         audio_mix as audio_mix_ui,
         audio_mix::{AudioMixPresentation, AudioMixSelectionAction, AudioMixSelectionState},
         audio_mix_progress::{self, AudioMixLifecycleAction, AudioMixLifecycleUiState},
-        file_intake::{self, FileIntakeAction, FileIntakeTool},
+        file_intake::{self, FileIntakeAction},
         fonts, frame_capture as frame_capture_ui,
         frame_capture::{FrameCaptureSelectionAction, FrameCaptureSelectionState},
         frame_capture_progress::{self, FrameCaptureLifecycleAction, FrameCaptureLifecycleUiState},
@@ -76,6 +76,13 @@ fn file_intake_enabled(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Phase 0.3.1.2 connects every operation to the workspace switcher"
+    )
+)]
 enum Tool {
     AudioMix,
     VideoUpscale,
@@ -84,26 +91,13 @@ enum Tool {
     FrameCapture,
 }
 
-impl Tool {
-    fn intake_tool(self) -> FileIntakeTool {
-        match self {
-            Self::AudioMix => FileIntakeTool::AudioMix,
-            Self::VideoUpscale => FileIntakeTool::Upscale,
-            Self::Remux => FileIntakeTool::Remux,
-            Self::AudioExtract => FileIntakeTool::AudioExtract,
-            Self::FrameCapture => FileIntakeTool::FrameCapture,
-        }
-    }
-
-    fn from_intake(tool: FileIntakeTool) -> Self {
-        match tool {
-            FileIntakeTool::AudioMix => Self::AudioMix,
-            FileIntakeTool::Upscale => Self::VideoUpscale,
-            FileIntakeTool::Remux => Self::Remux,
-            FileIntakeTool::AudioExtract => Self::AudioExtract,
-            FileIntakeTool::FrameCapture => Self::FrameCapture,
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum NavigationState {
+    #[default]
+    NoSource,
+    SourceWorkspace {
+        active_operation: Tool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,8 +153,7 @@ struct FrameCaptureToolState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AppState {
-    current_tool: Tool,
-    intake_active: bool,
+    navigation: NavigationState,
     intake_error: Option<MediaError>,
     intake_error_details_open: bool,
     media_intake: MediaIntake,
@@ -174,8 +167,7 @@ struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            current_tool: Tool::AudioMix,
-            intake_active: true,
+            navigation: NavigationState::NoSource,
             intake_error: None,
             intake_error_details_open: false,
             media_intake: MediaIntake::default(),
@@ -259,13 +251,23 @@ impl MediaToolsDiscovery {
 }
 
 impl AppState {
-    fn select_tool(&mut self, tool: Tool) {
-        self.current_tool = tool;
+    fn active_operation(&self) -> Option<Tool> {
+        match self.navigation {
+            NavigationState::NoSource => None,
+            NavigationState::SourceWorkspace { active_operation } => Some(active_operation),
+        }
     }
 
-    fn return_to_file_intake(&mut self, tool: Tool) {
-        self.current_tool = tool;
-        self.intake_active = true;
+    fn enter_workspace(&mut self, active_operation: Tool) {
+        self.navigation = NavigationState::SourceWorkspace { active_operation };
+        self.intake_error = None;
+        self.intake_error_details_open = false;
+    }
+
+    fn close_source(&mut self) {
+        self.navigation = NavigationState::NoSource;
+        self.media_intake.close_source();
+        self.retire_tool_sessions();
         self.intake_error = None;
         self.intake_error_details_open = false;
     }
@@ -345,17 +347,48 @@ impl ApolloApp {
             )
     }
 
+    fn workspace_interaction_enabled(&self) -> bool {
+        self.media_inspection.is_none() && !self.file_dialog.is_pending()
+    }
+
+    fn handle_source_action(&mut self, action: SourceAction, context: Context) {
+        if !self.file_intake_enabled() {
+            return;
+        }
+        match action {
+            SourceAction::ChangeFile => {
+                self.start_file_dialog(FileDialogRequest::OpenMedia, context)
+            }
+            SourceAction::CloseSource => self.state.close_source(),
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 0.3.1.2 connects operation selection to the workspace switcher"
+        )
+    )]
     fn select_tool(&mut self, tool: Tool) {
-        self.state.select_tool(tool);
-        self.state.intake_error = None;
-        self.state.intake_error_details_open = false;
-        if !self.activate_cached_source(tool) {
-            self.state.intake_active = true;
+        if !self.file_intake_enabled()
+            || !matches!(
+                self.state.navigation,
+                NavigationState::SourceWorkspace { .. }
+            )
+        {
+            return;
+        }
+        if self.activate_cached_source(tool) {
+            self.state.navigation = NavigationState::SourceWorkspace {
+                active_operation: tool,
+            };
         }
     }
 
     fn activate_cached_source(&mut self, tool: Tool) -> bool {
-        let Some(media) = self.state.media_intake.current_if_unchanged().cloned() else {
+        let Some(media) = self.state.media_intake.current().cloned() else {
+            self.state.navigation = NavigationState::NoSource;
             self.state.retire_tool_sessions();
             return false;
         };
@@ -453,7 +486,6 @@ impl ApolloApp {
                 }
             }
         }
-        self.state.intake_active = false;
         true
     }
 
@@ -577,13 +609,18 @@ impl ApolloApp {
         true
     }
 
-    fn show_tool(&mut self, ui: &mut Ui, tool: Tool) {
-        if self.state.intake_active {
-            self.show_file_intake(ui, tool);
+    fn show_navigation(&mut self, ui: &mut Ui) {
+        let NavigationState::SourceWorkspace { active_operation } = self.state.navigation else {
+            self.show_file_intake(ui);
             return;
+        };
+
+        if let Some(error) = self.state.intake_error.as_ref() {
+            media_error::show_inline(ui, error, &mut self.state.intake_error_details_open);
+            ui.add_space(theme::SPACING.section);
         }
 
-        match tool {
+        match active_operation {
             Tool::AudioMix if self.state.audio_mix.is_some() => self.show_audio_mix_tool(ui),
             Tool::VideoUpscale if self.state.upscale.is_some() => self.show_upscale_tool(ui),
             Tool::Remux if self.state.remux.is_some() => self.show_remux_tool(ui),
@@ -593,16 +630,21 @@ impl ApolloApp {
             Tool::FrameCapture if self.state.frame_capture.is_some() => {
                 self.show_frame_capture_tool(ui)
             }
-            _ => self.show_file_intake(ui, tool),
+            _ => self.show_file_intake(ui),
         }
     }
 
-    fn show_file_intake(&mut self, ui: &mut Ui, tool: Tool) {
+    #[cfg(test)]
+    fn show_tool(&mut self, ui: &mut Ui, tool: Tool) {
+        self.select_tool(tool);
+        self.show_navigation(ui);
+    }
+
+    fn show_file_intake(&mut self, ui: &mut Ui) {
         let action = ui
             .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
                 file_intake::show(
                     ui,
-                    tool.intake_tool(),
                     self.media_inspection.is_some(),
                     self.state.intake_error.as_ref(),
                     &mut self.state.intake_error_details_open,
@@ -611,12 +653,9 @@ impl ApolloApp {
             .inner;
         match action {
             FileIntakeAction::OpenFile => {
-                self.start_file_dialog(FileDialogRequest::OpenMedia, ui.ctx().clone())
+                self.handle_source_action(SourceAction::ChangeFile, ui.ctx().clone())
             }
-            FileIntakeAction::SelectTool(selected) if selected != tool.intake_tool() => {
-                self.select_tool(Tool::from_intake(selected));
-            }
-            FileIntakeAction::None | FileIntakeAction::SelectTool(_) => {}
+            FileIntakeAction::None => {}
         }
     }
 
@@ -646,20 +685,18 @@ impl ApolloApp {
             return None;
         }
 
-        self.state.intake_active = true;
         self.state.intake_error = None;
         self.state.intake_error_details_open = false;
         match self.state.media_intake.begin_load(path) {
             Ok(MediaLoadStart::Reused) => {
-                let _ = self.activate_cached_source(self.state.current_tool);
+                let operation = self.state.active_operation().unwrap_or(Tool::AudioMix);
+                if self.activate_cached_source(operation) {
+                    self.state.enter_workspace(operation);
+                }
                 None
             }
-            Ok(MediaLoadStart::Probe(request)) => {
-                self.state.retire_tool_sessions();
-                Some(request)
-            }
+            Ok(MediaLoadStart::Probe(request)) => Some(request),
             Err(error) => {
-                self.state.retire_tool_sessions();
                 self.state.intake_error = Some(MediaError::from_intake_error(&error));
                 None
             }
@@ -687,8 +724,6 @@ impl ApolloApp {
                     .take()
                     .expect("inspection exists while its worker disconnect is settled");
                 self.state.media_intake.retire_probe(&inspection.request);
-                self.state.intake_active = true;
-                self.state.retire_tool_sessions();
                 self.state.intake_error = Some(MediaError::probe_failure(
                     "Media inspection worker stopped before returning a result.",
                 ));
@@ -704,12 +739,14 @@ impl ApolloApp {
     ) {
         match self.state.media_intake.complete_probe(request, result) {
             Ok(MediaProbeDisposition::Published) => {
-                let _ = self.activate_cached_source(self.state.current_tool);
+                let operation = self.state.active_operation().unwrap_or(Tool::AudioMix);
+                self.state.retire_tool_sessions();
+                if self.activate_cached_source(operation) {
+                    self.state.enter_workspace(operation);
+                }
             }
             Ok(MediaProbeDisposition::Retired) => {}
             Err(error) => {
-                self.state.intake_active = true;
-                self.state.retire_tool_sessions();
                 self.state.intake_error = Some(MediaError::from_intake_error(&error));
                 self.state.intake_error_details_open = false;
             }
@@ -740,7 +777,6 @@ impl ApolloApp {
         match dropped {
             Some(Ok(path)) => self.load_media_path(&path),
             Some(Err(error)) => {
-                self.state.intake_active = true;
                 self.state.intake_error = Some(error);
                 self.state.intake_error_details_open = false;
             }
@@ -781,7 +817,7 @@ impl ApolloApp {
         }
 
         let action = ui
-            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+            .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let session = self
                     .state
                     .audio_mix
@@ -841,9 +877,6 @@ impl ApolloApp {
             return Ok(());
         }
         match action {
-            AudioMixSelectionAction::Back if self.file_intake_enabled() => {
-                self.state.return_to_file_intake(Tool::AudioMix);
-            }
             AudioMixSelectionAction::BrowseOutput => {
                 let Some(session) = self.state.audio_mix.as_ref() else {
                     return Ok(());
@@ -862,7 +895,7 @@ impl ApolloApp {
                 self.audio_mix_executor
                     .start(&tools, &session.media, &request)?;
             }
-            AudioMixSelectionAction::None | AudioMixSelectionAction::Back => {}
+            AudioMixSelectionAction::None => {}
         }
         Ok(())
     }
@@ -904,7 +937,7 @@ impl ApolloApp {
         }
 
         let action = ui
-            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+            .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let upscale = self
                     .state
                     .upscale
@@ -959,9 +992,6 @@ impl ApolloApp {
             return Ok(());
         }
         match action {
-            UpscaleSelectionAction::Back if self.file_intake_enabled() => {
-                self.state.return_to_file_intake(Tool::VideoUpscale);
-            }
             UpscaleSelectionAction::BrowseOutput => {
                 let Some(session) = self.state.upscale.as_ref() else {
                     return Ok(());
@@ -980,7 +1010,7 @@ impl ApolloApp {
                 self.upscale_executor
                     .start(&tools, &upscale.media, &request)?;
             }
-            UpscaleSelectionAction::None | UpscaleSelectionAction::Back => {}
+            UpscaleSelectionAction::None => {}
         }
         Ok(())
     }
@@ -1021,7 +1051,7 @@ impl ApolloApp {
         }
 
         let action = ui
-            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+            .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let remux = self
                     .state
                     .remux
@@ -1076,9 +1106,6 @@ impl ApolloApp {
             return Ok(());
         }
         match action {
-            RemuxSelectionAction::Back if self.file_intake_enabled() => {
-                self.state.return_to_file_intake(Tool::Remux);
-            }
             RemuxSelectionAction::BrowseOutput => {
                 let Some(session) = self.state.remux.as_ref() else {
                     return Ok(());
@@ -1095,7 +1122,7 @@ impl ApolloApp {
                 let request = remux.selection.request(&remux.media);
                 self.remux_executor.start(&tools, &remux.media, &request)?;
             }
-            RemuxSelectionAction::None | RemuxSelectionAction::Back => {}
+            RemuxSelectionAction::None => {}
         }
         Ok(())
     }
@@ -1139,7 +1166,7 @@ impl ApolloApp {
         }
 
         let action = ui
-            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+            .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let session = self
                     .state
                     .audio_extract
@@ -1194,9 +1221,6 @@ impl ApolloApp {
             return Ok(());
         }
         match action {
-            AudioExtractSelectionAction::Back if self.file_intake_enabled() => {
-                self.state.return_to_file_intake(Tool::AudioExtract);
-            }
             AudioExtractSelectionAction::BrowseOutput => {
                 let Some(session) = self.state.audio_extract.as_ref() else {
                     return Ok(());
@@ -1216,7 +1240,7 @@ impl ApolloApp {
                 self.audio_extract_executor
                     .start(&tools, &session.media, &request)?;
             }
-            AudioExtractSelectionAction::None | AudioExtractSelectionAction::Back => {}
+            AudioExtractSelectionAction::None => {}
         }
         Ok(())
     }
@@ -1260,7 +1284,7 @@ impl ApolloApp {
         }
 
         let action = ui
-            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+            .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let session = self
                     .state
                     .frame_capture
@@ -1315,9 +1339,6 @@ impl ApolloApp {
             return Ok(());
         }
         match action {
-            FrameCaptureSelectionAction::Back if self.file_intake_enabled() => {
-                self.state.return_to_file_intake(Tool::FrameCapture);
-            }
             FrameCaptureSelectionAction::BrowseOutput => {
                 let Some(session) = self.state.frame_capture.as_ref() else {
                     return Ok(());
@@ -1337,7 +1358,7 @@ impl ApolloApp {
                 self.frame_capture_executor
                     .start(&tools, &session.media, &request)?;
             }
-            FrameCaptureSelectionAction::None | FrameCaptureSelectionAction::Back => {}
+            FrameCaptureSelectionAction::None => {}
         }
         Ok(())
     }
@@ -1698,7 +1719,7 @@ impl eframe::App for ApolloApp {
                     file_intake::show_drag_hover(ui);
                 }
 
-                self.show_tool(ui, self.state.current_tool);
+                self.show_navigation(ui);
             });
     }
 }
@@ -1717,9 +1738,9 @@ mod tests {
     };
 
     use super::{
-        ApolloApp, AppState, MediaInspection, MediaToolsState, Tool, ToolExecutionStates,
-        audio_extract_output_dialog_request, audio_mix_output_dialog_request, file_intake_enabled,
-        frame_capture_output_dialog_request, remux_output_dialog_request,
+        ApolloApp, AppState, MediaInspection, MediaToolsState, NavigationState, Tool,
+        ToolExecutionStates, audio_extract_output_dialog_request, audio_mix_output_dialog_request,
+        file_intake_enabled, frame_capture_output_dialog_request, remux_output_dialog_request,
         settle_output_file_dialog, shows_audio_extract_lifecycle, shows_audio_mix_lifecycle,
         shows_frame_capture_lifecycle, shows_remux_lifecycle, shows_upscale_lifecycle,
     };
@@ -1746,7 +1767,7 @@ mod tests {
         },
         remux::execution::RemuxExecutionState,
         ui::{
-            audio_extract::AudioExtractSelectionAction, audio_mix::AudioMixSelectionAction, fonts,
+            SourceAction, audio_extract::AudioExtractSelectionAction, fonts,
             frame_capture::FrameCaptureSelectionAction, remux::RemuxSelectionAction, theme,
             upscale::UpscaleSelectionAction,
         },
@@ -1841,6 +1862,21 @@ mod tests {
             next_session_id: 1,
             tools_error_details_open: false,
         }
+    }
+
+    fn assert_no_source(state: &AppState) {
+        assert_eq!(state.navigation, NavigationState::NoSource);
+        assert!(state.media_intake.current().is_none());
+    }
+
+    fn assert_workspace(state: &AppState, operation: Tool) {
+        assert_eq!(
+            state.navigation,
+            NavigationState::SourceWorkspace {
+                active_operation: operation,
+            }
+        );
+        assert!(state.media_intake.current().is_some());
     }
 
     #[test]
@@ -2045,11 +2081,10 @@ mod tests {
     }
 
     #[test]
-    fn fresh_application_state_starts_on_audio_mix_file_intake() {
+    fn fresh_application_state_starts_without_a_source() {
         let state = AppState::default();
 
-        assert_eq!(state.current_tool, Tool::AudioMix);
-        assert!(state.intake_active);
+        assert_no_source(&state);
         assert!(state.audio_mix.is_none());
         assert!(state.upscale.is_none());
         assert!(state.remux.is_none());
@@ -2057,11 +2092,10 @@ mod tests {
     }
 
     #[test]
-    fn initialization_selects_audio_mix_without_starting_an_executor() {
+    fn initialization_has_no_source_without_starting_an_executor() {
         let app = app();
 
-        assert_eq!(app.state.current_tool, Tool::AudioMix);
-        assert!(app.state.intake_active);
+        assert_no_source(&app.state);
         assert!(!app.audio_mix_executor.is_running());
         assert!(!app.upscale_executor.is_running());
         assert!(!app.remux_executor.is_running());
@@ -2075,16 +2109,13 @@ mod tests {
         fonts::install(&context);
         theme::install(&context);
 
-        let tool = app.state.current_tool;
         let mut output = context.run_ui(Default::default(), |ui| {
-            app.show_tool(ui, tool);
+            app.show_navigation(ui);
         });
 
         assert!(output_contains_text(&output, "Open files"));
-        assert!(output_contains_text(&output, "Audio Mix"));
-        assert!(output_contains_text(&output, "Upscale"));
-        assert!(output_contains_text(&output, "Remux"));
-        assert!(output_contains_text(&output, "Audio Extract"));
+        assert!(!output_contains_text(&output, "Audio Mix"));
+        assert!(!output_contains_text(&output, "Upscale"));
         output.textures_delta.clear();
     }
 
@@ -2097,19 +2128,16 @@ mod tests {
         fonts::install(&context);
         theme::install(&context);
 
-        assert!(app.state.intake_active);
+        assert_eq!(app.state.navigation, NavigationState::NoSource);
         assert!(app.media_inspection.is_some());
         assert!(!app.file_intake_enabled());
 
         let mut output = context.run_ui(Default::default(), |ui| {
-            app.show_tool(ui, Tool::AudioMix);
+            app.show_navigation(ui);
         });
 
         assert!(output_contains_text(&output, "Inspecting media…"));
-        assert!(output_contains_text(&output, "Audio Mix"));
-        assert!(output_contains_text(&output, "Upscale"));
-        assert!(output_contains_text(&output, "Remux"));
-        assert!(output_contains_text(&output, "Audio Extract"));
+        assert!(!output_contains_text(&output, "Audio Mix"));
         assert!(!output_contains_text(&output, "Open files"));
         assert!(!output_contains_text(&output, "or drop a video anywhere"));
         output.textures_delta.clear();
@@ -2117,21 +2145,20 @@ mod tests {
     }
 
     #[test]
-    fn inspection_completion_activates_currently_selected_mode() {
+    fn inspection_completion_enters_default_source_workspace() {
         let (directory, path) = temp_file("inspection-mode-switch");
         let mut app = app();
         let sender = begin_pending_inspection(&mut app, &path);
 
-        app.select_tool(Tool::VideoUpscale);
         sender.send(Ok(media(&path))).unwrap();
         app.poll_media_inspection();
 
         assert!(app.media_inspection.is_none());
-        assert!(!app.state.intake_active);
-        assert!(app.state.audio_mix.is_none());
+        assert_workspace(&app.state, Tool::AudioMix);
+        assert!(app.state.audio_mix.is_some());
         assert_eq!(
             app.state
-                .upscale
+                .audio_mix
                 .as_ref()
                 .map(|session| &session.media.path),
             Some(&path)
@@ -2250,7 +2277,7 @@ mod tests {
         app.poll_media_inspection();
 
         assert!(app.media_inspection.is_none());
-        assert!(app.state.intake_active);
+        assert_no_source(&app.state);
         assert!(app.state.media_intake.current().is_none());
         assert!(app.state.audio_mix.is_none());
         assert!(app.state.upscale.is_none());
@@ -2258,67 +2285,134 @@ mod tests {
             app.state.intake_error.as_ref().map(MediaError::kind),
             Some(MediaErrorKind::ProbeFailure)
         );
+
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let mut output = context.run_ui(Default::default(), |ui| {
+            app.show_navigation(ui);
+        });
+        assert!(output_contains_text(
+            &output,
+            "This file could not be inspected."
+        ));
+        assert!(output_contains_text(&output, "Open files"));
+        output.textures_delta.clear();
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn switching_mode_on_intake_routes_next_source_to_selected_tool() {
+    fn operation_selection_is_navigation_inside_a_loaded_workspace() {
         let (directory, path) = temp_file("mode-switch");
         let mut app = app();
 
         app.select_tool(Tool::VideoUpscale);
-        assert_eq!(app.state.current_tool, Tool::VideoUpscale);
-        assert!(app.state.intake_active);
+        assert_no_source(&app.state);
 
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        assert_workspace(&app.state, Tool::AudioMix);
+        let source_path = app.state.media_intake.current().unwrap().path.clone();
 
-        assert!(!app.state.intake_active);
-        assert!(app.state.audio_mix.is_none());
-        assert_eq!(
-            app.state
-                .upscale
-                .as_ref()
-                .map(|session| &session.media.path),
-            Some(&path)
-        );
+        for operation in [
+            Tool::VideoUpscale,
+            Tool::Remux,
+            Tool::AudioExtract,
+            Tool::FrameCapture,
+            Tool::AudioMix,
+        ] {
+            app.select_tool(operation);
+            assert_workspace(&app.state, operation);
+            assert_eq!(app.state.media_intake.current().unwrap().path, source_path);
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn selecting_audio_extract_routes_next_source_to_audio_extract_ready_state() {
-        let (directory, path) = temp_file("audio-extract-mode-switch");
+    fn change_file_cancel_preserves_complete_workspace() {
+        let (directory, path) = temp_file("change-cancel");
         let mut app = app();
-        app.select_tool(Tool::AudioExtract);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-
-        assert!(!app.state.intake_active);
-        assert!(app.state.audio_mix.is_none());
-        assert_eq!(
-            app.state
-                .audio_extract
-                .as_ref()
-                .map(|session| &session.media.path),
-            Some(&path)
-        );
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn selecting_frame_capture_routes_next_source_to_frame_capture_ready_state() {
-        let (directory, path) = temp_file("frame-capture-mode-switch");
-        let mut app = app();
         app.select_tool(Tool::FrameCapture);
-        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.state
+            .frame_capture
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_format(FrameCaptureFormat::Jpeg);
+        let before = app.state.clone();
 
-        assert!(!app.state.intake_active);
-        assert!(app.state.audio_mix.is_none());
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::MediaInput,
+            outcome: DialogOutcome::Cancelled,
+        });
+
+        assert_eq!(app.state, before);
+        assert!(app.state.intake_error.is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn change_file_keeps_workspace_until_replacement_probe_publishes() {
+        let (directory, first) = temp_file("change-transaction");
+        let second = directory.join("replacement.mkv");
+        fs::write(&second, b"replacement").unwrap();
+        let mut app = app();
+        app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
+        app.state
+            .remux
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_container(MediaContainer::Mp4);
+        app.state.intake_error = Some(MediaError::probe_failure("previous replacement failed"));
+        let old_session = app.state.remux.clone().unwrap();
+
+        let request = app
+            .begin_media_path(&second)
+            .expect("replacement should require inspection");
+
+        assert_workspace(&app.state, Tool::Remux);
+        assert!(app.state.intake_error.is_none());
+        assert_eq!(app.state.remux.as_ref(), Some(&old_session));
         assert_eq!(
-            app.state
-                .frame_capture
-                .as_ref()
-                .map(|session| &session.media.path),
-            Some(&path)
+            app.state.media_intake.current().map(|media| &media.path),
+            Some(&first)
         );
+
+        app.complete_media_probe(request, Ok(media(&second)));
+
+        assert_workspace(&app.state, Tool::Remux);
+        let replacement = app.state.remux.as_ref().unwrap();
+        assert_ne!(replacement.session_id, old_session.session_id);
+        assert_eq!(replacement.media.path, second);
+        assert_eq!(replacement.selection.container(), MediaContainer::Matroska);
+        assert!(app.state.intake_error.is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn close_source_returns_to_true_empty_intake() {
+        let (directory, path) = temp_file("close-source");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        for operation in [
+            Tool::VideoUpscale,
+            Tool::Remux,
+            Tool::AudioExtract,
+            Tool::FrameCapture,
+        ] {
+            app.select_tool(operation);
+        }
+
+        app.handle_source_action(SourceAction::CloseSource, egui::Context::default());
+
+        assert_no_source(&app.state);
+        assert!(app.state.audio_mix.is_none());
+        assert!(app.state.upscale.is_none());
+        assert!(app.state.remux.is_none());
+        assert!(app.state.audio_extract.is_none());
+        assert!(app.state.frame_capture.is_none());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2326,10 +2420,9 @@ mod tests {
     fn open_valid_file_routes_audio_mix_to_ready_state() {
         let (directory, path) = temp_file("open");
         let mut app = app();
-        app.select_tool(Tool::AudioMix);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
 
-        assert!(!app.state.intake_active);
+        assert_workspace(&app.state, Tool::AudioMix);
         assert_eq!(
             app.state.audio_mix.as_ref().map(|s| &s.media.path),
             Some(&path)
@@ -2338,11 +2431,9 @@ mod tests {
     }
 
     #[test]
-    fn dropped_valid_file_routes_upscale_to_ready_state() {
+    fn dropped_valid_file_enters_default_workspace() {
         let (directory, path) = temp_file("drop");
         let mut app = app();
-        app.select_tool(Tool::VideoUpscale);
-
         assert!(file_intake_enabled(
             app.audio_mix_executor.state(),
             app.upscale_executor.state(),
@@ -2352,9 +2443,9 @@ mod tests {
         ));
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
 
-        assert!(!app.state.intake_active);
+        assert_workspace(&app.state, Tool::AudioMix);
         assert_eq!(
-            app.state.upscale.as_ref().map(|s| &s.media.path),
+            app.state.audio_mix.as_ref().map(|s| &s.media.path),
             Some(&path)
         );
         fs::remove_dir_all(directory).unwrap();
@@ -2442,8 +2533,8 @@ mod tests {
     fn opening_upscale_source_renders_ready_surface() {
         let (directory, path) = temp_file("upscale-ready-render");
         let mut app = app();
-        app.select_tool(Tool::VideoUpscale);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::VideoUpscale);
         let context = egui::Context::default();
         fonts::install(&context);
         theme::install(&context);
@@ -2455,7 +2546,7 @@ mod tests {
         assert!(output_contains_text(&output, "Upscale to"));
         assert!(output_contains_text(&output, "Video codec"));
         assert!(output_contains_text(&output, "Actual output"));
-        assert!(output_contains_text(&output, "← Back"));
+        assert!(!output_contains_text(&output, "← Back"));
         assert!(!output_contains_text(&output, "Change"));
         output.textures_delta.clear();
         fs::remove_dir_all(directory).unwrap();
@@ -2465,8 +2556,8 @@ mod tests {
     fn opening_remux_source_renders_ready_surface() {
         let (directory, path) = temp_file("remux-ready-render");
         let mut app = app();
-        app.select_tool(Tool::Remux);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
         let context = egui::Context::default();
         fonts::install(&context);
         theme::install(&context);
@@ -2482,7 +2573,6 @@ mod tests {
             "MKV",
             "Output",
             "Remux",
-            "← Back",
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
@@ -2494,8 +2584,8 @@ mod tests {
     fn opening_audio_extract_source_renders_ready_surface() {
         let (directory, path) = temp_file("audio-extract-ready-render");
         let mut app = app();
-        app.select_tool(Tool::AudioExtract);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::AudioExtract);
         let context = egui::Context::default();
         fonts::install(&context);
         theme::install(&context);
@@ -2514,7 +2604,6 @@ mod tests {
             "no re-encode · MKA",
             "Output",
             "Extract",
-            "← Back",
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
@@ -2526,8 +2615,8 @@ mod tests {
     fn opening_frame_capture_source_renders_ready_surface() {
         let (directory, path) = temp_file("frame-capture-ready-render");
         let mut app = app();
-        app.select_tool(Tool::FrameCapture);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
         let context = egui::Context::default();
         fonts::install(&context);
         theme::install(&context);
@@ -2545,7 +2634,6 @@ mod tests {
             "lossless",
             "Output",
             "Capture frame",
-            "← Back",
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
@@ -2571,7 +2659,7 @@ mod tests {
         assert!(output_contains_text(&output, "Loudness normalization"));
         assert!(!output_contains_text(&output, "Integrated loudness"));
         assert!(output_contains_text(&output, "Mix selected tracks"));
-        assert!(output_contains_text(&output, "← Back"));
+        assert!(!output_contains_text(&output, "← Back"));
         assert!(!output_contains_text(&output, "Change"));
         let audio_tracks = output_text_rect(&output, "Audio tracks");
         let select_all = output_text_rect(&output, "Select all");
@@ -2611,8 +2699,8 @@ mod tests {
     fn upscale_ready_selection_survives_same_source_navigation() {
         let (directory, path) = temp_file("selection-preserve");
         let mut app = app();
-        app.select_tool(Tool::VideoUpscale);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::VideoUpscale);
         let ready = app
             .state
             .upscale
@@ -2676,8 +2764,8 @@ mod tests {
     fn remux_output_dialog_request_follows_current_container() {
         let (directory, path) = temp_file("remux-browse");
         let mut app = app();
-        app.select_tool(Tool::Remux);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
 
         let session = app.state.remux.as_ref().unwrap();
         let FileDialogRequest::SaveOutput { target, options } =
@@ -2711,8 +2799,8 @@ mod tests {
     fn audio_extract_output_dialog_request_follows_current_format() {
         let (directory, path) = temp_file("audio-extract-browse");
         let mut app = app();
-        app.select_tool(Tool::AudioExtract);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::AudioExtract);
 
         let session = app.state.audio_extract.as_ref().unwrap();
         let FileDialogRequest::SaveOutput { target, options } =
@@ -2759,8 +2847,8 @@ mod tests {
     fn frame_capture_output_dialog_request_follows_current_format() {
         let (directory, path) = temp_file("frame-capture-browse");
         let mut app = app();
-        app.select_tool(Tool::FrameCapture);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
 
         let session = app.state.frame_capture.as_ref().unwrap();
         let FileDialogRequest::SaveOutput { target, options } =
@@ -2794,8 +2882,8 @@ mod tests {
     fn selected_output_paths_route_to_the_owning_tool() {
         let (directory, path) = temp_file("upscale-browse");
         let mut app = app();
-        app.select_tool(Tool::VideoUpscale);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::VideoUpscale);
         let upscale_session_id = app.state.upscale.as_ref().unwrap().session_id;
         let destination = directory.join("chosen upscale.mp4");
         app.settle_file_dialog(FileDialogCompletion {
@@ -2889,11 +2977,10 @@ mod tests {
         let second = directory.join("replacement.mkv");
         fs::write(&second, b"replacement").unwrap();
         let mut app = app();
-        app.select_tool(Tool::AudioExtract);
         app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        app.select_tool(Tool::AudioExtract);
         let stale_session_id = app.state.audio_extract.as_ref().unwrap().session_id;
 
-        app.state.return_to_file_intake(Tool::AudioExtract);
         app.load_media_path_with_probe(&second, |path| Ok(media(path)));
         let replacement_before = app
             .state
@@ -2926,11 +3013,10 @@ mod tests {
         let second = directory.join("replacement.mkv");
         fs::write(&second, b"replacement").unwrap();
         let mut app = app();
-        app.select_tool(Tool::FrameCapture);
         app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
         let stale_session_id = app.state.frame_capture.as_ref().unwrap().session_id;
 
-        app.state.return_to_file_intake(Tool::FrameCapture);
         app.load_media_path_with_probe(&second, |path| Ok(media(path)));
         let replacement_before = app
             .state
@@ -2963,11 +3049,10 @@ mod tests {
         let second = directory.join("replacement.mkv");
         fs::write(&second, b"replacement").unwrap();
         let mut app = app();
-        app.select_tool(Tool::Remux);
         app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
         let stale_session_id = app.state.remux.as_ref().unwrap().session_id;
 
-        app.state.return_to_file_intake(Tool::Remux);
         app.load_media_path_with_probe(&second, |path| Ok(media(path)));
         let replacement_before = app.state.remux.as_ref().unwrap().selection.output_path();
 
@@ -3020,9 +3105,7 @@ mod tests {
             .unwrap();
 
         assert!(!app.file_intake_enabled());
-        app.handle_audio_mix_action(AudioMixSelectionAction::Back, egui::Context::default())
-            .unwrap();
-        assert!(!app.state.intake_active);
+        assert_workspace(&app.state, Tool::AudioMix);
         assert_eq!(
             app.file_dialog.request(
                 FileDialogRequest::OpenMedia,
@@ -3269,8 +3352,8 @@ mod tests {
     fn output_picker_failure_surfaces_bounded_user_feedback() {
         let (directory, path) = temp_file("browse-failure");
         let mut app = app();
-        app.select_tool(Tool::VideoUpscale);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::VideoUpscale);
         let output_before = app
             .state
             .upscale
@@ -3325,8 +3408,8 @@ mod tests {
     fn upscale_intent_reaches_executor() {
         let (directory, path) = temp_file("execute");
         let mut app = app();
-        app.select_tool(Tool::VideoUpscale);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::VideoUpscale);
 
         let error = app
             .handle_upscale_action(
@@ -3350,8 +3433,8 @@ mod tests {
     fn remux_intent_reaches_executor() {
         let (directory, path) = temp_file("remux-execute");
         let mut app = app();
-        app.select_tool(Tool::Remux);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
 
         let error = app
             .handle_remux_action(
@@ -3375,8 +3458,8 @@ mod tests {
     fn audio_extract_intent_reaches_executor() {
         let (directory, path) = temp_file("audio-extract-execute");
         let mut app = app();
-        app.select_tool(Tool::AudioExtract);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::AudioExtract);
 
         let error = app
             .handle_audio_extract_action(
@@ -3399,8 +3482,8 @@ mod tests {
     fn frame_capture_intent_reaches_executor() {
         let (directory, path) = temp_file("frame-capture-execute");
         let mut app = app();
-        app.select_tool(Tool::FrameCapture);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
 
         let error = app
             .handle_frame_capture_action(
@@ -3502,13 +3585,14 @@ mod tests {
     }
 
     #[test]
-    fn probe_failure_leaves_no_previous_ready_metadata() {
+    fn change_file_probe_failure_is_rendered_and_survives_operation_switching() {
         let (directory, first) = temp_file("stale-first");
         let second = directory.join("replacement.mkv");
         fs::write(&second, b"replacement").unwrap();
         let mut app = app();
-        app.select_tool(Tool::VideoUpscale);
         app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        app.select_tool(Tool::VideoUpscale);
+        let before = app.state.clone();
         app.load_media_path_with_probe(&second, |_| {
             Err(apollo::media::probe::MediaProbeError::FfprobeFailed {
                 code: Some(1),
@@ -3516,10 +3600,54 @@ mod tests {
             })
         });
 
-        assert!(app.state.intake_active);
-        assert!(app.state.upscale.is_none());
-        assert!(app.state.media_intake.current().is_none());
-        assert!(app.state.intake_error.is_some());
+        assert_workspace(&app.state, Tool::VideoUpscale);
+        assert_eq!(app.state.upscale, before.upscale);
+        assert_eq!(
+            app.state.media_intake.current().map(|media| &media.path),
+            Some(&first)
+        );
+        assert_eq!(
+            app.state.intake_error.as_ref().map(MediaError::kind),
+            Some(MediaErrorKind::ProbeFailure)
+        );
+
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let mut output = context.run_ui(Default::default(), |ui| {
+            app.show_navigation(ui);
+        });
+        assert!(output_contains_text(
+            &output,
+            "This file could not be inspected."
+        ));
+        assert!(output_contains_text(
+            &output,
+            "Check that the source is a readable media file and try again."
+        ));
+        assert!(output_contains_text(&output, "Upscale to"));
+        assert!(!output_contains_text(&output, "Change file"));
+        assert!(!output_contains_text(&output, "Audio Mix"));
+        output.textures_delta.clear();
+
+        app.select_tool(Tool::Remux);
+
+        assert_workspace(&app.state, Tool::Remux);
+        assert_eq!(app.state.upscale, before.upscale);
+        assert_eq!(
+            app.state.intake_error.as_ref().map(MediaError::kind),
+            Some(MediaErrorKind::ProbeFailure)
+        );
+        let mut output = context.run_ui(Default::default(), |ui| {
+            app.show_navigation(ui);
+        });
+        assert!(output_contains_text(
+            &output,
+            "This file could not be inspected."
+        ));
+        assert!(output_contains_text(&output, "Remux"));
+        assert!(!output_contains_text(&output, "Change file"));
+        output.textures_delta.clear();
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -3527,13 +3655,11 @@ mod tests {
     fn switching_tools_reuses_successful_probe_without_probing_again() {
         let (directory, path) = temp_file("reuse");
         let mut app = app();
-        app.select_tool(Tool::AudioMix);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-        app.state.return_to_file_intake(Tool::AudioMix);
 
         app.select_tool(Tool::VideoUpscale);
 
-        assert!(!app.state.intake_active);
+        assert_workspace(&app.state, Tool::VideoUpscale);
         assert_eq!(
             app.state.upscale.as_ref().map(|s| &s.media.path),
             Some(&path)
@@ -3546,10 +3672,9 @@ mod tests {
     }
 
     #[test]
-    fn audio_mix_back_returns_to_intake_and_same_source_restores_ready_state() {
+    fn audio_mix_state_survives_operation_switching() {
         let (directory, path) = temp_file("audio-back");
         let mut app = app();
-        app.select_tool(Tool::AudioMix);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
         let session = app
             .state
@@ -3577,23 +3702,15 @@ mod tests {
         );
         session.selection.set_normalization_enabled(true);
 
-        app.handle_audio_mix_action(AudioMixSelectionAction::Back, egui::Context::default())
-            .unwrap();
-
-        assert!(app.state.intake_active);
-        assert_eq!(app.state.current_tool, Tool::AudioMix);
-        assert!(app.state.audio_mix.is_some());
-
-        app.load_media_path_with_probe(&path, |_| -> Result<MediaFile, MediaProbeError> {
-            panic!("unchanged cached source must not be probed again")
-        });
+        app.select_tool(Tool::VideoUpscale);
+        app.select_tool(Tool::AudioMix);
 
         let session = app
             .state
             .audio_mix
             .as_ref()
             .expect("same-source Audio Mix session should be restored");
-        assert!(!app.state.intake_active);
+        assert_workspace(&app.state, Tool::AudioMix);
         assert_eq!(session.selection.selected_count(), 0);
         assert_eq!(
             session.selection.track_gain(1),
@@ -3615,11 +3732,11 @@ mod tests {
     }
 
     #[test]
-    fn upscale_back_returns_to_intake_and_same_source_restores_ready_state() {
+    fn upscale_state_survives_operation_switching() {
         let (directory, path) = temp_file("upscale-back");
         let mut app = app();
-        app.select_tool(Tool::VideoUpscale);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::VideoUpscale);
         let session = app
             .state
             .upscale
@@ -3634,23 +3751,15 @@ mod tests {
             .selection
             .set_custom_output_path(custom_output.clone());
 
-        app.handle_upscale_action(UpscaleSelectionAction::Back, egui::Context::default())
-            .unwrap();
-
-        assert!(app.state.intake_active);
-        assert_eq!(app.state.current_tool, Tool::VideoUpscale);
-        assert!(app.state.upscale.is_some());
-
-        app.load_media_path_with_probe(&path, |_| -> Result<MediaFile, MediaProbeError> {
-            panic!("unchanged cached source must not be probed again")
-        });
+        app.select_tool(Tool::AudioMix);
+        app.select_tool(Tool::VideoUpscale);
 
         let session = app
             .state
             .upscale
             .as_ref()
             .expect("same-source Upscale session should be restored");
-        assert!(!app.state.intake_active);
+        assert_workspace(&app.state, Tool::VideoUpscale);
         assert_eq!(session.selection.target(), UpscaleTarget::Uhd8k);
         assert_eq!(session.selection.codec(), VideoCodec::H265);
         assert_eq!(session.selection.output_path(), custom_output);
@@ -3659,11 +3768,11 @@ mod tests {
     }
 
     #[test]
-    fn remux_back_returns_to_intake_and_same_source_restores_ready_state() {
+    fn remux_state_survives_operation_switching() {
         let (directory, path) = temp_file("remux-back");
         let mut app = app();
-        app.select_tool(Tool::Remux);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
         let session = app
             .state
             .remux
@@ -3675,21 +3784,15 @@ mod tests {
             .selection
             .set_custom_output_path(custom_output.clone());
 
-        app.handle_remux_action(RemuxSelectionAction::Back, egui::Context::default())
-            .unwrap();
-        assert!(app.state.intake_active);
-        assert_eq!(app.state.current_tool, Tool::Remux);
-
-        app.load_media_path_with_probe(&path, |_| -> Result<MediaFile, MediaProbeError> {
-            panic!("unchanged cached source must not be probed again")
-        });
+        app.select_tool(Tool::AudioMix);
+        app.select_tool(Tool::Remux);
 
         let session = app
             .state
             .remux
             .as_ref()
             .expect("same-source Remux session should be restored");
-        assert!(!app.state.intake_active);
+        assert_workspace(&app.state, Tool::Remux);
         assert_eq!(session.selection.container(), MediaContainer::Mp4);
         assert_eq!(session.selection.output_path(), custom_output);
         assert!(session.selection.output_is_customized());
@@ -3697,11 +3800,11 @@ mod tests {
     }
 
     #[test]
-    fn audio_extract_back_returns_to_intake_and_same_source_restores_ready_state() {
+    fn audio_extract_state_survives_operation_switching() {
         let (directory, path) = temp_file("audio-extract-back");
         let mut app = app();
-        app.select_tool(Tool::AudioExtract);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::AudioExtract);
         let session = app
             .state
             .audio_extract
@@ -3713,23 +3816,14 @@ mod tests {
             .selection
             .set_custom_output_path(custom_output.clone());
 
-        app.handle_audio_extract_action(
-            AudioExtractSelectionAction::Back,
-            egui::Context::default(),
-        )
-        .unwrap();
-        assert!(app.state.intake_active);
-        assert_eq!(app.state.current_tool, Tool::AudioExtract);
-
-        app.load_media_path_with_probe(&path, |_| -> Result<MediaFile, MediaProbeError> {
-            panic!("unchanged cached source must not be probed again")
-        });
+        app.select_tool(Tool::AudioMix);
+        app.select_tool(Tool::AudioExtract);
         let session = app
             .state
             .audio_extract
             .as_ref()
             .expect("same-source Audio Extract session should be restored");
-        assert!(!app.state.intake_active);
+        assert_workspace(&app.state, Tool::AudioExtract);
         assert_eq!(session.selection.selected_stream_index(), Some(1));
         assert_eq!(session.selection.format(), AudioExtractFormat::Flac);
         assert_eq!(session.selection.output_path(), custom_output);
@@ -3738,11 +3832,11 @@ mod tests {
     }
 
     #[test]
-    fn frame_capture_back_returns_to_intake_and_same_source_restores_ready_state() {
+    fn frame_capture_state_survives_operation_switching() {
         let (directory, path) = temp_file("frame-capture-back");
         let mut app = app();
-        app.select_tool(Tool::FrameCapture);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
         let session = app
             .state
             .frame_capture
@@ -3758,23 +3852,14 @@ mod tests {
             .selection
             .set_custom_output_path(custom_output.clone());
 
-        app.handle_frame_capture_action(
-            FrameCaptureSelectionAction::Back,
-            egui::Context::default(),
-        )
-        .unwrap();
-        assert!(app.state.intake_active);
-        assert_eq!(app.state.current_tool, Tool::FrameCapture);
-
-        app.load_media_path_with_probe(&path, |_| -> Result<MediaFile, MediaProbeError> {
-            panic!("unchanged cached source must not be probed again")
-        });
+        app.select_tool(Tool::AudioMix);
+        app.select_tool(Tool::FrameCapture);
         let session = app
             .state
             .frame_capture
             .as_ref()
             .expect("same-source Frame Capture session should be restored");
-        assert!(!app.state.intake_active);
+        assert_workspace(&app.state, Tool::FrameCapture);
         assert_eq!(session.selection.timestamp_text(), "00:00:03.250");
         assert_eq!(session.selection.format(), FrameCaptureFormat::Jpeg);
         assert_eq!(session.selection.output_path(), custom_output);
@@ -3788,8 +3873,8 @@ mod tests {
         let second = directory.join("replacement.mkv");
         fs::write(&second, b"replacement").unwrap();
         let mut app = app();
-        app.select_tool(Tool::VideoUpscale);
         app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        app.select_tool(Tool::VideoUpscale);
         app.select_tool(Tool::AudioMix);
         assert!(app.state.audio_mix.is_some());
         let old_audio_mix = app.state.audio_mix.as_mut().unwrap();
@@ -3807,9 +3892,6 @@ mod tests {
             .expect("upscale session should exist")
             .selection
             .set_custom_output_path(old_output);
-        app.handle_upscale_action(UpscaleSelectionAction::Back, egui::Context::default())
-            .unwrap();
-
         app.load_media_path_with_probe(&second, |path| Ok(media(path)));
 
         assert!(app.state.audio_mix.is_none());
@@ -3818,7 +3900,7 @@ mod tests {
             .upscale
             .as_ref()
             .expect("replacement should create a new Upscale session");
-        assert!(!app.state.intake_active);
+        assert_workspace(&app.state, Tool::VideoUpscale);
         assert_eq!(session.media.path, second);
         assert!(!session.selection.output_is_customized());
         assert_eq!(session.selection.target(), UpscaleTarget::Uhd4k);
@@ -3851,19 +3933,20 @@ mod tests {
     }
 
     #[test]
-    fn changed_cached_file_is_not_reused_when_switching_tools() {
+    fn switching_operations_does_not_revalidate_or_clear_the_source() {
         let (directory, path) = temp_file("changed-switch");
         let mut app = app();
-        app.select_tool(Tool::AudioMix);
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-        app.state.return_to_file_intake(Tool::AudioMix);
         fs::write(&path, b"changed-size").unwrap();
 
         app.select_tool(Tool::VideoUpscale);
 
-        assert!(app.state.intake_active);
-        assert!(app.state.upscale.is_none());
-        assert!(app.state.media_intake.current().is_none());
+        assert_workspace(&app.state, Tool::VideoUpscale);
+        assert!(app.state.upscale.is_some());
+        assert_eq!(
+            app.state.media_intake.current().map(|media| &media.path),
+            Some(&path)
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
