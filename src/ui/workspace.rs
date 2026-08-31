@@ -58,7 +58,6 @@ pub fn show(
         ui.add_space(theme::SPACING.related);
         show_operation_switcher(ui, active_operation, &action);
     });
-    ui.add_space(theme::SPACING.section);
 
     action.get()
 }

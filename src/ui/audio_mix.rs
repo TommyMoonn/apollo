@@ -1,13 +1,11 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
-use egui::{
-    Align, DragValue, Layout, Response, RichText, ScrollArea, Sides, TextStyle, Ui, WidgetInfo,
-    WidgetType,
-};
+use egui::{DragValue, Response, RichText, Sides, Ui, WidgetInfo, WidgetType};
 
 use crate::{
     audio_mix::{
@@ -286,71 +284,50 @@ pub fn show(
     presentation: &AudioMixPresentation,
     state: &mut AudioMixSelectionState,
 ) -> AudioMixSelectionAction {
-    let mut action = AudioMixSelectionAction::None;
-    let track_row_height =
-        layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH).row_height;
-    let list_content_height = presentation.tracks.len() as f32 * track_row_height;
+    let action = Cell::new(AudioMixSelectionAction::None);
     let validation = state.validation(media);
-    let has_validation_feedback = validation
-        .as_ref()
-        .err()
-        .and_then(audio_mix_ready_feedback)
-        .is_some();
-    let plan = layout::task_surface_plan(
-        ui.available_height(),
-        audio_mix_fixed_flow_height(
-            ui,
-            presentation.tracks.is_empty(),
-            has_validation_feedback,
-            state.normalization_enabled(),
-        ),
-        list_content_height,
-        track_row_height,
+
+    layout::operation_surface(
+        ui,
+        |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            show_track_header(ui, media, state);
+            ui.add_space(theme::SPACING.compact);
+            show_track_list(ui, media, state, &presentation.tracks);
+            ui.add_space(theme::INLINE_ACTION_GAP);
+            show_track_footer(ui, state);
+            ui.add_space(theme::SPACING.related);
+
+            show_loudness_header(ui, state);
+            ui.add_space(theme::SPACING.compact);
+            widgets::separator(ui);
+            if state.normalization_enabled() {
+                ui.add_space(theme::SPACING.compact);
+                show_normalization_targets(ui, state);
+            }
+            ui.add_space(theme::SPACING.section);
+
+            let _ = widgets::section_label(ui, OUTPUT_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            let output_action = show_output_row(ui, media, state);
+            if output_action != AudioMixSelectionAction::None {
+                action.set(output_action);
+            }
+
+            if let Some(feedback) = validation.as_ref().err().and_then(audio_mix_ready_feedback) {
+                ui.add_space(theme::SPACING.tight);
+                let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
+            }
+        },
+        |ui| {
+            if widgets::primary_button_enabled(ui, MIX_LABEL, validation.is_ok()).clicked() {
+                action.set(AudioMixSelectionAction::MixRequested);
+            }
+        },
     );
 
-    layout::task_surface(ui, plan.overflow, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-
-        show_track_header(ui, media, state);
-        ui.add_space(theme::SPACING.compact);
-        show_track_list(ui, media, state, &presentation.tracks, plan.list.max_height);
-        ui.add_space(theme::INLINE_ACTION_GAP);
-        show_track_footer(ui, state);
-        ui.add_space(theme::SPACING.related);
-
-        show_loudness_header(ui, state);
-        ui.add_space(theme::SPACING.compact);
-        widgets::separator(ui);
-        if state.normalization_enabled() {
-            ui.add_space(theme::SPACING.compact);
-            show_normalization_targets(ui, state);
-        }
-        ui.add_space(theme::SPACING.section);
-
-        let _ = widgets::section_label(ui, OUTPUT_LABEL);
-        ui.add_space(theme::SPACING.compact);
-        let output_action = show_output_row(ui, media, state);
-        if output_action != AudioMixSelectionAction::None {
-            action = output_action;
-        }
-
-        if let Some(feedback) = validation.as_ref().err().and_then(audio_mix_ready_feedback) {
-            ui.add_space(theme::SPACING.tight);
-            let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
-        }
-
-        ui.add_space(theme::SPACING.related);
-        let response = ui
-            .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                widgets::primary_button_enabled(ui, MIX_LABEL, validation.is_ok())
-            })
-            .inner;
-        if response.clicked() {
-            action = AudioMixSelectionAction::MixRequested;
-        }
-    });
-
-    action
+    action.get()
 }
 
 fn show_track_list(
@@ -358,7 +335,6 @@ fn show_track_list(
     media: &MediaFile,
     state: &mut AudioMixSelectionState,
     tracks: &[TrackPresentation],
-    list_height: f32,
 ) {
     widgets::separator(ui);
 
@@ -367,30 +343,25 @@ fn show_track_list(
         return;
     }
 
-    ScrollArea::vertical()
-        .max_height(list_height)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            for track in tracks {
-                let gain = state.track_gain(track.stream_index).unwrap_or_default();
-                let response = widgets::selectable_row_with_accessory(
-                    ui,
-                    &track.title,
-                    track.metadata.as_deref(),
-                    state.is_selected(track.stream_index),
-                    widgets::SelectionIndicator::Checkbox,
-                    theme::TRACK_GAIN_CONTROL_WIDTH,
-                    |ui| track_gain_control(ui, &track.title, gain),
-                );
+    for track in tracks {
+        let gain = state.track_gain(track.stream_index).unwrap_or_default();
+        let response = widgets::selectable_row_with_accessory(
+            ui,
+            &track.title,
+            track.metadata.as_deref(),
+            state.is_selected(track.stream_index),
+            widgets::SelectionIndicator::Checkbox,
+            theme::TRACK_GAIN_CONTROL_WIDTH,
+            |ui| track_gain_control(ui, &track.title, gain),
+        );
 
-                if response.selection.clicked() {
-                    state.toggle_stream(media, track.stream_index);
-                }
-                if response.accessory.0.changed() {
-                    state.set_track_gain(media, track.stream_index, response.accessory.1);
-                }
-            }
-        });
+        if response.selection.clicked() {
+            state.toggle_stream(media, track.stream_index);
+        }
+        if response.accessory.0.changed() {
+            state.set_track_gain(media, track.stream_index, response.accessory.1);
+        }
+    }
 }
 
 fn track_gain_control(ui: &mut Ui, title: &str, gain: TrackGain) -> (Response, TrackGain) {
@@ -434,57 +405,6 @@ fn stepped_track_gain(tenths_db: i16) -> TrackGain {
     let tenths_db = ((f64::from(tenths_db) / 5.0).round() as i16 * 5)
         .clamp(TrackGain::MIN.tenths_db(), TrackGain::MAX.tenths_db());
     TrackGain::from_tenths_db(tenths_db)
-}
-
-fn audio_mix_fixed_flow_height(
-    ui: &Ui,
-    track_list_empty: bool,
-    has_validation_feedback: bool,
-    normalization_enabled: bool,
-) -> f32 {
-    let section_label_height = ui.text_style_height(&TextStyle::Small);
-    let output_row_height = widgets::output_filename_row_plan(
-        ui,
-        Some(widgets::select_menu_intrinsic_width(ui, &CONTAINER_OPTIONS)),
-        BROWSE_LABEL,
-    )
-    .flow_height();
-    let track_list_chrome = if track_list_empty {
-        theme::SEPARATOR_WIDTH * 2.0
-    } else {
-        theme::SEPARATOR_WIDTH
-    };
-    let feedback_height = if has_validation_feedback {
-        theme::SPACING.tight + ui.text_style_height(&TextStyle::Body)
-    } else {
-        0.0
-    };
-
-    theme::COMPACT_CONTROL_HEIGHT.max(section_label_height)
-        + theme::SPACING.compact
-        + track_list_chrome
-        + theme::INLINE_ACTION_GAP
-        + theme::COMPACT_CONTROL_HEIGHT
-        + theme::SPACING.related
-        + theme::COMPACT_CONTROL_HEIGHT.max(section_label_height)
-        + theme::SPACING.compact
-        + theme::SEPARATOR_WIDTH
-        + normalization_targets_height(normalization_enabled)
-        + theme::SPACING.section
-        + section_label_height
-        + theme::SPACING.compact
-        + output_row_height
-        + feedback_height
-        + theme::SPACING.related
-        + theme::PRIMARY_CONTROL_HEIGHT
-}
-
-fn normalization_targets_height(enabled: bool) -> f32 {
-    if enabled {
-        theme::SPACING.compact + theme::COMPACT_CONTROL_HEIGHT * 4.0 + theme::SPACING.tight * 3.0
-    } else {
-        0.0
-    }
 }
 
 fn show_track_header(ui: &mut Ui, media: &MediaFile, state: &mut AudioMixSelectionState) {
@@ -889,14 +809,13 @@ mod tests {
     use crate::media::model::{AudioStream, MediaFile, VideoStream};
 
     use super::{
-        AudioMixPresentation, AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_fixed_flow_height,
-        audio_mix_ready_feedback, stepped_tenths, stepped_track_gain, track_presentations,
+        AudioMixPresentation, AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_ready_feedback,
+        stepped_tenths, stepped_track_gain, track_presentations,
     };
     use crate::audio_mix::model::{
         LoudnessNormalization, LoudnessTargets, OutputContainer, SelectedAudioTrack, TrackGain,
     };
     use crate::audio_mix::validation::AudioMixValidationError;
-    use crate::ui::{layout, theme};
 
     fn media() -> MediaFile {
         MediaFile {
@@ -1494,151 +1413,5 @@ mod tests {
         assert_eq!(stepped_tenths(1, 1, -90, 0), 0);
         assert_eq!(stepped_tenths(12, 5, 10, 500), 10);
         assert_eq!(stepped_tenths(498, 5, 10, 500), 500);
-    }
-
-    #[test]
-    fn minimum_height_uses_outer_task_scroll_when_fixed_audio_mix_flow_cannot_fit() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-
-        let output = context.run_ui(Default::default(), |ui| {
-            let usable_height =
-                layout::MINIMUM_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = audio_mix_fixed_flow_height(ui, false, false, false);
-            let row_height =
-                layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
-                    .row_height;
-            let plan = layout::task_surface_plan(
-                usable_height,
-                fixed_height,
-                12.0 * row_height,
-                row_height,
-            );
-
-            assert_eq!(usable_height, 204.0);
-            assert!(fixed_height > usable_height);
-            assert_eq!(plan.overflow, layout::TaskOverflow::Scroll);
-            assert!(plan.list.max_height >= theme::SELECTABLE_ROW_MIN_HEIGHT);
-        });
-        output.drop_without_applying_deltas();
-    }
-
-    #[test]
-    fn reference_height_preserves_a_full_track_row_with_distinct_normalization_section() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-
-        let output = context.run_ui(Default::default(), |ui| {
-            let usable_height =
-                layout::REFERENCE_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = audio_mix_fixed_flow_height(ui, false, false, false);
-            let row_height =
-                layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
-                    .row_height;
-            let plan = layout::task_surface_plan(
-                usable_height,
-                fixed_height,
-                12.0 * row_height,
-                row_height,
-            );
-
-            assert_eq!(usable_height, 323.0);
-            assert_eq!(plan.overflow, layout::TaskOverflow::Flow);
-            assert_eq!(plan.list.behavior, layout::ListBehavior::Scroll);
-            assert!(plan.list.max_height >= row_height);
-        });
-        output.drop_without_applying_deltas();
-    }
-
-    #[test]
-    fn taller_height_exposes_more_audio_tracks_before_scrolling() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-
-        let output = context.run_ui(Default::default(), |ui| {
-            let fixed_height = audio_mix_fixed_flow_height(ui, false, false, false);
-            let row_height =
-                layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
-                    .row_height;
-            let content_height = 20.0 * row_height;
-            let reference =
-                layout::task_surface_plan(323.0, fixed_height, content_height, row_height);
-            let tall = layout::task_surface_plan(700.0, fixed_height, content_height, row_height);
-
-            assert_eq!(reference.list.behavior, layout::ListBehavior::Scroll);
-            assert_eq!(tall.list.behavior, layout::ListBehavior::Scroll);
-            assert!(tall.list.max_height > reference.list.max_height);
-            assert_eq!(tall.overflow, layout::TaskOverflow::Flow);
-        });
-        output.drop_without_applying_deltas();
-    }
-
-    #[test]
-    fn enabled_normalization_targets_participate_in_task_surface_height() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-
-        let output = context.run_ui(Default::default(), |ui| {
-            let row_height =
-                layout::track_row_plan(ui.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
-                    .row_height;
-            let off_height = audio_mix_fixed_flow_height(ui, false, false, false);
-            let enabled_height = audio_mix_fixed_flow_height(ui, false, false, true);
-            let plan = layout::task_surface_plan(
-                off_height + row_height,
-                enabled_height,
-                12.0 * row_height,
-                row_height,
-            );
-
-            assert_eq!(
-                enabled_height - off_height,
-                theme::SPACING.compact
-                    + theme::COMPACT_CONTROL_HEIGHT * 4.0
-                    + theme::SPACING.tight * 3.0
-            );
-            assert_eq!(plan.overflow, layout::TaskOverflow::Scroll);
-            assert!(plan.list.max_height >= row_height);
-        });
-        output.drop_without_applying_deltas();
-    }
-
-    #[test]
-    fn narrow_audio_mix_requires_one_full_stacked_row_before_normal_flow() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-
-        let output = context.run_ui(Default::default(), |ui| {
-            let narrow_width =
-                layout::MINIMUM_CONTENT_SIZE.x - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(narrow_width, 800.0), egui::Sense::hover());
-            let child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
-            );
-            let row_height =
-                layout::track_row_plan(child.available_width(), theme::TRACK_GAIN_CONTROL_WIDTH)
-                    .row_height;
-            let fixed_height = audio_mix_fixed_flow_height(&child, false, false, false);
-            let plan = layout::task_surface_plan(
-                fixed_height + row_height - 1.0,
-                fixed_height,
-                12.0 * row_height,
-                row_height,
-            );
-
-            assert_eq!(narrow_width, 344.0);
-            assert_eq!(
-                row_height,
-                theme::SELECTABLE_ROW_MIN_HEIGHT
-                    + theme::SPACING.compact
-                    + theme::COMPACT_CONTROL_HEIGHT
-            );
-            assert_eq!(plan.overflow, layout::TaskOverflow::Scroll);
-            assert_eq!(plan.list.max_height, row_height);
-        });
-        output.drop_without_applying_deltas();
     }
 }

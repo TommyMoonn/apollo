@@ -1,11 +1,12 @@
 use std::{
+    cell::Cell,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
 };
 
-use egui::{Align, Label, Layout, RichText, TextEdit, TextStyle, Ui};
+use egui::{Align, Label, RichText, TextEdit, Ui};
 
 use crate::{
     frame_capture::{
@@ -134,80 +135,72 @@ pub fn show(
     media: &MediaFile,
     state: &mut FrameCaptureSelectionState,
 ) -> FrameCaptureSelectionAction {
-    let mut action = FrameCaptureSelectionAction::None;
+    let action = Cell::new(FrameCaptureSelectionAction::None);
     let validation = state.validation(media);
     let feedback = validation.as_ref().err().and_then(ready_feedback);
-    let plan = layout::task_surface_plan(
-        ui.available_height(),
-        fixed_flow_height(ui, media, feedback),
-        0.0,
-        0.0,
+
+    layout::operation_surface(
+        ui,
+        |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            let _ = widgets::section_label(ui, TIMESTAMP_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            let mut timestamp_text = state.timestamp_text().to_owned();
+            let timestamp = ui.add_sized(
+                [ui.available_width(), theme::COMPACT_CONTROL_HEIGHT],
+                TextEdit::singleline(&mut timestamp_text)
+                    .hint_text("HH:MM:SS.mmm")
+                    .vertical_align(Align::Center),
+            );
+            if timestamp.changed() {
+                state.set_timestamp_text(media, timestamp_text);
+            }
+            if timestamp.lost_focus() {
+                ui.ctx().request_repaint();
+            }
+            if let Some(duration) = media.duration {
+                ui.add_space(theme::SPACING.tight);
+                technical_context(ui, &format!("Duration {}", format_duration(duration)));
+            }
+
+            ui.add_space(theme::SPACING.focal);
+            let _ = widgets::section_label(ui, FORMAT_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            show_format_selector(ui, state);
+            ui.add_space(theme::SPACING.tight);
+            technical_context(ui, format_detail(state.format()));
+
+            ui.add_space(theme::SPACING.focal);
+            let _ = widgets::section_label(ui, OUTPUT_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
+            let row = widgets::output_filename_row(
+                ui,
+                &mut output_stem,
+                state.format().extension(),
+                BROWSE_LABEL,
+            );
+            if row.filename.changed() {
+                state.set_output_filename_stem(OsString::from(output_stem));
+            }
+            if row.browse.clicked() {
+                action.set(FrameCaptureSelectionAction::BrowseOutput);
+            }
+
+            if let Some(feedback) = feedback {
+                ui.add_space(theme::SPACING.tight);
+                let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
+            }
+        },
+        |ui| {
+            if widgets::primary_button_enabled(ui, CAPTURE_LABEL, validation.is_ok()).clicked() {
+                action.set(FrameCaptureSelectionAction::CaptureRequested);
+            }
+        },
     );
 
-    layout::task_surface(ui, plan.overflow, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-
-        let _ = widgets::section_label(ui, TIMESTAMP_LABEL);
-        ui.add_space(theme::SPACING.compact);
-        let mut timestamp_text = state.timestamp_text().to_owned();
-        let timestamp = ui.add_sized(
-            [ui.available_width(), theme::COMPACT_CONTROL_HEIGHT],
-            TextEdit::singleline(&mut timestamp_text)
-                .hint_text("HH:MM:SS.mmm")
-                .vertical_align(Align::Center),
-        );
-        if timestamp.changed() {
-            state.set_timestamp_text(media, timestamp_text);
-        }
-        if timestamp.lost_focus() {
-            ui.ctx().request_repaint();
-        }
-        if let Some(duration) = media.duration {
-            ui.add_space(theme::SPACING.tight);
-            technical_context(ui, &format!("Duration {}", format_duration(duration)));
-        }
-
-        ui.add_space(theme::SPACING.focal);
-        let _ = widgets::section_label(ui, FORMAT_LABEL);
-        ui.add_space(theme::SPACING.compact);
-        show_format_selector(ui, state);
-        ui.add_space(theme::SPACING.tight);
-        technical_context(ui, format_detail(state.format()));
-
-        ui.add_space(theme::SPACING.focal);
-        let _ = widgets::section_label(ui, OUTPUT_LABEL);
-        ui.add_space(theme::SPACING.compact);
-        let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
-        let row = widgets::output_filename_row(
-            ui,
-            &mut output_stem,
-            state.format().extension(),
-            BROWSE_LABEL,
-        );
-        if row.filename.changed() {
-            state.set_output_filename_stem(OsString::from(output_stem));
-        }
-        if row.browse.clicked() {
-            action = FrameCaptureSelectionAction::BrowseOutput;
-        }
-
-        if let Some(feedback) = feedback {
-            ui.add_space(theme::SPACING.tight);
-            let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
-        }
-
-        ui.add_space(theme::SPACING.related);
-        let response = ui
-            .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                widgets::primary_button_enabled(ui, CAPTURE_LABEL, validation.is_ok())
-            })
-            .inner;
-        if response.clicked() {
-            action = FrameCaptureSelectionAction::CaptureRequested;
-        }
-    });
-
-    action
+    action.get()
 }
 
 fn show_format_selector(ui: &mut Ui, state: &mut FrameCaptureSelectionState) {
@@ -248,36 +241,6 @@ fn ready_feedback(error: &FrameCaptureReadyError) -> Option<&'static str> {
         }) => Some("Output filename must match the selected format."),
         FrameCaptureReadyError::Request(FrameCaptureValidationError::Output(_)) => None,
     }
-}
-
-fn fixed_flow_height(ui: &Ui, media: &MediaFile, feedback: Option<&str>) -> f32 {
-    let section_label_height = ui.text_style_height(&TextStyle::Small);
-    let output_row_height = widgets::output_filename_row_plan(ui, None, BROWSE_LABEL).flow_height();
-    let feedback_height = feedback.map_or(0.0, |feedback| {
-        theme::SPACING.tight + widgets::inline_status_height(ui, feedback, ui.available_width())
-    });
-    let duration_height = media.duration.map_or(0.0, |_| {
-        theme::SPACING.tight + ui.text_style_height(&fonts::technical_text_style())
-    });
-    let format_detail_height =
-        theme::SPACING.tight + ui.text_style_height(&fonts::technical_text_style());
-
-    section_label_height
-        + theme::SPACING.compact
-        + theme::COMPACT_CONTROL_HEIGHT
-        + duration_height
-        + theme::SPACING.focal
-        + section_label_height
-        + theme::SPACING.compact
-        + theme::COMPACT_CONTROL_HEIGHT
-        + format_detail_height
-        + theme::SPACING.focal
-        + section_label_height
-        + theme::SPACING.compact
-        + output_row_height
-        + feedback_height
-        + theme::SPACING.related
-        + theme::PRIMARY_CONTROL_HEIGHT
 }
 
 fn default_output_stem(input: &Path, timestamp: FrameTimestamp) -> OsString {
@@ -333,13 +296,10 @@ mod tests {
     use crate::{
         frame_capture::model::FrameCaptureFormat,
         media::model::{MediaFile, MediaStream, StreamKind, VideoStream},
-        ui::{fonts, layout, theme},
+        ui::{fonts, theme},
     };
 
-    use super::{
-        FrameCaptureSelectionState, fixed_flow_height, format_detail, format_duration,
-        ready_feedback,
-    };
+    use super::{FrameCaptureSelectionState, format_detail, format_duration, ready_feedback};
 
     fn media(duration: Option<Duration>) -> MediaFile {
         MediaFile {
@@ -510,30 +470,6 @@ mod tests {
         state.set_timestamp_text(&media, "00:00:00.000".into());
         media.video_streams.clear();
         assert!(!state.can_capture(&media));
-    }
-
-    #[test]
-    fn constrained_ready_surface_scrolls_and_feedback_height_is_width_aware() {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let output = context.run_ui(Default::default(), |ui| {
-            let media = media(None);
-            let fixed = fixed_flow_height(ui, &media, None);
-            assert_eq!(
-                layout::task_surface_plan(fixed - 1.0, fixed, 0.0, 0.0).overflow,
-                layout::TaskOverflow::Scroll
-            );
-            assert_eq!(
-                layout::task_surface_plan(fixed, fixed, 0.0, 0.0).overflow,
-                layout::TaskOverflow::Flow
-            );
-
-            let feedback = "Enter a timestamp using HH:MM:SS.mmm.";
-            let with_feedback = fixed_flow_height(ui, &media, Some(feedback));
-            assert!(with_feedback > fixed);
-        });
-        output.drop_without_applying_deltas();
     }
 
     fn shape_contains(shape: &egui::Shape, expected: &str) -> bool {

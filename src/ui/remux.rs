@@ -1,9 +1,10 @@
 use std::{
+    cell::Cell,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
-use egui::{Align, Layout, TextStyle, Ui};
+use egui::Ui;
 
 use crate::{
     media::{
@@ -97,60 +98,51 @@ pub fn show(
     media: &MediaFile,
     state: &mut RemuxSelectionState,
 ) -> RemuxSelectionAction {
-    let mut action = RemuxSelectionAction::None;
+    let action = Cell::new(RemuxSelectionAction::None);
     let validation = state.validation(media);
     let feedback = validation
         .as_ref()
         .err()
         .and_then(|error| remux_ready_feedback(error, media));
-    let plan = layout::task_surface_plan(
-        ui.available_height(),
-        remux_fixed_flow_height(ui, feedback.as_deref()),
-        0.0,
-        0.0,
+    layout::operation_surface(
+        ui,
+        |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            let _ = widgets::section_label(ui, CONTAINER_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            show_container_selector(ui, state);
+
+            ui.add_space(theme::SPACING.focal);
+            let _ = widgets::section_label(ui, OUTPUT_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
+            let row = widgets::output_filename_row(
+                ui,
+                &mut output_stem,
+                state.container().extension(),
+                BROWSE_LABEL,
+            );
+            if row.filename.changed() {
+                state.set_output_filename_stem(OsString::from(output_stem));
+            }
+            if row.browse.clicked() {
+                action.set(RemuxSelectionAction::BrowseOutput);
+            }
+
+            if let Some(feedback) = feedback.as_deref() {
+                ui.add_space(theme::SPACING.tight);
+                let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
+            }
+        },
+        |ui| {
+            if widgets::primary_button_enabled(ui, REMUX_LABEL, validation.is_ok()).clicked() {
+                action.set(RemuxSelectionAction::RemuxRequested);
+            }
+        },
     );
 
-    layout::task_surface(ui, plan.overflow, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-
-        let _ = widgets::section_label(ui, CONTAINER_LABEL);
-        ui.add_space(theme::SPACING.compact);
-        show_container_selector(ui, state);
-
-        ui.add_space(theme::SPACING.focal);
-        let _ = widgets::section_label(ui, OUTPUT_LABEL);
-        ui.add_space(theme::SPACING.compact);
-        let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
-        let row = widgets::output_filename_row(
-            ui,
-            &mut output_stem,
-            state.container().extension(),
-            BROWSE_LABEL,
-        );
-        if row.filename.changed() {
-            state.set_output_filename_stem(OsString::from(output_stem));
-        }
-        if row.browse.clicked() {
-            action = RemuxSelectionAction::BrowseOutput;
-        }
-
-        if let Some(feedback) = feedback.as_deref() {
-            ui.add_space(theme::SPACING.tight);
-            let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
-        }
-
-        ui.add_space(theme::SPACING.related);
-        let response = ui
-            .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                widgets::primary_button_enabled(ui, REMUX_LABEL, validation.is_ok())
-            })
-            .inner;
-        if response.clicked() {
-            action = RemuxSelectionAction::RemuxRequested;
-        }
-    });
-
-    action
+    action.get()
 }
 
 fn show_container_selector(ui: &mut Ui, state: &mut RemuxSelectionState) {
@@ -240,25 +232,6 @@ fn stream_kind_label(kind: StreamKind) -> &'static str {
     }
 }
 
-fn remux_fixed_flow_height(ui: &Ui, feedback: Option<&str>) -> f32 {
-    let section_label_height = ui.text_style_height(&TextStyle::Small);
-    let output_row_height = widgets::output_filename_row_plan(ui, None, BROWSE_LABEL).flow_height();
-    let feedback_height = feedback.map_or(0.0, |feedback| {
-        theme::SPACING.tight + widgets::inline_status_height(ui, feedback, ui.available_width())
-    });
-
-    section_label_height
-        + theme::SPACING.compact
-        + theme::COMPACT_CONTROL_HEIGHT
-        + theme::SPACING.focal
-        + section_label_height
-        + theme::SPACING.compact
-        + output_row_height
-        + feedback_height
-        + theme::SPACING.related
-        + theme::PRIMARY_CONTROL_HEIGHT
-}
-
 fn default_output_stem(input: &Path) -> OsString {
     let stem = input
         .file_stem()
@@ -286,10 +259,9 @@ mod tests {
             model::{MediaFile, MediaStream, StreamKind},
         },
         remux::validation::RemuxValidationError,
-        ui::{fonts, layout, theme},
     };
 
-    use super::{RemuxSelectionState, remux_fixed_flow_height, remux_ready_feedback};
+    use super::{RemuxSelectionState, remux_ready_feedback};
 
     fn media() -> MediaFile {
         MediaFile {
@@ -433,95 +405,9 @@ mod tests {
         assert!(!state.can_remux(&media));
     }
 
-    #[test]
-    fn constrained_ready_surface_selects_outer_scrolling() {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let output = context.run_ui(Default::default(), |ui| {
-            let fixed = remux_fixed_flow_height(ui, None);
-            let plan = layout::task_surface_plan(fixed - 1.0, fixed, 0.0, 0.0);
-            assert_eq!(plan.overflow, layout::TaskOverflow::Scroll);
-        });
-        output.drop_without_applying_deltas();
-    }
-
-    #[test]
-    fn narrow_feedback_height_drives_ready_surface_overflow() {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let output = context.run_ui(Default::default(), |ui| {
-            let media = media_with_streams(vec![MediaStream {
-                stream_index: 4,
-                kind: StreamKind::Audio,
-                codec: Some("wmav2".to_owned()),
-            }]);
-            let feedback = remux_ready_feedback(
-                &RemuxValidationError::IncompatibleStream {
-                    container: MediaContainer::Mp4,
-                    stream_index: 4,
-                    kind: StreamKind::Audio,
-                    codec: Some("wmav2".to_owned()),
-                },
-                &media,
-            )
-            .unwrap();
-            let narrow = fixed_height_ui(ui, 344.0);
-            assert_eq!(narrow.available_width(), 344.0);
-            let body_line = narrow.text_style_height(&egui::TextStyle::Body);
-            let measured_feedback = crate::ui::widgets::inline_status_height(
-                &narrow,
-                &feedback,
-                narrow.available_width(),
-            );
-            assert!(measured_feedback > body_line);
-
-            let without_feedback = remux_fixed_flow_height(&narrow, None);
-            let old_one_line_estimate = without_feedback + theme::SPACING.tight + body_line;
-            let with_feedback = remux_fixed_flow_height(&narrow, Some(&feedback));
-            assert!(with_feedback > old_one_line_estimate);
-            assert_eq!(
-                layout::task_surface_plan(old_one_line_estimate, with_feedback, 0.0, 0.0).overflow,
-                layout::TaskOverflow::Scroll
-            );
-            assert_eq!(
-                layout::task_surface_plan(with_feedback, with_feedback, 0.0, 0.0).overflow,
-                layout::TaskOverflow::Flow
-            );
-            assert_eq!(
-                layout::task_surface_plan(without_feedback - 1.0, without_feedback, 0.0, 0.0,)
-                    .overflow,
-                layout::TaskOverflow::Scroll
-            );
-            assert_eq!(
-                layout::task_surface_plan(without_feedback, without_feedback, 0.0, 0.0,).overflow,
-                layout::TaskOverflow::Flow
-            );
-
-            let wide = fixed_height_ui(ui, 800.0);
-            let wide_without = remux_fixed_flow_height(&wide, None);
-            let wide_with = remux_fixed_flow_height(&wide, Some(&feedback));
-            let expected_wide_delta =
-                theme::SPACING.tight + wide.text_style_height(&egui::TextStyle::Body);
-            assert!((wide_with - wide_without - expected_wide_delta).abs() <= 0.5);
-        });
-        output.drop_without_applying_deltas();
-    }
-
     fn media_with_streams(streams: Vec<MediaStream>) -> MediaFile {
         let mut media = media();
         media.streams = streams;
         media
-    }
-
-    fn fixed_height_ui(parent: &mut egui::Ui, width: f32) -> egui::Ui {
-        let (rect, _) =
-            parent.allocate_exact_size(egui::vec2(width, 1_000.0), egui::Sense::hover());
-        parent.new_child(
-            egui::UiBuilder::new()
-                .max_rect(rect)
-                .layout(egui::Layout::top_down(egui::Align::LEFT)),
-        )
     }
 }

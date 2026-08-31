@@ -1,9 +1,10 @@
 use std::{
+    cell::Cell,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
-use egui::{Align, Label, Layout, RichText, ScrollArea, TextStyle, Ui};
+use egui::{Label, RichText, Ui};
 
 use crate::{
     audio_extract::{
@@ -139,112 +140,92 @@ pub fn show(
     media: &MediaFile,
     state: &mut AudioExtractSelectionState,
 ) -> AudioExtractSelectionAction {
-    let mut action = AudioExtractSelectionAction::None;
+    let action = Cell::new(AudioExtractSelectionAction::None);
     let validation = state.validation(media);
     let feedback = validation.as_ref().err().and_then(ready_feedback);
-    let row_height = theme::SELECTABLE_ROW_MIN_HEIGHT;
-    let list_content_height = media.audio_streams.len() as f32 * row_height;
-    let plan = layout::task_surface_plan(
-        ui.available_height(),
-        fixed_flow_height(ui, media, feedback),
-        list_content_height,
-        row_height,
+
+    layout::operation_surface(
+        ui,
+        |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            let _ = widgets::section_label(ui, AUDIO_TRACK_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            show_audio_tracks(ui, media, state);
+
+            ui.add_space(theme::SPACING.focal);
+            let _ = widgets::section_label(ui, FORMAT_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            show_format_selector(ui, state);
+            ui.add_space(theme::SPACING.tight);
+            ui.add(
+                Label::new(
+                    RichText::new(format_detail(state.format()))
+                        .text_style(fonts::technical_text_style())
+                        .color(theme::SECONDARY_FAINT),
+                )
+                .selectable(false),
+            );
+
+            ui.add_space(theme::SPACING.focal);
+            let _ = widgets::section_label(ui, OUTPUT_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
+            let row = widgets::output_filename_row(
+                ui,
+                &mut output_stem,
+                state.format().extension(),
+                BROWSE_LABEL,
+            );
+            if row.filename.changed() {
+                state.set_output_filename_stem(OsString::from(output_stem));
+            }
+            if row.browse.clicked() {
+                action.set(AudioExtractSelectionAction::BrowseOutput);
+            }
+
+            if let Some(feedback) = feedback {
+                ui.add_space(theme::SPACING.tight);
+                let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
+            }
+        },
+        |ui| {
+            if widgets::primary_button_enabled(ui, EXTRACT_LABEL, validation.is_ok()).clicked() {
+                action.set(AudioExtractSelectionAction::ExtractRequested);
+            }
+        },
     );
 
-    layout::task_surface(ui, plan.overflow, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-
-        let _ = widgets::section_label(ui, AUDIO_TRACK_LABEL);
-        ui.add_space(theme::SPACING.compact);
-        show_audio_tracks(ui, media, state, plan.list.max_height);
-
-        ui.add_space(theme::SPACING.focal);
-        let _ = widgets::section_label(ui, FORMAT_LABEL);
-        ui.add_space(theme::SPACING.compact);
-        show_format_selector(ui, state);
-        ui.add_space(theme::SPACING.tight);
-        ui.add(
-            Label::new(
-                RichText::new(format_detail(state.format()))
-                    .text_style(fonts::technical_text_style())
-                    .color(theme::SECONDARY_FAINT),
-            )
-            .selectable(false),
-        );
-
-        ui.add_space(theme::SPACING.focal);
-        let _ = widgets::section_label(ui, OUTPUT_LABEL);
-        ui.add_space(theme::SPACING.compact);
-        let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
-        let row = widgets::output_filename_row(
-            ui,
-            &mut output_stem,
-            state.format().extension(),
-            BROWSE_LABEL,
-        );
-        if row.filename.changed() {
-            state.set_output_filename_stem(OsString::from(output_stem));
-        }
-        if row.browse.clicked() {
-            action = AudioExtractSelectionAction::BrowseOutput;
-        }
-
-        if let Some(feedback) = feedback {
-            ui.add_space(theme::SPACING.tight);
-            let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
-        }
-
-        ui.add_space(theme::SPACING.related);
-        let response = ui
-            .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                widgets::primary_button_enabled(ui, EXTRACT_LABEL, validation.is_ok())
-            })
-            .inner;
-        if response.clicked() {
-            action = AudioExtractSelectionAction::ExtractRequested;
-        }
-    });
-
-    action
+    action.get()
 }
 
-fn show_audio_tracks(
-    ui: &mut Ui,
-    media: &MediaFile,
-    state: &mut AudioExtractSelectionState,
-    list_height: f32,
-) {
+fn show_audio_tracks(ui: &mut Ui, media: &MediaFile, state: &mut AudioExtractSelectionState) {
     widgets::separator(ui);
     if media.audio_streams.is_empty() {
         widgets::separator(ui);
         return;
     }
 
-    ScrollArea::vertical()
-        .max_height(list_height)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            for stream in &media.audio_streams {
-                let title = stream
-                    .title
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|title| !title.is_empty())
-                    .unwrap_or("Untitled audio");
-                let metadata = track_metadata(stream);
-                let response = widgets::selectable_row(
-                    ui,
-                    title,
-                    Some(&metadata),
-                    state.selected_stream_index() == Some(stream.stream_index),
-                    widgets::SelectionIndicator::Radio,
-                    theme::SELECTABLE_ROW_MIN_HEIGHT,
-                );
-                if response.clicked() {
-                    let _ = state.select_stream(media, stream.stream_index);
-                }
-            }
-        });
+    for stream in &media.audio_streams {
+        let title = stream
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("Untitled audio");
+        let metadata = track_metadata(stream);
+        let response = widgets::selectable_row(
+            ui,
+            title,
+            Some(&metadata),
+            state.selected_stream_index() == Some(stream.stream_index),
+            widgets::SelectionIndicator::Radio,
+            theme::SELECTABLE_ROW_MIN_HEIGHT,
+        );
+        if response.clicked() {
+            let _ = state.select_stream(media, stream.stream_index);
+        }
+    }
 }
 
 fn track_metadata(stream: &crate::media::model::AudioStream) -> String {
@@ -320,36 +301,6 @@ fn ready_feedback(error: &AudioExtractReadyError) -> Option<&'static str> {
     }
 }
 
-fn fixed_flow_height(ui: &Ui, media: &MediaFile, feedback: Option<&str>) -> f32 {
-    let section_label_height = ui.text_style_height(&TextStyle::Small);
-    let output_row_height = widgets::output_filename_row_plan(ui, None, BROWSE_LABEL).flow_height();
-    let feedback_height = feedback.map_or(0.0, |feedback| {
-        theme::SPACING.tight + widgets::inline_status_height(ui, feedback, ui.available_width())
-    });
-    let list_chrome = if media.audio_streams.is_empty() {
-        theme::SEPARATOR_WIDTH * 2.0
-    } else {
-        theme::SEPARATOR_WIDTH
-    };
-
-    section_label_height
-        + theme::SPACING.compact
-        + list_chrome
-        + theme::SPACING.focal
-        + section_label_height
-        + theme::SPACING.compact
-        + theme::COMPACT_CONTROL_HEIGHT
-        + theme::SPACING.tight
-        + ui.text_style_height(&fonts::technical_text_style())
-        + theme::SPACING.focal
-        + section_label_height
-        + theme::SPACING.compact
-        + output_row_height
-        + feedback_height
-        + theme::SPACING.related
-        + theme::PRIMARY_CONTROL_HEIGHT
-}
-
 fn default_output_stem(
     input: &Path,
     audio_stream_count: usize,
@@ -392,12 +343,10 @@ mod tests {
     use crate::{
         audio_extract::model::AudioExtractFormat,
         media::model::{AudioStream, MediaFile, MediaStream, StreamKind},
-        ui::{fonts, layout, theme},
     };
 
     use super::{
-        AudioExtractSelectionState, NO_AUDIO_FEEDBACK, fixed_flow_height, format_detail,
-        format_label, ready_feedback,
+        AudioExtractSelectionState, NO_AUDIO_FEEDBACK, format_detail, format_label, ready_feedback,
     };
 
     fn media() -> MediaFile {
@@ -566,26 +515,5 @@ mod tests {
             ready_feedback(&state.validation(&media).unwrap_err()),
             Some(NO_AUDIO_FEEDBACK)
         );
-    }
-
-    #[test]
-    fn responsive_list_grows_before_scrolling_and_preserves_one_row() {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let output = context.run_ui(Default::default(), |ui| {
-            let media = media();
-            let fixed = fixed_flow_height(ui, &media, None);
-            let row = theme::SELECTABLE_ROW_MIN_HEIGHT;
-            let content = row * media.audio_streams.len() as f32;
-            let short = layout::task_surface_plan(fixed + row - 1.0, fixed, content, row);
-            assert_eq!(short.overflow, layout::TaskOverflow::Scroll);
-            assert_eq!(short.list.max_height, row);
-            let one_row = layout::task_surface_plan(fixed + row, fixed, content, row);
-            assert_eq!(one_row.overflow, layout::TaskOverflow::Flow);
-            let tall = layout::task_surface_plan(fixed + content, fixed, content, row);
-            assert_eq!(tall.list.max_height, content);
-        });
-        output.drop_without_applying_deltas();
     }
 }

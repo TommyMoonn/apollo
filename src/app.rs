@@ -589,18 +589,20 @@ impl ApolloApp {
 
     fn show_navigation(&mut self, ui: &mut Ui) {
         let NavigationState::SourceWorkspace { active_operation } = self.state.navigation else {
-            self.show_file_intake(ui);
+            layout::padded_content(ui, |ui| self.show_file_intake(ui));
             return;
         };
 
         let Some(media) = self.state.media_intake.current().cloned() else {
             self.state.close_source();
-            self.show_file_intake(ui);
+            layout::padded_content(ui, |ui| self.show_file_intake(ui));
             return;
         };
 
-        let workspace_action =
-            workspace::show(ui, &media, active_operation, self.file_intake_enabled());
+        let workspace_action = layout::workspace_chrome(ui, |ui| {
+            workspace::show(ui, &media, active_operation, self.file_intake_enabled())
+        })
+        .inner;
         match workspace_action {
             WorkspaceAction::Source(action) => self.handle_source_action(action, ui.ctx().clone()),
             WorkspaceAction::SelectOperation(operation) => self.select_tool(operation),
@@ -608,26 +610,77 @@ impl ApolloApp {
         }
 
         let Some(active_operation) = self.state.active_operation() else {
-            self.show_file_intake(ui);
+            layout::padded_content(ui, |ui| self.show_file_intake(ui));
             return;
         };
 
         if let Some(error) = self.state.intake_error.as_ref() {
-            media_error::show_inline(ui, error, &mut self.state.intake_error_details_open);
-            ui.add_space(theme::SPACING.section);
+            layout::content_gutter(ui, |ui| {
+                media_error::show_inline(ui, error, &mut self.state.intake_error_details_open);
+                ui.add_space(theme::SPACING.section);
+            });
         }
 
-        match active_operation {
-            Tool::AudioMix if self.state.audio_mix.is_some() => self.show_audio_mix_tool(ui),
-            Tool::VideoUpscale if self.state.upscale.is_some() => self.show_upscale_tool(ui),
-            Tool::Remux if self.state.remux.is_some() => self.show_remux_tool(ui),
-            Tool::AudioExtract if self.state.audio_extract.is_some() => {
-                self.show_audio_extract_tool(ui)
+        let ready_surface = match active_operation {
+            Tool::AudioMix => {
+                !shows_audio_mix_lifecycle(self.audio_mix_executor.state())
+                    && self
+                        .state
+                        .audio_mix
+                        .as_ref()
+                        .is_some_and(|session| session.start_error.is_none())
             }
-            Tool::FrameCapture if self.state.frame_capture.is_some() => {
-                self.show_frame_capture_tool(ui)
+            Tool::VideoUpscale => {
+                !shows_upscale_lifecycle(self.upscale_executor.state())
+                    && self
+                        .state
+                        .upscale
+                        .as_ref()
+                        .is_some_and(|session| session.start_error.is_none())
             }
-            _ => self.show_file_intake(ui),
+            Tool::Remux => {
+                !shows_remux_lifecycle(self.remux_executor.state())
+                    && self
+                        .state
+                        .remux
+                        .as_ref()
+                        .is_some_and(|session| session.start_error.is_none())
+            }
+            Tool::AudioExtract => {
+                !shows_audio_extract_lifecycle(self.audio_extract_executor.state())
+                    && self
+                        .state
+                        .audio_extract
+                        .as_ref()
+                        .is_some_and(|session| session.start_error.is_none())
+            }
+            Tool::FrameCapture => {
+                !shows_frame_capture_lifecycle(self.frame_capture_executor.state())
+                    && self
+                        .state
+                        .frame_capture
+                        .as_ref()
+                        .is_some_and(|session| session.start_error.is_none())
+            }
+        };
+        let show_operation = |app: &mut Self, ui: &mut Ui| match active_operation {
+            Tool::AudioMix if app.state.audio_mix.is_some() => app.show_audio_mix_tool(ui),
+            Tool::VideoUpscale if app.state.upscale.is_some() => app.show_upscale_tool(ui),
+            Tool::Remux if app.state.remux.is_some() => app.show_remux_tool(ui),
+            Tool::AudioExtract if app.state.audio_extract.is_some() => {
+                app.show_audio_extract_tool(ui)
+            }
+            Tool::FrameCapture if app.state.frame_capture.is_some() => {
+                app.show_frame_capture_tool(ui)
+            }
+            _ => {
+                layout::padded_content(ui, |ui| app.show_file_intake(ui));
+            }
+        };
+        if ready_surface {
+            show_operation(self, ui);
+        } else {
+            layout::padded_content(ui, |ui| show_operation(self, ui));
         }
     }
 
@@ -1696,15 +1749,15 @@ fn open_folder(path: &Path) -> io::Result<()> {
 impl eframe::App for ApolloApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         CentralPanel::default()
-            .frame(layout::content_frame(ui.style()))
+            .frame(layout::root_frame(ui.style()))
             .show(ui, |ui| {
                 self.poll_media_tools_discovery();
                 if matches!(&self.media_tools, MediaToolsState::Checking { .. }) {
-                    self.show_media_tools_checking(ui);
+                    layout::padded_content(ui, |ui| self.show_media_tools_checking(ui));
                     return;
                 }
                 if matches!(&self.media_tools, MediaToolsState::Unavailable(_)) {
-                    self.show_media_tools_unavailable(ui);
+                    layout::padded_content(ui, |ui| self.show_media_tools_unavailable(ui));
                     return;
                 }
 
@@ -1765,7 +1818,7 @@ mod tests {
         remux::execution::RemuxExecutionState,
         ui::{
             SourceAction, audio_extract::AudioExtractSelectionAction, fonts,
-            frame_capture::FrameCaptureSelectionAction, remux::RemuxSelectionAction, theme,
+            frame_capture::FrameCaptureSelectionAction, layout, remux::RemuxSelectionAction, theme,
             upscale::UpscaleSelectionAction,
         },
         upscale::{
@@ -2080,6 +2133,31 @@ mod tests {
             .shapes
             .iter()
             .find_map(|clipped| shape_text_rect(&clipped.shape, text))
+            .unwrap_or_else(|| panic!("missing rendered text {text:?}"))
+    }
+
+    fn output_bottom_text_rect(output: &egui::FullOutput, text: &str) -> egui::Rect {
+        fn collect(shape: &egui::Shape, text: &str, matches: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Text(shape) if shape.galley.job.text == text => {
+                    matches.push(egui::Rect::from_min_size(shape.pos, shape.galley.size()))
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, text, matches);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut matches = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, text, &mut matches);
+        }
+        matches
+            .into_iter()
+            .max_by(|left, right| left.bottom().total_cmp(&right.bottom()))
             .unwrap_or_else(|| panic!("missing rendered text {text:?}"))
     }
 
@@ -2744,6 +2822,60 @@ mod tests {
                 );
             }
             assert!(!output_contains_text(&output, "← Back"));
+        }
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn every_ready_operation_keeps_its_primary_action_bottom_owned_at_all_heights() {
+        let (directory, path) = temp_file("shared-operation-shell");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let action_height = theme::PRIMARY_CONTROL_HEIGHT
+            + f32::from(layout::ACTION_BAR_VERTICAL_PADDING) * 2.0
+            + theme::SEPARATOR_WIDTH;
+
+        for (operation, label) in [
+            (Tool::AudioMix, "Mix selected tracks"),
+            (Tool::VideoUpscale, "Upscale"),
+            (Tool::Remux, "Remux"),
+            (Tool::AudioExtract, "Extract"),
+            (Tool::FrameCapture, "Capture frame"),
+        ] {
+            for (width, height) in [
+                (400.0, 260.0),
+                (620.0, 379.0),
+                (1_200.0, 700.0),
+                (620.0, 900.0),
+            ] {
+                let mut viewport = egui::Rect::NOTHING;
+                let mut output = context.run_ui(Default::default(), |ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+                    viewport = rect;
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(rect)
+                            .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    );
+                    child.set_clip_rect(rect);
+                    app.show_tool(&mut child, operation);
+                });
+                output.textures_delta.clear();
+                let action = output_bottom_text_rect(&output, label);
+                let source = output_text_rect(&output, "recording.mkv");
+
+                assert!(
+                    (action.center().y - (viewport.bottom() - action_height * 0.5)).abs() <= 1.0,
+                    "{operation:?} at {width}x{height}: action={action:?}, viewport={viewport:?}"
+                );
+                assert!(source.top() >= viewport.top() + f32::from(layout::CONTENT_PADDING));
+                assert!(source.bottom() < action.top());
+            }
         }
 
         fs::remove_dir_all(directory).unwrap();

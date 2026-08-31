@@ -22,6 +22,9 @@ pub const MINIMUM_CONTENT_SIZE: Vec2 = Vec2::new(400.0, 260.0);
 /// Quiet Focus content inset on every edge of the application surface.
 pub const CONTENT_PADDING: i8 = 28;
 
+/// Vertical inset inside the stable ready-operation action bar.
+pub const ACTION_BAR_VERTICAL_PADDING: i8 = 16;
+
 /// Maximum width for bounded sparse content at the reference window size after content insets.
 ///
 /// File intake keeps this reference-width bound. Ready/configuration surfaces intentionally do not.
@@ -121,28 +124,12 @@ pub struct IntakeLayoutPlan {
     pub region_gap: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ListBehavior {
-    Flow,
-    Scroll,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ListViewport {
-    pub behavior: ListBehavior,
-    pub max_height: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskOverflow {
-    Flow,
-    Scroll,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TaskSurfacePlan {
-    pub overflow: TaskOverflow,
-    pub list: ListViewport,
+pub struct OperationSurfaceResponse<Content, Action> {
+    pub content: Content,
+    pub action: Action,
+    pub content_viewport: Rect,
+    pub content_gutter: Rect,
+    pub action_bar: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,9 +137,143 @@ pub enum TextOverflowPolicy {
     Ellipsis,
 }
 
-/// Apply the selected Quiet Focus content inset while preserving the themed panel fill.
-pub fn content_frame(style: &Style) -> Frame {
-    Frame::central_panel(style).inner_margin(Margin::same(CONTENT_PADDING))
+/// Apply no outer inset so an operation-content scrollbar can own the central-panel edge.
+pub fn root_frame(style: &Style) -> Frame {
+    Frame::central_panel(style)
+}
+
+/// Apply the normal Quiet Focus inset to surfaces that do not use the ready-operation shell.
+pub fn padded_content<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    let available = safe_available_size(ui.available_size());
+    Frame::NONE
+        .inner_margin(Margin::same(CONTENT_PADDING))
+        .show(ui, |ui| {
+            ui.set_min_size(vec2(
+                (available.x - f32::from(CONTENT_PADDING) * 2.0).max(0.0),
+                (available.y - f32::from(CONTENT_PADDING) * 2.0).max(0.0),
+            ));
+            add_contents(ui)
+        })
+}
+
+/// Apply normal top and horizontal padding to persistent workspace chrome while leaving the
+/// operation body and its scrollbar to own the remaining full-width rectangle.
+pub fn workspace_chrome<R>(
+    ui: &mut Ui,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> InnerResponse<R> {
+    let available_width = safe_dimension(ui.available_width());
+    Frame::NONE
+        .inner_margin(Margin {
+            left: CONTENT_PADDING,
+            right: CONTENT_PADDING,
+            top: CONTENT_PADDING,
+            bottom: 0,
+        })
+        .show(ui, |ui| {
+            ui.set_min_width((available_width - f32::from(CONTENT_PADDING) * 2.0).max(0.0));
+            add_contents(ui)
+        })
+}
+
+/// Apply only the shared horizontal gutter to workspace-level feedback outside operation content.
+pub fn content_gutter<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    let available_width = safe_dimension(ui.available_width());
+    Frame::NONE
+        .inner_margin(Margin {
+            left: CONTENT_PADDING,
+            right: CONTENT_PADDING,
+            top: 0,
+            bottom: 0,
+        })
+        .show(ui, |ui| {
+            ui.set_min_width((available_width - f32::from(CONTENT_PADDING) * 2.0).max(0.0));
+            add_contents(ui)
+        })
+}
+
+/// Render a ready operation as one full-width scrolling content region plus a stable bottom action
+/// bar. Normal horizontal padding lives inside the scroll area, keeping the scrollbar lane at the
+/// central content edge and preventing operation-level nested scrolling.
+pub fn operation_surface<Content, Action>(
+    ui: &mut Ui,
+    add_content: impl FnOnce(&mut Ui) -> Content,
+    add_action: impl FnOnce(&mut Ui) -> Action,
+) -> OperationSurfaceResponse<Content, Action> {
+    let available = safe_available_size(
+        ui.available_rect_before_wrap()
+            .intersect(ui.clip_rect())
+            .size(),
+    );
+    let previous_item_spacing_y = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let action_height = theme::PRIMARY_CONTROL_HEIGHT
+        + f32::from(ACTION_BAR_VERTICAL_PADDING) * 2.0
+        + theme::SEPARATOR_WIDTH;
+    let content_height = (available.y - action_height).max(0.0);
+    let content_gutter = std::cell::Cell::new(Rect::NOTHING);
+
+    let (content_viewport, _) =
+        ui.allocate_exact_size(vec2(available.x, content_height), egui::Sense::hover());
+    let mut content_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(content_viewport)
+            .layout(Layout::top_down(Align::LEFT)),
+    );
+    let content = ScrollArea::vertical()
+        .id_salt("ready-operation-content")
+        .auto_shrink([false, false])
+        .show(&mut content_ui, |ui| {
+            let scroll_width = safe_dimension(ui.available_width());
+            Frame::NONE
+                .inner_margin(Margin::same(CONTENT_PADDING))
+                .show(ui, |ui| {
+                    content_gutter.set(ui.max_rect());
+                    ui.set_min_width((scroll_width - f32::from(CONTENT_PADDING) * 2.0).max(0.0));
+                    add_content(ui)
+                })
+                .inner
+        })
+        .inner;
+
+    let (action_bar, _) =
+        ui.allocate_exact_size(vec2(available.x, action_height), egui::Sense::hover());
+    let action_content = Rect::from_min_max(
+        action_bar.min
+            + vec2(
+                f32::from(CONTENT_PADDING),
+                f32::from(ACTION_BAR_VERTICAL_PADDING) + theme::SEPARATOR_WIDTH,
+            ),
+        action_bar.max
+            - vec2(
+                f32::from(CONTENT_PADDING),
+                f32::from(ACTION_BAR_VERTICAL_PADDING),
+            ),
+    );
+    let mut action_bar_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(action_bar)
+            .layout(Layout::top_down(Align::LEFT)),
+    );
+    action_bar_ui.painter().line_segment(
+        [action_bar.left_top(), action_bar.right_top()],
+        egui::Stroke::new(theme::SEPARATOR_WIDTH, theme::SEPARATOR),
+    );
+    let mut action_ui = action_bar_ui.new_child(
+        UiBuilder::new()
+            .max_rect(action_content)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    let action = add_action(&mut action_ui);
+    ui.spacing_mut().item_spacing.y = previous_item_spacing_y;
+
+    OperationSurfaceResponse {
+        content,
+        action,
+        content_viewport,
+        content_gutter: content_gutter.get(),
+        action_bar,
+    }
 }
 
 /// Center a sparse focal group within a bounded content column using egui layout flow.
@@ -342,37 +463,6 @@ pub fn focus_content<R>(
     }
 }
 
-/// Render a fluid ready/configuration surface with vertical overflow only when required.
-///
-/// The surface consumes the current padded viewport width. Constrained heights use an egui
-/// [`ScrollArea`] so required actions remain reachable without changing control metrics or the
-/// application's minimum window size.
-pub fn task_surface<R>(
-    ui: &mut Ui,
-    overflow: TaskOverflow,
-    add_contents: impl FnOnce(&mut Ui) -> R,
-) -> InnerResponse<R> {
-    let available = safe_available_size(ui.available_size());
-    let content_width = available.x;
-
-    ui.with_layout(Layout::top_down(Align::Center), |ui| {
-        ui.allocate_ui_with_layout(
-            vec2(content_width, available.y),
-            Layout::top_down(Align::LEFT),
-            |ui| match overflow {
-                TaskOverflow::Flow => add_contents(ui),
-                TaskOverflow::Scroll => {
-                    ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, add_contents)
-                        .inner
-                }
-            },
-        )
-    })
-    .inner
-}
-
 /// Choose an inline action row only when every intrinsic action width plus shared gaps fits.
 pub fn action_layout(available_width: f32, action_widths: &[f32]) -> ActionLayout {
     let available_width = safe_dimension(available_width);
@@ -550,69 +640,6 @@ pub fn track_row_plan(available_width: f32, gain_width: f32) -> TrackRowPlan {
     }
 }
 
-/// Reserve flow space after a potentially long list and request scrolling only when needed.
-pub fn list_viewport(
-    content_height: f32,
-    available_height: f32,
-    reserved_flow_height: f32,
-) -> ListViewport {
-    let content_height = safe_dimension(content_height);
-    let available_height = safe_dimension(available_height);
-    let reserved_flow_height = safe_dimension(reserved_flow_height);
-    let remaining_height = (available_height - reserved_flow_height).max(0.0);
-    let max_height = content_height.min(remaining_height);
-    let behavior = if content_height > remaining_height {
-        ListBehavior::Scroll
-    } else {
-        ListBehavior::Flow
-    };
-
-    ListViewport {
-        behavior,
-        max_height,
-    }
-}
-
-/// Plan nested list and task-surface overflow without sacrificing control hit targets.
-///
-/// Lists may consume all vertical space left after the fixed controls. Nested scrolling is used
-/// only when list content exceeds that remainder. If even one usable option row would no longer
-/// fit, the task surface becomes vertically scrollable and the nested list retains a one-row
-/// viewport so the primary action stays reachable through outer scrolling.
-pub fn task_surface_plan(
-    available_height: f32,
-    fixed_flow_height: f32,
-    list_content_height: f32,
-    minimum_row_height: f32,
-) -> TaskSurfacePlan {
-    let available_height = safe_dimension(available_height);
-    let fixed_flow_height = safe_dimension(fixed_flow_height);
-    let list_content_height = safe_dimension(list_content_height);
-    let minimum_list_height = safe_dimension(minimum_row_height).min(list_content_height);
-    let list = list_viewport(list_content_height, available_height, fixed_flow_height);
-
-    if fixed_flow_height > available_height
-        || (list_content_height > 0.0 && list.max_height < minimum_list_height)
-    {
-        TaskSurfacePlan {
-            overflow: TaskOverflow::Scroll,
-            list: ListViewport {
-                behavior: if list_content_height > minimum_list_height {
-                    ListBehavior::Scroll
-                } else {
-                    ListBehavior::Flow
-                },
-                max_height: minimum_list_height,
-            },
-        }
-    } else {
-        TaskSurfacePlan {
-            overflow: TaskOverflow::Flow,
-            list,
-        }
-    }
-}
-
 fn safe_available_size(size: Vec2) -> Vec2 {
     vec2(safe_dimension(size.x), safe_dimension(size.y))
 }
@@ -629,18 +656,18 @@ fn safe_dimension(value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use egui::{Style, Vec2};
+    use egui::Vec2;
 
     use super::{
-        ActionLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT, FIELD_PAIR_MIN_COLUMN_WIDTH,
-        FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, FieldPairLayout, IntakeLayout,
-        ListBehavior, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, OUTPUT_FILENAME_MIN_INLINE_WIDTH,
-        OutputRowLayout, PATH_TEXT_OVERFLOW, PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE,
-        REFERENCE_WINDOW_SIZE, TRACK_TEXT_MIN_INLINE_WIDTH, TaskOverflow, TextOverflowPolicy,
-        TrackRowLayout, WINDOW_CHROME_HEIGHT, WORKSPACE_METADATA_MIN_WIDTH, action_group_size,
-        action_layout, bounded_content_width, centered_action_group, content_frame,
-        field_pair_layout, focus_content, intake_content, intake_layout_plan, list_viewport,
-        output_row_plan, task_surface, task_surface_plan, track_row_plan,
+        ACTION_BAR_VERTICAL_PADDING, ActionLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT,
+        FIELD_PAIR_MIN_COLUMN_WIDTH, FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT,
+        FieldPairLayout, IntakeLayout, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE,
+        OUTPUT_FILENAME_MIN_INLINE_WIDTH, OutputRowLayout, PATH_TEXT_OVERFLOW,
+        PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
+        TRACK_TEXT_MIN_INLINE_WIDTH, TextOverflowPolicy, TrackRowLayout, WINDOW_CHROME_HEIGHT,
+        WORKSPACE_METADATA_MIN_WIDTH, action_group_size, action_layout, bounded_content_width,
+        centered_action_group, field_pair_layout, focus_content, intake_content,
+        intake_layout_plan, operation_surface, output_row_plan, track_row_plan,
         workspace_header_shows_metadata, workspace_switcher_fits_one_line,
     };
     use crate::ui::theme;
@@ -652,6 +679,7 @@ mod tests {
         assert_eq!(REFERENCE_CONTENT_SIZE, Vec2::new(620.0, 379.0));
         assert_eq!(MINIMUM_CONTENT_SIZE, Vec2::new(400.0, 260.0));
         assert_eq!(CONTENT_PADDING, 28);
+        assert_eq!(ACTION_BAR_VERTICAL_PADDING, 16);
         assert_eq!(MAX_CONTENT_WIDTH, 564.0);
         assert_eq!(FIELD_PAIR_MIN_COLUMN_WIDTH, 180.0);
         assert_eq!(OUTPUT_FILENAME_MIN_INLINE_WIDTH, 180.0);
@@ -691,16 +719,6 @@ mod tests {
 
         assert!(workspace_switcher_fits_one_line(564.0, &operation_widths));
         assert!(!workspace_switcher_fits_one_line(344.0, &operation_widths));
-    }
-
-    #[test]
-    fn content_frame_uses_selected_quiet_focus_padding() {
-        let frame = content_frame(&Style::default());
-
-        assert_eq!(frame.inner_margin.left, CONTENT_PADDING);
-        assert_eq!(frame.inner_margin.right, CONTENT_PADDING);
-        assert_eq!(frame.inner_margin.top, CONTENT_PADDING);
-        assert_eq!(frame.inner_margin.bottom, CONTENT_PADDING);
     }
 
     #[test]
@@ -1292,204 +1310,68 @@ mod tests {
     }
 
     #[test]
-    fn stacked_audio_row_is_the_minimum_usable_list_viewport() {
-        let row_height = track_row_plan(344.0, theme::TRACK_GAIN_CONTROL_WIDTH).row_height;
-        let fixed_height = 200.0;
-        let content_height = row_height * 3.0;
-
-        let below_one_row = task_surface_plan(
-            fixed_height + row_height - 1.0,
-            fixed_height,
-            content_height,
-            row_height,
-        );
-        assert_eq!(below_one_row.overflow, TaskOverflow::Scroll);
-        assert_eq!(below_one_row.list.max_height, row_height);
-
-        let one_full_row = task_surface_plan(
-            fixed_height + row_height,
-            fixed_height,
-            content_height,
-            row_height,
-        );
-        assert_eq!(one_full_row.overflow, TaskOverflow::Flow);
-        assert_eq!(one_full_row.list.max_height, row_height);
-    }
-
-    #[test]
-    fn inline_audio_row_keeps_its_compact_minimum_viewport() {
-        let row_height = track_row_plan(564.0, theme::TRACK_GAIN_CONTROL_WIDTH).row_height;
-        let plan = task_surface_plan(200.0 + row_height, 200.0, row_height * 3.0, row_height);
-
-        assert_eq!(row_height, theme::SELECTABLE_ROW_MIN_HEIGHT);
-        assert_eq!(plan.overflow, TaskOverflow::Flow);
-        assert_eq!(plan.list.max_height, row_height);
-    }
-
-    #[test]
-    fn long_list_chooses_scrolling_and_reserves_following_actions() {
-        let viewport = list_viewport(500.0, 320.0, 80.0);
-
-        assert_eq!(viewport.behavior, ListBehavior::Scroll);
-        assert_eq!(viewport.max_height, 240.0);
-    }
-
-    #[test]
-    fn short_list_remains_in_normal_flow() {
-        let viewport = list_viewport(180.0, 320.0, 80.0);
-
-        assert_eq!(viewport.behavior, ListBehavior::Flow);
-        assert_eq!(viewport.max_height, 180.0);
-    }
-
-    #[test]
-    fn minimum_drawable_height_leaves_204_px_after_quiet_focus_padding() {
-        let usable_height = MINIMUM_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
-
-        assert_eq!(MINIMUM_CONTENT_SIZE.y, 260.0);
-        assert_eq!(f32::from(CONTENT_PADDING), 28.0);
-        assert_eq!(usable_height, 204.0);
-    }
-
-    #[test]
-    fn task_list_uses_all_remaining_height_before_outer_overflow_is_needed() {
-        let plan = task_surface_plan(280.0, 200.0, 108.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
-
-        assert_eq!(plan.overflow, TaskOverflow::Flow);
-        assert_eq!(plan.list.behavior, ListBehavior::Scroll);
-        assert_eq!(plan.list.max_height, 80.0);
-    }
-
-    #[test]
-    fn fixed_controls_still_use_outer_scroll_when_the_option_list_is_empty() {
-        let plan = task_surface_plan(204.0, 220.0, 0.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
-
-        assert_eq!(plan.overflow, TaskOverflow::Scroll);
-        assert_eq!(plan.list.behavior, ListBehavior::Flow);
-        assert_eq!(plan.list.max_height, 0.0);
-    }
-
-    #[test]
-    fn constrained_task_surface_scrolls_before_list_becomes_unusable() {
-        let plan = task_surface_plan(204.0, 205.0, 108.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
-
-        assert_eq!(plan.overflow, TaskOverflow::Scroll);
-        assert_eq!(plan.list.behavior, ListBehavior::Scroll);
-        assert_eq!(plan.list.max_height, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
-    }
-
-    #[test]
-    fn reference_height_uses_all_space_left_for_a_long_list() {
-        let usable_reference_height = REFERENCE_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
-        let plan = task_surface_plan(
-            usable_reference_height,
-            205.0,
-            500.0,
-            theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-        );
-
-        assert_eq!(usable_reference_height, 323.0);
-        assert_eq!(plan.overflow, TaskOverflow::Flow);
-        assert_eq!(plan.list.behavior, ListBehavior::Scroll);
-        assert_eq!(plan.list.max_height, 118.0);
-    }
-
-    #[test]
-    fn taller_task_surface_increases_list_viewport_until_content_fits() {
-        let reference =
-            task_surface_plan(323.0, 205.0, 500.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
-        let tall = task_surface_plan(600.0, 205.0, 500.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
-        let taller_than_content =
-            task_surface_plan(800.0, 205.0, 500.0, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
-
-        assert_eq!(reference.list.max_height, 118.0);
-        assert_eq!(tall.list.max_height, 395.0);
-        assert!(tall.list.max_height > reference.list.max_height);
-        assert_eq!(tall.list.behavior, ListBehavior::Scroll);
-        assert_eq!(taller_than_content.list.max_height, 500.0);
-        assert_eq!(taller_than_content.list.behavior, ListBehavior::Flow);
-    }
-
-    #[test]
-    fn three_upscale_targets_flow_at_reference_height_when_fixed_controls_leave_room() {
-        let usable_reference_height = REFERENCE_CONTENT_SIZE.y - f32::from(CONTENT_PADDING) * 2.0;
-        let content_height = theme::UPSCALE_TARGET_ROW_MIN_HEIGHT * 3.0;
-        let fixed_flow_height = usable_reference_height - content_height;
-
-        let plan = task_surface_plan(
-            usable_reference_height,
-            fixed_flow_height,
-            content_height,
-            theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-        );
-
-        assert_eq!(plan.overflow, TaskOverflow::Flow);
-        assert_eq!(plan.list.behavior, ListBehavior::Flow);
-        assert_eq!(plan.list.max_height, content_height);
-    }
-
-    #[test]
-    fn tall_audio_surface_shows_more_tracks_before_nested_scrolling() {
-        let content_height = theme::SELECTABLE_ROW_MIN_HEIGHT * 20.0;
-        let reference = task_surface_plan(
-            323.0,
-            205.0,
-            content_height,
-            theme::SELECTABLE_ROW_MIN_HEIGHT,
-        );
-        let tall = task_surface_plan(
-            700.0,
-            205.0,
-            content_height,
-            theme::SELECTABLE_ROW_MIN_HEIGHT,
-        );
-
-        assert_eq!(reference.list.behavior, ListBehavior::Scroll);
-        assert_eq!(tall.list.behavior, ListBehavior::Scroll);
-        assert!(tall.list.max_height > reference.list.max_height);
-        assert_eq!(reference.overflow, TaskOverflow::Flow);
-        assert_eq!(tall.overflow, TaskOverflow::Flow);
-    }
-
-    #[test]
-    fn layout_helpers_never_return_negative_or_non_finite_sizes() {
-        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -10.0] {
-            let width = bounded_content_width(value);
-            let viewport = list_viewport(value, value, value);
-
-            assert!(width.is_finite());
-            assert!(width >= 0.0);
-            assert!(viewport.max_height.is_finite());
-            assert!(viewport.max_height >= 0.0);
-        }
-    }
-
-    #[test]
-    fn task_surface_width_grows_with_required_viewports_after_shared_gutters() {
+    fn operation_surface_anchors_action_and_keeps_content_above_it_at_all_heights() {
         egui::__run_test_ui(|ui| {
-            let mut previous = 0.0;
-
-            for viewport_width in [400.0, 620.0, 900.0, 1200.0, 1600.0] {
-                let available_width = viewport_width - f32::from(CONTENT_PADDING) * 2.0;
-                let (parent_rect, _) =
-                    ui.allocate_exact_size(Vec2::new(available_width, 80.0), egui::Sense::hover());
-
-                let rendered_width = ui
+            for height in [204.0, 323.0, 700.0] {
+                let (rect, _) =
+                    ui.allocate_exact_size(Vec2::new(620.0, height), egui::Sense::hover());
+                let response = ui
                     .scope_builder(
                         egui::UiBuilder::new()
-                            .max_rect(parent_rect)
+                            .max_rect(rect)
                             .layout(egui::Layout::top_down(egui::Align::LEFT)),
-                        |ui| task_surface(ui, TaskOverflow::Flow, |ui| ui.available_width()).inner,
+                        |ui| {
+                            operation_surface(
+                                ui,
+                                |ui| ui.add_space(1_000.0),
+                                |ui| {
+                                    ui.allocate_exact_size(
+                                        Vec2::new(90.0, theme::PRIMARY_CONTROL_HEIGHT),
+                                        egui::Sense::click(),
+                                    )
+                                    .0
+                                },
+                            )
+                        },
                     )
                     .inner;
 
-                assert!((rendered_width - available_width).abs() < 0.01);
-                assert!(rendered_width > previous);
-                previous = rendered_width;
+                assert_eq!(response.content_viewport.left(), rect.left());
+                assert_eq!(response.content_viewport.right(), rect.right());
+                assert!(response.content_viewport.bottom() <= response.action_bar.top());
+                assert!((response.action_bar.bottom() - rect.bottom()).abs() <= 0.5);
+                assert_eq!(
+                    response.action_bar.height(),
+                    theme::PRIMARY_CONTROL_HEIGHT
+                        + f32::from(ACTION_BAR_VERTICAL_PADDING) * 2.0
+                        + theme::SEPARATOR_WIDTH
+                );
             }
         });
     }
 
+    #[test]
+    fn operation_surface_keeps_padding_inside_edge_owned_scroll_viewport() {
+        egui::__run_test_ui(|ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(620.0, 323.0), egui::Sense::hover());
+            let response = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    |ui| operation_surface(ui, |ui| ui.add_space(900.0), |ui| ui.label("Run")),
+                )
+                .inner;
+
+            assert_eq!(response.content_viewport.left(), rect.left());
+            assert_eq!(response.content_viewport.right(), rect.right());
+            assert!(
+                response.content_gutter.left()
+                    >= response.content_viewport.left() + f32::from(CONTENT_PADDING)
+            );
+            assert!(response.content_gutter.right() < response.content_viewport.right());
+        });
+    }
     #[test]
     fn wide_running_and_terminal_surfaces_keep_independent_readability_bound() {
         egui::__run_test_ui(|ui| {

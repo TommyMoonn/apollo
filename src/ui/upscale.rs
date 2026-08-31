@@ -1,9 +1,10 @@
 use std::{
+    cell::Cell,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
-use egui::{Align, Layout, RichText, ScrollArea, TextStyle, Ui};
+use egui::{RichText, Ui};
 
 use crate::{
     media::{model::MediaFile, output::MediaOutputError},
@@ -136,60 +137,46 @@ pub fn show(
     media: &MediaFile,
     state: &mut UpscaleSelectionState,
 ) -> UpscaleSelectionAction {
-    let mut action = UpscaleSelectionAction::None;
-    let list_content_height = TARGETS.len() as f32 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT;
+    let action = Cell::new(UpscaleSelectionAction::None);
     let validation = state.validation(media);
-    let has_validation_feedback = validation
-        .as_ref()
-        .err()
-        .and_then(upscale_ready_feedback)
-        .is_some();
-    let plan = layout::task_surface_plan(
-        ui.available_height(),
-        upscale_fixed_flow_height(ui, has_validation_feedback),
-        list_content_height,
-        theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
+
+    layout::operation_surface(
+        ui,
+        |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            let _ = widgets::section_label(ui, UPSCALE_TO_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            show_target_list(ui, media, state);
+            ui.add_space(theme::SPACING.section);
+
+            show_codec_and_actual_output(ui, media, state);
+            ui.add_space(theme::SPACING.focal);
+
+            let _ = widgets::section_label(ui, OUTPUT_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
+            let row = widgets::output_filename_row(ui, &mut output_stem, "mp4", BROWSE_LABEL);
+            if row.filename.changed() {
+                state.set_output_filename_stem(OsString::from(output_stem));
+            }
+            if row.browse.clicked() {
+                action.set(UpscaleSelectionAction::BrowseOutput);
+            }
+
+            if let Some(feedback) = validation.as_ref().err().and_then(upscale_ready_feedback) {
+                ui.add_space(theme::SPACING.tight);
+                let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
+            }
+        },
+        |ui| {
+            if widgets::primary_button_enabled(ui, UPSCALE_LABEL, validation.is_ok()).clicked() {
+                action.set(UpscaleSelectionAction::UpscaleRequested);
+            }
+        },
     );
 
-    layout::task_surface(ui, plan.overflow, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-
-        let _ = widgets::section_label(ui, UPSCALE_TO_LABEL);
-        ui.add_space(theme::SPACING.compact);
-        show_target_list(ui, media, state, plan.list.max_height);
-        ui.add_space(theme::SPACING.section);
-
-        show_codec_and_actual_output(ui, media, state);
-        ui.add_space(theme::SPACING.focal);
-
-        let _ = widgets::section_label(ui, OUTPUT_LABEL);
-        ui.add_space(theme::SPACING.compact);
-        let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
-        let row = widgets::output_filename_row(ui, &mut output_stem, "mp4", BROWSE_LABEL);
-        if row.filename.changed() {
-            state.set_output_filename_stem(OsString::from(output_stem));
-        }
-        if row.browse.clicked() {
-            action = UpscaleSelectionAction::BrowseOutput;
-        }
-
-        if let Some(feedback) = validation.as_ref().err().and_then(upscale_ready_feedback) {
-            ui.add_space(theme::SPACING.tight);
-            let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
-        }
-
-        ui.add_space(theme::SPACING.related);
-        let response = ui
-            .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                widgets::primary_button_enabled(ui, UPSCALE_LABEL, validation.is_ok())
-            })
-            .inner;
-        if response.clicked() {
-            action = UpscaleSelectionAction::UpscaleRequested;
-        }
-    });
-
-    action
+    action.get()
 }
 
 fn upscale_ready_feedback(error: &UpscaleValidationError) -> Option<&'static str> {
@@ -201,33 +188,23 @@ fn upscale_ready_feedback(error: &UpscaleValidationError) -> Option<&'static str
     }
 }
 
-fn show_target_list(
-    ui: &mut Ui,
-    media: &MediaFile,
-    state: &mut UpscaleSelectionState,
-    list_height: f32,
-) {
+fn show_target_list(ui: &mut Ui, media: &MediaFile, state: &mut UpscaleSelectionState) {
     widgets::separator(ui);
 
-    ScrollArea::vertical()
-        .max_height(list_height)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            for target in TARGETS {
-                let response = widgets::selectable_row(
-                    ui,
-                    target_label(target),
-                    Some(&target_boundary_text(target)),
-                    state.target() == target,
-                    widgets::SelectionIndicator::Radio,
-                    theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-                );
+    for target in TARGETS {
+        let response = widgets::selectable_row(
+            ui,
+            target_label(target),
+            Some(&target_boundary_text(target)),
+            state.target() == target,
+            widgets::SelectionIndicator::Radio,
+            theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
+        );
 
-                if response.clicked() {
-                    state.set_target(media, target);
-                }
-            }
-        });
+        if response.clicked() {
+            state.set_target(media, target);
+        }
+    }
 }
 
 fn show_codec_and_actual_output(ui: &mut Ui, media: &MediaFile, state: &mut UpscaleSelectionState) {
@@ -281,37 +258,6 @@ fn show_actual_output_field(ui: &mut Ui, actual_output: &str) {
             .text_style(fonts::technical_text_style())
             .color(theme::FOREGROUND),
     );
-}
-
-fn upscale_fixed_flow_height(ui: &Ui, has_validation_feedback: bool) -> f32 {
-    let section_label_height = ui.text_style_height(&TextStyle::Small);
-    let technical_height = ui.text_style_height(&fonts::technical_text_style());
-    let output_row_height = widgets::output_filename_row_plan(ui, None, BROWSE_LABEL).flow_height();
-    let field_height = section_label_height
-        + theme::SPACING.compact
-        + theme::COMPACT_CONTROL_HEIGHT.max(technical_height);
-    let field_flow_height = match layout::field_pair_layout(ui.available_width()) {
-        layout::FieldPairLayout::Columns => field_height,
-        layout::FieldPairLayout::Stacked => field_height * 2.0 + theme::SPACING.related,
-    };
-    let feedback_height = if has_validation_feedback {
-        theme::SPACING.tight + ui.text_style_height(&TextStyle::Body)
-    } else {
-        0.0
-    };
-
-    section_label_height
-        + theme::SPACING.compact
-        + theme::SEPARATOR_WIDTH
-        + theme::SPACING.section
-        + field_flow_height
-        + theme::SPACING.focal
-        + section_label_height
-        + theme::SPACING.compact
-        + output_row_height
-        + feedback_height
-        + theme::SPACING.related
-        + theme::PRIMARY_CONTROL_HEIGHT
 }
 
 fn source_dimensions(media: &MediaFile) -> Option<(u32, u32)> {
@@ -381,17 +327,13 @@ mod tests {
             model::{FrameRate, MediaFile, VideoStream},
             output::MediaOutputError,
         },
-        ui::{layout, theme},
         upscale::{
             model::{UpscaleTarget, VideoCodec},
             validation::UpscaleValidationError,
         },
     };
 
-    use super::{
-        UpscaleSelectionState, actual_output_text, upscale_fixed_flow_height,
-        upscale_ready_feedback,
-    };
+    use super::{UpscaleSelectionState, actual_output_text, upscale_ready_feedback};
 
     fn media(width: Option<u32>, height: Option<u32>) -> MediaFile {
         MediaFile {
@@ -636,111 +578,5 @@ mod tests {
         assert_eq!(request.output, PathBuf::from("captures/recording-8k.mp4"));
         assert_eq!(request.target, UpscaleTarget::Uhd8k);
         assert_eq!(request.codec, VideoCodec::H265);
-    }
-
-    #[test]
-    fn minimum_height_uses_outer_task_scroll_before_shrinking_target_rows() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-
-        let output = context.run_ui(Default::default(), |ui| {
-            let usable_height =
-                layout::MINIMUM_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = upscale_fixed_flow_height(ui, false);
-            let plan = layout::task_surface_plan(
-                usable_height,
-                fixed_height,
-                3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-                theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-            );
-
-            assert_eq!(usable_height, 204.0);
-            assert_eq!(plan.overflow, layout::TaskOverflow::Scroll);
-            assert_eq!(plan.list.max_height, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
-        });
-        output.drop_without_applying_deltas();
-    }
-
-    #[test]
-    fn narrow_stacked_fields_are_accounted_for_before_task_overflow() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-
-        let output = context.run_ui(Default::default(), |ui| {
-            let narrow_width =
-                layout::MINIMUM_CONTENT_SIZE.x - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(narrow_width, 204.0), egui::Sense::hover());
-            let child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
-            );
-            let fixed_height = upscale_fixed_flow_height(&child, false);
-            let plan = layout::task_surface_plan(
-                child.available_height(),
-                fixed_height,
-                3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-                theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-            );
-
-            assert_eq!(
-                layout::field_pair_layout(child.available_width()),
-                layout::FieldPairLayout::Stacked
-            );
-            assert_eq!(plan.overflow, layout::TaskOverflow::Scroll);
-            assert_eq!(plan.list.max_height, theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
-        });
-        output.drop_without_applying_deltas();
-    }
-
-    #[test]
-    fn reference_height_keeps_target_list_nested_and_primary_action_in_flow() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-
-        let output = context.run_ui(Default::default(), |ui| {
-            let usable_height =
-                layout::REFERENCE_CONTENT_SIZE.y - f32::from(layout::CONTENT_PADDING) * 2.0;
-            let fixed_height = upscale_fixed_flow_height(ui, false);
-            let plan = layout::task_surface_plan(
-                usable_height,
-                fixed_height,
-                3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-                theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-            );
-
-            assert_eq!(usable_height, 323.0);
-            assert_eq!(plan.overflow, layout::TaskOverflow::Flow);
-            assert_eq!(plan.list.behavior, layout::ListBehavior::Scroll);
-            assert_eq!(
-                plan.list.max_height,
-                (usable_height - fixed_height).max(0.0)
-            );
-            assert!(plan.list.max_height >= theme::UPSCALE_TARGET_ROW_MIN_HEIGHT);
-        });
-        output.drop_without_applying_deltas();
-    }
-
-    #[test]
-    fn all_three_targets_are_visible_when_height_can_fit_them() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-
-        let output = context.run_ui(Default::default(), |ui| {
-            let fixed_height = upscale_fixed_flow_height(ui, false);
-            let content_height = 3.0 * theme::UPSCALE_TARGET_ROW_MIN_HEIGHT;
-            let plan = layout::task_surface_plan(
-                fixed_height + content_height,
-                fixed_height,
-                content_height,
-                theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
-            );
-
-            assert_eq!(plan.overflow, layout::TaskOverflow::Flow);
-            assert_eq!(plan.list.behavior, layout::ListBehavior::Flow);
-            assert_eq!(plan.list.max_height, content_height);
-        });
-        output.drop_without_applying_deltas();
     }
 }
