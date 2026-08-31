@@ -5,7 +5,7 @@ use egui::{
 use super::theme;
 
 /// Reference outer-window geometry selected by `.project/design/LAYOUT.md`.
-pub const REFERENCE_WINDOW_SIZE: Vec2 = Vec2::new(620.0, 410.0);
+pub const REFERENCE_WINDOW_SIZE: Vec2 = Vec2::new(730.0, 520.0);
 
 /// Native window chrome accounted for by the selected reference geometry.
 pub const WINDOW_CHROME_HEIGHT: f32 = 31.0;
@@ -23,7 +23,7 @@ pub const MINIMUM_CONTENT_SIZE: Vec2 = Vec2::new(400.0, 260.0);
 pub const CONTENT_PADDING: i8 = 28;
 
 /// Vertical inset inside the stable ready-operation action bar.
-pub const ACTION_BAR_VERTICAL_PADDING: i8 = 16;
+pub const ACTION_BAR_VERTICAL_PADDING: i8 = 10;
 
 /// Maximum width for bounded sparse content at the reference window size after content insets.
 ///
@@ -226,7 +226,12 @@ pub fn operation_surface<Content, Action>(
         .show(&mut content_ui, |ui| {
             let scroll_width = safe_dimension(ui.available_width());
             Frame::NONE
-                .inner_margin(Margin::same(CONTENT_PADDING))
+                .inner_margin(Margin {
+                    left: CONTENT_PADDING,
+                    right: CONTENT_PADDING,
+                    top: 6,
+                    bottom: CONTENT_PADDING,
+                })
                 .show(ui, |ui| {
                     content_gutter.set(ui.max_rect());
                     ui.set_min_width((scroll_width - f32::from(CONTENT_PADDING) * 2.0).max(0.0));
@@ -674,13 +679,13 @@ mod tests {
 
     #[test]
     fn quiet_focus_reference_geometry_is_centralized() {
-        assert_eq!(REFERENCE_WINDOW_SIZE, Vec2::new(620.0, 410.0));
+        assert_eq!(REFERENCE_WINDOW_SIZE, Vec2::new(730.0, 520.0));
         assert_eq!(WINDOW_CHROME_HEIGHT, 31.0);
-        assert_eq!(REFERENCE_CONTENT_SIZE, Vec2::new(620.0, 379.0));
+        assert_eq!(REFERENCE_CONTENT_SIZE, Vec2::new(730.0, 489.0));
         assert_eq!(MINIMUM_CONTENT_SIZE, Vec2::new(400.0, 260.0));
         assert_eq!(CONTENT_PADDING, 28);
-        assert_eq!(ACTION_BAR_VERTICAL_PADDING, 16);
-        assert_eq!(MAX_CONTENT_WIDTH, 564.0);
+        assert_eq!(ACTION_BAR_VERTICAL_PADDING, 10);
+        assert_eq!(MAX_CONTENT_WIDTH, 674.0);
         assert_eq!(FIELD_PAIR_MIN_COLUMN_WIDTH, 180.0);
         assert_eq!(OUTPUT_FILENAME_MIN_INLINE_WIDTH, 180.0);
         assert_eq!(WORKSPACE_METADATA_MIN_WIDTH, 220.0);
