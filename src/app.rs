@@ -23,6 +23,10 @@ use apollo::{
         execution::{AudioMixExecutionState, AudioMixExecutor, AudioMixStartError},
         model::OutputContainer,
     },
+    frame_capture::{
+        execution::{FrameCaptureExecutionState, FrameCaptureExecutor, FrameCaptureStartError},
+        model::FrameCaptureFormat,
+    },
     media::{
         container::MediaContainer,
         error::{MediaError, MediaErrorKind},
@@ -40,7 +44,10 @@ use apollo::{
         audio_mix::{AudioMixPresentation, AudioMixSelectionAction, AudioMixSelectionState},
         audio_mix_progress::{self, AudioMixLifecycleAction, AudioMixLifecycleUiState},
         file_intake::{self, FileIntakeAction, FileIntakeTool},
-        fonts, layout, media_error, remux as remux_ui,
+        fonts, frame_capture as frame_capture_ui,
+        frame_capture::{FrameCaptureSelectionAction, FrameCaptureSelectionState},
+        frame_capture_progress::{self, FrameCaptureLifecycleAction, FrameCaptureLifecycleUiState},
+        layout, media_error, remux as remux_ui,
         remux::{RemuxSelectionAction, RemuxSelectionState},
         remux_progress::{self, RemuxLifecycleAction, RemuxLifecycleUiState},
         theme, upscale as upscale_ui,
@@ -58,12 +65,14 @@ fn file_intake_enabled(
     upscale_state: &UpscaleExecutionState,
     remux_state: &RemuxExecutionState,
     audio_extract_state: &AudioExtractExecutionState,
+    frame_capture_state: &FrameCaptureExecutionState,
 ) -> bool {
     // Done/Back owns terminal settlement. Intake resumes only after every executor returns to Idle.
     matches!(audio_state, AudioMixExecutionState::Idle)
         && matches!(upscale_state, UpscaleExecutionState::Idle)
         && matches!(remux_state, RemuxExecutionState::Idle)
         && matches!(audio_extract_state, AudioExtractExecutionState::Idle)
+        && matches!(frame_capture_state, FrameCaptureExecutionState::Idle)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +81,7 @@ enum Tool {
     VideoUpscale,
     Remux,
     AudioExtract,
+    FrameCapture,
 }
 
 impl Tool {
@@ -81,6 +91,7 @@ impl Tool {
             Self::VideoUpscale => FileIntakeTool::Upscale,
             Self::Remux => FileIntakeTool::Remux,
             Self::AudioExtract => FileIntakeTool::AudioExtract,
+            Self::FrameCapture => FileIntakeTool::FrameCapture,
         }
     }
 
@@ -90,6 +101,7 @@ impl Tool {
             FileIntakeTool::Upscale => Self::VideoUpscale,
             FileIntakeTool::Remux => Self::Remux,
             FileIntakeTool::AudioExtract => Self::AudioExtract,
+            FileIntakeTool::FrameCapture => Self::FrameCapture,
         }
     }
 }
@@ -136,6 +148,16 @@ struct AudioExtractToolState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct FrameCaptureToolState {
+    session_id: u64,
+    media: MediaFile,
+    selection: FrameCaptureSelectionState,
+    lifecycle_ui: FrameCaptureLifecycleUiState,
+    start_error: Option<MediaError>,
+    start_error_details_open: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AppState {
     current_tool: Tool,
     intake_active: bool,
@@ -146,6 +168,7 @@ struct AppState {
     upscale: Option<UpscaleToolState>,
     remux: Option<RemuxToolState>,
     audio_extract: Option<AudioExtractToolState>,
+    frame_capture: Option<FrameCaptureToolState>,
 }
 
 impl Default for AppState {
@@ -160,6 +183,7 @@ impl Default for AppState {
             upscale: None,
             remux: None,
             audio_extract: None,
+            frame_capture: None,
         }
     }
 }
@@ -251,6 +275,7 @@ impl AppState {
         self.upscale = None;
         self.remux = None;
         self.audio_extract = None;
+        self.frame_capture = None;
     }
 }
 
@@ -262,6 +287,7 @@ pub(crate) struct ApolloApp {
     upscale_executor: UpscaleExecutor,
     remux_executor: RemuxExecutor,
     audio_extract_executor: AudioExtractExecutor,
+    frame_capture_executor: FrameCaptureExecutor,
     media_inspection: Option<MediaInspection>,
     file_dialog: FileDialogOwner,
     native_window_owner: Result<WindowOwner, String>,
@@ -287,6 +313,7 @@ impl ApolloApp {
             upscale_executor: UpscaleExecutor::new(),
             remux_executor: RemuxExecutor::new(),
             audio_extract_executor: AudioExtractExecutor::new(),
+            frame_capture_executor: FrameCaptureExecutor::new(),
             media_inspection: None,
             file_dialog: FileDialogOwner::default(),
             native_window_owner: WindowOwner::from_window(creation_context),
@@ -314,6 +341,7 @@ impl ApolloApp {
                 self.upscale_executor.state(),
                 self.remux_executor.state(),
                 self.audio_extract_executor.state(),
+                self.frame_capture_executor.state(),
             )
     }
 
@@ -400,6 +428,24 @@ impl ApolloApp {
                         session_id,
                         selection: AudioExtractSelectionState::new(&media),
                         lifecycle_ui: AudioExtractLifecycleUiState::default(),
+                        start_error: None,
+                        start_error_details_open: false,
+                        media,
+                    });
+                }
+            }
+            Tool::FrameCapture => {
+                if !self
+                    .state
+                    .frame_capture
+                    .as_ref()
+                    .is_some_and(|session| session.media == media)
+                {
+                    let session_id = self.take_session_id();
+                    self.state.frame_capture = Some(FrameCaptureToolState {
+                        session_id,
+                        selection: FrameCaptureSelectionState::new(&media),
+                        lifecycle_ui: FrameCaptureLifecycleUiState::default(),
                         start_error: None,
                         start_error_details_open: false,
                         media,
@@ -543,6 +589,9 @@ impl ApolloApp {
             Tool::Remux if self.state.remux.is_some() => self.show_remux_tool(ui),
             Tool::AudioExtract if self.state.audio_extract.is_some() => {
                 self.show_audio_extract_tool(ui)
+            }
+            Tool::FrameCapture if self.state.frame_capture.is_some() => {
+                self.show_frame_capture_tool(ui)
             }
             _ => self.show_file_intake(ui, tool),
         }
@@ -1180,6 +1229,127 @@ impl ApolloApp {
         }
     }
 
+    fn show_frame_capture_tool(&mut self, ui: &mut Ui) {
+        if shows_frame_capture_lifecycle(self.frame_capture_executor.state()) {
+            let action = {
+                let session = self
+                    .state
+                    .frame_capture
+                    .as_mut()
+                    .expect("frame capture source exists while lifecycle surface is shown");
+                let request = session
+                    .selection
+                    .request(&session.media)
+                    .expect("running frame capture session owns a valid timestamp");
+                frame_capture_progress::show(
+                    ui,
+                    &request,
+                    &mut self.frame_capture_executor,
+                    &mut session.lifecycle_ui,
+                )
+            };
+            if self.frame_capture_executor.is_running() {
+                ui.ctx().request_repaint_after(EXECUTION_REPAINT_INTERVAL);
+            }
+            self.handle_frame_capture_lifecycle_action(action);
+            return;
+        }
+
+        if self.show_frame_capture_start_error(ui) {
+            return;
+        }
+
+        let action = ui
+            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+                let session = self
+                    .state
+                    .frame_capture
+                    .as_mut()
+                    .expect("frame capture source exists while ready surface is shown");
+                frame_capture_ui::show(ui, &session.media, &mut session.selection)
+            })
+            .inner;
+        if let Err(error) = self.handle_frame_capture_action(action, ui.ctx().clone())
+            && let Some(session) = self.state.frame_capture.as_mut()
+        {
+            session.start_error = Some(error.user_error());
+            session.start_error_details_open = false;
+        }
+    }
+
+    fn show_frame_capture_start_error(&mut self, ui: &mut Ui) -> bool {
+        let Some(session) = self.state.frame_capture.as_mut() else {
+            return false;
+        };
+        let Some(error) = session.start_error.as_ref() else {
+            return false;
+        };
+
+        let title = if error.kind() == MediaErrorKind::OutputPickerUnavailable {
+            "Output picker unavailable"
+        } else {
+            "Frame capture could not start"
+        };
+        let response = layout::focus_content(ui, |ui| {
+            let mut sizing_details_open = session.start_error_details_open;
+            let details_open = if ui.is_sizing_pass() {
+                &mut sizing_details_open
+            } else {
+                &mut session.start_error_details_open
+            };
+            media_error::show_failure_content(ui, title, error, details_open, "Back")
+        });
+        if response.inner.clicked() {
+            session.start_error = None;
+            session.start_error_details_open = false;
+        }
+        true
+    }
+
+    fn handle_frame_capture_action(
+        &mut self,
+        action: FrameCaptureSelectionAction,
+        context: Context,
+    ) -> Result<(), FrameCaptureStartError> {
+        if self.file_dialog.is_pending() {
+            return Ok(());
+        }
+        match action {
+            FrameCaptureSelectionAction::Back if self.file_intake_enabled() => {
+                self.state.return_to_file_intake(Tool::FrameCapture);
+            }
+            FrameCaptureSelectionAction::BrowseOutput => {
+                let Some(session) = self.state.frame_capture.as_ref() else {
+                    return Ok(());
+                };
+                self.start_file_dialog(frame_capture_output_dialog_request(session), context);
+            }
+            FrameCaptureSelectionAction::CaptureRequested => {
+                let Some(session) = self.state.frame_capture.as_ref() else {
+                    return Ok(());
+                };
+                let Some(request) = session.selection.request(&session.media) else {
+                    return Ok(());
+                };
+                let Some(tools) = self.ready_media_tools().cloned() else {
+                    return Ok(());
+                };
+                self.frame_capture_executor
+                    .start(&tools, &session.media, &request)?;
+            }
+            FrameCaptureSelectionAction::None | FrameCaptureSelectionAction::Back => {}
+        }
+        Ok(())
+    }
+
+    fn handle_frame_capture_lifecycle_action(&self, action: FrameCaptureLifecycleAction) {
+        if let FrameCaptureLifecycleAction::OpenFolder(path) = action
+            && let Err(error) = open_folder(&path)
+        {
+            eprintln!("Frame Capture output folder could not be opened: {error}");
+        }
+    }
+
     fn start_file_dialog(&mut self, request: FileDialogRequest, context: Context) {
         let target = request.target();
         if let Err(error) =
@@ -1212,10 +1382,13 @@ impl ApolloApp {
             }
             (target, outcome) => settle_output_file_dialog(
                 &mut self.state,
-                self.audio_mix_executor.state(),
-                self.upscale_executor.state(),
-                self.remux_executor.state(),
-                self.audio_extract_executor.state(),
+                ToolExecutionStates {
+                    audio_mix: self.audio_mix_executor.state(),
+                    upscale: self.upscale_executor.state(),
+                    remux: self.remux_executor.state(),
+                    audio_extract: self.audio_extract_executor.state(),
+                    frame_capture: self.frame_capture_executor.state(),
+                },
                 target,
                 outcome,
             ),
@@ -1223,18 +1396,23 @@ impl ApolloApp {
     }
 }
 
+struct ToolExecutionStates<'a> {
+    audio_mix: &'a AudioMixExecutionState,
+    upscale: &'a UpscaleExecutionState,
+    remux: &'a RemuxExecutionState,
+    audio_extract: &'a AudioExtractExecutionState,
+    frame_capture: &'a FrameCaptureExecutionState,
+}
+
 fn settle_output_file_dialog(
     state: &mut AppState,
-    audio_execution: &AudioMixExecutionState,
-    upscale_execution: &UpscaleExecutionState,
-    remux_execution: &RemuxExecutionState,
-    audio_extract_execution: &AudioExtractExecutionState,
+    execution: ToolExecutionStates<'_>,
     target: DialogTarget,
     outcome: DialogOutcome,
 ) {
     match (target, outcome) {
         (DialogTarget::AudioMixOutput { session_id }, DialogOutcome::Selected(path))
-            if matches!(audio_execution, AudioMixExecutionState::Idle) =>
+            if matches!(execution.audio_mix, AudioMixExecutionState::Idle) =>
         {
             if let Some(session) = state
                 .audio_mix
@@ -1247,7 +1425,7 @@ fn settle_output_file_dialog(
             }
         }
         (DialogTarget::AudioMixOutput { session_id }, DialogOutcome::Failed(diagnostic))
-            if matches!(audio_execution, AudioMixExecutionState::Idle) =>
+            if matches!(execution.audio_mix, AudioMixExecutionState::Idle) =>
         {
             if let Some(session) = state
                 .audio_mix
@@ -1259,7 +1437,7 @@ fn settle_output_file_dialog(
             }
         }
         (DialogTarget::UpscaleOutput { session_id }, DialogOutcome::Selected(path))
-            if matches!(upscale_execution, UpscaleExecutionState::Idle) =>
+            if matches!(execution.upscale, UpscaleExecutionState::Idle) =>
         {
             if let Some(session) = state
                 .upscale
@@ -1272,7 +1450,7 @@ fn settle_output_file_dialog(
             }
         }
         (DialogTarget::UpscaleOutput { session_id }, DialogOutcome::Failed(diagnostic))
-            if matches!(upscale_execution, UpscaleExecutionState::Idle) =>
+            if matches!(execution.upscale, UpscaleExecutionState::Idle) =>
         {
             if let Some(session) = state
                 .upscale
@@ -1284,7 +1462,7 @@ fn settle_output_file_dialog(
             }
         }
         (DialogTarget::RemuxOutput { session_id }, DialogOutcome::Selected(path))
-            if matches!(remux_execution, RemuxExecutionState::Idle) =>
+            if matches!(execution.remux, RemuxExecutionState::Idle) =>
         {
             if let Some(session) = state
                 .remux
@@ -1297,7 +1475,7 @@ fn settle_output_file_dialog(
             }
         }
         (DialogTarget::RemuxOutput { session_id }, DialogOutcome::Failed(diagnostic))
-            if matches!(remux_execution, RemuxExecutionState::Idle) =>
+            if matches!(execution.remux, RemuxExecutionState::Idle) =>
         {
             if let Some(session) = state
                 .remux
@@ -1309,7 +1487,7 @@ fn settle_output_file_dialog(
             }
         }
         (DialogTarget::AudioExtractOutput { session_id }, DialogOutcome::Selected(path))
-            if matches!(audio_extract_execution, AudioExtractExecutionState::Idle) =>
+            if matches!(execution.audio_extract, AudioExtractExecutionState::Idle) =>
         {
             if let Some(session) = state
                 .audio_extract
@@ -1322,10 +1500,35 @@ fn settle_output_file_dialog(
             }
         }
         (DialogTarget::AudioExtractOutput { session_id }, DialogOutcome::Failed(diagnostic))
-            if matches!(audio_extract_execution, AudioExtractExecutionState::Idle) =>
+            if matches!(execution.audio_extract, AudioExtractExecutionState::Idle) =>
         {
             if let Some(session) = state
                 .audio_extract
+                .as_mut()
+                .filter(|session| session.session_id == session_id)
+            {
+                session.start_error = Some(MediaError::output_picker_unavailable(diagnostic));
+                session.start_error_details_open = false;
+            }
+        }
+        (DialogTarget::FrameCaptureOutput { session_id }, DialogOutcome::Selected(path))
+            if matches!(execution.frame_capture, FrameCaptureExecutionState::Idle) =>
+        {
+            if let Some(session) = state
+                .frame_capture
+                .as_mut()
+                .filter(|session| session.session_id == session_id)
+            {
+                session.selection.set_custom_output_path(path);
+                session.start_error = None;
+                session.start_error_details_open = false;
+            }
+        }
+        (DialogTarget::FrameCaptureOutput { session_id }, DialogOutcome::Failed(diagnostic))
+            if matches!(execution.frame_capture, FrameCaptureExecutionState::Idle) =>
+        {
+            if let Some(session) = state
+                .frame_capture
                 .as_mut()
                 .filter(|session| session.session_id == session_id)
             {
@@ -1415,6 +1618,20 @@ fn audio_extract_output_dialog_request(session: &AudioExtractToolState) -> FileD
     )
 }
 
+fn frame_capture_output_dialog_request(session: &FrameCaptureToolState) -> FileDialogRequest {
+    let format = match session.selection.format() {
+        FrameCaptureFormat::Png => OutputFormat::Png,
+        FrameCaptureFormat::Jpeg => OutputFormat::Jpeg,
+    };
+    output_dialog_request(
+        DialogTarget::FrameCaptureOutput {
+            session_id: session.session_id,
+        },
+        &session.selection.output_path(),
+        format,
+    )
+}
+
 fn shows_audio_mix_lifecycle(state: &AudioMixExecutionState) -> bool {
     !matches!(state, AudioMixExecutionState::Idle)
 }
@@ -1429,6 +1646,10 @@ fn shows_remux_lifecycle(state: &RemuxExecutionState) -> bool {
 
 fn shows_audio_extract_lifecycle(state: &AudioExtractExecutionState) -> bool {
     !matches!(state, AudioExtractExecutionState::Idle)
+}
+
+fn shows_frame_capture_lifecycle(state: &FrameCaptureExecutionState) -> bool {
+    !matches!(state, FrameCaptureExecutionState::Idle)
 }
 
 fn open_folder(path: &Path) -> io::Result<()> {
@@ -1496,10 +1717,11 @@ mod tests {
     };
 
     use super::{
-        ApolloApp, AppState, MediaInspection, MediaToolsState, Tool,
+        ApolloApp, AppState, MediaInspection, MediaToolsState, Tool, ToolExecutionStates,
         audio_extract_output_dialog_request, audio_mix_output_dialog_request, file_intake_enabled,
-        remux_output_dialog_request, settle_output_file_dialog, shows_audio_extract_lifecycle,
-        shows_audio_mix_lifecycle, shows_remux_lifecycle, shows_upscale_lifecycle,
+        frame_capture_output_dialog_request, remux_output_dialog_request,
+        settle_output_file_dialog, shows_audio_extract_lifecycle, shows_audio_mix_lifecycle,
+        shows_frame_capture_lifecycle, shows_remux_lifecycle, shows_upscale_lifecycle,
     };
     use crate::file_dialog::{
         DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
@@ -1511,6 +1733,7 @@ mod tests {
             execution::AudioMixExecutionState,
             model::{LoudnessNormalization, LoudnessTargets, OutputContainer, TrackGain},
         },
+        frame_capture::{execution::FrameCaptureExecutionState, model::FrameCaptureFormat},
         media::{
             container::MediaContainer,
             error::{MediaError, MediaErrorKind},
@@ -1524,7 +1747,8 @@ mod tests {
         remux::execution::RemuxExecutionState,
         ui::{
             audio_extract::AudioExtractSelectionAction, audio_mix::AudioMixSelectionAction, fonts,
-            remux::RemuxSelectionAction, theme, upscale::UpscaleSelectionAction,
+            frame_capture::FrameCaptureSelectionAction, remux::RemuxSelectionAction, theme,
+            upscale::UpscaleSelectionAction,
         },
         upscale::{
             execution::UpscaleExecutionState,
@@ -1608,6 +1832,7 @@ mod tests {
             upscale_executor: apollo::upscale::execution::UpscaleExecutor::new(),
             remux_executor: apollo::remux::execution::RemuxExecutor::new(),
             audio_extract_executor: apollo::audio_extract::execution::AudioExtractExecutor::new(),
+            frame_capture_executor: apollo::frame_capture::execution::FrameCaptureExecutor::new(),
             media_inspection: None,
             file_dialog: FileDialogOwner::default(),
             native_window_owner: Ok(WindowOwner::test_value()),
@@ -2079,6 +2304,25 @@ mod tests {
     }
 
     #[test]
+    fn selecting_frame_capture_routes_next_source_to_frame_capture_ready_state() {
+        let (directory, path) = temp_file("frame-capture-mode-switch");
+        let mut app = app();
+        app.select_tool(Tool::FrameCapture);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+
+        assert!(!app.state.intake_active);
+        assert!(app.state.audio_mix.is_none());
+        assert_eq!(
+            app.state
+                .frame_capture
+                .as_ref()
+                .map(|session| &session.media.path),
+            Some(&path)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn open_valid_file_routes_audio_mix_to_ready_state() {
         let (directory, path) = temp_file("open");
         let mut app = app();
@@ -2104,6 +2348,7 @@ mod tests {
             app.upscale_executor.state(),
             app.remux_executor.state(),
             app.audio_extract_executor.state(),
+            app.frame_capture_executor.state(),
         ));
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
 
@@ -2268,6 +2513,36 @@ mod tests {
             "Original",
             "Output",
             "Extract",
+            "← Back",
+        ] {
+            assert!(output_contains_text(&output, text), "missing {text:?}");
+        }
+        output.textures_delta.clear();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn opening_frame_capture_source_renders_ready_surface() {
+        let (directory, path) = temp_file("frame-capture-ready-render");
+        let mut app = app();
+        app.select_tool(Tool::FrameCapture);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+
+        let mut output = context.run_ui(Default::default(), |ui| {
+            app.show_tool(ui, Tool::FrameCapture);
+        });
+        for text in [
+            "recording.mkv",
+            "1920×1080",
+            "Timestamp",
+            "00:00:00.000",
+            "Format",
+            "PNG",
+            "Output",
+            "Capture frame",
             "← Back",
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
@@ -2479,6 +2754,41 @@ mod tests {
     }
 
     #[test]
+    fn frame_capture_output_dialog_request_follows_current_format() {
+        let (directory, path) = temp_file("frame-capture-browse");
+        let mut app = app();
+        app.select_tool(Tool::FrameCapture);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+
+        let session = app.state.frame_capture.as_ref().unwrap();
+        let FileDialogRequest::SaveOutput { target, options } =
+            frame_capture_output_dialog_request(session)
+        else {
+            panic!("frame capture Browse must create a save request");
+        };
+        assert_eq!(
+            target,
+            DialogTarget::FrameCaptureOutput {
+                session_id: session.session_id,
+            }
+        );
+        assert_eq!(options.initial_directory, directory);
+        assert_eq!(options.file_name, "recording-frame.png");
+        assert_eq!(options.format, OutputFormat::Png);
+
+        let session = app.state.frame_capture.as_mut().unwrap();
+        session.selection.set_format(FrameCaptureFormat::Jpeg);
+        let FileDialogRequest::SaveOutput { options, .. } =
+            frame_capture_output_dialog_request(session)
+        else {
+            unreachable!();
+        };
+        assert_eq!(options.file_name, "recording-frame.jpg");
+        assert_eq!(options.format, OutputFormat::Jpeg);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn selected_output_paths_route_to_the_owning_tool() {
         let (directory, path) = temp_file("upscale-browse");
         let mut app = app();
@@ -2549,6 +2859,25 @@ mod tests {
                 .output_path(),
             extract_destination
         );
+
+        app.select_tool(Tool::FrameCapture);
+        let capture_session_id = app.state.frame_capture.as_ref().unwrap().session_id;
+        let capture_destination = directory.join("chosen frame.png");
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::FrameCaptureOutput {
+                session_id: capture_session_id,
+            },
+            outcome: DialogOutcome::Selected(capture_destination.clone()),
+        });
+        assert_eq!(
+            app.state
+                .frame_capture
+                .as_ref()
+                .unwrap()
+                .selection
+                .output_path(),
+            capture_destination
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2580,6 +2909,43 @@ mod tests {
         assert_eq!(
             app.state
                 .audio_extract
+                .as_ref()
+                .unwrap()
+                .selection
+                .output_path(),
+            replacement_before
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_frame_capture_completion_cannot_mutate_replacement_session() {
+        let (directory, first) = temp_file("stale-frame-capture");
+        let second = directory.join("replacement.mkv");
+        fs::write(&second, b"replacement").unwrap();
+        let mut app = app();
+        app.select_tool(Tool::FrameCapture);
+        app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        let stale_session_id = app.state.frame_capture.as_ref().unwrap().session_id;
+
+        app.state.return_to_file_intake(Tool::FrameCapture);
+        app.load_media_path_with_probe(&second, |path| Ok(media(path)));
+        let replacement_before = app
+            .state
+            .frame_capture
+            .as_ref()
+            .unwrap()
+            .selection
+            .output_path();
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::FrameCaptureOutput {
+                session_id: stale_session_id,
+            },
+            outcome: DialogOutcome::Selected(directory.join("stale.png")),
+        });
+        assert_eq!(
+            app.state
+                .frame_capture
                 .as_ref()
                 .unwrap()
                 .selection
@@ -2747,10 +3113,13 @@ mod tests {
 
         settle_output_file_dialog(
             &mut app.state,
-            &AudioMixExecutionState::Running,
-            &UpscaleExecutionState::Idle,
-            &RemuxExecutionState::Idle,
-            &AudioExtractExecutionState::Idle,
+            ToolExecutionStates {
+                audio_mix: &AudioMixExecutionState::Running,
+                upscale: &UpscaleExecutionState::Idle,
+                remux: &RemuxExecutionState::Idle,
+                audio_extract: &AudioExtractExecutionState::Idle,
+                frame_capture: &FrameCaptureExecutionState::Idle,
+            },
             DialogTarget::AudioMixOutput {
                 session_id: audio_id,
             },
@@ -2771,10 +3140,13 @@ mod tests {
         let upscale_output = app.state.upscale.as_ref().unwrap().selection.output_path();
         settle_output_file_dialog(
             &mut app.state,
-            &AudioMixExecutionState::Idle,
-            &UpscaleExecutionState::Running,
-            &RemuxExecutionState::Idle,
-            &AudioExtractExecutionState::Idle,
+            ToolExecutionStates {
+                audio_mix: &AudioMixExecutionState::Idle,
+                upscale: &UpscaleExecutionState::Running,
+                remux: &RemuxExecutionState::Idle,
+                audio_extract: &AudioExtractExecutionState::Idle,
+                frame_capture: &FrameCaptureExecutionState::Idle,
+            },
             DialogTarget::UpscaleOutput {
                 session_id: upscale_id,
             },
@@ -2796,10 +3168,13 @@ mod tests {
             .output_path();
         settle_output_file_dialog(
             &mut app.state,
-            &AudioMixExecutionState::Idle,
-            &UpscaleExecutionState::Idle,
-            &RemuxExecutionState::Idle,
-            &AudioExtractExecutionState::Running,
+            ToolExecutionStates {
+                audio_mix: &AudioMixExecutionState::Idle,
+                upscale: &UpscaleExecutionState::Idle,
+                remux: &RemuxExecutionState::Idle,
+                audio_extract: &AudioExtractExecutionState::Running,
+                frame_capture: &FrameCaptureExecutionState::Idle,
+            },
             DialogTarget::AudioExtractOutput {
                 session_id: extract_id,
             },
@@ -2813,6 +3188,39 @@ mod tests {
                 .selection
                 .output_path(),
             extract_output
+        );
+
+        app.select_tool(Tool::FrameCapture);
+        let capture_id = app.state.frame_capture.as_ref().unwrap().session_id;
+        let capture_output = app
+            .state
+            .frame_capture
+            .as_ref()
+            .unwrap()
+            .selection
+            .output_path();
+        settle_output_file_dialog(
+            &mut app.state,
+            ToolExecutionStates {
+                audio_mix: &AudioMixExecutionState::Idle,
+                upscale: &UpscaleExecutionState::Idle,
+                remux: &RemuxExecutionState::Idle,
+                audio_extract: &AudioExtractExecutionState::Idle,
+                frame_capture: &FrameCaptureExecutionState::Running,
+            },
+            DialogTarget::FrameCaptureOutput {
+                session_id: capture_id,
+            },
+            DialogOutcome::Selected(directory.join("late-frame.png")),
+        );
+        assert_eq!(
+            app.state
+                .frame_capture
+                .as_ref()
+                .unwrap()
+                .selection
+                .output_path(),
+            capture_output
         );
 
         fs::remove_dir_all(directory).unwrap();
@@ -2986,6 +3394,30 @@ mod tests {
     }
 
     #[test]
+    fn frame_capture_intent_reaches_executor() {
+        let (directory, path) = temp_file("frame-capture-execute");
+        let mut app = app();
+        app.select_tool(Tool::FrameCapture);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+
+        let error = app
+            .handle_frame_capture_action(
+                FrameCaptureSelectionAction::CaptureRequested,
+                egui::Context::default(),
+            )
+            .expect_err("missing test FFmpeg should prove the execution path was attempted");
+        assert!(matches!(
+            error,
+            apollo::frame_capture::execution::FrameCaptureStartError::Process(
+                apollo::media::process::MediaProcessStartError::ProcessLaunchFailed(
+                    std::io::ErrorKind::NotFound
+                )
+            )
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn upscale_execution_state_routes_running_and_terminal_surfaces_to_lifecycle_ui() {
         use apollo::media::{execution::MediaExecutionFailure, process::MediaProcessFailure};
 
@@ -3040,6 +3472,30 @@ mod tests {
         ));
         assert!(shows_audio_extract_lifecycle(
             &AudioExtractExecutionState::Cancelled
+        ));
+    }
+
+    #[test]
+    fn frame_capture_execution_state_routes_running_and_terminal_surfaces_to_lifecycle_ui() {
+        assert!(!shows_frame_capture_lifecycle(
+            &FrameCaptureExecutionState::Idle
+        ));
+        assert!(shows_frame_capture_lifecycle(
+            &FrameCaptureExecutionState::Running
+        ));
+        assert!(shows_frame_capture_lifecycle(
+            &FrameCaptureExecutionState::Completed {
+                output: PathBuf::from("recording-frame.png"),
+            }
+        ));
+        assert!(shows_frame_capture_lifecycle(
+            &FrameCaptureExecutionState::Failed(MediaExecutionFailure::Process {
+                reason: MediaProcessFailure::Exit(Some(1)),
+                diagnostic: String::new(),
+            })
+        ));
+        assert!(shows_frame_capture_lifecycle(
+            &FrameCaptureExecutionState::Cancelled
         ));
     }
 
@@ -3280,6 +3736,48 @@ mod tests {
     }
 
     #[test]
+    fn frame_capture_back_returns_to_intake_and_same_source_restores_ready_state() {
+        let (directory, path) = temp_file("frame-capture-back");
+        let mut app = app();
+        app.select_tool(Tool::FrameCapture);
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let session = app
+            .state
+            .frame_capture
+            .as_mut()
+            .expect("frame capture session should exist");
+        session.selection.set_timestamp_text("00:00:03.250".into());
+        session.selection.set_format(FrameCaptureFormat::Jpeg);
+        let custom_output = directory.join("chosen-frame.jpg");
+        session
+            .selection
+            .set_custom_output_path(custom_output.clone());
+
+        app.handle_frame_capture_action(
+            FrameCaptureSelectionAction::Back,
+            egui::Context::default(),
+        )
+        .unwrap();
+        assert!(app.state.intake_active);
+        assert_eq!(app.state.current_tool, Tool::FrameCapture);
+
+        app.load_media_path_with_probe(&path, |_| -> Result<MediaFile, MediaProbeError> {
+            panic!("unchanged cached source must not be probed again")
+        });
+        let session = app
+            .state
+            .frame_capture
+            .as_ref()
+            .expect("same-source Frame Capture session should be restored");
+        assert!(!app.state.intake_active);
+        assert_eq!(session.selection.timestamp_text(), "00:00:03.250");
+        assert_eq!(session.selection.format(), FrameCaptureFormat::Jpeg);
+        assert_eq!(session.selection.output_path(), custom_output);
+        assert!(session.selection.output_is_customized());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn replacement_source_retires_preserved_ready_sessions() {
         let (directory, first) = temp_file("replace-after-back");
         let second = directory.join("replacement.mkv");
@@ -3378,30 +3876,42 @@ mod tests {
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Idle,
             &AudioExtractExecutionState::Idle,
+            &FrameCaptureExecutionState::Idle,
         ));
         assert!(!file_intake_enabled(
             &AudioMixExecutionState::Running,
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Idle,
             &AudioExtractExecutionState::Idle,
+            &FrameCaptureExecutionState::Idle,
         ));
         assert!(!file_intake_enabled(
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Running,
             &RemuxExecutionState::Idle,
             &AudioExtractExecutionState::Idle,
+            &FrameCaptureExecutionState::Idle,
         ));
         assert!(!file_intake_enabled(
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Running,
             &AudioExtractExecutionState::Idle,
+            &FrameCaptureExecutionState::Idle,
         ));
         assert!(!file_intake_enabled(
             &AudioMixExecutionState::Idle,
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Idle,
             &AudioExtractExecutionState::Running,
+            &FrameCaptureExecutionState::Idle,
+        ));
+        assert!(!file_intake_enabled(
+            &AudioMixExecutionState::Idle,
+            &UpscaleExecutionState::Idle,
+            &RemuxExecutionState::Idle,
+            &AudioExtractExecutionState::Idle,
+            &FrameCaptureExecutionState::Running,
         ));
     }
 
@@ -3429,6 +3939,7 @@ mod tests {
                 &UpscaleExecutionState::Idle,
                 &RemuxExecutionState::Idle,
                 &AudioExtractExecutionState::Idle,
+                &FrameCaptureExecutionState::Idle,
             ));
         }
     }
@@ -3441,6 +3952,7 @@ mod tests {
                 &state,
                 &RemuxExecutionState::Idle,
                 &AudioExtractExecutionState::Idle,
+                &FrameCaptureExecutionState::Idle,
             ));
         }
     }
@@ -3455,6 +3967,7 @@ mod tests {
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Idle,
             &AudioExtractExecutionState::Idle,
+            &FrameCaptureExecutionState::Idle,
         ));
 
         assert!(file_intake_enabled(
@@ -3462,6 +3975,7 @@ mod tests {
             &UpscaleExecutionState::Idle,
             &RemuxExecutionState::Idle,
             &AudioExtractExecutionState::Idle,
+            &FrameCaptureExecutionState::Idle,
         ));
     }
 }

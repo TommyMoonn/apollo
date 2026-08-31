@@ -14,6 +14,7 @@ const AUDIO_MIX_LABEL: &str = "Audio Mix";
 const UPSCALE_LABEL: &str = "Upscale";
 const REMUX_LABEL: &str = "Remux";
 const AUDIO_EXTRACT_LABEL: &str = "Audio Extract";
+const FRAME_CAPTURE_LABEL: &str = "Frame Capture";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileIntakeTool {
@@ -21,6 +22,7 @@ pub enum FileIntakeTool {
     Upscale,
     Remux,
     AudioExtract,
+    FrameCapture,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -161,6 +163,7 @@ fn show_mode_selector(ui: &mut Ui, selected_tool: FileIntakeTool) -> FileIntakeA
         widgets::mode_button_intrinsic_size(ui, UPSCALE_LABEL),
         widgets::mode_button_intrinsic_size(ui, REMUX_LABEL),
         widgets::mode_button_intrinsic_size(ui, AUDIO_EXTRACT_LABEL),
+        widgets::mode_button_intrinsic_size(ui, FRAME_CAPTURE_LABEL),
     ];
     let widths = sizes.map(|size| size.x);
     let arrangement = layout::action_layout(ui.available_width(), &widths);
@@ -193,6 +196,15 @@ fn show_mode_selector(ui: &mut Ui, selected_tool: FileIntakeTool) -> FileIntakeA
         {
             action = FileIntakeAction::SelectTool(FileIntakeTool::AudioExtract);
         }
+        if widgets::mode_button(
+            ui,
+            FRAME_CAPTURE_LABEL,
+            selected_tool == FileIntakeTool::FrameCapture,
+        )
+        .clicked()
+        {
+            action = FileIntakeAction::SelectTool(FileIntakeTool::FrameCapture);
+        }
     });
 
     action
@@ -210,8 +222,8 @@ mod tests {
     };
 
     use super::{
-        AUDIO_EXTRACT_LABEL, AUDIO_MIX_LABEL, DROP_HINT, FileIntakeTool, INSPECTING_LABEL,
-        OPEN_LABEL, REMUX_LABEL, UPSCALE_LABEL, WORDMARK, intake_region_heights,
+        AUDIO_EXTRACT_LABEL, AUDIO_MIX_LABEL, DROP_HINT, FRAME_CAPTURE_LABEL, FileIntakeTool,
+        INSPECTING_LABEL, OPEN_LABEL, REMUX_LABEL, UPSCALE_LABEL, WORDMARK, intake_region_heights,
         show_with_layout_plan,
     };
 
@@ -225,6 +237,7 @@ mod tests {
         assert_eq!(UPSCALE_LABEL, "Upscale");
         assert_eq!(REMUX_LABEL, "Remux");
         assert_eq!(AUDIO_EXTRACT_LABEL, "Audio Extract");
+        assert_eq!(FRAME_CAPTURE_LABEL, "Frame Capture");
     }
 
     #[test]

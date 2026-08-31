@@ -21,6 +21,7 @@ pub(crate) enum DialogTarget {
     UpscaleOutput { session_id: u64 },
     RemuxOutput { session_id: u64 },
     AudioExtractOutput { session_id: u64 },
+    FrameCaptureOutput { session_id: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +58,8 @@ pub(crate) enum OutputFormat {
     Mka,
     M4a,
     Flac,
+    Png,
+    Jpeg,
 }
 
 impl OutputFormat {
@@ -67,6 +70,8 @@ impl OutputFormat {
             Self::Mka => "mka",
             Self::M4a => "m4a",
             Self::Flac => "flac",
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
         }
     }
 
@@ -77,6 +82,8 @@ impl OutputFormat {
             Self::Mka => "Matroska audio (*.mka)",
             Self::M4a => "MPEG-4 audio (*.m4a)",
             Self::Flac => "FLAC audio (*.flac)",
+            Self::Png => "PNG image (*.png)",
+            Self::Jpeg => "JPEG image (*.jpg)",
         }
     }
 
@@ -87,6 +94,8 @@ impl OutputFormat {
             Self::Mka => "*.mka",
             Self::M4a => "*.m4a",
             Self::Flac => "*.flac",
+            Self::Png => "*.png",
+            Self::Jpeg => "*.jpg",
         }
     }
 }
@@ -488,6 +497,18 @@ mod tests {
             (OutputFormat::Mka, "mka", "Matroska audio (*.mka)", "*.mka"),
             (OutputFormat::M4a, "m4a", "MPEG-4 audio (*.m4a)", "*.m4a"),
             (OutputFormat::Flac, "flac", "FLAC audio (*.flac)", "*.flac"),
+        ] {
+            assert_eq!(format.extension(), extension);
+            assert_eq!(format.filter_name(), name);
+            assert_eq!(format.filter_pattern(), pattern);
+        }
+    }
+
+    #[test]
+    fn frame_capture_formats_own_save_extensions_and_filters() {
+        for (format, extension, name, pattern) in [
+            (OutputFormat::Png, "png", "PNG image (*.png)", "*.png"),
+            (OutputFormat::Jpeg, "jpg", "JPEG image (*.jpg)", "*.jpg"),
         ] {
             assert_eq!(format.extension(), extension);
             assert_eq!(format.filter_name(), name);

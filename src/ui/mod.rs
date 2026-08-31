@@ -4,6 +4,8 @@ pub mod audio_mix;
 pub mod audio_mix_progress;
 pub mod file_intake;
 pub mod fonts;
+pub mod frame_capture;
+pub mod frame_capture_progress;
 pub mod icon;
 pub mod layout;
 pub mod media_error;
