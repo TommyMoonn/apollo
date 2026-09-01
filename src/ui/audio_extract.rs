@@ -17,7 +17,6 @@ use crate::{
 use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
 
 const AUDIO_TRACK_LABEL: &str = "Audio track";
-const FORMAT_LABEL: &str = "Format";
 const OUTPUT_LABEL: &str = "Output";
 const BROWSE_LABEL: &str = "Browse";
 const EXTRACT_LABEL: &str = "Extract";
@@ -153,10 +152,25 @@ pub fn show(
             ui.add_space(theme::SPACING.compact);
             show_audio_tracks(ui, media, state);
 
-            ui.add_space(theme::SPACING.focal);
-            let _ = widgets::section_label(ui, FORMAT_LABEL);
+            ui.add_space(theme::SPACING.section);
+            let _ = widgets::section_label(ui, OUTPUT_LABEL);
             ui.add_space(theme::SPACING.compact);
-            show_format_selector(ui, state);
+            let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
+            let selector_width = widgets::select_menu_intrinsic_width(ui, &FORMAT_OPTIONS);
+            let row = widgets::operation_output_row(
+                ui,
+                &mut output_stem,
+                state.format().extension(),
+                BROWSE_LABEL,
+                selector_width,
+                |ui| show_format_selector(ui, state),
+            );
+            if row.filename.changed() {
+                state.set_output_filename_stem(OsString::from(output_stem));
+            }
+            if row.browse.clicked() {
+                action.set(AudioExtractSelectionAction::BrowseOutput);
+            }
             ui.add_space(theme::SPACING.tight);
             ui.add(
                 Label::new(
@@ -166,23 +180,6 @@ pub fn show(
                 )
                 .selectable(false),
             );
-
-            ui.add_space(theme::SPACING.focal);
-            let _ = widgets::section_label(ui, OUTPUT_LABEL);
-            ui.add_space(theme::SPACING.compact);
-            let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
-            let row = widgets::output_filename_row(
-                ui,
-                &mut output_stem,
-                state.format().extension(),
-                BROWSE_LABEL,
-            );
-            if row.filename.changed() {
-                state.set_output_filename_stem(OsString::from(output_stem));
-            }
-            if row.browse.clicked() {
-                action.set(AudioExtractSelectionAction::BrowseOutput);
-            }
 
             if let Some(feedback) = feedback {
                 ui.add_space(theme::SPACING.tight);

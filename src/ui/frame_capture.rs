@@ -23,7 +23,6 @@ use crate::{
 use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
 
 const TIMESTAMP_LABEL: &str = "Timestamp";
-const FORMAT_LABEL: &str = "Format";
 const OUTPUT_LABEL: &str = "Output";
 const BROWSE_LABEL: &str = "Browse";
 const CAPTURE_LABEL: &str = "Capture frame";
@@ -164,22 +163,18 @@ pub fn show(
                 technical_context(ui, &format!("Duration {}", format_duration(duration)));
             }
 
-            ui.add_space(theme::SPACING.focal);
-            let _ = widgets::section_label(ui, FORMAT_LABEL);
-            ui.add_space(theme::SPACING.compact);
-            show_format_selector(ui, state);
-            ui.add_space(theme::SPACING.tight);
-            technical_context(ui, format_detail(state.format()));
-
-            ui.add_space(theme::SPACING.focal);
+            ui.add_space(theme::SPACING.section);
             let _ = widgets::section_label(ui, OUTPUT_LABEL);
             ui.add_space(theme::SPACING.compact);
             let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
-            let row = widgets::output_filename_row(
+            let selector_width = widgets::select_menu_intrinsic_width(ui, &FORMAT_OPTIONS);
+            let row = widgets::operation_output_row(
                 ui,
                 &mut output_stem,
                 state.format().extension(),
                 BROWSE_LABEL,
+                selector_width,
+                |ui| show_format_selector(ui, state),
             );
             if row.filename.changed() {
                 state.set_output_filename_stem(OsString::from(output_stem));
@@ -187,6 +182,8 @@ pub fn show(
             if row.browse.clicked() {
                 action.set(FrameCaptureSelectionAction::BrowseOutput);
             }
+            ui.add_space(theme::SPACING.tight);
+            technical_context(ui, format_detail(state.format()));
 
             if let Some(feedback) = feedback {
                 ui.add_space(theme::SPACING.tight);

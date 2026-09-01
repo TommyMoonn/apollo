@@ -2639,8 +2639,11 @@ mod tests {
         output.textures_delta.clear();
 
         assert!(output_contains_text(&output, "Upscale to"));
-        assert!(output_contains_text(&output, "Video codec"));
-        assert!(output_contains_text(&output, "Actual output"));
+        assert!(output_contains_text(&output, "Output"));
+        assert!(output_contains_text(&output, "H.264"));
+        assert!(output_contains_text(&output, "Browse"));
+        assert!(!output_contains_text(&output, "Video codec"));
+        assert!(!output_contains_text(&output, "Actual output"));
         assert!(!output_contains_text(&output, "← Back"));
         assert!(output_contains_text(&output, "Change file"));
         assert!(output_contains_text(&output, "Close source"));
@@ -2665,13 +2668,14 @@ mod tests {
         for text in [
             "recording.mkv",
             "1920×1080",
-            "Container",
             "MKV",
             "Output",
+            "Browse",
             "Remux",
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
+        assert!(!output_contains_text(&output, "Container"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2695,14 +2699,15 @@ mod tests {
             "Audio track",
             "Desktop Audio",
             "stream 1",
-            "Format",
             "Original (copy)",
             "no re-encode · MKA",
             "Output",
+            "Browse",
             "Extract",
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
+        assert!(!output_contains_text(&output, "Format"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2725,14 +2730,15 @@ mod tests {
             "1920×1080",
             "Timestamp",
             "00:00:00.000",
-            "Format",
             "PNG",
             "lossless",
             "Output",
+            "Browse",
             "Capture frame",
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
+        assert!(!output_contains_text(&output, "Format"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2753,6 +2759,9 @@ mod tests {
 
         assert!(output_contains_text(&output, "Audio tracks"));
         assert!(output_contains_text(&output, "Loudness normalization"));
+        assert!(output_contains_text(&output, "Output"));
+        assert!(output_contains_text(&output, "MP4"));
+        assert!(output_contains_text(&output, "Browse"));
         assert!(!output_contains_text(&output, "Integrated loudness"));
         assert!(output_contains_text(&output, "Mix selected tracks"));
         assert!(!output_contains_text(&output, "← Back"));

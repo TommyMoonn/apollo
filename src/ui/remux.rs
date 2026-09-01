@@ -20,7 +20,6 @@ use crate::{
 
 use super::{layout, output_name::OutputNameState, theme, widgets};
 
-const CONTAINER_LABEL: &str = "Container";
 const OUTPUT_LABEL: &str = "Output";
 const BROWSE_LABEL: &str = "Browse";
 const REMUX_LABEL: &str = "Remux";
@@ -109,19 +108,17 @@ pub fn show(
         |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
 
-            let _ = widgets::section_label(ui, CONTAINER_LABEL);
-            ui.add_space(theme::SPACING.compact);
-            show_container_selector(ui, state);
-
-            ui.add_space(theme::SPACING.focal);
             let _ = widgets::section_label(ui, OUTPUT_LABEL);
             ui.add_space(theme::SPACING.compact);
             let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
-            let row = widgets::output_filename_row(
+            let selector_width = widgets::select_menu_intrinsic_width(ui, &CONTAINER_OPTIONS);
+            let row = widgets::operation_output_row(
                 ui,
                 &mut output_stem,
                 state.container().extension(),
                 BROWSE_LABEL,
+                selector_width,
+                |ui| show_container_selector(ui, state),
             );
             if row.filename.changed() {
                 state.set_output_filename_stem(OsString::from(output_stem));

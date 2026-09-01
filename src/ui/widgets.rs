@@ -558,71 +558,54 @@ pub fn filename_field(ui: &mut Ui, stem: &mut String, extension: &str, width: f3
     )
 }
 
-/// Responsive editable filename + Browse composite using the shared output-row policy.
+/// Shared responsive operation output row: selector, editable filename, and Browse.
 #[must_use]
-pub fn output_filename_row(
+pub fn operation_output_row(
     ui: &mut Ui,
     stem: &mut String,
     extension: &str,
     browse_label: &str,
+    selector_width: f32,
+    add_selector: impl FnMut(&mut Ui),
 ) -> OutputFilenameRowResponse {
-    output_filename_row_impl(ui, stem, extension, browse_label, None, |_| {})
-}
-
-/// Shared responsive output row with one stable leading control, such as Audio Mix container.
-#[must_use]
-pub fn output_filename_row_with_leading(
-    ui: &mut Ui,
-    stem: &mut String,
-    extension: &str,
-    browse_label: &str,
-    leading_width: f32,
-    add_leading: impl FnMut(&mut Ui),
-) -> OutputFilenameRowResponse {
-    output_filename_row_impl(
+    operation_output_row_impl(
         ui,
         stem,
         extension,
         browse_label,
-        Some(leading_width),
-        add_leading,
+        selector_width,
+        add_selector,
     )
 }
 
-/// Shared layout plan used by output-row rendering and ready-surface height accounting.
-pub fn output_filename_row_plan(
+/// Shared layout plan used by every operation output-row renderer.
+pub fn operation_output_row_plan(
     ui: &Ui,
-    leading_width: Option<f32>,
+    selector_width: f32,
     browse_label: &str,
 ) -> layout::OutputRowPlan {
     layout::output_row_plan(
         ui.available_width(),
-        leading_width,
+        Some(selector_width),
         compact_secondary_button_intrinsic_width(ui, browse_label),
     )
 }
 
-fn output_filename_row_impl(
+fn operation_output_row_impl(
     ui: &mut Ui,
     stem: &mut String,
     extension: &str,
     browse_label: &str,
-    leading_width: Option<f32>,
-    mut add_leading: impl FnMut(&mut Ui),
+    selector_width: f32,
+    mut add_selector: impl FnMut(&mut Ui),
 ) -> OutputFilenameRowResponse {
-    let plan = output_filename_row_plan(ui, leading_width, browse_label);
+    let plan = operation_output_row_plan(ui, selector_width, browse_label);
 
     match plan.layout {
         layout::OutputRowLayout::Inline => {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = theme::SPACING.compact;
-                if let Some(leading_width) = plan.leading_width {
-                    ui.allocate_ui_with_layout(
-                        vec2(leading_width, theme::COMPACT_CONTROL_HEIGHT),
-                        Layout::left_to_right(Align::Center),
-                        |ui| add_leading(ui),
-                    );
-                }
+                output_selector_slot(ui, selector_width, &mut add_selector);
                 let filename = filename_field(ui, stem, extension, plan.filename_width);
                 let browse = compact_secondary_button(ui, browse_label);
                 OutputFilenameRowResponse { filename, browse }
@@ -632,13 +615,7 @@ fn output_filename_row_impl(
         layout::OutputRowLayout::Stacked => {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = theme::SPACING.compact;
-                if let Some(leading_width) = plan.leading_width {
-                    ui.allocate_ui_with_layout(
-                        vec2(leading_width, theme::COMPACT_CONTROL_HEIGHT),
-                        Layout::left_to_right(Align::Center),
-                        |ui| add_leading(ui),
-                    );
-                }
+                output_selector_slot(ui, selector_width, &mut add_selector);
                 let filename = filename_field(ui, stem, extension, plan.filename_width);
                 let browse = ui
                     .allocate_ui_with_layout(
@@ -652,6 +629,19 @@ fn output_filename_row_impl(
             .inner
         }
     }
+}
+
+fn output_selector_slot(ui: &mut Ui, selector_width: f32, add_selector: &mut impl FnMut(&mut Ui)) {
+    let (rect, _) = ui.allocate_exact_size(
+        vec2(selector_width, theme::COMPACT_CONTROL_HEIGHT),
+        Sense::hover(),
+    );
+    let mut selector_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    add_selector(&mut selector_ui);
 }
 
 /// Thin rectangular progress rail. The fraction is display-only and deliberately carries no
@@ -928,11 +918,10 @@ mod tests {
         BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
         button_text_style, displayed_progress_fraction, filename_field, inline_status,
         inline_status_color, inline_status_height, labeled_control, mode_button,
-        mode_button_intrinsic_size, output_filename_row, output_filename_row_with_leading,
-        plain_button_text_style, primary_button_enabled, progress_bar, progress_rail_color,
-        select_button, select_menu_intrinsic_width, select_menu_option, selectable_row,
-        selectable_row_visuals, selectable_row_with_accessory, selector_popup_width,
-        show_selector_popup, switch_control,
+        mode_button_intrinsic_size, operation_output_row, plain_button_text_style,
+        primary_button_enabled, progress_bar, progress_rail_color, select_button,
+        select_menu_intrinsic_width, select_menu_option, selectable_row, selectable_row_visuals,
+        selectable_row_with_accessory, selector_popup_width, show_selector_popup, switch_control,
     };
     use crate::ui::{fonts, layout, theme};
 
@@ -1063,7 +1052,7 @@ mod tests {
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
             let selector_width = select_menu_intrinsic_width(&child, &["MP4", "MKV"]);
-            let row = output_filename_row_with_leading(
+            let row = operation_output_row(
                 &mut child,
                 &mut stem,
                 "mp4",
@@ -1084,41 +1073,58 @@ mod tests {
     }
 
     #[test]
-    fn minimum_content_width_keeps_audio_container_selector_usable() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-        let mut stem = String::from("recording-mix");
+    fn minimum_content_width_keeps_every_operation_selector_usable() {
         let content_width =
             layout::MINIMUM_CONTENT_SIZE.x - f32::from(layout::CONTENT_PADDING) * 2.0;
+        let mut saw_inline = false;
+        let mut saw_stacked = false;
+        for options in [
+            &["MP4", "MKV"][..],
+            &["H.264", "H.265"][..],
+            &["Original (copy)", "AAC", "FLAC"][..],
+            &["PNG", "JPEG"][..],
+        ] {
+            let context = egui::Context::default();
+            super::fonts::install(&context);
+            let mut stem = String::from("recording-output");
+            let output = context.run_ui(Default::default(), |ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(content_width, 140.0), egui::Sense::hover());
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                );
+                let selector_width = select_menu_intrinsic_width(&child, options);
+                let mut selector_rect = egui::Rect::NOTHING;
+                let row = operation_output_row(
+                    &mut child,
+                    &mut stem,
+                    "mp4",
+                    "Browse",
+                    selector_width,
+                    |ui| selector_rect = select_button(ui, options[0]).rect,
+                );
 
-        let output = context.run_ui(Default::default(), |ui| {
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(content_width, 140.0), egui::Sense::hover());
-            let mut child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
-            );
-            let selector_width = select_menu_intrinsic_width(&child, &["MP4", "MKV"]);
-            let mut selector_rect = egui::Rect::NOTHING;
-            let row = output_filename_row_with_leading(
-                &mut child,
-                &mut stem,
-                "mp4",
-                "Browse",
-                selector_width,
-                |ui| selector_rect = select_button(ui, "MP4").rect,
-            );
-
-            assert!((selector_rect.width() - selector_width).abs() <= 0.5);
-            assert!(selector_rect.width() > 0.0);
-            assert!(
-                selector_rect.right() <= row.filename.rect.left()
-                    || selector_rect.bottom() <= row.filename.rect.top()
-            );
-            assert!((row.browse.rect.right() - rect.right()).abs() <= 0.5);
-        });
-        output.drop_without_applying_deltas();
+                assert!(selector_rect.width() <= selector_width + 0.5);
+                assert!(selector_rect.width() > 0.0);
+                let inline = selector_rect.right() <= row.filename.rect.left()
+                    && row.filename.rect.right() <= row.browse.rect.left();
+                let stacked = selector_rect.bottom() <= row.filename.rect.top()
+                    && row.filename.rect.bottom() <= row.browse.rect.top();
+                assert!(inline || stacked);
+                saw_inline |= inline;
+                saw_stacked |= stacked;
+                assert!(
+                    (row.browse.rect.right() - rect.right()).abs() <= 0.5,
+                    "options={options:?} browse={:?} row={rect:?}",
+                    row.browse.rect
+                );
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert!(saw_inline);
+        assert!(saw_stacked);
     }
 
     #[test]
@@ -1136,7 +1142,7 @@ mod tests {
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
             let selector_width = select_menu_intrinsic_width(&child, &["MP4", "MKV"]);
-            let row = output_filename_row_with_leading(
+            let row = operation_output_row(
                 &mut child,
                 &mut stem,
                 "mp4",
@@ -1147,28 +1153,6 @@ mod tests {
 
             assert!((row.filename.rect.width() - rect.width()).abs() <= 0.5);
             assert!(selector_rect.bottom() <= row.filename.rect.top());
-            assert!(row.filename.rect.bottom() <= row.browse.rect.top());
-            assert!((row.browse.rect.right() - rect.right()).abs() <= 0.5);
-        });
-        output.drop_without_applying_deltas();
-    }
-
-    #[test]
-    fn narrow_output_row_without_selector_stacks_filename_then_browse() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-        let mut stem = String::from("recording-4k");
-
-        let output = context.run_ui(Default::default(), |ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(240.0, 100.0), egui::Sense::hover());
-            let mut child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
-            );
-            let row = output_filename_row(&mut child, &mut stem, "mp4", "Browse");
-
-            assert!((row.filename.rect.width() - rect.width()).abs() <= 0.5);
             assert!(row.filename.rect.bottom() <= row.browse.rect.top());
             assert!((row.browse.rect.right() - rect.right()).abs() <= 0.5);
         });

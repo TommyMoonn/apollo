@@ -584,7 +584,7 @@ fn show_output_row(
     let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
     let selector_width = widgets::select_menu_intrinsic_width(ui, &CONTAINER_OPTIONS);
 
-    let row = widgets::output_filename_row_with_leading(
+    let row = widgets::operation_output_row(
         ui,
         &mut output_stem,
         state.container().extension(),

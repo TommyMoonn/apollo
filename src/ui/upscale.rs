@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use egui::{RichText, Ui};
+use egui::Ui;
 
 use crate::{
     media::{model::MediaFile, output::MediaOutputError},
@@ -15,7 +15,7 @@ use crate::{
     },
 };
 
-use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
+use super::{layout, output_name::OutputNameState, theme, widgets};
 
 const TARGETS: [UpscaleTarget; 3] = [
     UpscaleTarget::Qhd1440,
@@ -24,12 +24,10 @@ const TARGETS: [UpscaleTarget; 3] = [
 ];
 
 const UPSCALE_TO_LABEL: &str = "Upscale to";
-const VIDEO_CODEC_LABEL: &str = "Video codec";
-const ACTUAL_OUTPUT_LABEL: &str = "Actual output";
 const OUTPUT_LABEL: &str = "Output";
 const BROWSE_LABEL: &str = "Browse";
 const UPSCALE_LABEL: &str = "Upscale";
-const UNAVAILABLE_OUTPUT: &str = "Unavailable";
+const CODEC_OPTIONS: [&str; 2] = ["H.264", "H.265"];
 
 /// Pre-execution Upscale state. Sizing remains owned by `upscale::sizing`, while execution stays
 /// deferred to the shared process integration phase.
@@ -150,15 +148,39 @@ pub fn show(
             show_target_list(ui, media, state);
             ui.add_space(theme::SPACING.section);
 
-            show_codec_and_actual_output(ui, media, state);
-            ui.add_space(theme::SPACING.focal);
-
             let _ = widgets::section_label(ui, OUTPUT_LABEL);
             ui.add_space(theme::SPACING.compact);
             let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
-            let row = widgets::output_filename_row(ui, &mut output_stem, "mp4", BROWSE_LABEL);
+            let selector_width = widgets::select_menu_intrinsic_width(ui, &CODEC_OPTIONS);
+            let mut requested_codec = None;
+            let row = widgets::operation_output_row(
+                ui,
+                &mut output_stem,
+                "mp4",
+                BROWSE_LABEL,
+                selector_width,
+                |ui| {
+                    widgets::select_menu(ui, codec_label(state.codec()), &CODEC_OPTIONS, |ui| {
+                        for codec in [VideoCodec::H264, VideoCodec::H265] {
+                            if widgets::select_menu_option(
+                                ui,
+                                codec_label(codec),
+                                state.codec() == codec,
+                            )
+                            .clicked()
+                            {
+                                requested_codec = Some(codec);
+                                ui.close();
+                            }
+                        }
+                    });
+                },
+            );
             if row.filename.changed() {
                 state.set_output_filename_stem(OsString::from(output_stem));
+            }
+            if let Some(codec) = requested_codec {
+                state.set_codec(codec);
             }
             if row.browse.clicked() {
                 action.set(UpscaleSelectionAction::BrowseOutput);
@@ -207,72 +229,12 @@ fn show_target_list(ui: &mut Ui, media: &MediaFile, state: &mut UpscaleSelection
     }
 }
 
-fn show_codec_and_actual_output(ui: &mut Ui, media: &MediaFile, state: &mut UpscaleSelectionState) {
-    let actual_output = actual_output_text(state, media);
-    let arrangement = layout::field_pair_layout(ui.available_width());
-    let requested_codec = match arrangement {
-        layout::FieldPairLayout::Columns => {
-            let mut requested_codec = None;
-            ui.columns(2, |columns| {
-                requested_codec = show_codec_field(&mut columns[0], state.codec());
-                show_actual_output_field(&mut columns[1], &actual_output);
-            });
-            requested_codec
-        }
-        layout::FieldPairLayout::Stacked => {
-            let requested_codec = show_codec_field(ui, state.codec());
-            ui.add_space(theme::SPACING.related);
-            show_actual_output_field(ui, &actual_output);
-            requested_codec
-        }
-    };
-
-    if let Some(codec) = requested_codec {
-        state.set_codec(codec);
-    }
-}
-
-fn show_codec_field(ui: &mut Ui, codec: VideoCodec) -> Option<VideoCodec> {
-    let _ = widgets::section_label(ui, VIDEO_CODEC_LABEL);
-    ui.add_space(theme::SPACING.compact);
-
-    let mut requested_codec = None;
-    widgets::select_menu(ui, codec_label(codec), &["H.264", "H.265"], |ui| {
-        if widgets::select_menu_option(ui, "H.264", codec == VideoCodec::H264).clicked() {
-            requested_codec = Some(VideoCodec::H264);
-            ui.close();
-        }
-        if widgets::select_menu_option(ui, "H.265", codec == VideoCodec::H265).clicked() {
-            requested_codec = Some(VideoCodec::H265);
-            ui.close();
-        }
-    });
-    requested_codec
-}
-
-fn show_actual_output_field(ui: &mut Ui, actual_output: &str) {
-    let _ = widgets::section_label(ui, ACTUAL_OUTPUT_LABEL);
-    ui.add_space(theme::SPACING.compact);
-    ui.label(
-        RichText::new(actual_output)
-            .text_style(fonts::technical_text_style())
-            .color(theme::FOREGROUND),
-    );
-}
-
 fn source_dimensions(media: &MediaFile) -> Option<(u32, u32)> {
     let video = media.video_streams.first()?;
     match (video.width, video.height) {
         (Some(width), Some(height)) if width > 0 && height > 0 => Some((width, height)),
         _ => None,
     }
-}
-
-fn actual_output_text(state: &UpscaleSelectionState, media: &MediaFile) -> String {
-    state
-        .output_dimensions(media)
-        .map(|dimensions| format!("{} × {}", dimensions.width, dimensions.height))
-        .unwrap_or_else(|| UNAVAILABLE_OUTPUT.to_owned())
 }
 
 fn default_output_stem(input: &Path, target: UpscaleTarget) -> OsString {
@@ -333,7 +295,7 @@ mod tests {
         },
     };
 
-    use super::{UpscaleSelectionState, actual_output_text, upscale_ready_feedback};
+    use super::{UpscaleSelectionState, upscale_ready_feedback};
 
     fn media(width: Option<u32>, height: Option<u32>) -> MediaFile {
         MediaFile {
@@ -394,7 +356,13 @@ mod tests {
         let media = media(Some(1920), Some(800));
         let state = UpscaleSelectionState::new(&media);
 
-        assert_eq!(actual_output_text(&state, &media), "3840 × 1600");
+        assert_eq!(
+            state.output_dimensions(&media),
+            Some(crate::upscale::sizing::OutputDimensions {
+                width: 3840,
+                height: 1600,
+            })
+        );
     }
 
     #[test]
