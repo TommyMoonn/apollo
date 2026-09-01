@@ -58,13 +58,19 @@ impl UpscaleStartError {
                 UpscaleValidationError::MissingSourceDimensions { .. }
                 | UpscaleValidationError::InvalidSourceDimensions { .. }
                 | UpscaleValidationError::InvalidTargetBoundary { .. }
-                | UpscaleValidationError::TargetNotLarger { .. } => {
+                | UpscaleValidationError::TargetNotLarger { .. }
+                | UpscaleValidationError::NvencUnavailable { .. } => {
                     MediaError::invalid_request(error.to_string())
                 }
             },
             Self::Sizing(error) => MediaError::invalid_request(error.to_string()),
             Self::Output(error) => MediaError::from_output_error(error),
-            Self::Command(error) => MediaError::missing_stream(error.to_string()),
+            Self::Command(UpscaleCommandError::MissingVideoStream) => {
+                MediaError::missing_stream("upscale command requires a video stream")
+            }
+            Self::Command(error @ UpscaleCommandError::NvencUnavailable { .. }) => {
+                MediaError::invalid_request(error.to_string())
+            }
             Self::Process(error) => MediaError::from_process_start_error(error),
             Self::AlreadyRunning => MediaError::invalid_request(self.to_string()),
         }
@@ -227,7 +233,9 @@ mod tests {
             tools::MediaTools,
         },
         upscale::{
-            model::{UpscaleRequest, UpscaleTarget, VideoCodec},
+            model::{
+                NvencCapability, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec,
+            },
             validation::{UpscaleValidationError, validate_upscale_request},
         },
     };
@@ -545,6 +553,8 @@ mod tests {
             output: directory.path().join("upscaled.mp4"),
             target: UpscaleTarget::Uhd4k,
             codec: VideoCodec::H264,
+            encoder_settings: UpscaleEncoderSettings::default(),
+            nvenc_capability: NvencCapability::Unchecked,
         };
         let media = MediaFile {
             path: input,

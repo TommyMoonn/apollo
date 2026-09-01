@@ -267,7 +267,9 @@ mod tests {
         },
         upscale::{
             execution::{UpscaleExecutionFailure, UpscaleExecutionState, UpscaleExecutor},
-            model::{UpscaleRequest, UpscaleTarget, VideoCodec},
+            model::{
+                NvencCapability, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec,
+            },
         },
     };
 
@@ -493,6 +495,8 @@ mod tests {
             output: PathBuf::from("C:/media/recording-4k.mp4"),
             target: UpscaleTarget::Uhd4k,
             codec: VideoCodec::H264,
+            encoder_settings: UpscaleEncoderSettings::default(),
+            nvenc_capability: NvencCapability::Unchecked,
         }
     }
 

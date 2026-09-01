@@ -13,7 +13,10 @@ use apollo::{
     },
     upscale::{
         command::{UpscaleCommandError, build_upscale_invocation},
-        model::{UpscaleRequest, UpscaleTarget, VideoCodec},
+        model::{
+            CpuQuality, NvencCapability, NvencQuality, UpscaleEncoderSettings, UpscaleRequest,
+            UpscaleTarget, VideoCodec, VideoEncoderBackend, VideoEncoderSelection,
+        },
         sizing::{
             OutputDimensions, UpscaleSizingError, calculate_output_dimensions,
             resolve_target_boundary,
@@ -95,6 +98,175 @@ fn h265_uses_libx265_crf_20_and_slow_preset() {
     assert_eq!(option_values(&args, "-c:v"), vec!["libx265"]);
     assert_eq!(option_values(&args, "-crf"), vec!["20"]);
     assert_eq!(option_values(&args, "-preset"), vec!["slow"]);
+}
+
+#[test]
+fn cpu_command_uses_the_selected_typed_quality_instead_of_a_fixed_crf() {
+    let temp = TestDirectory::new();
+    let mut request = request(&temp, UpscaleTarget::Uhd4k);
+    request
+        .encoder_settings
+        .set_selection(VideoEncoderSelection::Cpu);
+    request
+        .encoder_settings
+        .set_cpu_quality(VideoCodec::H264, CpuQuality::new(7).unwrap());
+    let media = media(request.input.clone(), Some(1920), Some(1080));
+
+    let args = invocation_args(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    );
+
+    assert_eq!(option_values(&args, "-c:v"), vec!["libx264"]);
+    assert_eq!(option_values(&args, "-crf"), vec!["7"]);
+}
+
+#[test]
+fn cpu_and_nvenc_quality_types_enforce_their_distinct_bounds() {
+    assert_eq!(CpuQuality::new(CpuQuality::MIN).unwrap().value(), 0);
+    assert_eq!(CpuQuality::new(CpuQuality::MAX).unwrap().value(), 51);
+    assert_eq!(CpuQuality::new(52), None);
+
+    assert_eq!(NvencQuality::new(NvencQuality::MIN).unwrap().value(), 1);
+    assert_eq!(NvencQuality::new(NvencQuality::MAX).unwrap().value(), 51);
+    assert_eq!(NvencQuality::new(0), None);
+    assert_eq!(NvencQuality::new(52), None);
+}
+
+#[test]
+fn encoder_settings_keep_codec_and_backend_quality_values_independent() {
+    let mut settings = UpscaleEncoderSettings::default();
+    let h264_cpu = CpuQuality::new(12).unwrap();
+    let h265_cpu = CpuQuality::new(24).unwrap();
+    let h264_nvenc = NvencQuality::new(8).unwrap();
+    let h265_nvenc = NvencQuality::new(30).unwrap();
+
+    settings.set_cpu_quality(VideoCodec::H264, h264_cpu);
+    settings.set_cpu_quality(VideoCodec::H265, h265_cpu);
+    settings.set_nvenc_quality(VideoCodec::H264, h264_nvenc);
+    settings.set_nvenc_quality(VideoCodec::H265, h265_nvenc);
+    settings.set_selection(VideoEncoderSelection::NvidiaNvenc);
+    settings.set_selection(VideoEncoderSelection::Cpu);
+
+    assert_eq!(settings.cpu_quality(VideoCodec::H264), h264_cpu);
+    assert_eq!(settings.cpu_quality(VideoCodec::H265), h265_cpu);
+    assert_eq!(settings.nvenc_quality(VideoCodec::H264), h264_nvenc);
+    assert_eq!(settings.nvenc_quality(VideoCodec::H265), h265_nvenc);
+}
+
+#[test]
+fn nvenc_h264_uses_p5_vbr_and_typed_cq_without_cpu_options() {
+    let temp = TestDirectory::new();
+    let mut request = request(&temp, UpscaleTarget::Uhd4k);
+    request
+        .encoder_settings
+        .set_selection(VideoEncoderSelection::NvidiaNvenc);
+    request.nvenc_capability = NvencCapability::Available;
+    let media = media(request.input.clone(), Some(1920), Some(1080));
+
+    let args = invocation_args(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    );
+
+    assert_eq!(option_values(&args, "-c:v"), vec!["h264_nvenc"]);
+    assert_eq!(option_values(&args, "-preset"), vec!["p5"]);
+    assert_eq!(option_values(&args, "-rc"), vec!["vbr"]);
+    assert_eq!(option_values(&args, "-cq"), vec!["16"]);
+    assert!(option_values(&args, "-crf").is_empty());
+    assert!(
+        args.iter()
+            .all(|arg| !arg.contains("cuda") && !arg.contains("npp"))
+    );
+}
+
+#[test]
+fn nvenc_h265_uses_hevc_encoder_and_selected_cq() {
+    let temp = TestDirectory::new();
+    let mut request = request(&temp, UpscaleTarget::Uhd4k);
+    request.codec = VideoCodec::H265;
+    request
+        .encoder_settings
+        .set_selection(VideoEncoderSelection::NvidiaNvenc);
+    request
+        .encoder_settings
+        .set_nvenc_quality(VideoCodec::H265, NvencQuality::new(27).unwrap());
+    request.nvenc_capability = NvencCapability::Available;
+    let media = media(request.input.clone(), Some(1920), Some(1080));
+
+    let args = invocation_args(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    );
+
+    assert_eq!(option_values(&args, "-c:v"), vec!["hevc_nvenc"]);
+    assert_eq!(option_values(&args, "-cq"), vec!["27"]);
+}
+
+#[test]
+fn auto_resolves_to_nvenc_only_when_capability_is_available() {
+    let temp = TestDirectory::new();
+    let mut request = request(&temp, UpscaleTarget::Uhd4k);
+
+    assert_eq!(
+        request.resolve_video_encoder().unwrap().backend,
+        VideoEncoderBackend::Cpu
+    );
+
+    request.nvenc_capability = NvencCapability::unavailable("driver initialization failed");
+    assert_eq!(
+        request.resolve_video_encoder().unwrap().backend,
+        VideoEncoderBackend::Cpu
+    );
+
+    request.nvenc_capability = NvencCapability::Available;
+    assert_eq!(
+        request.resolve_video_encoder().unwrap().backend,
+        VideoEncoderBackend::NvidiaNvenc
+    );
+}
+
+#[test]
+fn explicit_unavailable_nvenc_is_rejected_with_the_capability_reason() {
+    let temp = TestDirectory::new();
+    let mut request = request(&temp, UpscaleTarget::Uhd4k);
+    request
+        .encoder_settings
+        .set_selection(VideoEncoderSelection::NvidiaNvenc);
+    request.nvenc_capability = NvencCapability::unavailable("installed NVIDIA driver is too old");
+    let media = media(request.input.clone(), Some(1920), Some(1080));
+
+    assert_eq!(
+        validate_upscale_request(&request, &media),
+        Err(UpscaleValidationError::NvencUnavailable {
+            reason: "installed NVIDIA driver is too old".to_owned(),
+        })
+    );
+    assert_eq!(
+        build_upscale_invocation(
+            &request,
+            &media,
+            OutputDimensions {
+                width: 3840,
+                height: 2160,
+            },
+        ),
+        Err(UpscaleCommandError::NvencUnavailable {
+            reason: "installed NVIDIA driver is too old".to_owned(),
+        })
+    );
 }
 
 #[test]
@@ -293,6 +465,8 @@ fn unusual_input_and_output_paths_remain_single_arguments() {
         output: temp.path().join("output [$weird]; name 'two'.mp4"),
         target: UpscaleTarget::Uhd4k,
         codec: VideoCodec::H264,
+        encoder_settings: UpscaleEncoderSettings::default(),
+        nvenc_capability: NvencCapability::Unchecked,
     };
     let media = media_with_audio_codecs(
         request.input.clone(),
@@ -955,6 +1129,8 @@ fn request(temp: &TestDirectory, target: UpscaleTarget) -> UpscaleRequest {
         output: temp.path().join("upscaled.mp4"),
         target,
         codec: VideoCodec::H264,
+        encoder_settings: UpscaleEncoderSettings::default(),
+        nvenc_capability: NvencCapability::Unchecked,
     }
 }
 

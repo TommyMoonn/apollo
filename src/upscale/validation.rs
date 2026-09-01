@@ -30,6 +30,9 @@ pub enum UpscaleValidationError {
         target_width: u32,
         target_height: u32,
     },
+    NvencUnavailable {
+        reason: String,
+    },
     Output(MediaOutputError),
 }
 
@@ -60,6 +63,9 @@ impl fmt::Display for UpscaleValidationError {
                 f,
                 "target boundary {target_width}x{target_height} is not larger than source {source_width}x{source_height}"
             ),
+            Self::NvencUnavailable { reason } => {
+                write!(f, "NVIDIA NVENC is unavailable: {reason}")
+            }
             Self::Output(error) => write!(f, "{error}"),
         }
     }
@@ -95,6 +101,11 @@ pub fn validate_upscale_request(
     }
 
     validate_target_is_larger(request.target, width, height)?;
+    request
+        .resolve_video_encoder()
+        .map_err(|error| UpscaleValidationError::NvencUnavailable {
+            reason: error.reason,
+        })?;
     validate_output_path(&request.output).map_err(UpscaleValidationError::Output)?;
 
     Ok(())

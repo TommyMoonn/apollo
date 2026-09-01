@@ -9,7 +9,9 @@ use egui::{RichText, Ui};
 use crate::{
     media::{model::MediaFile, output::MediaOutputError},
     upscale::{
-        model::{UpscaleRequest, UpscaleTarget, VideoCodec},
+        model::{
+            NvencCapability, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec,
+        },
         sizing::{OutputDimensions, calculate_output_dimensions, resolve_target_boundary},
         validation::{UpscaleValidationError, validate_upscale_request},
     },
@@ -36,6 +38,7 @@ pub struct UpscaleSelectionState {
     target: UpscaleTarget,
     custom_boundary: Option<(u32, u32)>,
     codec: VideoCodec,
+    encoder_settings: UpscaleEncoderSettings,
     output_name: OutputNameState,
 }
 
@@ -55,6 +58,7 @@ impl UpscaleSelectionState {
             target,
             custom_boundary: None,
             codec: VideoCodec::H264,
+            encoder_settings: UpscaleEncoderSettings::default(),
             output_name: OutputNameState::new(
                 &media.path,
                 generated_output_stem(media, target)
@@ -170,6 +174,8 @@ impl UpscaleSelectionState {
             output: self.output_path(),
             target: self.target,
             codec: self.codec,
+            encoder_settings: self.encoder_settings.clone(),
+            nvenc_capability: NvencCapability::Unchecked,
         }
     }
 
