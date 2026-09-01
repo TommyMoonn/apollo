@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-01
+
+Apollo 0.3.1 reorganizes the existing media tools into a persistent source workspace with direct operation switching and consistent controls.
+
+### Changed
+
+- A loaded source now stays visible and active while switching between Audio Mix, Upscale, Remux, Audio Extract, and Frame Capture.
+- `Change file` replaces the current source only after the new file is selected and inspected, while `Close source` explicitly returns to the empty intake screen.
+- Every operation now shares the same source header, operation switcher, scrollable configuration area, and bottom-anchored primary action.
+- Output controls now use a consistent selector, editable filename, extension, and Browse layout across all five operations.
+- Operation changes, conditional controls, and button hover states now use short restrained fades without moving or resizing controls.
+
+### Fixed
+
+- Cancelling or failing a source replacement keeps the current workspace intact and now leaves replacement errors visible until the source lifecycle changes.
+- The selected operation remains visually distinct while workspace controls are temporarily disabled.
+- Button hover shading now fades smoothly both when the pointer enters and when it leaves.
+
 ## [0.3.0] - 2026-08-31
 
 Apollo 0.3.0 adds Remux, Audio Extract, and Frame Capture as focused media utilities alongside Audio Mix and Video Upscale.
@@ -98,7 +116,8 @@ Apollo 0.1.0 is the first public Windows release, bringing focused Audio Mix and
 - Missing optional FFprobe metadata falls back to usable media and track labels instead of preventing intake or selection.
 - Upscale sizing preserves the source aspect ratio within the selected target boundary without default cropping, stretching, or black padding.
 
-[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/TommyMoonn/apollo/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/TommyMoonn/apollo/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TommyMoonn/apollo/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/TommyMoonn/apollo/compare/v0.1.1...v0.1.2
