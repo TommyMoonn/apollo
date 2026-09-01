@@ -1,7 +1,7 @@
 use egui::{
-    Align, Align2, Color32, CornerRadius, Frame, InnerResponse, Label, Layout, Popup, Rect,
-    Response, RichText, Sense, Sides, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder, Vec2,
-    WidgetInfo, WidgetType, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, DragValue, Frame, InnerResponse, Label, Layout, Popup,
+    Rect, Response, RichText, Sense, Sides, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder,
+    Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 
 use super::{fonts, layout, theme};
@@ -246,6 +246,27 @@ pub fn labeled_control<R>(ui: &mut Ui, label: &str, add_control: impl FnOnce(&mu
             |ui| trailing_control(ui, add_control),
         );
     control
+}
+
+/// Integer pixel-boundary input with the shared compact geometry and two-pixel interaction step.
+#[must_use]
+pub fn pixel_dimension_control(ui: &mut Ui, label: &str, value: &mut u32) -> Response {
+    let response = ui.add_sized(
+        [
+            layout::PIXEL_DIMENSION_CONTROL_WIDTH,
+            theme::COMPACT_CONTROL_HEIGHT,
+        ],
+        DragValue::new(value)
+            .range(0..=u32::MAX)
+            .speed(layout::PIXEL_DIMENSION_STEP)
+            .custom_parser(|text| Some(parse_pixel_dimension(text))),
+    );
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::DragValue, response.enabled(), label));
+    response
+}
+
+fn parse_pixel_dimension(text: &str) -> f64 {
+    text.trim().parse::<u32>().map_or(0.0, f64::from)
 }
 
 /// Apply the shared ready-surface inset to a trailing control or action group.
@@ -996,10 +1017,11 @@ mod tests {
         BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
         button_text_style, conditional_fade, displayed_progress_fraction, filename_field,
         inline_status, inline_status_color, inline_status_height, labeled_control, mode_button,
-        mode_button_intrinsic_size, operation_output_row, plain_button_text_style,
-        primary_button_enabled, progress_bar, progress_rail_color, secondary_button, select_button,
-        select_menu_intrinsic_width, select_menu_option, selectable_row, selectable_row_visuals,
-        selectable_row_with_accessory, selector_popup_width, show_selector_popup, switch_control,
+        mode_button_intrinsic_size, operation_output_row, parse_pixel_dimension,
+        pixel_dimension_control, plain_button_text_style, primary_button_enabled, progress_bar,
+        progress_rail_color, secondary_button, select_button, select_menu_intrinsic_width,
+        select_menu_option, selectable_row, selectable_row_visuals, selectable_row_with_accessory,
+        selector_popup_width, show_selector_popup, switch_control,
     };
     use crate::ui::{fonts, layout, theme};
 
@@ -1113,6 +1135,25 @@ mod tests {
             assert_eq!(control_rect.width(), 86.0);
             assert_eq!(control_rect.right(), 320.0 - theme::READY_TRAILING_INSET);
         });
+    }
+
+    #[test]
+    fn pixel_dimension_control_uses_shared_width_and_two_pixel_speed() {
+        egui::__run_test_ui(|ui| {
+            let mut value = 3840;
+            let response = pixel_dimension_control(ui, "Maximum output width", &mut value);
+
+            assert_eq!(response.rect.width(), layout::PIXEL_DIMENSION_CONTROL_WIDTH);
+            assert_eq!(response.rect.height(), theme::COMPACT_CONTROL_HEIGHT);
+        });
+    }
+
+    #[test]
+    fn incomplete_pixel_dimension_drafts_become_invalid_without_rounding_odd_values() {
+        assert_eq!(parse_pixel_dimension(""), 0.0);
+        assert_eq!(parse_pixel_dimension("not-a-size"), 0.0);
+        assert_eq!(parse_pixel_dimension("2999"), 2999.0);
+        assert_eq!(parse_pixel_dimension(" 3000 "), 3000.0);
     }
 
     #[test]

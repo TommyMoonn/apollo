@@ -288,6 +288,35 @@ mod tests {
     }
 
     #[test]
+    fn custom_request_routes_only_sizing_owned_dimensions_to_the_command() {
+        let directory = TestDirectory::new("custom-sizing-start");
+        let (mut request, media) = valid_request_and_media(&directory);
+        request.target = UpscaleTarget::Custom {
+            max_width: 3000,
+            max_height: 2000,
+        };
+        let tools = fake_tools(&directory);
+        let observed_args = Arc::new(Mutex::new(Vec::<OsString>::new()));
+        let args_capture = Arc::clone(&observed_args);
+        let mut executor = UpscaleExecutor::new();
+
+        executor
+            .start_with_launcher(&tools, &media, &request, move |command| {
+                *args_capture.lock().unwrap() = command.arguments().to_vec();
+                Ok(FakeProcessControl::running())
+            })
+            .unwrap();
+
+        let args = observed_args.lock().unwrap();
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                OsString::from("-vf"),
+                OsString::from("scale=3000:1688:flags=lanczos"),
+            ]
+        }));
+    }
+
+    #[test]
     fn invalid_request_never_launches_process() {
         let directory = TestDirectory::new("invalid-no-spawn");
         let (mut request, media) = valid_request_and_media(&directory);

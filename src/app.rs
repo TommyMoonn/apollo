@@ -4508,9 +4508,10 @@ mod tests {
             .upscale
             .as_mut()
             .expect("upscale session should exist");
+        session.selection.select_custom_target(&session.media);
         session
             .selection
-            .set_target(&session.media, UpscaleTarget::Uhd8k);
+            .set_custom_boundary(&session.media, 3000, 2000);
         session.selection.set_codec(VideoCodec::H265);
         let custom_output = directory.join("custom-upscale.mp4");
         session
@@ -4526,7 +4527,14 @@ mod tests {
             .as_ref()
             .expect("same-source Upscale session should be restored");
         assert_workspace(&app.state, Tool::VideoUpscale);
-        assert_eq!(session.selection.target(), UpscaleTarget::Uhd8k);
+        assert_eq!(
+            session.selection.target(),
+            UpscaleTarget::Custom {
+                max_width: 3000,
+                max_height: 2000,
+            }
+        );
+        assert_eq!(session.selection.custom_boundary(), Some((3000, 2000)));
         assert_eq!(session.selection.codec(), VideoCodec::H265);
         assert_eq!(session.selection.output_path(), custom_output);
         assert!(session.selection.output_is_customized());
@@ -4670,6 +4678,7 @@ mod tests {
         assert_eq!(session.media.path, second);
         assert!(!session.selection.output_is_customized());
         assert_eq!(session.selection.target(), UpscaleTarget::Uhd4k);
+        assert_eq!(session.selection.custom_boundary(), None);
         assert_eq!(session.selection.codec(), VideoCodec::H264);
         assert_eq!(
             app.state.media_intake.current().map(|media| &media.path),
