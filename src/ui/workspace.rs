@@ -45,16 +45,31 @@ pub enum WorkspaceAction {
     SelectOperation(Operation),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePresentation {
+    file_name: String,
+    metadata: Option<String>,
+}
+
+impl WorkspacePresentation {
+    pub fn new(media: &MediaFile) -> Self {
+        Self {
+            file_name: source_file_name(&media.path),
+            metadata: source_metadata(media),
+        }
+    }
+}
+
 pub fn show(
     ui: &mut Ui,
-    media: &MediaFile,
+    presentation: &WorkspacePresentation,
     active_operation: Operation,
     enabled: bool,
 ) -> WorkspaceAction {
     let action = Cell::new(WorkspaceAction::None);
 
     ui.add_enabled_ui(enabled, |ui| {
-        show_source_header(ui, media, &action);
+        show_source_header(ui, presentation, &action);
         ui.add_space(theme::SPACING.related);
         show_operation_switcher(ui, active_operation, &action);
     });
@@ -62,14 +77,17 @@ pub fn show(
     action.get()
 }
 
-fn show_source_header(ui: &mut Ui, media: &MediaFile, action: &Cell<WorkspaceAction>) {
+fn show_source_header(
+    ui: &mut Ui,
+    presentation: &WorkspacePresentation,
+    action: &Cell<WorkspaceAction>,
+) {
     let action_sizes = [
         widgets::plain_button_intrinsic_size(ui, CHANGE_FILE_LABEL),
         widgets::plain_button_intrinsic_size(ui, CLOSE_SOURCE_LABEL),
     ];
     let action_widths = action_sizes.map(|size| size.x);
-    let metadata = source_metadata(media);
-    let show_metadata = metadata.is_some()
+    let show_metadata = presentation.metadata.is_some()
         && layout::workspace_header_shows_metadata(ui.available_width(), &action_widths);
     let header_height = source_header_height(ui, show_metadata);
 
@@ -89,13 +107,12 @@ fn show_source_header(ui: &mut Ui, media: &MediaFile, action: &Cell<WorkspaceAct
                     };
                     ui.add(
                         Label::new(
-                            RichText::new(source_file_name(&media.path))
-                                .text_style(TextStyle::Body),
+                            RichText::new(&presentation.file_name).text_style(TextStyle::Body),
                         )
                         .truncate()
                         .selectable(false),
                     );
-                    if show_metadata && let Some(metadata) = metadata.as_deref() {
+                    if show_metadata && let Some(metadata) = presentation.metadata.as_deref() {
                         ui.add(
                             Label::new(
                                 RichText::new(metadata)
@@ -207,7 +224,7 @@ mod tests {
         ui::{fonts, theme},
     };
 
-    use super::{Operation, WorkspaceAction, show, source_metadata};
+    use super::{Operation, WorkspaceAction, WorkspacePresentation, show, source_metadata};
 
     fn shape_text_rect(shape: &egui::Shape, text: &str) -> Option<egui::Rect> {
         match shape {
@@ -249,21 +266,21 @@ mod tests {
         fonts::install(&context);
         theme::install(&context);
         let mut initial = context.run_ui(Default::default(), |ui| {
-            let _ = show(ui, &media(), Operation::AudioMix, false);
+            let _ = show(ui, &presentation(), Operation::AudioMix, false);
         });
         let position = output_text_rect(&initial, label).center();
         initial.textures_delta.clear();
 
         let mut pressed_action = WorkspaceAction::None;
         let mut pressed = context.run_ui(pointer_button_input(position, true), |ui| {
-            pressed_action = show(ui, &media(), Operation::AudioMix, false);
+            pressed_action = show(ui, &presentation(), Operation::AudioMix, false);
         });
         pressed.textures_delta.clear();
         assert_eq!(pressed_action, WorkspaceAction::None);
 
         let mut released_action = WorkspaceAction::None;
         let mut released = context.run_ui(pointer_button_input(position, false), |ui| {
-            released_action = show(ui, &media(), Operation::AudioMix, false);
+            released_action = show(ui, &presentation(), Operation::AudioMix, false);
         });
         released.textures_delta.clear();
         released_action
@@ -303,6 +320,10 @@ mod tests {
         }
     }
 
+    fn presentation() -> WorkspacePresentation {
+        WorkspacePresentation::new(&media())
+    }
+
     #[test]
     fn shared_metadata_uses_source_dimensions_and_duration() {
         assert_eq!(
@@ -318,7 +339,7 @@ mod tests {
         theme::install(&context);
         let output = context.run_ui(Default::default(), |ui| {
             assert_eq!(
-                show(ui, &media(), Operation::Remux, true),
+                show(ui, &presentation(), Operation::Remux, true),
                 WorkspaceAction::None
             );
         });
@@ -364,7 +385,7 @@ mod tests {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
-            let _ = show(&mut child, &media(), Operation::AudioMix, true);
+            let _ = show(&mut child, &presentation(), Operation::AudioMix, true);
         });
 
         let debug = format!("{:?}", output.shapes);
@@ -398,7 +419,7 @@ mod tests {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
-            let _ = show(&mut child, &media(), Operation::AudioMix, true);
+            let _ = show(&mut child, &presentation(), Operation::AudioMix, true);
         });
 
         let first = output_text_rect(&output, "Audio Mix");

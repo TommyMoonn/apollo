@@ -48,6 +48,26 @@ pub struct AudioMixSelectionState {
     normalization_targets: LoudnessTargets,
     container: OutputContainer,
     output_name: OutputNameState,
+    ready_validation: AudioMixReadyValidationCache,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioMixReadyValidationCache {
+    dirty: bool,
+    result: Result<(), AudioMixValidationError>,
+    #[cfg(test)]
+    rebuild_count: usize,
+}
+
+impl Default for AudioMixReadyValidationCache {
+    fn default() -> Self {
+        Self {
+            dirty: true,
+            result: Ok(()),
+            #[cfg(test)]
+            rebuild_count: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -90,7 +110,7 @@ struct TrackIdentity {
 impl AudioMixSelectionState {
     /// New Audio Mix sessions begin with every probed audio stream selected and MP4 output.
     pub fn new(media: &MediaFile) -> Self {
-        Self {
+        let mut state = Self {
             selected_streams: media
                 .audio_streams
                 .iter()
@@ -105,7 +125,10 @@ impl AudioMixSelectionState {
             normalization_targets: LoudnessTargets::default(),
             container: OutputContainer::Mp4,
             output_name: OutputNameState::new(&media.path, default_output_stem(&media.path)),
-        }
+            ready_validation: AudioMixReadyValidationCache::default(),
+        };
+        let _ = state.validation(media);
+        state
     }
 
     pub fn container(&self) -> OutputContainer {
@@ -145,7 +168,11 @@ impl AudioMixSelectionState {
     }
 
     pub fn set_normalization_enabled(&mut self, enabled: bool) {
+        if self.normalization_enabled == enabled {
+            return;
+        }
         self.normalization_enabled = enabled;
+        self.invalidate_ready_validation();
     }
 
     pub fn set_normalization_targets(&mut self, targets: LoudnessTargets) -> bool {
@@ -156,20 +183,44 @@ impl AudioMixSelectionState {
             return false;
         }
 
-        self.normalization_targets = targets;
+        if self.normalization_targets != targets {
+            self.normalization_targets = targets;
+            self.invalidate_ready_validation();
+        }
         true
     }
 
     pub fn reset_normalization_targets(&mut self) {
-        self.normalization_targets = LoudnessTargets::default();
+        let defaults = LoudnessTargets::default();
+        if self.normalization_targets != defaults {
+            self.normalization_targets = defaults;
+            self.invalidate_ready_validation();
+        }
     }
 
-    pub fn can_mix(&self, media: &MediaFile) -> bool {
+    pub fn can_mix(&mut self, media: &MediaFile) -> bool {
         self.validation(media).is_ok()
     }
 
-    fn validation(&self, media: &MediaFile) -> Result<(), AudioMixValidationError> {
-        validate_audio_mix_request(&self.request(media), media)
+    fn validation(&mut self, media: &MediaFile) -> &Result<(), AudioMixValidationError> {
+        if self.ready_validation.dirty {
+            self.ready_validation.result = validate_audio_mix_request(&self.request(media), media);
+            self.ready_validation.dirty = false;
+            #[cfg(test)]
+            {
+                self.ready_validation.rebuild_count += 1;
+            }
+        }
+        &self.ready_validation.result
+    }
+
+    fn invalidate_ready_validation(&mut self) {
+        self.ready_validation.dirty = true;
+    }
+
+    #[cfg(test)]
+    fn ready_validation_rebuild_count(&self) -> usize {
+        self.ready_validation.rebuild_count
     }
 
     /// Toggle only a stream that belongs to the current probed media.
@@ -185,19 +236,27 @@ impl AudioMixSelectionState {
         if !self.selected_streams.insert(stream_index) {
             self.selected_streams.remove(&stream_index);
         }
+        self.invalidate_ready_validation();
         true
     }
 
     pub fn select_all(&mut self, media: &MediaFile) {
-        self.selected_streams = media
+        let selected_streams = media
             .audio_streams
             .iter()
             .map(|stream| stream.stream_index)
             .collect();
+        if self.selected_streams != selected_streams {
+            self.selected_streams = selected_streams;
+            self.invalidate_ready_validation();
+        }
     }
 
     pub fn clear(&mut self) {
-        self.selected_streams.clear();
+        if !self.selected_streams.is_empty() {
+            self.selected_streams.clear();
+            self.invalidate_ready_validation();
+        }
     }
 
     /// Change one current stream's gain without affecting its selection or any sibling track.
@@ -216,13 +275,21 @@ impl AudioMixSelectionState {
             return false;
         }
 
-        self.track_gains.insert(stream_index, gain);
+        if self.track_gains.get(&stream_index).copied() != Some(gain) {
+            self.track_gains.insert(stream_index, gain);
+            self.invalidate_ready_validation();
+        }
         true
     }
 
     pub fn reset_track_gains(&mut self) {
+        let mut changed = false;
         for gain in self.track_gains.values_mut() {
+            changed |= *gain != TrackGain::ZERO;
             *gain = TrackGain::ZERO;
+        }
+        if changed {
+            self.invalidate_ready_validation();
         }
     }
 
@@ -235,14 +302,20 @@ impl AudioMixSelectionState {
         self.container = container;
         self.output_name
             .set_generated_stem(default_output_stem(&media.path));
+        self.invalidate_ready_validation();
     }
 
     pub fn set_output_filename_stem(&mut self, stem: OsString) {
+        if self.output_name.stem() == stem.as_os_str() {
+            return;
+        }
         self.output_name.set_stem(stem);
+        self.invalidate_ready_validation();
     }
 
     pub fn set_custom_output_path(&mut self, output: PathBuf) {
         self.output_name.set_custom_path(output);
+        self.invalidate_ready_validation();
     }
 
     /// Build the Phase 24 request without starting work. Stream order follows probe/source order.
@@ -285,7 +358,13 @@ pub fn show(
     state: &mut AudioMixSelectionState,
 ) -> AudioMixSelectionAction {
     let action = Cell::new(AudioMixSelectionAction::None);
-    let validation = state.validation(media);
+    let (can_mix, feedback) = {
+        let validation = state.validation(media);
+        (
+            validation.is_ok(),
+            validation.as_ref().err().and_then(audio_mix_ready_feedback),
+        )
+    };
 
     layout::operation_surface(
         ui,
@@ -321,13 +400,13 @@ pub fn show(
                 action.set(output_action);
             }
 
-            if let Some(feedback) = validation.as_ref().err().and_then(audio_mix_ready_feedback) {
+            if let Some(feedback) = feedback {
                 ui.add_space(theme::SPACING.tight);
                 let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
             }
         },
         |ui| {
-            if widgets::primary_button_enabled(ui, MIX_LABEL, validation.is_ok()).clicked() {
+            if widgets::primary_button_enabled(ui, MIX_LABEL, can_mix).clicked() {
                 action.set(AudioMixSelectionAction::MixRequested);
             }
         },
@@ -812,11 +891,14 @@ mod tests {
         time::Duration,
     };
 
-    use crate::media::model::{AudioStream, MediaFile, VideoStream};
+    use crate::{
+        media::model::{AudioStream, MediaFile, VideoStream},
+        ui::{fonts, theme},
+    };
 
     use super::{
-        AudioMixPresentation, AudioMixSelectionState, UNTITLED_AUDIO, audio_mix_ready_feedback,
-        stepped_tenths, stepped_track_gain, track_presentations,
+        AudioMixPresentation, AudioMixSelectionAction, AudioMixSelectionState, UNTITLED_AUDIO,
+        audio_mix_ready_feedback, stepped_tenths, stepped_track_gain, track_presentations,
     };
     use crate::audio_mix::model::{
         LoudnessNormalization, LoudnessTargets, OutputContainer, SelectedAudioTrack, TrackGain,
@@ -910,9 +992,101 @@ mod tests {
     fn valid_request_enables_primary_action() {
         let mut media = media();
         media.path = PathBuf::from("audio-mix-ready-source.mkv");
-        let state = AudioMixSelectionState::new(&media);
+        let mut state = AudioMixSelectionState::new(&media);
 
         assert!(state.can_mix(&media));
+    }
+
+    #[test]
+    fn unchanged_ready_repaints_reuse_cached_validation() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let media = media();
+        let presentation = AudioMixPresentation::new(&media);
+        let mut state = AudioMixSelectionState::new(&media);
+        assert_eq!(state.ready_validation_rebuild_count(), 1);
+
+        for _ in 0..2 {
+            let output = context.run_ui(Default::default(), |ui| {
+                assert_eq!(
+                    super::show(ui, &media, &presentation, &mut state),
+                    AudioMixSelectionAction::None
+                );
+            });
+            output.drop_without_applying_deltas();
+        }
+
+        assert_eq!(state.ready_validation_rebuild_count(), 1);
+    }
+
+    #[test]
+    fn relevant_state_changes_recompute_ready_validation_once() {
+        let media = media();
+        let mut state = AudioMixSelectionState::new(&media);
+        let mut expected_rebuilds = 1;
+
+        state.clear();
+        assert!(!state.can_mix(&media));
+        expected_rebuilds += 1;
+        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
+
+        state.select_all(&media);
+        assert!(state.can_mix(&media));
+        expected_rebuilds += 1;
+        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
+
+        assert!(state.set_track_gain(&media, 4, TrackGain::from_tenths_db(-55)));
+        assert!(state.can_mix(&media));
+        expected_rebuilds += 1;
+        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
+
+        state.set_normalization_enabled(true);
+        assert!(state.can_mix(&media));
+        expected_rebuilds += 1;
+        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
+
+        assert!(state.set_normalization_targets(LoudnessTargets::from_tenths(-220, -8, 145)));
+        assert!(state.can_mix(&media));
+        expected_rebuilds += 1;
+        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
+
+        state.set_container(&media, OutputContainer::Mkv);
+        assert!(state.can_mix(&media));
+        expected_rebuilds += 1;
+        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
+
+        state.set_output_filename_stem(OsString::from(""));
+        assert!(!state.can_mix(&media));
+        expected_rebuilds += 1;
+        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
+
+        state.set_custom_output_path(PathBuf::from("exports/final-mix.mkv"));
+        assert!(state.can_mix(&media));
+        expected_rebuilds += 1;
+        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
+
+        assert!(state.can_mix(&media));
+        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
+    }
+
+    #[test]
+    fn replacement_source_builds_source_bound_ready_validation() {
+        let original = media();
+        let mut original_state = AudioMixSelectionState::new(&original);
+        assert!(original_state.can_mix(&original));
+
+        let mut replacement = original.clone();
+        replacement.path = PathBuf::from("captures/replacement.mkv");
+        replacement.video_streams.clear();
+        let mut replacement_state = AudioMixSelectionState::new(&replacement);
+
+        assert!(!replacement_state.can_mix(&replacement));
+        assert_eq!(replacement_state.ready_validation_rebuild_count(), 1);
+        assert_eq!(
+            replacement_state.validation(&replacement).as_ref(),
+            Err(&AudioMixValidationError::MissingVideoStream)
+        );
     }
 
     #[test]
@@ -1080,9 +1254,9 @@ mod tests {
             state.set_output_filename_stem(OsString::from(stem));
             assert!(!state.can_mix(&media), "{stem:?} should not be runnable");
             assert!(state.request(&media).output.as_os_str().is_empty());
-            let error = state.validation(&media).unwrap_err();
+            let error = state.validation(&media).as_ref().unwrap_err();
             assert_eq!(
-                audio_mix_ready_feedback(&error),
+                audio_mix_ready_feedback(error),
                 Some("Enter a usable output filename.")
             );
         }

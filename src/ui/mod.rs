@@ -13,6 +13,7 @@ mod media_lifecycle;
 mod output_name;
 pub mod remux;
 pub mod remux_progress;
+pub mod source_presentation;
 pub mod theme;
 pub mod upscale;
 pub mod upscale_progress;

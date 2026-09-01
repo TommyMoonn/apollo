@@ -30,6 +30,40 @@ pub struct AudioExtractSelectionState {
     output_name: OutputNameState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioExtractPresentation {
+    tracks: Vec<AudioTrackPresentation>,
+}
+
+impl AudioExtractPresentation {
+    pub fn new(media: &MediaFile) -> Self {
+        Self {
+            tracks: media
+                .audio_streams
+                .iter()
+                .map(|stream| AudioTrackPresentation {
+                    stream_index: stream.stream_index,
+                    title: stream
+                        .title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or("Untitled audio")
+                        .to_owned(),
+                    metadata: track_metadata(stream),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioTrackPresentation {
+    stream_index: u32,
+    title: String,
+    metadata: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AudioExtractSelectionAction {
     #[default]
@@ -137,6 +171,7 @@ enum AudioExtractReadyError {
 pub fn show(
     ui: &mut Ui,
     media: &MediaFile,
+    presentation: &AudioExtractPresentation,
     state: &mut AudioExtractSelectionState,
 ) -> AudioExtractSelectionAction {
     let action = Cell::new(AudioExtractSelectionAction::None);
@@ -150,7 +185,7 @@ pub fn show(
 
             let _ = widgets::section_label(ui, AUDIO_TRACK_LABEL);
             ui.add_space(theme::SPACING.compact);
-            show_audio_tracks(ui, media, state);
+            show_audio_tracks(ui, media, presentation, state);
 
             ui.add_space(theme::SPACING.section);
             let _ = widgets::section_label(ui, OUTPUT_LABEL);
@@ -196,31 +231,29 @@ pub fn show(
     action.get()
 }
 
-fn show_audio_tracks(ui: &mut Ui, media: &MediaFile, state: &mut AudioExtractSelectionState) {
+fn show_audio_tracks(
+    ui: &mut Ui,
+    media: &MediaFile,
+    presentation: &AudioExtractPresentation,
+    state: &mut AudioExtractSelectionState,
+) {
     widgets::separator(ui);
-    if media.audio_streams.is_empty() {
+    if presentation.tracks.is_empty() {
         widgets::separator(ui);
         return;
     }
 
-    for stream in &media.audio_streams {
-        let title = stream
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .unwrap_or("Untitled audio");
-        let metadata = track_metadata(stream);
+    for track in &presentation.tracks {
         let response = widgets::selectable_row(
             ui,
-            title,
-            Some(&metadata),
-            state.selected_stream_index() == Some(stream.stream_index),
+            &track.title,
+            Some(&track.metadata),
+            state.selected_stream_index() == Some(track.stream_index),
             widgets::SelectionIndicator::Radio,
             theme::SELECTABLE_ROW_MIN_HEIGHT,
         );
         if response.clicked() {
-            let _ = state.select_stream(media, stream.stream_index);
+            let _ = state.select_stream(media, track.stream_index);
         }
     }
 }

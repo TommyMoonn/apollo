@@ -2,7 +2,10 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc::{self, Receiver, TryRecvError},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, TryRecvError},
+    },
     thread,
     time::Duration,
 };
@@ -42,7 +45,7 @@ use apollo::{
         audio_extract::{AudioExtractSelectionAction, AudioExtractSelectionState},
         audio_extract_progress::{self, AudioExtractLifecycleAction, AudioExtractLifecycleUiState},
         audio_mix as audio_mix_ui,
-        audio_mix::{AudioMixPresentation, AudioMixSelectionAction, AudioMixSelectionState},
+        audio_mix::{AudioMixSelectionAction, AudioMixSelectionState},
         audio_mix_progress::{self, AudioMixLifecycleAction, AudioMixLifecycleUiState},
         file_intake::{self, FileIntakeAction},
         fonts, frame_capture as frame_capture_ui,
@@ -51,6 +54,7 @@ use apollo::{
         layout, media_error, remux as remux_ui,
         remux::{RemuxSelectionAction, RemuxSelectionState},
         remux_progress::{self, RemuxLifecycleAction, RemuxLifecycleUiState},
+        source_presentation::SourcePresentation,
         theme, upscale as upscale_ui,
         upscale::{UpscaleSelectionAction, UpscaleSelectionState},
         upscale_progress::{self, UpscaleLifecycleAction, UpscaleLifecycleUiState},
@@ -92,7 +96,6 @@ enum NavigationState {
 struct AudioMixToolState {
     session_id: u64,
     media: MediaFile,
-    presentation: AudioMixPresentation,
     selection: AudioMixSelectionState,
     lifecycle_ui: AudioMixLifecycleUiState,
     start_error: Option<MediaError>,
@@ -145,6 +148,7 @@ struct AppState {
     intake_error: Option<MediaError>,
     intake_error_details_open: bool,
     media_intake: MediaIntake,
+    source_presentation: Option<Arc<SourcePresentation>>,
     audio_mix: Option<AudioMixToolState>,
     upscale: Option<UpscaleToolState>,
     remux: Option<RemuxToolState>,
@@ -159,6 +163,7 @@ impl Default for AppState {
             intake_error: None,
             intake_error_details_open: false,
             media_intake: MediaIntake::default(),
+            source_presentation: None,
             audio_mix: None,
             upscale: None,
             remux: None,
@@ -255,6 +260,7 @@ impl AppState {
     fn close_source(&mut self) {
         self.navigation = NavigationState::NoSource;
         self.media_intake.close_source();
+        self.source_presentation = None;
         self.retire_tool_sessions();
         self.intake_error = None;
         self.intake_error_details_open = false;
@@ -374,6 +380,9 @@ impl ApolloApp {
             self.state.retire_tool_sessions();
             return false;
         };
+        self.state
+            .source_presentation
+            .get_or_insert_with(|| Arc::new(SourcePresentation::new(&media)));
 
         match tool {
             Tool::AudioMix => {
@@ -386,7 +395,6 @@ impl ApolloApp {
                     let session_id = self.take_session_id();
                     self.state.audio_mix = Some(AudioMixToolState {
                         session_id,
-                        presentation: AudioMixPresentation::new(&media),
                         selection: AudioMixSelectionState::new(&media),
                         lifecycle_ui: AudioMixLifecycleUiState::default(),
                         start_error: None,
@@ -597,7 +605,13 @@ impl ApolloApp {
             return;
         };
 
-        let Some(media) = self.state.media_intake.current().cloned() else {
+        let Some(media) = self.state.media_intake.current() else {
+            self.state.close_source();
+            layout::padded_content(ui, |ui| self.show_file_intake(ui));
+            return;
+        };
+        let surface_key = egui::Id::new((active_operation.label(), media.path.as_path()));
+        let Some(source_presentation) = self.state.source_presentation.clone() else {
             self.state.close_source();
             layout::padded_content(ui, |ui| self.show_file_intake(ui));
             return;
@@ -606,7 +620,7 @@ impl ApolloApp {
         let workspace_action = layout::workspace_chrome(ui, |ui| {
             workspace::show(
                 ui,
-                &media,
+                &source_presentation.workspace,
                 active_operation,
                 self.media_inspection.is_none()
                     && file_intake_enabled(
@@ -693,7 +707,6 @@ impl ApolloApp {
                 layout::padded_content(ui, |ui| app.show_file_intake(ui));
             }
         };
-        let surface_key = egui::Id::new((active_operation.label(), media.path.as_path()));
         layout::surface_fade(ui, surface_key, |ui| {
             if ready_surface {
                 show_operation(self, ui);
@@ -803,6 +816,11 @@ impl ApolloApp {
         match self.state.media_intake.complete_probe(request, result) {
             Ok(MediaProbeDisposition::Published) => {
                 let operation = self.state.active_operation().unwrap_or(Tool::AudioMix);
+                self.state.source_presentation = self
+                    .state
+                    .media_intake
+                    .current()
+                    .map(|media| Arc::new(SourcePresentation::new(media)));
                 self.state.retire_tool_sessions();
                 if self.activate_cached_source(operation) {
                     self.state.enter_workspace(operation);
@@ -879,6 +897,12 @@ impl ApolloApp {
             return;
         }
 
+        let presentation = self
+            .state
+            .source_presentation
+            .as_ref()
+            .expect("source presentation exists while workspace is shown")
+            .clone();
         let action = ui
             .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let session = self
@@ -889,7 +913,7 @@ impl ApolloApp {
                 audio_mix_ui::show(
                     ui,
                     &session.media,
-                    &session.presentation,
+                    &presentation.audio_mix,
                     &mut session.selection,
                 )
             })
@@ -1111,6 +1135,12 @@ impl ApolloApp {
             return;
         }
 
+        let presentation = self
+            .state
+            .source_presentation
+            .as_ref()
+            .expect("source presentation exists while workspace is shown")
+            .clone();
         let action = ui
             .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let remux = self
@@ -1118,7 +1148,7 @@ impl ApolloApp {
                     .remux
                     .as_mut()
                     .expect("remux source exists while ready surface is shown");
-                remux_ui::show(ui, &remux.media, &mut remux.selection)
+                remux_ui::show(ui, &remux.media, &presentation.remux, &mut remux.selection)
             })
             .inner;
         if let Err(error) = self.handle_remux_action(action)
@@ -1222,6 +1252,12 @@ impl ApolloApp {
             return;
         }
 
+        let presentation = self
+            .state
+            .source_presentation
+            .as_ref()
+            .expect("source presentation exists while workspace is shown")
+            .clone();
         let action = ui
             .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let session = self
@@ -1229,7 +1265,12 @@ impl ApolloApp {
                     .audio_extract
                     .as_mut()
                     .expect("audio extract source exists while ready surface is shown");
-                audio_extract_ui::show(ui, &session.media, &mut session.selection)
+                audio_extract_ui::show(
+                    ui,
+                    &session.media,
+                    &presentation.audio_extract,
+                    &mut session.selection,
+                )
             })
             .inner;
         if let Err(error) = self.handle_audio_extract_action(action)
@@ -1339,6 +1380,12 @@ impl ApolloApp {
             return;
         }
 
+        let presentation = self
+            .state
+            .source_presentation
+            .as_ref()
+            .expect("source presentation exists while workspace is shown")
+            .clone();
         let action = ui
             .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let session = self
@@ -1346,7 +1393,12 @@ impl ApolloApp {
                     .frame_capture
                     .as_mut()
                     .expect("frame capture source exists while ready surface is shown");
-                frame_capture_ui::show(ui, &session.media, &mut session.selection)
+                frame_capture_ui::show(
+                    ui,
+                    &session.media,
+                    &presentation.frame_capture,
+                    &mut session.selection,
+                )
             })
             .inner;
         if let Err(error) = self.handle_frame_capture_action(action)
@@ -2495,6 +2547,41 @@ mod tests {
     }
 
     #[test]
+    fn accepted_source_presentation_is_reused_until_source_replacement() {
+        let (directory, first) = temp_file("source-presentation");
+        let second = directory.join("replacement.mkv");
+        fs::write(&second, b"replacement").unwrap();
+        let mut app = app();
+        app.load_media_path_with_probe(&first, |path| Ok(media(path)));
+        let original_presentation = app.state.source_presentation.as_ref().unwrap().clone();
+
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        for operation in [
+            Tool::AudioMix,
+            Tool::Remux,
+            Tool::AudioExtract,
+            Tool::FrameCapture,
+        ] {
+            app.select_tool(operation);
+            let output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
+            output.drop_without_applying_deltas();
+            assert!(Arc::ptr_eq(
+                app.state.source_presentation.as_ref().unwrap(),
+                &original_presentation
+            ));
+        }
+
+        app.load_media_path_with_probe(&second, |path| Ok(media(path)));
+        assert!(!Arc::ptr_eq(
+            app.state.source_presentation.as_ref().unwrap(),
+            &original_presentation
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn change_file_cancel_preserves_complete_workspace() {
         let (directory, path) = temp_file("change-cancel");
         let mut app = app();
@@ -2580,6 +2667,7 @@ mod tests {
         assert!(app.state.remux.is_none());
         assert!(app.state.audio_extract.is_none());
         assert!(app.state.frame_capture.is_none());
+        assert!(app.state.source_presentation.is_none());
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -35,6 +35,21 @@ pub struct FrameCaptureSelectionState {
     output_name: OutputNameState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameCapturePresentation {
+    duration_context: Option<String>,
+}
+
+impl FrameCapturePresentation {
+    pub fn new(media: &MediaFile) -> Self {
+        Self {
+            duration_context: media
+                .duration
+                .map(|duration| format!("Duration {}", format_duration(duration))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FrameCaptureSelectionAction {
     #[default]
@@ -132,6 +147,7 @@ enum FrameCaptureReadyError {
 pub fn show(
     ui: &mut Ui,
     media: &MediaFile,
+    presentation: &FrameCapturePresentation,
     state: &mut FrameCaptureSelectionState,
 ) -> FrameCaptureSelectionAction {
     let action = Cell::new(FrameCaptureSelectionAction::None);
@@ -158,9 +174,9 @@ pub fn show(
             if timestamp.lost_focus() {
                 ui.ctx().request_repaint();
             }
-            if let Some(duration) = media.duration {
+            if let Some(duration_context) = presentation.duration_context.as_deref() {
                 ui.add_space(theme::SPACING.tight);
-                technical_context(ui, &format!("Duration {}", format_duration(duration)));
+                technical_context(ui, duration_context);
             }
 
             ui.add_space(theme::SPACING.section);
@@ -296,7 +312,10 @@ mod tests {
         ui::{fonts, theme},
     };
 
-    use super::{FrameCaptureSelectionState, format_detail, format_duration, ready_feedback};
+    use super::{
+        FrameCapturePresentation, FrameCaptureSelectionState, format_detail, format_duration,
+        ready_feedback,
+    };
 
     fn media(duration: Option<Duration>) -> MediaFile {
         MediaFile {
@@ -368,9 +387,10 @@ mod tests {
         let mut state = FrameCaptureSelectionState::new(&media(None));
         let media = media(None);
         state.set_timestamp_text(&media, "not a timestamp".into());
+        let presentation = FrameCapturePresentation::new(&media);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &mut state);
+            let _ = super::show(ui, &media, &presentation, &mut state);
         });
         assert!(output.shapes.iter().any(|shape| {
             shape_contains(&shape.shape, "Enter a timestamp using HH:MM:SS.mmm.")
@@ -416,10 +436,11 @@ mod tests {
         fonts::install(&context);
         theme::install(&context);
         let media = media(Some(Duration::from_millis(754_567)));
+        let presentation = FrameCapturePresentation::new(&media);
         let mut state = FrameCaptureSelectionState::new(&media);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &mut state);
+            let _ = super::show(ui, &media, &presentation, &mut state);
         });
 
         assert!(

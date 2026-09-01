@@ -217,7 +217,7 @@ fn show_target_list(ui: &mut Ui, media: &MediaFile, state: &mut UpscaleSelection
         let response = widgets::selectable_row(
             ui,
             target_label(target),
-            Some(&target_boundary_text(target)),
+            Some(target_boundary_text(target)),
             state.target() == target,
             widgets::SelectionIndicator::Radio,
             theme::UPSCALE_TARGET_ROW_MIN_HEIGHT,
@@ -265,9 +265,12 @@ fn target_suffix(target: UpscaleTarget) -> &'static str {
     }
 }
 
-fn target_boundary_text(target: UpscaleTarget) -> String {
-    let (width, height) = target.boundary();
-    format!("{width} × {height}")
+fn target_boundary_text(target: UpscaleTarget) -> &'static str {
+    match target {
+        UpscaleTarget::Qhd1440 => "2560 × 1440",
+        UpscaleTarget::Uhd4k => "3840 × 2160",
+        UpscaleTarget::Uhd8k => "7680 × 4320",
+    }
 }
 
 pub(super) fn codec_label(codec: VideoCodec) -> &'static str {

@@ -1507,6 +1507,39 @@ mod tests {
             assert!(response.content_gutter.right() < response.content_viewport.right());
         });
     }
+
+    #[test]
+    fn deterministic_operation_surface_renders_content_and_action_once() {
+        use std::cell::Cell;
+
+        egui::__run_test_ui(|ui| {
+            let content_calls = Cell::new(0);
+            let action_calls = Cell::new(0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(620.0, 323.0), egui::Sense::hover());
+
+            let _ = ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                |ui| {
+                    operation_surface(
+                        ui,
+                        |ui| {
+                            content_calls.set(content_calls.get() + 1);
+                            ui.add_space(900.0)
+                        },
+                        |ui| {
+                            action_calls.set(action_calls.get() + 1);
+                            ui.label("Run")
+                        },
+                    )
+                },
+            );
+
+            assert_eq!(content_calls.get(), 1);
+            assert_eq!(action_calls.get(), 1);
+        });
+    }
     #[test]
     fn wide_running_and_terminal_surfaces_keep_independent_readability_bound() {
         egui::__run_test_ui(|ui| {
