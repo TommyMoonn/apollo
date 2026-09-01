@@ -254,6 +254,7 @@ pub(super) fn target_label(target: UpscaleTarget) -> &'static str {
         UpscaleTarget::Qhd1440 => "1440p",
         UpscaleTarget::Uhd4k => "4K",
         UpscaleTarget::Uhd8k => "8K",
+        UpscaleTarget::Custom { .. } => "Custom",
     }
 }
 
@@ -262,6 +263,7 @@ fn target_suffix(target: UpscaleTarget) -> &'static str {
         UpscaleTarget::Qhd1440 => "1440",
         UpscaleTarget::Uhd4k => "4k",
         UpscaleTarget::Uhd8k => "8k",
+        UpscaleTarget::Custom { .. } => "custom",
     }
 }
 
@@ -270,6 +272,7 @@ fn target_boundary_text(target: UpscaleTarget) -> &'static str {
         UpscaleTarget::Qhd1440 => "2560 × 1440",
         UpscaleTarget::Uhd4k => "3840 × 2160",
         UpscaleTarget::Uhd8k => "7680 × 4320",
+        UpscaleTarget::Custom { .. } => "Custom boundary",
     }
 }
 
@@ -412,7 +415,6 @@ mod tests {
     #[test]
     fn invalid_target_and_destination_preflight_errors_have_no_ready_feedback() {
         let target_error = UpscaleValidationError::TargetNotLarger {
-            target: UpscaleTarget::Uhd4k,
             source_width: 3840,
             source_height: 2160,
             target_width: 3840,

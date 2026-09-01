@@ -14,8 +14,11 @@ pub enum UpscaleSizingError {
         width: u32,
         height: u32,
     },
+    InvalidTargetBoundary {
+        boundary_width: u32,
+        boundary_height: u32,
+    },
     TargetNotLarger {
-        target: UpscaleTarget,
         source_width: u32,
         source_height: u32,
         boundary_width: u32,
@@ -29,15 +32,21 @@ impl fmt::Display for UpscaleSizingError {
             Self::InvalidSourceDimensions { width, height } => {
                 write!(f, "source dimensions must be non-zero: {width}x{height}")
             }
+            Self::InvalidTargetBoundary {
+                boundary_width,
+                boundary_height,
+            } => write!(
+                f,
+                "target boundary must use positive even dimensions: {boundary_width}x{boundary_height}"
+            ),
             Self::TargetNotLarger {
-                target,
                 source_width,
                 source_height,
                 boundary_width,
                 boundary_height,
             } => write!(
                 f,
-                "{target:?} boundary {boundary_width}x{boundary_height} is not larger than source {source_width}x{source_height}"
+                "target boundary {boundary_width}x{boundary_height} is not larger than source {source_width}x{source_height}"
             ),
         }
     }
@@ -45,25 +54,33 @@ impl fmt::Display for UpscaleSizingError {
 
 impl std::error::Error for UpscaleSizingError {}
 
-/// Return the target box for the source orientation.
+/// Resolve the target box for the selected target and source orientation.
 ///
 /// Landscape and square sources use the target's normal landscape boundary.
 /// Portrait sources use the corresponding portrait boundary by swapping the
 /// target edges. For example, the 4K boundary is `3840x2160` for landscape or
-/// square media and `2160x3840` for portrait media.
-pub const fn oriented_target_boundary(
+/// square media and `2160x3840` for portrait media. Custom boundaries are the
+/// explicit box supplied by the caller and are never orientation-swapped.
+pub fn resolve_target_boundary(
     target: UpscaleTarget,
     source_width: u32,
     source_height: u32,
-) -> OutputDimensions {
+) -> Result<OutputDimensions, UpscaleSizingError> {
     let (width, height) = target.boundary();
-    if source_height > source_width {
-        OutputDimensions {
+    if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(UpscaleSizingError::InvalidTargetBoundary {
+            boundary_width: width,
+            boundary_height: height,
+        });
+    }
+
+    if !target.is_custom() && source_height > source_width {
+        Ok(OutputDimensions {
             width: height,
             height: width,
-        }
+        })
     } else {
-        OutputDimensions { width, height }
+        Ok(OutputDimensions { width, height })
     }
 }
 
@@ -87,10 +104,9 @@ pub fn calculate_output_dimensions(
         });
     }
 
-    let boundary = oriented_target_boundary(target, source_width, source_height);
+    let boundary = resolve_target_boundary(target, source_width, source_height)?;
     if source_width >= boundary.width || source_height >= boundary.height {
         return Err(UpscaleSizingError::TargetNotLarger {
-            target,
             source_width,
             source_height,
             boundary_width: boundary.width,

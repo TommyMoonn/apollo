@@ -16,7 +16,7 @@ use apollo::{
         model::{UpscaleRequest, UpscaleTarget, VideoCodec},
         sizing::{
             OutputDimensions, UpscaleSizingError, calculate_output_dimensions,
-            oriented_target_boundary,
+            resolve_target_boundary,
         },
         validation::{UpscaleValidationError, validate_upscale_request},
     },
@@ -364,6 +364,7 @@ fn supported_targets_expose_the_planned_boundaries() {
     assert_eq!(UpscaleTarget::Qhd1440.boundary(), (2560, 1440));
     assert_eq!(UpscaleTarget::Uhd4k.boundary(), (3840, 2160));
     assert_eq!(UpscaleTarget::Uhd8k.boundary(), (7680, 4320));
+    assert_eq!(custom_target(3000, 2000).boundary(), (3000, 2000));
 }
 
 #[test]
@@ -402,11 +403,11 @@ fn four_by_three_fills_the_short_edge_without_stretching() {
 #[test]
 fn portrait_uses_the_corresponding_portrait_boundary() {
     assert_eq!(
-        oriented_target_boundary(UpscaleTarget::Uhd4k, 1080, 1920),
-        OutputDimensions {
+        resolve_target_boundary(UpscaleTarget::Uhd4k, 1080, 1920),
+        Ok(OutputDimensions {
             width: 2160,
             height: 3840,
-        }
+        })
     );
     assert_eq!(
         calculate_output_dimensions(1080, 1920, UpscaleTarget::Uhd4k),
@@ -420,11 +421,11 @@ fn portrait_uses_the_corresponding_portrait_boundary() {
 #[test]
 fn square_uses_the_landscape_box_and_is_limited_by_its_short_edge() {
     assert_eq!(
-        oriented_target_boundary(UpscaleTarget::Uhd4k, 1000, 1000),
-        OutputDimensions {
+        resolve_target_boundary(UpscaleTarget::Uhd4k, 1000, 1000),
+        Ok(OutputDimensions {
             width: 3840,
             height: 2160,
-        }
+        })
     );
     assert_eq!(
         calculate_output_dimensions(1000, 1000, UpscaleTarget::Uhd4k),
@@ -433,6 +434,63 @@ fn square_uses_the_landscape_box_and_is_limited_by_its_short_edge() {
             height: 2160,
         })
     );
+}
+
+#[test]
+fn custom_boundaries_are_explicit_and_never_orientation_swapped() {
+    let target = custom_target(3000, 2000);
+
+    assert_eq!(
+        resolve_target_boundary(target, 1080, 1920),
+        Ok(OutputDimensions {
+            width: 3000,
+            height: 2000,
+        })
+    );
+}
+
+#[test]
+fn custom_landscape_portrait_square_and_ultrawide_boxes_use_the_largest_even_fit() {
+    for (source, target, expected) in [
+        (
+            (1920, 1080),
+            custom_target(3000, 2000),
+            OutputDimensions {
+                width: 3000,
+                height: 1688,
+            },
+        ),
+        (
+            (1080, 1920),
+            custom_target(2000, 3000),
+            OutputDimensions {
+                width: 1688,
+                height: 3000,
+            },
+        ),
+        (
+            (1000, 1000),
+            custom_target(2400, 1800),
+            OutputDimensions {
+                width: 1800,
+                height: 1800,
+            },
+        ),
+        (
+            (1920, 800),
+            custom_target(3000, 2000),
+            OutputDimensions {
+                width: 3000,
+                height: 1250,
+            },
+        ),
+    ] {
+        let output = calculate_output_dimensions(source.0, source.1, target)
+            .expect("custom fixture should produce a valid upscale");
+
+        assert_eq!(output, expected);
+        assert_close_to_maximal_boundary_fit(source.0, source.1, target, output);
+    }
 }
 
 #[test]
@@ -503,7 +561,8 @@ fn portrait_nonstandard_ratio_uses_the_maximal_portrait_4k_fit() {
 #[test]
 fn even_rounding_never_exceeds_the_selected_boundary() {
     for (width, height) in [(1919, 1079), (2001, 2000), (1079, 1919), (1001, 333)] {
-        let boundary = oriented_target_boundary(UpscaleTarget::Uhd4k, width, height);
+        let boundary = resolve_target_boundary(UpscaleTarget::Uhd4k, width, height)
+            .expect("preset boundary should be valid");
         let output = calculate_output_dimensions(width, height, UpscaleTarget::Uhd4k)
             .expect("fixture should produce a valid upscale");
 
@@ -516,16 +575,34 @@ fn even_rounding_never_exceeds_the_selected_boundary() {
 
 #[test]
 fn source_at_target_boundary_is_rejected_by_sizing() {
+    let error = calculate_output_dimensions(3840, 2160, UpscaleTarget::Uhd4k).unwrap_err();
+
     assert_eq!(
-        calculate_output_dimensions(3840, 2160, UpscaleTarget::Uhd4k),
-        Err(UpscaleSizingError::TargetNotLarger {
-            target: UpscaleTarget::Uhd4k,
+        error,
+        UpscaleSizingError::TargetNotLarger {
             source_width: 3840,
             source_height: 2160,
             boundary_width: 3840,
             boundary_height: 2160,
-        })
+        }
     );
+    assert_eq!(
+        error.to_string(),
+        "target boundary 3840x2160 is not larger than source 3840x2160"
+    );
+}
+
+#[test]
+fn sizing_rejects_zero_or_odd_custom_edges() {
+    for (width, height) in [(0, 2000), (3000, 0), (2999, 2000), (3000, 1999)] {
+        assert_eq!(
+            calculate_output_dimensions(1280, 720, custom_target(width, height)),
+            Err(UpscaleSizingError::InvalidTargetBoundary {
+                boundary_width: width,
+                boundary_height: height,
+            })
+        );
+    }
 }
 
 #[test]
@@ -670,13 +747,49 @@ fn source_at_target_boundary_is_rejected() {
     assert_eq!(
         validate_upscale_request(&request, &media),
         Err(UpscaleValidationError::TargetNotLarger {
-            target: UpscaleTarget::Uhd4k,
             source_width: 3840,
             source_height: 2160,
             target_width: 3840,
             target_height: 2160,
         })
     );
+}
+
+#[test]
+fn request_validation_rejects_invalid_custom_edges() {
+    let temp = TestDirectory::new();
+    let media = media(temp.path().join("input.mp4"), Some(1280), Some(720));
+
+    for (width, height) in [(0, 2000), (3000, 0), (2999, 2000), (3000, 1999)] {
+        let request = request(&temp, custom_target(width, height));
+        assert_eq!(
+            validate_upscale_request(&request, &media),
+            Err(UpscaleValidationError::InvalidTargetBoundary {
+                target_width: width,
+                target_height: height,
+            })
+        );
+    }
+}
+
+#[test]
+fn custom_target_must_be_larger_on_both_source_edges() {
+    let temp = TestDirectory::new();
+    let media = media(temp.path().join("input.mp4"), Some(1920), Some(1080));
+
+    for target in [custom_target(1920, 2000), custom_target(3000, 1080)] {
+        let request = request(&temp, target);
+        let (target_width, target_height) = target.boundary();
+        assert_eq!(
+            validate_upscale_request(&request, &media),
+            Err(UpscaleValidationError::TargetNotLarger {
+                source_width: 1920,
+                source_height: 1080,
+                target_width,
+                target_height,
+            })
+        );
+    }
 }
 
 #[test]
@@ -784,7 +897,8 @@ fn assert_close_to_maximal_boundary_fit(
     target: UpscaleTarget,
     output: OutputDimensions,
 ) {
-    let boundary = oriented_target_boundary(target, source_width, source_height);
+    let boundary = resolve_target_boundary(target, source_width, source_height)
+        .expect("assertion helper requires a valid target boundary");
     let width_limited = u64::from(boundary.width) * u64::from(source_height)
         <= u64::from(boundary.height) * u64::from(source_width);
 
@@ -841,6 +955,13 @@ fn request(temp: &TestDirectory, target: UpscaleTarget) -> UpscaleRequest {
         output: temp.path().join("upscaled.mp4"),
         target,
         codec: VideoCodec::H264,
+    }
+}
+
+fn custom_target(max_width: u32, max_height: u32) -> UpscaleTarget {
+    UpscaleTarget::Custom {
+        max_width,
+        max_height,
     }
 }
 

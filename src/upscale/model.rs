@@ -5,6 +5,7 @@ pub enum UpscaleTarget {
     Qhd1440,
     Uhd4k,
     Uhd8k,
+    Custom { max_width: u32, max_height: u32 },
 }
 
 impl UpscaleTarget {
@@ -13,7 +14,15 @@ impl UpscaleTarget {
             Self::Qhd1440 => (2560, 1440),
             Self::Uhd4k => (3840, 2160),
             Self::Uhd8k => (7680, 4320),
+            Self::Custom {
+                max_width,
+                max_height,
+            } => (max_width, max_height),
         }
+    }
+
+    pub const fn is_custom(self) -> bool {
+        matches!(self, Self::Custom { .. })
     }
 }
 

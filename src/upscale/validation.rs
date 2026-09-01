@@ -7,7 +7,7 @@ use crate::media::{
 
 use super::{
     model::{UpscaleRequest, UpscaleTarget},
-    sizing::oriented_target_boundary,
+    sizing::{UpscaleSizingError, resolve_target_boundary},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,8 +20,11 @@ pub enum UpscaleValidationError {
         width: u32,
         height: u32,
     },
+    InvalidTargetBoundary {
+        target_width: u32,
+        target_height: u32,
+    },
     TargetNotLarger {
-        target: UpscaleTarget,
         source_width: u32,
         source_height: u32,
         target_width: u32,
@@ -41,15 +44,21 @@ impl fmt::Display for UpscaleValidationError {
             Self::InvalidSourceDimensions { width, height } => {
                 write!(f, "source dimensions must be non-zero: {width}x{height}")
             }
+            Self::InvalidTargetBoundary {
+                target_width,
+                target_height,
+            } => write!(
+                f,
+                "target boundary must use positive even dimensions: {target_width}x{target_height}"
+            ),
             Self::TargetNotLarger {
-                target,
                 source_width,
                 source_height,
                 target_width,
                 target_height,
             } => write!(
                 f,
-                "{target:?} boundary {target_width}x{target_height} is not larger than source {source_width}x{source_height}"
+                "target boundary {target_width}x{target_height} is not larger than source {source_width}x{source_height}"
             ),
             Self::Output(error) => write!(f, "{error}"),
         }
@@ -60,10 +69,10 @@ impl std::error::Error for UpscaleValidationError {}
 
 /// Validate an Upscale request against the primary probed video stream without filesystem access.
 ///
-/// Target eligibility is orientation-independent: the source long and short edges
-/// must both be strictly smaller than the selected target boundary. Exact output
-/// sizing, aspect-ratio preservation, and portrait scaling remain owned by Phase
-/// 0.1.0.30.
+/// Preset eligibility remains orientation-aware, while custom width and height
+/// are compared against the source exactly as entered. Exact boundary resolution,
+/// target validation, output sizing, and aspect-ratio preservation remain owned
+/// by `upscale::sizing`.
 pub fn validate_upscale_request(
     request: &UpscaleRequest,
     media: &MediaFile,
@@ -96,14 +105,27 @@ fn validate_target_is_larger(
     source_width: u32,
     source_height: u32,
 ) -> Result<(), UpscaleValidationError> {
-    let boundary = oriented_target_boundary(target, source_width, source_height);
+    let boundary = resolve_target_boundary(target, source_width, source_height).map_err(
+        |error| match error {
+            UpscaleSizingError::InvalidTargetBoundary {
+                boundary_width,
+                boundary_height,
+            } => UpscaleValidationError::InvalidTargetBoundary {
+                target_width: boundary_width,
+                target_height: boundary_height,
+            },
+            UpscaleSizingError::InvalidSourceDimensions { .. }
+            | UpscaleSizingError::TargetNotLarger { .. } => {
+                unreachable!("source and target-size eligibility are validated separately")
+            }
+        },
+    )?;
 
     if source_width < boundary.width && source_height < boundary.height {
         return Ok(());
     }
 
     Err(UpscaleValidationError::TargetNotLarger {
-        target,
         source_width,
         source_height,
         target_width: boundary.width,

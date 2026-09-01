@@ -57,6 +57,7 @@ impl UpscaleStartError {
                 UpscaleValidationError::Output(error) => MediaError::from_output_error(error),
                 UpscaleValidationError::MissingSourceDimensions { .. }
                 | UpscaleValidationError::InvalidSourceDimensions { .. }
+                | UpscaleValidationError::InvalidTargetBoundary { .. }
                 | UpscaleValidationError::TargetNotLarger { .. } => {
                     MediaError::invalid_request(error.to_string())
                 }
