@@ -1,6 +1,29 @@
 use egui::style::{HandleShape, ImeComposition, TextCursorStyle, WidgetVisuals, Widgets};
 use egui::{Color32, Context, CornerRadius, Shadow, Stroke, Style, Vec2, Visuals};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionDurations {
+    pub surface_enter: f32,
+    pub conditional_detail: f32,
+    pub button_hover: f32,
+}
+
+impl MotionDurations {
+    pub const STANDARD: Self = Self {
+        surface_enter: 0.12,
+        conditional_detail: 0.11,
+        button_hover: 0.085,
+    };
+
+    pub const DISABLED: Self = Self {
+        surface_enter: 0.0,
+        conditional_detail: 0.0,
+        button_hover: 0.0,
+    };
+}
+
+const MOTION_POLICY_ID: &str = "apollo-motion-durations";
+
 // Color values are the implementation of `.project/design/COLOR.md`.
 // White-alpha roles deliberately avoid a separate neutral-gray palette.
 pub const BACKGROUND: Color32 = Color32::BLACK;
@@ -16,6 +39,7 @@ pub const SELECTION: Color32 = FOREGROUND;
 pub const FOCUS: Color32 = FOREGROUND;
 pub const PROGRESS: Color32 = FOREGROUND;
 pub const DANGER_INTERACTIVE: Color32 = Color32::from_rgb(0x7E, 0x30, 0x30);
+pub const SURFACE_ENTER_START_OPACITY: f32 = 0.2;
 
 // Primary-button hover/press are white-alpha interaction treatments, not neutral-gray roles.
 pub const PRIMARY_HOVER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 224);
@@ -54,6 +78,8 @@ pub const DETAILS_SEPARATOR_GAP: f32 = 9.0;
 const _: () = assert!(CONTROL_RADIUS == 4);
 const _: () = assert!(CONTAINER_RADIUS == 4);
 const _: () = assert!(PROGRESS_RADIUS == 0);
+const _: () = assert!(SURFACE_ENTER_START_OPACITY > 0.0);
+const _: () = assert!(SURFACE_ENTER_START_OPACITY < 1.0);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpacingScale {
@@ -224,6 +250,18 @@ pub const fn operation_mode_colors(state: InteractionState, selected: bool) -> C
 
 pub fn install(context: &Context) {
     context.all_styles_mut(apply_to_style);
+    set_motion_durations(context, MotionDurations::STANDARD);
+}
+
+pub fn motion_durations(context: &Context) -> MotionDurations {
+    context
+        .data(|data| data.get_temp(egui::Id::new(MOTION_POLICY_ID)))
+        .unwrap_or(MotionDurations::STANDARD)
+}
+
+/// Central motion override used when the integration gains a reduced-motion signal and by tests.
+pub fn set_motion_durations(context: &Context, durations: MotionDurations) {
+    context.data_mut(|data| data.insert_temp(egui::Id::new(MOTION_POLICY_ID), durations));
 }
 
 fn apply_to_style(style: &mut Style) {
@@ -335,15 +373,15 @@ mod tests {
         BACKGROUND, BORDER_STRONG, COMPACT_CONTROL_HEIGHT, CONTAINER_RADIUS, CONTROL_RADIUS,
         ControlTone, DANGER_INTERACTIVE, DETAILS_SEPARATOR_GAP, DETAILS_TOP_GAP,
         DIAGNOSTIC_TOP_GAP, DISABLED, FOCUS, FOCUS_OFFSET, FOCUS_STROKE_WIDTH, FOOTER_ACTION_GAP,
-        FOREGROUND, HOVER, InteractionState, MODE_BUTTON_HORIZONTAL_PADDING, PRESSED,
-        PRIMARY_CONTROL_HEIGHT, PRIMARY_HOVER, PRIMARY_PRESSED, PROGRESS, PROGRESS_RADIUS,
+        FOREGROUND, HOVER, InteractionState, MODE_BUTTON_HORIZONTAL_PADDING, MotionDurations,
+        PRESSED, PRIMARY_CONTROL_HEIGHT, PRIMARY_HOVER, PRIMARY_PRESSED, PROGRESS, PROGRESS_RADIUS,
         READY_TRAILING_INSET, RESULT_FOOTER_GAP, RUNNING_FOOTER_GAP, SECONDARY, SECONDARY_FAINT,
         SELECTABLE_ROW_CONTENT_GAP, SELECTABLE_ROW_HORIZONTAL_PADDING,
         SELECTABLE_ROW_INDICATOR_COLUMN, SELECTABLE_ROW_MIN_HEIGHT, SELECTION,
         SELECTION_INDICATOR_SIZE, SEPARATOR, SEPARATOR_WIDTH, SPACING, STATUS_COPY_GAP,
         TOGGLE_SWITCH_HEIGHT, TOGGLE_SWITCH_KNOB_SIZE, TOGGLE_SWITCH_WIDTH,
         TRACK_GAIN_CONTROL_WIDTH, ThemeRole, apply_to_style, control_colors, monochrome_visuals,
-        operation_mode_colors, selectable_colors,
+        motion_durations, operation_mode_colors, selectable_colors, set_motion_durations,
     };
 
     #[test]
@@ -468,6 +506,26 @@ mod tests {
         assert_eq!(disabled_selected.background, BACKGROUND);
         assert_eq!(disabled_selected.foreground, DISABLED);
         assert_eq!(disabled_selected.border, DISABLED);
+    }
+
+    #[test]
+    fn restrained_motion_timings_are_centralized_in_the_requested_ranges() {
+        let durations = MotionDurations::STANDARD;
+
+        assert!((0.10..=0.14).contains(&durations.surface_enter));
+        assert!((0.10..=0.12).contains(&durations.conditional_detail));
+        assert!((0.07..=0.10).contains(&durations.button_hover));
+    }
+
+    #[test]
+    fn motion_policy_can_be_disabled_centrally() {
+        let context = egui::Context::default();
+        set_motion_durations(&context, MotionDurations::DISABLED);
+
+        assert_eq!(motion_durations(&context), MotionDurations::DISABLED);
+        assert_eq!(motion_durations(&context).surface_enter, 0.0);
+        assert_eq!(motion_durations(&context).conditional_detail, 0.0);
+        assert_eq!(motion_durations(&context).button_hover, 0.0);
     }
 
     #[test]

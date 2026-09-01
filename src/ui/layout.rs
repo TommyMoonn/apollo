@@ -192,6 +192,44 @@ pub fn content_gutter<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -
         })
 }
 
+/// Fade a replacement operation surface without moving or resizing its layout.
+pub fn surface_fade<R>(
+    ui: &mut Ui,
+    surface_key: egui::Id,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let owner_id = ui.make_persistent_id("operation-surface-fade");
+    let animation_id = owner_id.with("opacity");
+    let duration = theme::motion_durations(ui.ctx()).surface_enter;
+    let previous_key = ui.ctx().data(|data| data.get_temp::<egui::Id>(owner_id));
+    let changed = previous_key != Some(surface_key);
+
+    if changed {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(owner_id, surface_key));
+    }
+
+    let opacity = if duration <= 0.0 {
+        1.0
+    } else {
+        if changed {
+            let _ = ui.ctx().animate_value_with_time(
+                animation_id,
+                theme::SURFACE_ENTER_START_OPACITY,
+                0.0,
+            );
+        }
+        ui.ctx()
+            .animate_value_with_time(animation_id, 1.0, duration)
+    };
+
+    ui.scope(|ui| {
+        ui.multiply_opacity(opacity);
+        add_contents(ui)
+    })
+    .inner
+}
+
 /// Render a ready operation as one full-width scrolling content region plus a stable bottom action
 /// bar. Normal horizontal padding lives inside the scroll area, keeping the scrollbar lane at the
 /// central content edge and preventing operation-level nested scrolling.
@@ -672,7 +710,7 @@ mod tests {
         TRACK_TEXT_MIN_INLINE_WIDTH, TextOverflowPolicy, TrackRowLayout, WINDOW_CHROME_HEIGHT,
         WORKSPACE_METADATA_MIN_WIDTH, action_group_size, action_layout, bounded_content_width,
         centered_action_group, field_pair_layout, focus_content, intake_content,
-        intake_layout_plan, operation_surface, output_row_plan, track_row_plan,
+        intake_layout_plan, operation_surface, output_row_plan, surface_fade, track_row_plan,
         workspace_header_shows_metadata, workspace_switcher_fits_one_line,
     };
     use crate::ui::theme;
@@ -1311,6 +1349,98 @@ mod tests {
             theme::SELECTABLE_ROW_MIN_HEIGHT
                 + theme::SPACING.compact
                 + theme::COMPACT_CONTROL_HEIGHT
+        );
+    }
+
+    #[test]
+    fn operation_surface_fade_changes_opacity_without_changing_geometry() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut first_rect = egui::Rect::NOTHING;
+        let mut switched_rect = egui::Rect::NOTHING;
+
+        let mut first = context.run_ui(
+            egui::RawInput {
+                time: Some(0.0),
+                ..Default::default()
+            },
+            |ui| {
+                surface_fade(ui, egui::Id::new("audio-mix"), |ui| {
+                    first_rect = ui.label("Operation content").rect;
+                });
+            },
+        );
+        first.textures_delta.clear();
+
+        let mut switched = context.run_ui(
+            egui::RawInput {
+                time: Some(0.2),
+                ..Default::default()
+            },
+            |ui| {
+                surface_fade(ui, egui::Id::new("remux"), |ui| {
+                    switched_rect = ui.label("Operation content").rect;
+                });
+            },
+        );
+        switched.textures_delta.clear();
+
+        assert_eq!(first_rect, switched_rect);
+        assert_eq!(
+            switched.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn settled_or_disabled_surface_fade_does_not_keep_requesting_repaint() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let key = egui::Id::new("audio-mix");
+
+        for time in [0.0, 0.2] {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    surface_fade(ui, key, |ui| ui.label("Operation content"));
+                },
+            );
+            output.textures_delta.clear();
+        }
+        let mut settled = context.run_ui(
+            egui::RawInput {
+                time: Some(0.4),
+                ..Default::default()
+            },
+            |ui| {
+                surface_fade(ui, key, |ui| ui.label("Operation content"));
+            },
+        );
+        settled.textures_delta.clear();
+        assert_eq!(
+            settled.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            std::time::Duration::MAX
+        );
+
+        theme::set_motion_durations(&context, theme::MotionDurations::DISABLED);
+        let mut disabled = context.run_ui(
+            egui::RawInput {
+                time: Some(0.6),
+                ..Default::default()
+            },
+            |ui| {
+                surface_fade(ui, egui::Id::new("remux"), |ui| {
+                    ui.label("Operation content")
+                });
+            },
+        );
+        disabled.textures_delta.clear();
+        assert_eq!(
+            disabled.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            std::time::Duration::MAX
         );
     }
 

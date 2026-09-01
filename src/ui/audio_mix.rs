@@ -302,10 +302,16 @@ pub fn show(
             show_loudness_header(ui, state);
             ui.add_space(theme::SPACING.compact);
             widgets::separator(ui);
-            if state.normalization_enabled() {
-                ui.add_space(theme::SPACING.compact);
-                show_normalization_targets(ui, state);
-            }
+            let normalization_enabled = state.normalization_enabled();
+            let _ = widgets::conditional_fade(
+                ui,
+                "audio-mix-normalization-targets",
+                normalization_enabled,
+                |ui| {
+                    ui.add_space(theme::SPACING.compact);
+                    show_normalization_targets(ui, state);
+                },
+            );
             ui.add_space(theme::SPACING.section);
 
             let _ = widgets::section_label(ui, OUTPUT_LABEL);

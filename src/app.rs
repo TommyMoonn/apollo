@@ -677,11 +677,14 @@ impl ApolloApp {
                 layout::padded_content(ui, |ui| app.show_file_intake(ui));
             }
         };
-        if ready_surface {
-            show_operation(self, ui);
-        } else {
-            layout::padded_content(ui, |ui| show_operation(self, ui));
-        }
+        let surface_key = egui::Id::new((active_operation.label(), media.path.as_path()));
+        layout::surface_fade(ui, surface_key, |ui| {
+            if ready_surface {
+                show_operation(self, ui);
+            } else {
+                layout::padded_content(ui, |ui| show_operation(self, ui));
+            }
+        });
     }
 
     #[cfg(test)]

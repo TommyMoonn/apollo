@@ -46,6 +46,34 @@ struct SelectableRowVisuals {
     indicator_border: Color32,
 }
 
+/// Retain normal detail geometry while opacity settles, then remove it from layout when hidden.
+pub fn conditional_fade<R>(
+    ui: &mut Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    visible: bool,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let duration = theme::motion_durations(ui.ctx()).conditional_detail;
+    let opacity = if duration <= 0.0 {
+        f32::from(visible)
+    } else {
+        ui.ctx()
+            .animate_bool_with_time(ui.make_persistent_id(id_salt), visible, duration)
+    };
+
+    if opacity <= 0.0 {
+        return None;
+    }
+
+    Some(
+        ui.scope(|ui| {
+            ui.multiply_opacity(opacity);
+            add_contents(ui)
+        })
+        .inner,
+    )
+}
+
 #[must_use]
 pub fn primary_button(ui: &mut Ui, label: &str) -> Response {
     primary_button_enabled(ui, label, true)
@@ -740,10 +768,41 @@ fn button_with_horizontal_padding(
         debug_assert_eq!(desired_size.y, height);
         let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
         let state = interaction_state(&response);
-        let colors = if kind.selected {
+        let state_colors = if kind.selected {
             theme::operation_mode_colors(state, true)
         } else {
             theme::control_colors(kind.tone, state)
+        };
+        let idle_colors = if kind.selected {
+            theme::operation_mode_colors(theme::InteractionState::Idle, true)
+        } else {
+            theme::control_colors(kind.tone, theme::InteractionState::Idle)
+        };
+        let hover_colors = if kind.selected {
+            theme::operation_mode_colors(theme::InteractionState::Hovered, true)
+        } else {
+            theme::control_colors(kind.tone, theme::InteractionState::Hovered)
+        };
+        let hover_target = matches!(
+            state,
+            theme::InteractionState::Hovered | theme::InteractionState::Pressed
+        );
+        let hover_progress = if matches!(state, theme::InteractionState::Disabled) {
+            0.0
+        } else {
+            ui.ctx().animate_bool_with_time(
+                response.id.with("hover-shade"),
+                hover_target,
+                theme::motion_durations(ui.ctx()).button_hover,
+            )
+        };
+        let colors = if matches!(
+            state,
+            theme::InteractionState::Pressed | theme::InteractionState::Disabled
+        ) {
+            state_colors
+        } else {
+            lerp_control_colors(idle_colors, hover_colors, hover_progress)
         };
 
         ui.painter().rect_filled(
@@ -776,6 +835,25 @@ fn button_with_horizontal_padding(
         response
     })
     .inner
+}
+
+fn lerp_control_colors(
+    from: theme::ControlColors,
+    to: theme::ControlColors,
+    amount: f32,
+) -> theme::ControlColors {
+    theme::ControlColors {
+        background: lerp_color(from.background, to.background, amount),
+        foreground: lerp_color(from.foreground, to.foreground, amount),
+        border: lerp_color(from.border, to.border, amount),
+    }
+}
+
+fn lerp_color(from: Color32, to: Color32, amount: f32) -> Color32 {
+    let amount = amount.clamp(0.0, 1.0);
+    let from = egui::Rgba::from(from);
+    let to = egui::Rgba::from(to);
+    Color32::from(from * (1.0 - amount) + to * amount)
 }
 
 fn button_intrinsic_size(ui: &Ui, label: &str, compact: bool, horizontal_padding: f32) -> Vec2 {
@@ -916,10 +994,10 @@ mod tests {
 
     use super::{
         BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
-        button_text_style, displayed_progress_fraction, filename_field, inline_status,
-        inline_status_color, inline_status_height, labeled_control, mode_button,
+        button_text_style, conditional_fade, displayed_progress_fraction, filename_field,
+        inline_status, inline_status_color, inline_status_height, labeled_control, mode_button,
         mode_button_intrinsic_size, operation_output_row, plain_button_text_style,
-        primary_button_enabled, progress_bar, progress_rail_color, select_button,
+        primary_button_enabled, progress_bar, progress_rail_color, secondary_button, select_button,
         select_menu_intrinsic_width, select_menu_option, selectable_row, selectable_row_visuals,
         selectable_row_with_accessory, selector_popup_width, show_selector_popup, switch_control,
     };
@@ -965,6 +1043,43 @@ mod tests {
                 .iter()
                 .find_map(|shape| shape_text_color(shape, text)),
             _ => None,
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct RenderedButtonFrame {
+        rect: egui::Rect,
+        fill: egui::Color32,
+        repaint_delay: std::time::Duration,
+    }
+
+    fn pointer_input(time: f64, position: egui::Pos2) -> egui::RawInput {
+        egui::RawInput {
+            time: Some(time),
+            events: vec![egui::Event::PointerMoved(position)],
+            ..Default::default()
+        }
+    }
+
+    fn render_secondary_button(
+        context: &egui::Context,
+        input: egui::RawInput,
+    ) -> RenderedButtonFrame {
+        let mut rect = egui::Rect::NOTHING;
+        let mut output = context.run_ui(input, |ui| {
+            rect = secondary_button(ui, "Browse").rect;
+        });
+        output.textures_delta.clear();
+        let fill = output
+            .shapes
+            .iter()
+            .find_map(|shape| shape_rect_fill(&shape.shape, rect))
+            .expect("shared button fill should be painted");
+
+        RenderedButtonFrame {
+            rect,
+            fill,
+            repaint_delay: output.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
         }
     }
 
@@ -1291,6 +1406,180 @@ mod tests {
             assert!(!response.enabled());
             assert!(!response.clicked());
         });
+    }
+
+    #[test]
+    fn shared_button_hover_interpolates_on_entry_and_exit_without_geometry_change() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let outside = egui::pos2(500.0, 500.0);
+
+        let idle = render_secondary_button(&context, pointer_input(0.0, outside));
+        let inside = idle.rect.center();
+        let entering = render_secondary_button(&context, pointer_input(1.0 / 60.0, inside));
+
+        assert_eq!(idle.rect, entering.rect);
+        assert_ne!(entering.fill, idle.fill);
+        assert_ne!(entering.fill, theme::HOVER);
+        assert_eq!(entering.repaint_delay, std::time::Duration::ZERO);
+
+        let mut hovered = entering;
+        for frame in 2..=7 {
+            hovered =
+                render_secondary_button(&context, pointer_input(f64::from(frame) / 60.0, inside));
+        }
+        assert_eq!(hovered.rect, idle.rect);
+        assert_eq!(hovered.fill, theme::HOVER);
+
+        let exiting = render_secondary_button(&context, pointer_input(8.0 / 60.0, outside));
+        assert_eq!(exiting.rect, idle.rect);
+        assert_ne!(exiting.fill, theme::HOVER);
+        assert_ne!(exiting.fill, idle.fill);
+        assert_eq!(exiting.repaint_delay, std::time::Duration::ZERO);
+
+        let mut settled = exiting;
+        for frame in 9..=15 {
+            settled =
+                render_secondary_button(&context, pointer_input(f64::from(frame) / 60.0, outside));
+        }
+        let mut settled_without_pointer_event = settled;
+        for frame in 16..=18 {
+            settled_without_pointer_event = render_secondary_button(
+                &context,
+                egui::RawInput {
+                    time: Some(f64::from(frame) / 60.0),
+                    ..Default::default()
+                },
+            );
+        }
+
+        assert_eq!(settled.fill, idle.fill);
+        assert_eq!(settled_without_pointer_event.fill, idle.fill);
+        assert_eq!(
+            settled_without_pointer_event.repaint_delay,
+            std::time::Duration::MAX
+        );
+    }
+
+    #[test]
+    fn zero_duration_hover_entry_and_exit_are_immediate() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        theme::set_motion_durations(
+            &context,
+            theme::MotionDurations {
+                button_hover: 0.0,
+                ..theme::MotionDurations::STANDARD
+            },
+        );
+        let outside = egui::pos2(500.0, 500.0);
+
+        let idle = render_secondary_button(&context, pointer_input(0.0, outside));
+        let hovered =
+            render_secondary_button(&context, pointer_input(1.0 / 60.0, idle.rect.center()));
+        let exited = render_secondary_button(&context, pointer_input(2.0 / 60.0, outside));
+
+        assert_eq!(hovered.fill, theme::HOVER);
+        assert_eq!(exited.fill, idle.fill);
+        assert_eq!(idle.rect, hovered.rect);
+        assert_eq!(idle.rect, exited.rect);
+    }
+
+    #[test]
+    fn conditional_detail_fades_out_at_stable_geometry_then_leaves_layout() {
+        let context = egui::Context::default();
+        theme::install(&context);
+        let mut shown_rect = egui::Rect::NOTHING;
+        let mut fading_rect = egui::Rect::NOTHING;
+
+        let mut hidden = context.run_ui(
+            egui::RawInput {
+                time: Some(0.0),
+                ..Default::default()
+            },
+            |ui| {
+                assert!(conditional_fade(ui, "detail", false, |_| ()).is_none());
+            },
+        );
+        hidden.textures_delta.clear();
+
+        for time in [0.1, 0.25] {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = conditional_fade(ui, "detail", true, |ui| {
+                        shown_rect = ui.label("Normalization targets").rect;
+                    });
+                },
+            );
+            output.textures_delta.clear();
+        }
+
+        let mut fading = context.run_ui(
+            egui::RawInput {
+                time: Some(0.3),
+                ..Default::default()
+            },
+            |ui| {
+                let result = conditional_fade(ui, "detail", false, |ui| {
+                    fading_rect = ui.label("Normalization targets").rect;
+                });
+                assert!(result.is_some());
+            },
+        );
+        fading.textures_delta.clear();
+        assert_eq!(shown_rect, fading_rect);
+        assert_eq!(
+            fading.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            std::time::Duration::ZERO
+        );
+
+        for frame in 1..=8 {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    time: Some(0.3 + f64::from(frame) / 60.0),
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = conditional_fade(ui, "detail", false, |_| ());
+                },
+            );
+            output.textures_delta.clear();
+        }
+        let mut settled = context.run_ui(
+            egui::RawInput {
+                time: Some(0.5),
+                ..Default::default()
+            },
+            |ui| {
+                assert!(conditional_fade(ui, "detail", false, |_| ()).is_none());
+            },
+        );
+        settled.textures_delta.clear();
+        assert_eq!(
+            settled.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            std::time::Duration::MAX
+        );
+    }
+
+    #[test]
+    fn disabling_motion_keeps_conditional_detail_functional() {
+        let context = egui::Context::default();
+        theme::set_motion_durations(&context, theme::MotionDurations::DISABLED);
+        let mut render_count = 0;
+
+        let mut output = context.run_ui(Default::default(), |ui| {
+            assert!(conditional_fade(ui, "detail", true, |_| render_count += 1).is_some());
+            assert!(conditional_fade(ui, "other-detail", false, |_| ()).is_none());
+        });
+        output.textures_delta.clear();
+
+        assert_eq!(render_count, 1);
     }
 
     #[test]
