@@ -1,6 +1,6 @@
 use std::{
     io,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
@@ -13,6 +13,7 @@ use crate::file_dialog::{
     DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
     FileDialogStartError, OutputFormat, SaveDialogOptions, WindowOwner,
 };
+use crate::settings::AppSettings;
 
 use apollo::{
     audio_extract::{
@@ -277,7 +278,7 @@ pub(crate) struct ApolloApp {
     frame_capture_executor: FrameCaptureExecutor,
     media_inspection: Option<MediaInspection>,
     file_dialog: FileDialogOwner,
-    native_window_owner: Result<WindowOwner, String>,
+    settings: AppSettings,
     egui_context: Context,
     next_media_tools_attempt_id: u64,
     next_session_id: u64,
@@ -290,6 +291,7 @@ impl ApolloApp {
         theme::install(&creation_context.egui_ctx);
 
         let egui_context = creation_context.egui_ctx.clone();
+        let native_window_owner = WindowOwner::from_window(creation_context);
         let mut app = Self {
             state: AppState::default(),
             media_tools: MediaToolsState::Unavailable(MediaToolsError::DiscoveryFailed(
@@ -302,8 +304,8 @@ impl ApolloApp {
             audio_extract_executor: AudioExtractExecutor::new(),
             frame_capture_executor: FrameCaptureExecutor::new(),
             media_inspection: None,
-            file_dialog: FileDialogOwner::default(),
-            native_window_owner: WindowOwner::from_window(creation_context),
+            file_dialog: FileDialogOwner::new(egui_context.clone(), native_window_owner),
+            settings: AppSettings::load(creation_context.storage),
             egui_context: egui_context.clone(),
             next_media_tools_attempt_id: 0,
             next_session_id: 1,
@@ -333,17 +335,17 @@ impl ApolloApp {
     }
 
     fn workspace_interaction_enabled(&self) -> bool {
-        self.media_inspection.is_none() && !self.file_dialog.is_pending()
+        self.media_inspection.is_none()
     }
 
-    fn handle_source_action(&mut self, action: SourceAction, context: Context) {
+    fn handle_source_action(&mut self, action: SourceAction) {
         if !self.file_intake_enabled() {
             return;
         }
         match action {
-            SourceAction::ChangeFile => {
-                self.start_file_dialog(FileDialogRequest::OpenMedia, context)
-            }
+            SourceAction::ChangeFile => self.start_file_dialog(FileDialogRequest::OpenSource {
+                initial_directory: None,
+            }),
             SourceAction::CloseSource => self.state.close_source(),
         }
     }
@@ -600,11 +602,23 @@ impl ApolloApp {
         };
 
         let workspace_action = layout::workspace_chrome(ui, |ui| {
-            workspace::show(ui, &media, active_operation, self.file_intake_enabled())
+            workspace::show(
+                ui,
+                &media,
+                active_operation,
+                self.media_inspection.is_none()
+                    && file_intake_enabled(
+                        self.audio_mix_executor.state(),
+                        self.upscale_executor.state(),
+                        self.remux_executor.state(),
+                        self.audio_extract_executor.state(),
+                        self.frame_capture_executor.state(),
+                    ),
+            )
         })
         .inner;
         match workspace_action {
-            WorkspaceAction::Source(action) => self.handle_source_action(action, ui.ctx().clone()),
+            WorkspaceAction::Source(action) => self.handle_source_action(action),
             WorkspaceAction::SelectOperation(operation) => self.select_tool(operation),
             WorkspaceAction::None => {}
         }
@@ -694,20 +708,14 @@ impl ApolloApp {
     }
 
     fn show_file_intake(&mut self, ui: &mut Ui) {
-        let action = ui
-            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
-                file_intake::show(
-                    ui,
-                    self.media_inspection.is_some(),
-                    self.state.intake_error.as_ref(),
-                    &mut self.state.intake_error_details_open,
-                )
-            })
-            .inner;
+        let action = file_intake::show(
+            ui,
+            self.media_inspection.is_some(),
+            self.state.intake_error.as_ref(),
+            &mut self.state.intake_error_details_open,
+        );
         match action {
-            FileIntakeAction::OpenFile => {
-                self.handle_source_action(SourceAction::ChangeFile, ui.ctx().clone())
-            }
+            FileIntakeAction::OpenFile => self.handle_source_action(SourceAction::ChangeFile),
             FileIntakeAction::None => {}
         }
     }
@@ -884,7 +892,7 @@ impl ApolloApp {
                 )
             })
             .inner;
-        if let Err(error) = self.handle_audio_mix_action(action, ui.ctx().clone())
+        if let Err(error) = self.handle_audio_mix_action(action)
             && let Some(session) = self.state.audio_mix.as_mut()
         {
             session.start_error = Some(error.user_error());
@@ -924,7 +932,6 @@ impl ApolloApp {
     fn handle_audio_mix_action(
         &mut self,
         action: AudioMixSelectionAction,
-        context: Context,
     ) -> Result<(), AudioMixStartError> {
         if self.file_dialog.is_pending() {
             return Ok(());
@@ -935,7 +942,7 @@ impl ApolloApp {
                     return Ok(());
                 };
                 let request = audio_mix_output_dialog_request(session);
-                self.start_file_dialog(request, context);
+                self.start_file_dialog(request);
             }
             AudioMixSelectionAction::MixRequested => {
                 let Some(session) = self.state.audio_mix.as_ref() else {
@@ -999,7 +1006,7 @@ impl ApolloApp {
                 upscale_ui::show(ui, &upscale.media, &mut upscale.selection)
             })
             .inner;
-        if let Err(error) = self.handle_upscale_action(action, ui.ctx().clone())
+        if let Err(error) = self.handle_upscale_action(action)
             && let Some(session) = self.state.upscale.as_mut()
         {
             session.start_error = Some(error.user_error());
@@ -1039,7 +1046,6 @@ impl ApolloApp {
     fn handle_upscale_action(
         &mut self,
         action: UpscaleSelectionAction,
-        context: Context,
     ) -> Result<(), UpscaleStartError> {
         if self.file_dialog.is_pending() {
             return Ok(());
@@ -1050,7 +1056,7 @@ impl ApolloApp {
                     return Ok(());
                 };
                 let request = upscale_output_dialog_request(session);
-                self.start_file_dialog(request, context);
+                self.start_file_dialog(request);
             }
             UpscaleSelectionAction::UpscaleRequested => {
                 let Some(upscale) = self.state.upscale.as_ref() else {
@@ -1113,7 +1119,7 @@ impl ApolloApp {
                 remux_ui::show(ui, &remux.media, &mut remux.selection)
             })
             .inner;
-        if let Err(error) = self.handle_remux_action(action, ui.ctx().clone())
+        if let Err(error) = self.handle_remux_action(action)
             && let Some(session) = self.state.remux.as_mut()
         {
             session.start_error = Some(error.user_error());
@@ -1150,11 +1156,7 @@ impl ApolloApp {
         true
     }
 
-    fn handle_remux_action(
-        &mut self,
-        action: RemuxSelectionAction,
-        context: Context,
-    ) -> Result<(), RemuxStartError> {
+    fn handle_remux_action(&mut self, action: RemuxSelectionAction) -> Result<(), RemuxStartError> {
         if self.file_dialog.is_pending() {
             return Ok(());
         }
@@ -1163,7 +1165,7 @@ impl ApolloApp {
                 let Some(session) = self.state.remux.as_ref() else {
                     return Ok(());
                 };
-                self.start_file_dialog(remux_output_dialog_request(session), context);
+                self.start_file_dialog(remux_output_dialog_request(session));
             }
             RemuxSelectionAction::RemuxRequested => {
                 let Some(remux) = self.state.remux.as_ref() else {
@@ -1228,7 +1230,7 @@ impl ApolloApp {
                 audio_extract_ui::show(ui, &session.media, &mut session.selection)
             })
             .inner;
-        if let Err(error) = self.handle_audio_extract_action(action, ui.ctx().clone())
+        if let Err(error) = self.handle_audio_extract_action(action)
             && let Some(session) = self.state.audio_extract.as_mut()
         {
             session.start_error = Some(error.user_error());
@@ -1268,7 +1270,6 @@ impl ApolloApp {
     fn handle_audio_extract_action(
         &mut self,
         action: AudioExtractSelectionAction,
-        context: Context,
     ) -> Result<(), AudioExtractStartError> {
         if self.file_dialog.is_pending() {
             return Ok(());
@@ -1278,7 +1279,7 @@ impl ApolloApp {
                 let Some(session) = self.state.audio_extract.as_ref() else {
                     return Ok(());
                 };
-                self.start_file_dialog(audio_extract_output_dialog_request(session), context);
+                self.start_file_dialog(audio_extract_output_dialog_request(session));
             }
             AudioExtractSelectionAction::ExtractRequested => {
                 let Some(session) = self.state.audio_extract.as_ref() else {
@@ -1346,7 +1347,7 @@ impl ApolloApp {
                 frame_capture_ui::show(ui, &session.media, &mut session.selection)
             })
             .inner;
-        if let Err(error) = self.handle_frame_capture_action(action, ui.ctx().clone())
+        if let Err(error) = self.handle_frame_capture_action(action)
             && let Some(session) = self.state.frame_capture.as_mut()
         {
             session.start_error = Some(error.user_error());
@@ -1386,7 +1387,6 @@ impl ApolloApp {
     fn handle_frame_capture_action(
         &mut self,
         action: FrameCaptureSelectionAction,
-        context: Context,
     ) -> Result<(), FrameCaptureStartError> {
         if self.file_dialog.is_pending() {
             return Ok(());
@@ -1396,7 +1396,7 @@ impl ApolloApp {
                 let Some(session) = self.state.frame_capture.as_ref() else {
                     return Ok(());
                 };
-                self.start_file_dialog(frame_capture_output_dialog_request(session), context);
+                self.start_file_dialog(frame_capture_output_dialog_request(session));
             }
             FrameCaptureSelectionAction::CaptureRequested => {
                 let Some(session) = self.state.frame_capture.as_ref() else {
@@ -1424,11 +1424,26 @@ impl ApolloApp {
         }
     }
 
-    fn start_file_dialog(&mut self, request: FileDialogRequest, context: Context) {
+    fn prepare_file_dialog_request(&self, mut request: FileDialogRequest) -> FileDialogRequest {
+        match &mut request {
+            FileDialogRequest::OpenSource { initial_directory } => {
+                *initial_directory = self.settings.source_directory();
+            }
+            FileDialogRequest::SaveOutput { options, .. } => {
+                let source_fallback = options
+                    .initial_directory
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("."));
+                options.initial_directory = self.settings.output_directory(&source_fallback);
+            }
+        }
+        request
+    }
+
+    fn start_file_dialog(&mut self, request: FileDialogRequest) {
+        let request = self.prepare_file_dialog_request(request);
         let target = request.target();
-        if let Err(error) =
-            self.file_dialog
-                .request(request, context, self.native_window_owner.clone())
+        if let Err(error) = self.file_dialog.request(request)
             && !matches!(error, FileDialogStartError::AlreadyPending)
         {
             self.settle_file_dialog(FileDialogCompletion {
@@ -1445,6 +1460,12 @@ impl ApolloApp {
     }
 
     fn settle_file_dialog(&mut self, completion: FileDialogCompletion) {
+        if let DialogOutcome::Selected(path) = &completion.outcome {
+            match completion.target {
+                DialogTarget::MediaInput => self.settings.remember_source(path),
+                _ => self.settings.remember_output(path),
+            }
+        }
         match (completion.target, completion.outcome) {
             (_, DialogOutcome::Cancelled) => {}
             (DialogTarget::MediaInput, DialogOutcome::Selected(path)) => {
@@ -1622,7 +1643,7 @@ fn save_dialog_options(output: &Path, format: OutputFormat) -> SaveDialogOptions
         .to_path_buf();
     let file_name = output.file_name().unwrap_or_default().to_os_string();
     SaveDialogOptions {
-        initial_directory,
+        initial_directory: Some(initial_directory),
         file_name,
         format,
     }
@@ -1775,6 +1796,10 @@ impl eframe::App for ApolloApp {
                 self.show_navigation(ui);
             });
     }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.settings.save(storage);
+    }
 }
 
 #[cfg(test)]
@@ -1791,7 +1816,7 @@ mod tests {
     };
 
     use super::{
-        ApolloApp, AppState, MediaInspection, MediaToolsState, NavigationState, Tool,
+        ApolloApp, AppSettings, AppState, MediaInspection, MediaToolsState, NavigationState, Tool,
         ToolExecutionStates, audio_extract_output_dialog_request, audio_mix_output_dialog_request,
         file_intake_enabled, frame_capture_output_dialog_request, remux_output_dialog_request,
         settle_output_file_dialog, shows_audio_extract_lifecycle, shows_audio_mix_lifecycle,
@@ -1799,7 +1824,7 @@ mod tests {
     };
     use crate::file_dialog::{
         DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
-        FileDialogStartError, OutputFormat, WindowOwner,
+        FileDialogStartError, OutputFormat,
     };
     use apollo::{
         audio_extract::{execution::AudioExtractExecutionState, model::AudioExtractFormat},
@@ -1908,8 +1933,10 @@ mod tests {
             audio_extract_executor: apollo::audio_extract::execution::AudioExtractExecutor::new(),
             frame_capture_executor: apollo::frame_capture::execution::FrameCaptureExecutor::new(),
             media_inspection: None,
-            file_dialog: FileDialogOwner::default(),
-            native_window_owner: Ok(WindowOwner::test_value()),
+            file_dialog: FileDialogOwner::new_for_test(egui_context.clone(), || {
+                Ok(|_: &FileDialogRequest| Ok(None))
+            }),
+            settings: AppSettings::default(),
             egui_context,
             next_media_tools_attempt_id: 0,
             next_session_id: 1,
@@ -2502,7 +2529,7 @@ mod tests {
             app.select_tool(operation);
         }
 
-        app.handle_source_action(SourceAction::CloseSource, egui::Context::default());
+        app.handle_source_action(SourceAction::CloseSource);
 
         assert_no_source(&app.state);
         assert!(app.state.audio_mix.is_none());
@@ -2939,7 +2966,7 @@ mod tests {
                 session_id: session.session_id,
             }
         );
-        assert_eq!(options.initial_directory, directory);
+        assert_eq!(options.initial_directory, Some(directory.clone()));
         assert_eq!(options.file_name, "recording-mixed.mp4");
         assert_eq!(options.format, OutputFormat::Mp4);
 
@@ -2977,7 +3004,7 @@ mod tests {
                 session_id: session.session_id,
             }
         );
-        assert_eq!(options.initial_directory, directory);
+        assert_eq!(options.initial_directory, Some(directory.clone()));
         assert_eq!(options.file_name, "recording-remuxed.mkv");
         assert_eq!(options.format, OutputFormat::Mkv);
 
@@ -3012,7 +3039,7 @@ mod tests {
                 session_id: session.session_id,
             }
         );
-        assert_eq!(options.initial_directory, directory);
+        assert_eq!(options.initial_directory, Some(directory.clone()));
         assert_eq!(options.file_name, "recording-audio.mka");
         assert_eq!(options.format, OutputFormat::Mka);
 
@@ -3060,7 +3087,7 @@ mod tests {
                 session_id: session.session_id,
             }
         );
-        assert_eq!(options.initial_directory, directory);
+        assert_eq!(options.initial_directory, Some(directory.clone()));
         assert_eq!(options.file_name, "recording-frame-00-00-00-000.png");
         assert_eq!(options.format, OutputFormat::Png);
 
@@ -3073,6 +3100,87 @@ mod tests {
         };
         assert_eq!(options.file_name, "recording-frame-00-00-00-000.jpg");
         assert_eq!(options.format, OutputFormat::Jpeg);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn dialog_requests_prefer_independent_remembered_directories() {
+        let (source_directory, source_path) = temp_file("remember-source");
+        let output_directory = source_directory.join("remembered-output");
+        fs::create_dir_all(&output_directory).unwrap();
+        let mut app = app();
+        app.settings
+            .remember_source(&source_directory.join("previous-source.mp4"));
+        app.settings
+            .remember_output(&output_directory.join("previous-output.mkv"));
+
+        let open = app.prepare_file_dialog_request(FileDialogRequest::OpenSource {
+            initial_directory: None,
+        });
+        assert_eq!(
+            open,
+            FileDialogRequest::OpenSource {
+                initial_directory: Some(source_directory.clone()),
+            }
+        );
+
+        app.load_media_path_with_probe(&source_path, |path| Ok(media(path)));
+        let save = app.prepare_file_dialog_request(audio_mix_output_dialog_request(
+            app.state.audio_mix.as_ref().unwrap(),
+        ));
+        let FileDialogRequest::SaveOutput { options, .. } = save else {
+            unreachable!();
+        };
+        assert_eq!(options.initial_directory, Some(output_directory));
+        fs::remove_dir_all(source_directory).unwrap();
+    }
+
+    #[test]
+    fn dialog_cancel_does_not_change_directory_memory() {
+        let (directory, path) = temp_file("remember-cancel");
+        let mut app = app();
+        app.settings.remember_source(&path);
+        app.settings
+            .remember_output(&directory.join("existing.mkv"));
+        let before = app.settings.clone();
+
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::MediaInput,
+            outcome: DialogOutcome::Cancelled,
+        });
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::AudioMixOutput { session_id: 1 },
+            outcome: DialogOutcome::Cancelled,
+        });
+
+        assert_eq!(app.settings, before);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn successful_dialog_selections_update_only_their_directory_history() {
+        let (directory, source_path) = temp_file("remember-success");
+        let output_directory = directory.join("output");
+        fs::create_dir_all(&output_directory).unwrap();
+        let mut app = app();
+        app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
+
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::MediaInput,
+            outcome: DialogOutcome::Selected(source_path),
+        });
+        assert_eq!(app.settings.source_directory(), Some(directory.clone()));
+        assert_eq!(app.settings.output_directory(Path::new("missing")), None);
+
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::AudioMixOutput { session_id: 999 },
+            outcome: DialogOutcome::Selected(output_directory.join("chosen.mkv")),
+        });
+        assert_eq!(app.settings.source_directory(), Some(directory.clone()));
+        assert_eq!(
+            app.settings.output_directory(Path::new("missing")),
+            Some(output_directory)
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -3291,25 +3399,28 @@ mod tests {
         let mut app = app();
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
         let (release_sender, release_receiver) = mpsc::channel();
+        let mut release_receiver = Some(release_receiver);
+        app.file_dialog = FileDialogOwner::new_for_test(egui::Context::default(), move || {
+            Ok(move |_: &FileDialogRequest| {
+                if let Some(receiver) = release_receiver.take() {
+                    receiver.recv().unwrap();
+                }
+                Ok(None)
+            })
+        });
         app.file_dialog
-            .request_for_test(
-                FileDialogRequest::OpenMedia,
-                egui::Context::default(),
-                move |_| {
-                    release_receiver.recv().unwrap();
-                    Ok(None)
-                },
-            )
+            .request(FileDialogRequest::OpenSource {
+                initial_directory: None,
+            })
             .unwrap();
 
         assert!(!app.file_intake_enabled());
+        assert!(app.workspace_interaction_enabled());
         assert_workspace(&app.state, Tool::AudioMix);
         assert_eq!(
-            app.file_dialog.request(
-                FileDialogRequest::OpenMedia,
-                egui::Context::default(),
-                Ok(WindowOwner::test_value()),
-            ),
+            app.file_dialog.request(FileDialogRequest::OpenSource {
+                initial_directory: None,
+            }),
             Err(FileDialogStartError::AlreadyPending)
         );
 
@@ -3610,10 +3721,7 @@ mod tests {
         app.select_tool(Tool::VideoUpscale);
 
         let error = app
-            .handle_upscale_action(
-                UpscaleSelectionAction::UpscaleRequested,
-                egui::Context::default(),
-            )
+            .handle_upscale_action(UpscaleSelectionAction::UpscaleRequested)
             .expect_err("missing test FFmpeg should prove the execution path was attempted");
 
         assert!(matches!(
@@ -3635,10 +3743,7 @@ mod tests {
         app.select_tool(Tool::Remux);
 
         let error = app
-            .handle_remux_action(
-                RemuxSelectionAction::RemuxRequested,
-                egui::Context::default(),
-            )
+            .handle_remux_action(RemuxSelectionAction::RemuxRequested)
             .expect_err("missing test FFmpeg should prove the execution path was attempted");
 
         assert!(matches!(
@@ -3660,10 +3765,7 @@ mod tests {
         app.select_tool(Tool::AudioExtract);
 
         let error = app
-            .handle_audio_extract_action(
-                AudioExtractSelectionAction::ExtractRequested,
-                egui::Context::default(),
-            )
+            .handle_audio_extract_action(AudioExtractSelectionAction::ExtractRequested)
             .expect_err("missing test FFmpeg should prove the execution path was attempted");
         assert!(matches!(
             error,
@@ -3684,10 +3786,7 @@ mod tests {
         app.select_tool(Tool::FrameCapture);
 
         let error = app
-            .handle_frame_capture_action(
-                FrameCaptureSelectionAction::CaptureRequested,
-                egui::Context::default(),
-            )
+            .handle_frame_capture_action(FrameCaptureSelectionAction::CaptureRequested)
             .expect_err("missing test FFmpeg should prove the execution path was attempted");
         assert!(matches!(
             error,

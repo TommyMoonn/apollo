@@ -2,6 +2,7 @@
 
 mod app;
 mod file_dialog;
+mod settings;
 use apollo::ui::layout;
 use app::ApolloApp;
 

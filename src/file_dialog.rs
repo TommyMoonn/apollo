@@ -2,7 +2,7 @@ use std::{
     ffi::OsString,
     fmt,
     path::PathBuf,
-    sync::mpsc::{self, Receiver, TryRecvError},
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     thread,
 };
 
@@ -39,14 +39,6 @@ impl WindowOwner {
                 hwnd: handle.hwnd.get(),
             }),
             _ => Err("Apollo's native window handle is unavailable on this platform.".to_owned()),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_value() -> Self {
-        Self {
-            #[cfg(target_os = "windows")]
-            hwnd: 1,
         }
     }
 }
@@ -102,14 +94,16 @@ impl OutputFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SaveDialogOptions {
-    pub(crate) initial_directory: PathBuf,
+    pub(crate) initial_directory: Option<PathBuf>,
     pub(crate) file_name: OsString,
     pub(crate) format: OutputFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileDialogRequest {
-    OpenMedia,
+    OpenSource {
+        initial_directory: Option<PathBuf>,
+    },
     SaveOutput {
         target: DialogTarget,
         options: SaveDialogOptions,
@@ -119,7 +113,7 @@ pub(crate) enum FileDialogRequest {
 impl FileDialogRequest {
     pub(crate) fn target(&self) -> DialogTarget {
         match self {
-            Self::OpenMedia => DialogTarget::MediaInput,
+            Self::OpenSource { .. } => DialogTarget::MediaInput,
             Self::SaveOutput { target, .. } => *target,
         }
     }
@@ -155,93 +149,106 @@ impl fmt::Display for FileDialogStartError {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct FileDialogOwner {
-    pending: Option<PendingDialog>,
-}
-
-struct PendingDialog {
-    target: DialogTarget,
-    receiver: Receiver<FileDialogCompletion>,
+    request_sender: Option<SyncSender<FileDialogRequest>>,
+    completion_receiver: Receiver<FileDialogCompletion>,
+    pending_target: Option<DialogTarget>,
+    unavailable: Option<FileDialogStartError>,
 }
 
 impl FileDialogOwner {
-    pub(crate) fn request(
-        &mut self,
-        request: FileDialogRequest,
-        context: Context,
-        owner: Result<WindowOwner, String>,
-    ) -> Result<(), FileDialogStartError> {
-        if self.pending.is_some() {
-            return Err(FileDialogStartError::AlreadyPending);
+    pub(crate) fn new(context: Context, owner: Result<WindowOwner, String>) -> Self {
+        match owner {
+            Ok(owner) => Self::spawn(context, move || native_dialog_runner(owner)),
+            Err(error) => Self::unavailable(FileDialogStartError::WindowOwnerUnavailable(error)),
         }
-        let owner = owner.map_err(FileDialogStartError::WindowOwnerUnavailable)?;
-        self.request_with(request, context, move |request| {
-            run_native_dialog(request, owner)
-        })
     }
 
-    fn request_with<F>(
-        &mut self,
-        request: FileDialogRequest,
-        context: Context,
-        runner: F,
-    ) -> Result<(), FileDialogStartError>
+    fn spawn<F, R>(context: Context, runner_factory: F) -> Self
     where
-        F: FnOnce(&FileDialogRequest) -> Result<Option<PathBuf>, String> + Send + 'static,
+        F: FnOnce() -> Result<R, String> + Send + 'static,
+        R: DialogBackend + Send + 'static,
     {
-        if self.pending.is_some() {
-            return Err(FileDialogStartError::AlreadyPending);
-        }
-
-        let target = request.target();
-        let (sender, receiver) = mpsc::sync_channel(1);
-        thread::Builder::new()
+        let (request_sender, request_receiver) = mpsc::sync_channel(1);
+        let (completion_sender, completion_receiver) = mpsc::sync_channel(1);
+        match thread::Builder::new()
             .name("apollo-file-dialog".to_owned())
             .spawn(move || {
-                let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    runner(&request)
-                })) {
-                    Ok(Ok(Some(path))) => DialogOutcome::Selected(path),
-                    Ok(Ok(None)) => DialogOutcome::Cancelled,
-                    Ok(Err(error)) => DialogOutcome::Failed(error),
-                    Err(_) => DialogOutcome::Failed(
-                        "The native file dialog stopped unexpectedly.".to_owned(),
-                    ),
-                };
-                let _ = sender.send(FileDialogCompletion { target, outcome });
-                context.request_repaint();
-            })
-            .map_err(|error| FileDialogStartError::WorkerUnavailable(error.to_string()))?;
-
-        self.pending = Some(PendingDialog { target, receiver });
-        Ok(())
+                run_dialog_service(request_receiver, completion_sender, context, runner_factory);
+            }) {
+            Ok(_) => Self {
+                request_sender: Some(request_sender),
+                completion_receiver,
+                pending_target: None,
+                unavailable: None,
+            },
+            Err(error) => Self {
+                request_sender: None,
+                completion_receiver,
+                pending_target: None,
+                unavailable: Some(FileDialogStartError::WorkerUnavailable(error.to_string())),
+            },
+        }
     }
 
     #[cfg(test)]
-    pub(crate) fn request_for_test<F>(
+    pub(crate) fn new_for_test<F, R>(context: Context, runner_factory: F) -> Self
+    where
+        F: FnOnce() -> Result<R, String> + Send + 'static,
+        R: DialogBackend + Send + 'static,
+    {
+        Self::spawn(context, runner_factory)
+    }
+
+    fn unavailable(error: FileDialogStartError) -> Self {
+        let (_, completion_receiver) = mpsc::sync_channel(1);
+        Self {
+            request_sender: None,
+            completion_receiver,
+            pending_target: None,
+            unavailable: Some(error),
+        }
+    }
+
+    pub(crate) fn request(
         &mut self,
         request: FileDialogRequest,
-        context: Context,
-        runner: F,
-    ) -> Result<(), FileDialogStartError>
-    where
-        F: FnOnce(&FileDialogRequest) -> Result<Option<PathBuf>, String> + Send + 'static,
-    {
-        self.request_with(request, context, runner)
+    ) -> Result<(), FileDialogStartError> {
+        if self.pending_target.is_some() {
+            return Err(FileDialogStartError::AlreadyPending);
+        }
+        if let Some(error) = self.unavailable.clone() {
+            return Err(error);
+        }
+
+        let target = request.target();
+        let Some(sender) = self.request_sender.as_ref() else {
+            return Err(FileDialogStartError::WorkerUnavailable(
+                "The native file dialog service is unavailable.".to_owned(),
+            ));
+        };
+        match sender.try_send(request) {
+            Ok(()) => {
+                self.pending_target = Some(target);
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => Err(FileDialogStartError::AlreadyPending),
+            Err(TrySendError::Disconnected(_)) => Err(FileDialogStartError::WorkerUnavailable(
+                "The native file dialog service disconnected.".to_owned(),
+            )),
+        }
     }
 
     pub(crate) fn poll(&mut self) -> Option<FileDialogCompletion> {
-        let pending = self.pending.as_ref()?;
-        let target = pending.target;
-        match pending.receiver.try_recv() {
+        let target = self.pending_target?;
+        match self.completion_receiver.try_recv() {
             Ok(completion) => {
-                self.pending = None;
+                self.pending_target = None;
                 Some(completion)
             }
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => {
-                self.pending = None;
+                self.pending_target = None;
                 Some(FileDialogCompletion {
                     target,
                     outcome: DialogOutcome::Failed(
@@ -253,23 +260,81 @@ impl FileDialogOwner {
     }
 
     pub(crate) fn is_pending(&self) -> bool {
-        self.pending.is_some()
+        self.pending_target.is_some()
+    }
+}
+
+fn run_dialog_service<F, R>(
+    request_receiver: Receiver<FileDialogRequest>,
+    completion_sender: SyncSender<FileDialogCompletion>,
+    context: Context,
+    runner_factory: F,
+) where
+    F: FnOnce() -> Result<R, String>,
+    R: DialogBackend,
+{
+    let mut runner = runner_factory();
+    while let Ok(request) = request_receiver.recv() {
+        let target = request.target();
+        let outcome = match runner.as_mut() {
+            Ok(runner) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runner.run(&request)
+                })) {
+                    Ok(Ok(Some(path))) => DialogOutcome::Selected(path),
+                    Ok(Ok(None)) => DialogOutcome::Cancelled,
+                    Ok(Err(error)) => DialogOutcome::Failed(error),
+                    Err(_) => DialogOutcome::Failed(
+                        "The native file dialog stopped unexpectedly.".to_owned(),
+                    ),
+                }
+            }
+            Err(error) => DialogOutcome::Failed(error.clone()),
+        };
+        if completion_sender
+            .send(FileDialogCompletion { target, outcome })
+            .is_err()
+        {
+            break;
+        }
+        context.request_repaint();
+    }
+}
+
+pub(crate) trait DialogBackend {
+    fn run(&mut self, request: &FileDialogRequest) -> Result<Option<PathBuf>, String>;
+}
+
+impl<F> DialogBackend for F
+where
+    F: FnMut(&FileDialogRequest) -> Result<Option<PathBuf>, String>,
+{
+    fn run(&mut self, request: &FileDialogRequest) -> Result<Option<PathBuf>, String> {
+        self(request)
     }
 }
 
 #[cfg(target_os = "windows")]
-fn run_native_dialog(
-    request: &FileDialogRequest,
-    owner: WindowOwner,
-) -> Result<Option<PathBuf>, String> {
-    native_windows::run(request, owner).map_err(|error| error.to_string())
+struct NativeDialogBackend(native_windows::DialogSession);
+
+#[cfg(target_os = "windows")]
+impl DialogBackend for NativeDialogBackend {
+    fn run(&mut self, request: &FileDialogRequest) -> Result<Option<PathBuf>, String> {
+        self.0.run(request).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn native_dialog_runner(owner: WindowOwner) -> Result<NativeDialogBackend, String> {
+    native_windows::DialogSession::new(owner)
+        .map(NativeDialogBackend)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn run_native_dialog(
-    _request: &FileDialogRequest,
+fn native_dialog_runner(
     _owner: WindowOwner,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<fn(&FileDialogRequest) -> Result<Option<PathBuf>, String>, String> {
     Err("Native file dialogs are currently available on Windows.".to_owned())
 }
 
@@ -314,15 +379,33 @@ mod native_windows {
         }
     }
 
-    pub(super) fn run(request: &FileDialogRequest, owner: WindowOwner) -> Result<Option<PathBuf>> {
-        let _apartment = ComApartment::initialize()?;
-        match request {
-            FileDialogRequest::OpenMedia => open_media(owner),
-            FileDialogRequest::SaveOutput { options, .. } => save_output(options, owner),
+    pub(super) struct DialogSession {
+        _apartment: ComApartment,
+        owner: WindowOwner,
+    }
+
+    impl DialogSession {
+        pub(super) fn new(owner: WindowOwner) -> Result<Self> {
+            Ok(Self {
+                _apartment: ComApartment::initialize()?,
+                owner,
+            })
+        }
+
+        pub(super) fn run(&mut self, request: &FileDialogRequest) -> Result<Option<PathBuf>> {
+            match request {
+                FileDialogRequest::OpenSource { initial_directory } => {
+                    open_source(initial_directory.as_deref(), self.owner)
+                }
+                FileDialogRequest::SaveOutput { options, .. } => save_output(options, self.owner),
+            }
         }
     }
 
-    fn open_media(owner: WindowOwner) -> Result<Option<PathBuf>> {
+    fn open_source(
+        initial_directory: Option<&std::path::Path>,
+        owner: WindowOwner,
+    ) -> Result<Option<PathBuf>> {
         let dialog: IFileDialog =
             unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)? };
         unsafe {
@@ -335,6 +418,7 @@ mod native_windows {
                     (ALL_FILES_FILTER_NAME, ALL_FILES_FILTER_PATTERN),
                 ],
             )?;
+            set_initial_folder_if_available(&dialog, initial_directory);
         }
         show(dialog, owner)
     }
@@ -365,11 +449,23 @@ mod native_windows {
             dialog.SetDefaultExtension(&HSTRING::from(options.format.extension()))?;
             dialog.SetFileName(&HSTRING::from(options.file_name.as_os_str()))?;
 
-            let location = HSTRING::from(options.initial_directory.as_os_str());
-            let folder: IShellItem = SHCreateItemFromParsingName(&location, None)?;
-            dialog.SetFolder(&folder)?;
+            set_initial_folder_if_available(&dialog, options.initial_directory.as_deref());
         }
         show(dialog, owner)
+    }
+
+    unsafe fn set_initial_folder_if_available(
+        dialog: &IFileDialog,
+        directory: Option<&std::path::Path>,
+    ) {
+        let Some(directory) = directory else {
+            return;
+        };
+        let location = HSTRING::from(directory.as_os_str());
+        let folder: Result<IShellItem> = unsafe { SHCreateItemFromParsingName(&location, None) };
+        if let Ok(folder) = folder {
+            let _ = unsafe { dialog.SetFolder(&folder) };
+        }
     }
 
     unsafe fn set_filters(dialog: &IFileDialog, filters: &[(&str, &str)]) -> Result<()> {
@@ -415,28 +511,40 @@ mod native_windows {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::mpsc, time::Duration};
+    use std::{
+        collections::VecDeque,
+        path::PathBuf,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
+        thread::ThreadId,
+        time::Duration,
+    };
 
     use super::{
         DialogOutcome, DialogTarget, FileDialogOwner, FileDialogRequest, FileDialogStartError,
         OutputFormat, SaveDialogOptions,
     };
 
+    fn open_request() -> FileDialogRequest {
+        FileDialogRequest::OpenSource {
+            initial_directory: Some(PathBuf::from(r"C:\media")),
+        }
+    }
+
     #[test]
     fn open_request_routes_selected_path_through_owner() {
         let expected = PathBuf::from(r"C:\media\clip.mp4");
         let selected = expected.clone();
-        let mut owner = FileDialogOwner::default();
-        owner
-            .request_with(
-                FileDialogRequest::OpenMedia,
-                egui::Context::default(),
-                move |request| {
-                    assert_eq!(request, &FileDialogRequest::OpenMedia);
-                    Ok(Some(selected))
-                },
-            )
-            .unwrap();
+        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), move || {
+            Ok(move |request: &FileDialogRequest| {
+                assert_eq!(request, &open_request());
+                Ok(Some(selected.clone()))
+            })
+        });
+        owner.request(open_request()).unwrap();
 
         let completion = wait_for_completion(&mut owner);
         assert_eq!(completion.target, DialogTarget::MediaInput);
@@ -445,14 +553,10 @@ mod tests {
 
     #[test]
     fn cancellation_is_not_a_failure() {
-        let mut owner = FileDialogOwner::default();
-        owner
-            .request_with(
-                FileDialogRequest::OpenMedia,
-                egui::Context::default(),
-                |_| Ok(None),
-            )
-            .unwrap();
+        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), || {
+            Ok(|_: &FileDialogRequest| Ok(None))
+        });
+        owner.request(open_request()).unwrap();
 
         assert_eq!(
             wait_for_completion(&mut owner).outcome,
@@ -465,15 +569,14 @@ mod tests {
         let request = FileDialogRequest::SaveOutput {
             target: DialogTarget::AudioMixOutput { session_id: 7 },
             options: SaveDialogOptions {
-                initial_directory: PathBuf::from(r"C:\media"),
+                initial_directory: Some(PathBuf::from(r"C:\media")),
                 file_name: "clip-mixed.mkv".into(),
                 format: OutputFormat::Mkv,
             },
         };
         let expected = request.clone();
-        let mut owner = FileDialogOwner::default();
-        owner
-            .request_with(request, egui::Context::default(), move |actual| {
+        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), move || {
+            Ok(move |actual: &FileDialogRequest| {
                 assert_eq!(actual, &expected);
                 let FileDialogRequest::SaveOutput { options, .. } = actual else {
                     unreachable!();
@@ -483,7 +586,8 @@ mod tests {
                 assert_eq!(options.format.filter_pattern(), "*.mkv");
                 Ok(None)
             })
-            .unwrap();
+        });
+        owner.request(request).unwrap();
 
         assert_eq!(
             wait_for_completion(&mut owner).outcome,
@@ -519,25 +623,20 @@ mod tests {
     #[test]
     fn owner_rejects_a_second_pending_request() {
         let (release_sender, release_receiver) = mpsc::channel();
-        let mut owner = FileDialogOwner::default();
-        owner
-            .request_with(
-                FileDialogRequest::OpenMedia,
-                egui::Context::default(),
-                move |_| {
-                    release_receiver.recv().unwrap();
-                    Ok(None)
-                },
-            )
-            .unwrap();
+        let mut release_receiver = Some(release_receiver);
+        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), move || {
+            Ok(move |_: &FileDialogRequest| {
+                if let Some(receiver) = release_receiver.take() {
+                    receiver.recv().unwrap();
+                }
+                Ok(None)
+            })
+        });
+        owner.request(open_request()).unwrap();
 
         assert!(owner.is_pending());
         assert_eq!(
-            owner.request_with(
-                FileDialogRequest::OpenMedia,
-                egui::Context::default(),
-                |_| Ok(None)
-            ),
+            owner.request(open_request()),
             Err(FileDialogStartError::AlreadyPending)
         );
         release_sender.send(()).unwrap();
@@ -546,19 +645,71 @@ mod tests {
 
     #[test]
     fn backend_failure_remains_distinct_from_cancellation() {
-        let mut owner = FileDialogOwner::default();
-        owner
-            .request_with(
-                FileDialogRequest::OpenMedia,
-                egui::Context::default(),
-                |_| Err("native dialog diagnostic".to_owned()),
-            )
-            .unwrap();
+        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), || {
+            Ok(|_: &FileDialogRequest| Err("native dialog diagnostic".to_owned()))
+        });
+        owner.request(open_request()).unwrap();
 
         assert_eq!(
             wait_for_completion(&mut owner).outcome,
             DialogOutcome::Failed("native dialog diagnostic".to_owned())
         );
+    }
+
+    #[test]
+    fn repeated_requests_reuse_one_initialized_service_thread() {
+        let initialization_count = Arc::new(AtomicUsize::new(0));
+        let thread_ids = Arc::new(Mutex::new(Vec::<ThreadId>::new()));
+        let results = VecDeque::from([
+            Some(PathBuf::from(r"C:\media\first.mp4")),
+            Some(PathBuf::from(r"C:\output\second.mkv")),
+        ]);
+        let mut results = results;
+        let initialized = Arc::clone(&initialization_count);
+        let observed_threads = Arc::clone(&thread_ids);
+        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), move || {
+            initialized.fetch_add(1, Ordering::SeqCst);
+            Ok(move |_: &FileDialogRequest| {
+                observed_threads
+                    .lock()
+                    .unwrap()
+                    .push(std::thread::current().id());
+                Ok(results.pop_front().unwrap())
+            })
+        });
+
+        owner.request(open_request()).unwrap();
+        assert!(matches!(
+            wait_for_completion(&mut owner).outcome,
+            DialogOutcome::Selected(_)
+        ));
+        owner.request(open_request()).unwrap();
+        assert!(matches!(
+            wait_for_completion(&mut owner).outcome,
+            DialogOutcome::Selected(_)
+        ));
+
+        let thread_ids = thread_ids.lock().unwrap();
+        assert_eq!(initialization_count.load(Ordering::SeqCst), 1);
+        assert_eq!(thread_ids.len(), 2);
+        assert_eq!(thread_ids[0], thread_ids[1]);
+    }
+
+    #[test]
+    fn completion_requests_egui_repaint() {
+        let context = egui::Context::default();
+        let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
+        context.set_request_repaint_callback(move |_| {
+            let _ = repaint_sender.try_send(());
+        });
+        let mut owner =
+            FileDialogOwner::new_for_test(context, || Ok(|_: &FileDialogRequest| Ok(None)));
+
+        owner.request(open_request()).unwrap();
+        let _ = wait_for_completion(&mut owner);
+        repaint_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("dialog completion should wake egui");
     }
 
     fn wait_for_completion(owner: &mut FileDialogOwner) -> super::FileDialogCompletion {
