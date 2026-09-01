@@ -7,7 +7,6 @@ use std::{
         mpsc::{self, Receiver, TryRecvError},
     },
     thread,
-    time::Duration,
 };
 
 use egui::{CentralPanel, Context, Ui};
@@ -16,6 +15,7 @@ use crate::file_dialog::{
     DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
     FileDialogStartError, OutputFormat, SaveDialogOptions, WindowOwner,
 };
+use crate::progress_repaint::MediaProgressRepaintOwner;
 use crate::settings::AppSettings;
 
 use apollo::{
@@ -63,10 +63,6 @@ use apollo::{
     },
     upscale::execution::{UpscaleExecutionState, UpscaleExecutor, UpscaleStartError},
 };
-
-// One-shot workers wake egui when they publish. This schedule is reserved for visibly changing
-// running-operation progress.
-const EXECUTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
 fn file_intake_enabled(
     audio_state: &AudioMixExecutionState,
@@ -284,6 +280,7 @@ pub(crate) struct ApolloApp {
     remux_executor: RemuxExecutor,
     audio_extract_executor: AudioExtractExecutor,
     frame_capture_executor: FrameCaptureExecutor,
+    progress_repaint: MediaProgressRepaintOwner,
     media_inspection: Option<MediaInspection>,
     file_dialog: FileDialogOwner,
     settings: AppSettings,
@@ -311,6 +308,7 @@ impl ApolloApp {
             remux_executor: RemuxExecutor::new(),
             audio_extract_executor: AudioExtractExecutor::new(),
             frame_capture_executor: FrameCaptureExecutor::new(),
+            progress_repaint: MediaProgressRepaintOwner::new(egui_context.clone()),
             media_inspection: None,
             file_dialog: FileDialogOwner::new(egui_context.clone(), native_window_owner),
             settings: AppSettings::load(creation_context.storage),
@@ -886,9 +884,6 @@ impl ApolloApp {
                     &mut session.lifecycle_ui,
                 )
             };
-            if self.audio_mix_executor.is_running() {
-                ui.ctx().request_repaint_after(EXECUTION_REPAINT_INTERVAL);
-            }
             self.handle_audio_mix_lifecycle_action(action);
             return;
         }
@@ -978,8 +973,9 @@ impl ApolloApp {
                     return Ok(());
                 };
                 let request = session.selection.request(&session.media);
+                let wake = self.progress_repaint.begin();
                 self.audio_mix_executor
-                    .start(&tools, &session.media, &request)?;
+                    .start_with_wake(&tools, &session.media, &request, wake)?;
             }
             AudioMixSelectionAction::None => {}
         }
@@ -1011,9 +1007,6 @@ impl ApolloApp {
                     &mut upscale.lifecycle_ui,
                 )
             };
-            if self.upscale_executor.is_running() {
-                ui.ctx().request_repaint_after(EXECUTION_REPAINT_INTERVAL);
-            }
             self.handle_upscale_lifecycle_action(action);
             return;
         }
@@ -1092,8 +1085,9 @@ impl ApolloApp {
                     return Ok(());
                 };
                 let request = upscale.selection.request(&upscale.media);
+                let wake = self.progress_repaint.begin();
                 self.upscale_executor
-                    .start(&tools, &upscale.media, &request)?;
+                    .start_with_wake(&tools, &upscale.media, &request, wake)?;
             }
             UpscaleSelectionAction::None => {}
         }
@@ -1124,9 +1118,6 @@ impl ApolloApp {
                     &mut remux.lifecycle_ui,
                 )
             };
-            if self.remux_executor.is_running() {
-                ui.ctx().request_repaint_after(EXECUTION_REPAINT_INTERVAL);
-            }
             self.handle_remux_lifecycle_action(action);
             return;
         }
@@ -1207,7 +1198,9 @@ impl ApolloApp {
                     return Ok(());
                 };
                 let request = remux.selection.request(&remux.media);
-                self.remux_executor.start(&tools, &remux.media, &request)?;
+                let wake = self.progress_repaint.begin();
+                self.remux_executor
+                    .start_with_wake(&tools, &remux.media, &request, wake)?;
             }
             RemuxSelectionAction::None => {}
         }
@@ -1241,9 +1234,6 @@ impl ApolloApp {
                     &mut session.lifecycle_ui,
                 )
             };
-            if self.audio_extract_executor.is_running() {
-                ui.ctx().request_repaint_after(EXECUTION_REPAINT_INTERVAL);
-            }
             self.handle_audio_extract_lifecycle_action(action);
             return;
         }
@@ -1334,8 +1324,13 @@ impl ApolloApp {
                 let Some(tools) = self.ready_media_tools().cloned() else {
                     return Ok(());
                 };
-                self.audio_extract_executor
-                    .start(&tools, &session.media, &request)?;
+                let wake = self.progress_repaint.begin();
+                self.audio_extract_executor.start_with_wake(
+                    &tools,
+                    &session.media,
+                    &request,
+                    wake,
+                )?;
             }
             AudioExtractSelectionAction::None => {}
         }
@@ -1369,9 +1364,6 @@ impl ApolloApp {
                     &mut session.lifecycle_ui,
                 )
             };
-            if self.frame_capture_executor.is_running() {
-                ui.ctx().request_repaint_after(EXECUTION_REPAINT_INTERVAL);
-            }
             self.handle_frame_capture_lifecycle_action(action);
             return;
         }
@@ -1462,8 +1454,13 @@ impl ApolloApp {
                 let Some(tools) = self.ready_media_tools().cloned() else {
                     return Ok(());
                 };
-                self.frame_capture_executor
-                    .start(&tools, &session.media, &request)?;
+                let wake = self.progress_repaint.begin();
+                self.frame_capture_executor.start_with_wake(
+                    &tools,
+                    &session.media,
+                    &request,
+                    wake,
+                )?;
             }
             FrameCaptureSelectionAction::None => {}
         }
@@ -1880,6 +1877,7 @@ mod tests {
         DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
         FileDialogStartError, OutputFormat,
     };
+    use crate::progress_repaint::MediaProgressRepaintOwner;
     use apollo::{
         audio_extract::{execution::AudioExtractExecutionState, model::AudioExtractFormat},
         audio_mix::{
@@ -1986,6 +1984,7 @@ mod tests {
             remux_executor: apollo::remux::execution::RemuxExecutor::new(),
             audio_extract_executor: apollo::audio_extract::execution::AudioExtractExecutor::new(),
             frame_capture_executor: apollo::frame_capture::execution::FrameCaptureExecutor::new(),
+            progress_repaint: MediaProgressRepaintOwner::new(egui_context.clone()),
             media_inspection: None,
             file_dialog: FileDialogOwner::new_for_test(egui_context.clone(), || {
                 Ok(|_: &FileDialogRequest| Ok(None))

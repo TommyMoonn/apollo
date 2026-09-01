@@ -2,6 +2,7 @@
 
 mod app;
 mod file_dialog;
+mod progress_repaint;
 mod settings;
 use apollo::ui::layout;
 use app::ApolloApp;

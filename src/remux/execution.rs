@@ -9,7 +9,9 @@ use crate::media::{
     },
     model::MediaFile,
     output::{MediaOutput, MediaOutputError},
-    process::{MediaProcessCommand, MediaProcessStartError, ProcessProgressSource},
+    process::{
+        MediaProcessCommand, MediaProcessStartError, MediaProcessWake, ProcessProgressSource,
+    },
     progress::MediaProgress,
     tools::MediaTools,
 };
@@ -120,6 +122,18 @@ impl RemuxExecutor {
             request,
             crate::media::process::MediaProcess::start,
         )
+    }
+
+    pub fn start_with_wake(
+        &mut self,
+        tools: &MediaTools,
+        media: &MediaFile,
+        request: &RemuxRequest,
+        wake: MediaProcessWake,
+    ) -> Result<(), RemuxStartError> {
+        self.start_with_launcher(tools, media, request, move |command| {
+            crate::media::process::MediaProcess::start_with_wake(command, wake)
+        })
     }
 
     pub fn cancel(&self) -> bool {

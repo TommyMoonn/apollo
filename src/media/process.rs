@@ -23,6 +23,31 @@ const STREAM_READ_CHUNK_BYTES: usize = 4 * 1024;
 const LIVE_OUTPUT_MESSAGE_LIMIT_BYTES: usize = 16 * 1024;
 pub const DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES: usize = 64 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaProcessEvent {
+    Progress,
+    Terminal,
+}
+
+#[derive(Clone, Default)]
+pub struct MediaProcessWake {
+    callback: Option<Arc<dyn Fn(MediaProcessEvent) + Send + Sync>>,
+}
+
+impl MediaProcessWake {
+    pub fn new(callback: impl Fn(MediaProcessEvent) + Send + Sync + 'static) -> Self {
+        Self {
+            callback: Some(Arc::new(callback)),
+        }
+    }
+
+    pub fn notify(&self, event: MediaProcessEvent) {
+        if let Some(callback) = self.callback.as_ref() {
+            callback(event);
+        }
+    }
+}
+
 #[cfg(windows)]
 pub(super) fn background_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
@@ -156,6 +181,13 @@ pub struct MediaProcess {
 
 impl MediaProcess {
     pub fn start(command: MediaProcessCommand) -> Result<Self, MediaProcessStartError> {
+        Self::start_with_wake(command, MediaProcessWake::default())
+    }
+
+    pub fn start_with_wake(
+        command: MediaProcessCommand,
+        wake: MediaProcessWake,
+    ) -> Result<Self, MediaProcessStartError> {
         let lifecycle = Arc::new(ProcessLifecycle::new());
         let diagnostics = Arc::new(Mutex::new(BoundedDiagnostic::new(
             command.diagnostic_stderr_limit,
@@ -175,6 +207,7 @@ impl MediaProcess {
                     command,
                     worker_lifecycle,
                     worker_diagnostics,
+                    wake,
                     WorkerChannels {
                         stdout_tx,
                         stderr_tx,
@@ -417,6 +450,7 @@ fn run_worker(
     command: MediaProcessCommand,
     lifecycle: Arc<ProcessLifecycle>,
     diagnostics: Arc<Mutex<BoundedDiagnostic>>,
+    wake: MediaProcessWake,
     channels: WorkerChannels,
 ) {
     let WorkerChannels {
@@ -444,10 +478,10 @@ fn run_worker(
         .take()
         .expect("stderr is piped by media process owner");
 
-    let stdout_progress =
-        (command.progress_source == ProcessProgressSource::Stdout).then(|| progress_tx.clone());
-    let stderr_progress =
-        (command.progress_source == ProcessProgressSource::Stderr).then(|| progress_tx.clone());
+    let stdout_progress = (command.progress_source == ProcessProgressSource::Stdout)
+        .then(|| (progress_tx.clone(), wake.clone()));
+    let stderr_progress = (command.progress_source == ProcessProgressSource::Stderr)
+        .then(|| (progress_tx.clone(), wake.clone()));
     drop(progress_tx);
 
     let stdout_reader =
@@ -492,7 +526,9 @@ fn run_worker(
 
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
-    lifecycle.publish_terminal_claim();
+    if lifecycle.publish_terminal_claim() {
+        wake.notify(MediaProcessEvent::Terminal);
+    }
 }
 
 fn spawn_child(command: &MediaProcessCommand) -> io::Result<Child> {
@@ -526,7 +562,7 @@ fn spawn_stream_reader<R>(
     name: &str,
     stream: R,
     output_tx: SyncSender<String>,
-    progress_tx: Option<SyncSender<String>>,
+    progress: Option<(SyncSender<String>, MediaProcessWake)>,
     diagnostics: Option<Arc<Mutex<BoundedDiagnostic>>>,
 ) -> io::Result<JoinHandle<()>>
 where
@@ -534,13 +570,13 @@ where
 {
     thread::Builder::new()
         .name(format!("apollo-media-{name}"))
-        .spawn(move || read_stream(stream, output_tx, progress_tx, diagnostics))
+        .spawn(move || read_stream(stream, output_tx, progress, diagnostics))
 }
 
 fn read_stream<R: Read>(
     mut stream: R,
     output_tx: SyncSender<String>,
-    progress_tx: Option<SyncSender<String>>,
+    progress: Option<(SyncSender<String>, MediaProcessWake)>,
     diagnostics: Option<Arc<Mutex<BoundedDiagnostic>>>,
 ) {
     let mut chunk = [0_u8; STREAM_READ_CHUNK_BYTES];
@@ -550,7 +586,7 @@ fn read_stream<R: Read>(
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => {
-                emit_stream_eof(&mut line, &output_tx, progress_tx.as_ref());
+                emit_stream_eof(&mut line, &output_tx, progress.as_ref());
                 break;
             }
             Ok(read) => {
@@ -564,7 +600,7 @@ fn read_stream<R: Read>(
                     &mut line,
                     &mut fragmented,
                     &output_tx,
-                    progress_tx.as_ref(),
+                    progress.as_ref(),
                 );
             }
             Err(_) => break,
@@ -577,15 +613,15 @@ fn consume_stream_bytes(
     line: &mut Vec<u8>,
     fragmented: &mut bool,
     output_tx: &SyncSender<String>,
-    progress_tx: Option<&SyncSender<String>>,
+    progress: Option<&(SyncSender<String>, MediaProcessWake)>,
 ) {
     while let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
-        append_stream_fragment(&bytes[..newline], line, fragmented, output_tx, progress_tx);
-        emit_stream_line(line, fragmented, output_tx, progress_tx);
+        append_stream_fragment(&bytes[..newline], line, fragmented, output_tx, progress);
+        emit_stream_line(line, fragmented, output_tx, progress);
         bytes = &bytes[newline + 1..];
     }
 
-    append_stream_fragment(bytes, line, fragmented, output_tx, progress_tx);
+    append_stream_fragment(bytes, line, fragmented, output_tx, progress);
 }
 
 fn append_stream_fragment(
@@ -593,11 +629,11 @@ fn append_stream_fragment(
     line: &mut Vec<u8>,
     fragmented: &mut bool,
     output_tx: &SyncSender<String>,
-    progress_tx: Option<&SyncSender<String>>,
+    progress: Option<&(SyncSender<String>, MediaProcessWake)>,
 ) {
     while !bytes.is_empty() {
         if line.len() == LIVE_OUTPUT_MESSAGE_LIMIT_BYTES {
-            emit_stream_message(line, output_tx, progress_tx);
+            emit_stream_message(line, output_tx, progress);
             line.clear();
             *fragmented = true;
         }
@@ -613,14 +649,14 @@ fn emit_stream_line(
     line: &mut Vec<u8>,
     fragmented: &mut bool,
     output_tx: &SyncSender<String>,
-    progress_tx: Option<&SyncSender<String>>,
+    progress: Option<&(SyncSender<String>, MediaProcessWake)>,
 ) {
     if line.last() == Some(&b'\r') {
         line.pop();
     }
 
     if !line.is_empty() || !*fragmented {
-        emit_stream_message(line, output_tx, progress_tx);
+        emit_stream_message(line, output_tx, progress);
     }
 
     line.clear();
@@ -630,10 +666,10 @@ fn emit_stream_line(
 fn emit_stream_eof(
     line: &mut Vec<u8>,
     output_tx: &SyncSender<String>,
-    progress_tx: Option<&SyncSender<String>>,
+    progress: Option<&(SyncSender<String>, MediaProcessWake)>,
 ) {
     if !line.is_empty() {
-        emit_stream_message(line, output_tx, progress_tx);
+        emit_stream_message(line, output_tx, progress);
         line.clear();
     }
 }
@@ -641,18 +677,21 @@ fn emit_stream_eof(
 fn emit_stream_message(
     bytes: &[u8],
     output_tx: &SyncSender<String>,
-    progress_tx: Option<&SyncSender<String>>,
+    progress: Option<&(SyncSender<String>, MediaProcessWake)>,
 ) {
     let text = String::from_utf8_lossy(bytes).into_owned();
-    try_send_bounded(output_tx, text.clone());
-    if let Some(progress_tx) = progress_tx {
-        try_send_bounded(progress_tx, text);
+    let _ = try_send_bounded(output_tx, text.clone());
+    if let Some((progress_tx, wake)) = progress
+        && try_send_bounded(progress_tx, text)
+    {
+        wake.notify(MediaProcessEvent::Progress);
     }
 }
 
-fn try_send_bounded(sender: &SyncSender<String>, value: String) {
+fn try_send_bounded(sender: &SyncSender<String>, value: String) -> bool {
     match sender.try_send(value) {
-        Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
     }
 }
 
@@ -676,8 +715,9 @@ mod tests {
 
     use super::{
         BoundedDiagnostic, LIVE_OUTPUT_MESSAGE_LIMIT_BYTES, MediaProcess, MediaProcessCommand,
-        MediaProcessFailure, MediaProcessStartError, MediaProcessState, ProcessLifecycle,
-        ProcessProgressSource, STREAM_READ_CHUNK_BYTES, lock_unpoisoned, read_stream,
+        MediaProcessEvent, MediaProcessFailure, MediaProcessStartError, MediaProcessState,
+        MediaProcessWake, ProcessLifecycle, ProcessProgressSource, STREAM_READ_CHUNK_BYTES,
+        lock_unpoisoned, read_stream,
     };
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -693,6 +733,30 @@ mod tests {
         assert_eq!(drain(process.stdout_channel()), ["stdout-line"]);
         assert_eq!(drain(process.progress_channel()), ["stdout-line"]);
         assert!(drain(process.stderr_channel()).is_empty());
+    }
+
+    #[test]
+    fn successful_process_wakes_for_progress_and_terminal_settlement() {
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let wake = MediaProcessWake::new(move |event| {
+            let _ = event_tx.send(event);
+        });
+        let process = MediaProcess::start_with_wake(
+            shell_command(success_script()).progress_source(ProcessProgressSource::Stdout),
+            wake,
+        )
+        .expect("helper process should start");
+
+        assert_eq!(wait_for_process(&process), MediaProcessState::Completed);
+        assert_eq!(
+            event_rx.recv_timeout(TEST_TIMEOUT).unwrap(),
+            MediaProcessEvent::Progress
+        );
+        assert_eq!(
+            event_rx.recv_timeout(TEST_TIMEOUT).unwrap(),
+            MediaProcessEvent::Terminal
+        );
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
@@ -755,7 +819,7 @@ mod tests {
         read_stream(
             reader,
             stderr_tx,
-            Some(progress_tx),
+            Some((progress_tx, MediaProcessWake::default())),
             Some(Arc::clone(&diagnostics)),
         );
 
