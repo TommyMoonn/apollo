@@ -30,6 +30,7 @@ use apollo::{
     frame_capture::{
         execution::{FrameCaptureExecutionState, FrameCaptureExecutor, FrameCaptureStartError},
         model::FrameCaptureFormat,
+        thumbnail::{FrameCaptureThumbnail, decode_frame_capture_thumbnail},
     },
     media::{
         container::MediaContainer,
@@ -50,7 +51,10 @@ use apollo::{
         file_intake::{self, FileIntakeAction},
         fonts, frame_capture as frame_capture_ui,
         frame_capture::{FrameCaptureSelectionAction, FrameCaptureSelectionState},
-        frame_capture_progress::{self, FrameCaptureLifecycleAction, FrameCaptureLifecycleUiState},
+        frame_capture_progress::{
+            self, FrameCaptureLifecycleAction, FrameCaptureLifecycleUiState,
+            FrameCaptureThumbnailRequest,
+        },
         layout, media_error, remux as remux_ui,
         remux::{RemuxSelectionAction, RemuxSelectionState},
         remux_progress::{self, RemuxLifecycleAction, RemuxLifecycleUiState},
@@ -77,6 +81,13 @@ fn file_intake_enabled(
         && matches!(remux_state, RemuxExecutionState::Idle)
         && matches!(audio_extract_state, AudioExtractExecutionState::Idle)
         && matches!(frame_capture_state, FrameCaptureExecutionState::Idle)
+}
+
+fn operation_workspace_visible(
+    execution_state: &AudioMixExecutionState,
+    has_ready_session: bool,
+) -> bool {
+    matches!(execution_state, AudioMixExecutionState::Idle) && has_ready_session
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -172,6 +183,52 @@ impl Default for AppState {
 struct MediaInspection {
     request: MediaIntakeRequest,
     receiver: Receiver<Result<MediaFile, MediaProbeError>>,
+}
+
+struct FrameCaptureThumbnailLoad {
+    session_id: u64,
+    request_id: u64,
+    receiver: Receiver<Result<FrameCaptureThumbnail, String>>,
+}
+
+impl FrameCaptureThumbnailLoad {
+    fn spawn(
+        session_id: u64,
+        request: &FrameCaptureThumbnailRequest,
+        context: Context,
+    ) -> io::Result<Self> {
+        let output = request.output().to_path_buf();
+        Self::spawn_with(session_id, request.request_id(), context, move || {
+            decode_frame_capture_thumbnail(&output)
+        })
+    }
+
+    fn spawn_with<F>(
+        session_id: u64,
+        request_id: u64,
+        context: Context,
+        decode: F,
+    ) -> io::Result<Self>
+    where
+        F: FnOnce() -> Result<FrameCaptureThumbnail, String> + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("apollo-frame-thumbnail".to_owned())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode));
+                if let Ok(result) = result {
+                    let _ = sender.send(result);
+                }
+                drop(sender);
+                context.request_repaint();
+            })?;
+        Ok(Self {
+            session_id,
+            request_id,
+            receiver,
+        })
+    }
 }
 
 impl MediaInspection {
@@ -280,6 +337,7 @@ pub(crate) struct ApolloApp {
     remux_executor: RemuxExecutor,
     audio_extract_executor: AudioExtractExecutor,
     frame_capture_executor: FrameCaptureExecutor,
+    frame_capture_thumbnail_load: Option<FrameCaptureThumbnailLoad>,
     progress_repaint: MediaProgressRepaintOwner,
     media_inspection: Option<MediaInspection>,
     file_dialog: FileDialogOwner,
@@ -308,6 +366,7 @@ impl ApolloApp {
             remux_executor: RemuxExecutor::new(),
             audio_extract_executor: AudioExtractExecutor::new(),
             frame_capture_executor: FrameCaptureExecutor::new(),
+            frame_capture_thumbnail_load: None,
             progress_repaint: MediaProgressRepaintOwner::new(egui_context.clone()),
             media_inspection: None,
             file_dialog: FileDialogOwner::new(egui_context.clone(), native_window_owner),
@@ -352,8 +411,13 @@ impl ApolloApp {
             SourceAction::ChangeFile => self.start_file_dialog(FileDialogRequest::OpenSource {
                 initial_directory: None,
             }),
-            SourceAction::CloseSource => self.state.close_source(),
+            SourceAction::CloseSource => self.close_source(),
         }
+    }
+
+    fn close_source(&mut self) {
+        self.frame_capture_thumbnail_load = None;
+        self.state.close_source();
     }
 
     fn select_tool(&mut self, tool: Tool) {
@@ -597,6 +661,46 @@ impl ApolloApp {
         true
     }
 
+    fn operation_ready_surface(&self, active_operation: Tool) -> bool {
+        match active_operation {
+            Tool::AudioMix => operation_workspace_visible(
+                self.audio_mix_executor.state(),
+                self.state
+                    .audio_mix
+                    .as_ref()
+                    .is_some_and(|session| session.start_error.is_none()),
+            ),
+            Tool::VideoUpscale => operation_workspace_visible(
+                self.upscale_executor.state(),
+                self.state
+                    .upscale
+                    .as_ref()
+                    .is_some_and(|session| session.start_error.is_none()),
+            ),
+            Tool::Remux => operation_workspace_visible(
+                self.remux_executor.state(),
+                self.state
+                    .remux
+                    .as_ref()
+                    .is_some_and(|session| session.start_error.is_none()),
+            ),
+            Tool::AudioExtract => operation_workspace_visible(
+                self.audio_extract_executor.state(),
+                self.state
+                    .audio_extract
+                    .as_ref()
+                    .is_some_and(|session| session.start_error.is_none()),
+            ),
+            Tool::FrameCapture => operation_workspace_visible(
+                self.frame_capture_executor.state(),
+                self.state
+                    .frame_capture
+                    .as_ref()
+                    .is_some_and(|session| session.start_error.is_none()),
+            ),
+        }
+    }
+
     fn show_navigation(&mut self, ui: &mut Ui) {
         let NavigationState::SourceWorkspace { active_operation } = self.state.navigation else {
             layout::padded_content(ui, |ui| self.show_file_intake(ui));
@@ -604,93 +708,53 @@ impl ApolloApp {
         };
 
         let Some(media) = self.state.media_intake.current() else {
-            self.state.close_source();
+            self.close_source();
             layout::padded_content(ui, |ui| self.show_file_intake(ui));
             return;
         };
-        let surface_key = egui::Id::new((active_operation.label(), media.path.as_path()));
+        let source_surface_key = egui::Id::new(media.path.as_path());
         let Some(source_presentation) = self.state.source_presentation.clone() else {
-            self.state.close_source();
+            self.close_source();
             layout::padded_content(ui, |ui| self.show_file_intake(ui));
             return;
         };
 
-        let workspace_action = layout::workspace_chrome(ui, |ui| {
-            workspace::show(
-                ui,
-                &source_presentation.workspace,
-                active_operation,
-                self.media_inspection.is_none()
-                    && file_intake_enabled(
-                        self.audio_mix_executor.state(),
-                        self.upscale_executor.state(),
-                        self.remux_executor.state(),
-                        self.audio_extract_executor.state(),
-                        self.frame_capture_executor.state(),
-                    ),
-            )
-        })
-        .inner;
-        match workspace_action {
-            WorkspaceAction::Source(action) => self.handle_source_action(action),
-            WorkspaceAction::SelectOperation(operation) => self.select_tool(operation),
-            WorkspaceAction::None => {}
+        if self.operation_ready_surface(active_operation) {
+            let workspace_action = layout::workspace_chrome(ui, |ui| {
+                workspace::show(
+                    ui,
+                    &source_presentation.workspace,
+                    active_operation,
+                    self.media_inspection.is_none()
+                        && file_intake_enabled(
+                            self.audio_mix_executor.state(),
+                            self.upscale_executor.state(),
+                            self.remux_executor.state(),
+                            self.audio_extract_executor.state(),
+                            self.frame_capture_executor.state(),
+                        ),
+                )
+            })
+            .inner;
+            match workspace_action {
+                WorkspaceAction::Source(action) => self.handle_source_action(action),
+                WorkspaceAction::SelectOperation(operation) => self.select_tool(operation),
+                WorkspaceAction::None => {}
+            }
         }
 
         let Some(active_operation) = self.state.active_operation() else {
             layout::padded_content(ui, |ui| self.show_file_intake(ui));
             return;
         };
-
-        if let Some(error) = self.state.intake_error.as_ref() {
+        let surface_key = egui::Id::new((active_operation.label(), source_surface_key));
+        let ready_surface = self.operation_ready_surface(active_operation);
+        if ready_surface && let Some(error) = self.state.intake_error.as_ref() {
             layout::content_gutter(ui, |ui| {
                 media_error::show_inline(ui, error, &mut self.state.intake_error_details_open);
                 ui.add_space(theme::SPACING.section);
             });
         }
-
-        let ready_surface = match active_operation {
-            Tool::AudioMix => {
-                !shows_audio_mix_lifecycle(self.audio_mix_executor.state())
-                    && self
-                        .state
-                        .audio_mix
-                        .as_ref()
-                        .is_some_and(|session| session.start_error.is_none())
-            }
-            Tool::VideoUpscale => {
-                !shows_upscale_lifecycle(self.upscale_executor.state())
-                    && self
-                        .state
-                        .upscale
-                        .as_ref()
-                        .is_some_and(|session| session.start_error.is_none())
-            }
-            Tool::Remux => {
-                !shows_remux_lifecycle(self.remux_executor.state())
-                    && self
-                        .state
-                        .remux
-                        .as_ref()
-                        .is_some_and(|session| session.start_error.is_none())
-            }
-            Tool::AudioExtract => {
-                !shows_audio_extract_lifecycle(self.audio_extract_executor.state())
-                    && self
-                        .state
-                        .audio_extract
-                        .as_ref()
-                        .is_some_and(|session| session.start_error.is_none())
-            }
-            Tool::FrameCapture => {
-                !shows_frame_capture_lifecycle(self.frame_capture_executor.state())
-                    && self
-                        .state
-                        .frame_capture
-                        .as_ref()
-                        .is_some_and(|session| session.start_error.is_none())
-            }
-        };
         let show_operation = |app: &mut Self, ui: &mut Ui| match active_operation {
             Tool::AudioMix if app.state.audio_mix.is_some() => app.show_audio_mix_tool(ui),
             Tool::VideoUpscale if app.state.upscale.is_some() => app.show_upscale_tool(ui),
@@ -806,6 +870,36 @@ impl ApolloApp {
         }
     }
 
+    fn poll_frame_capture_thumbnail(&mut self) {
+        let result = match self.frame_capture_thumbnail_load.as_ref() {
+            Some(load) => load.receiver.try_recv(),
+            None => return,
+        };
+
+        let result = match result {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                Err("Frame Capture preview worker stopped before returning a result.".to_owned())
+            }
+        };
+        let load = self
+            .frame_capture_thumbnail_load
+            .take()
+            .expect("thumbnail load exists while its result is settled");
+        let Some(session) = self
+            .state
+            .frame_capture
+            .as_mut()
+            .filter(|session| session.session_id == load.session_id)
+        else {
+            return;
+        };
+        session
+            .lifecycle_ui
+            .settle_thumbnail(load.request_id, result);
+    }
+
     fn complete_media_probe(
         &mut self,
         request: MediaIntakeRequest,
@@ -819,6 +913,7 @@ impl ApolloApp {
                     .media_intake
                     .current()
                     .map(|media| Arc::new(SourcePresentation::new(media)));
+                self.frame_capture_thumbnail_load = None;
                 self.state.retire_tool_sessions();
                 if self.activate_cached_source(operation) {
                     self.state.enter_workspace(operation);
@@ -1461,17 +1556,56 @@ impl ApolloApp {
                     &request,
                     wake,
                 )?;
+                self.frame_capture_thumbnail_load = None;
             }
             FrameCaptureSelectionAction::None => {}
         }
         Ok(())
     }
 
-    fn handle_frame_capture_lifecycle_action(&self, action: FrameCaptureLifecycleAction) {
-        if let FrameCaptureLifecycleAction::OpenFolder(path) = action
-            && let Err(error) = open_folder(&path)
-        {
-            eprintln!("Frame Capture output folder could not be opened: {error}");
+    fn handle_frame_capture_lifecycle_action(&mut self, action: FrameCaptureLifecycleAction) {
+        match action {
+            FrameCaptureLifecycleAction::LoadThumbnail(request) => {
+                self.start_frame_capture_thumbnail_load(request);
+            }
+            FrameCaptureLifecycleAction::OpenFolder(path) => {
+                if let Err(error) = open_folder(&path) {
+                    eprintln!("Frame Capture output folder could not be opened: {error}");
+                }
+            }
+            FrameCaptureLifecycleAction::None
+            | FrameCaptureLifecycleAction::CancelRequested
+            | FrameCaptureLifecycleAction::Done
+            | FrameCaptureLifecycleAction::Back => {}
+        }
+    }
+
+    fn start_frame_capture_thumbnail_load(&mut self, request: FrameCaptureThumbnailRequest) {
+        let Some(session_id) = self
+            .state
+            .frame_capture
+            .as_ref()
+            .map(|session| session.session_id)
+        else {
+            return;
+        };
+        match FrameCaptureThumbnailLoad::spawn(session_id, &request, self.egui_context.clone()) {
+            Ok(load) => self.frame_capture_thumbnail_load = Some(load),
+            Err(error) => {
+                if let Some(session) = self
+                    .state
+                    .frame_capture
+                    .as_mut()
+                    .filter(|session| session.session_id == session_id)
+                {
+                    session.lifecycle_ui.settle_thumbnail(
+                        request.request_id(),
+                        Err(format!(
+                            "Frame Capture preview worker could not start: {error}"
+                        )),
+                    );
+                }
+            }
         }
     }
 
@@ -1838,6 +1972,7 @@ impl eframe::App for ApolloApp {
 
                 self.poll_file_dialog();
                 self.poll_media_inspection();
+                self.poll_frame_capture_thumbnail();
 
                 self.handle_window_file_drop(ui.ctx());
                 if self.drag_hovered(ui.ctx()) {
@@ -1867,11 +2002,13 @@ mod tests {
     };
 
     use super::{
-        ApolloApp, AppSettings, AppState, MediaInspection, MediaToolsState, NavigationState, Tool,
-        ToolExecutionStates, audio_extract_output_dialog_request, audio_mix_output_dialog_request,
-        file_intake_enabled, frame_capture_output_dialog_request, remux_output_dialog_request,
-        settle_output_file_dialog, shows_audio_extract_lifecycle, shows_audio_mix_lifecycle,
-        shows_frame_capture_lifecycle, shows_remux_lifecycle, shows_upscale_lifecycle,
+        ApolloApp, AppSettings, AppState, FrameCaptureThumbnailLoad, MediaInspection,
+        MediaToolsState, NavigationState, Tool, ToolExecutionStates,
+        audio_extract_output_dialog_request, audio_mix_output_dialog_request, file_intake_enabled,
+        frame_capture_output_dialog_request, operation_workspace_visible,
+        remux_output_dialog_request, settle_output_file_dialog, shows_audio_extract_lifecycle,
+        shows_audio_mix_lifecycle, shows_frame_capture_lifecycle, shows_remux_lifecycle,
+        shows_upscale_lifecycle,
     };
     use crate::file_dialog::{
         DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
@@ -1884,7 +2021,10 @@ mod tests {
             execution::AudioMixExecutionState,
             model::{LoudnessNormalization, LoudnessTargets, OutputContainer, TrackGain},
         },
-        frame_capture::{execution::FrameCaptureExecutionState, model::FrameCaptureFormat},
+        frame_capture::{
+            execution::FrameCaptureExecutionState, model::FrameCaptureFormat,
+            thumbnail::FrameCaptureThumbnail,
+        },
         media::{
             container::MediaContainer,
             error::{MediaError, MediaErrorKind},
@@ -1898,8 +2038,9 @@ mod tests {
         remux::execution::RemuxExecutionState,
         ui::{
             SourceAction, audio_extract::AudioExtractSelectionAction, fonts,
-            frame_capture::FrameCaptureSelectionAction, layout, remux::RemuxSelectionAction, theme,
-            upscale::UpscaleSelectionAction,
+            frame_capture::FrameCaptureSelectionAction,
+            frame_capture_progress::FrameCaptureThumbnailState, layout,
+            remux::RemuxSelectionAction, theme, upscale::UpscaleSelectionAction,
         },
         upscale::{
             execution::UpscaleExecutionState,
@@ -1970,6 +2111,10 @@ mod tests {
         }
     }
 
+    fn thumbnail() -> FrameCaptureThumbnail {
+        FrameCaptureThumbnail::from_rgba([2, 1], vec![255; 8]).unwrap()
+    }
+
     fn app() -> ApolloApp {
         let egui_context = egui::Context::default();
         ApolloApp {
@@ -1984,6 +2129,7 @@ mod tests {
             remux_executor: apollo::remux::execution::RemuxExecutor::new(),
             audio_extract_executor: apollo::audio_extract::execution::AudioExtractExecutor::new(),
             frame_capture_executor: apollo::frame_capture::execution::FrameCaptureExecutor::new(),
+            frame_capture_thumbnail_load: None,
             progress_repaint: MediaProgressRepaintOwner::new(egui_context.clone()),
             media_inspection: None,
             file_dialog: FileDialogOwner::new_for_test(egui_context.clone(), || {
@@ -2452,6 +2598,139 @@ mod tests {
             app.state.intake_error.as_ref().map(MediaError::kind),
             Some(MediaErrorKind::ProbeFailure)
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn frame_thumbnail_decode_runs_on_the_dedicated_worker() {
+        let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
+        let load =
+            FrameCaptureThumbnailLoad::spawn_with(7, 11, egui::Context::default(), move || {
+                thread_sender
+                    .send(std::thread::current().name().map(str::to_owned))
+                    .unwrap();
+                Ok(thumbnail())
+            })
+            .expect("thumbnail worker should start");
+
+        assert_eq!(
+            thread_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            Some("apollo-frame-thumbnail".to_owned())
+        );
+        assert!(
+            load.receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn thumbnail_completion_routes_to_its_originating_frame_capture_session() {
+        let (directory, path) = temp_file("thumbnail-routing");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let session = app.state.frame_capture.as_mut().unwrap();
+        let session_id = session.session_id;
+        let request = session
+            .lifecycle_ui
+            .begin_thumbnail(Path::new("capture.png"))
+            .unwrap();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
+            session_id,
+            request_id: request.request_id(),
+            receiver,
+        });
+
+        sender.send(Ok(thumbnail())).unwrap();
+        app.poll_frame_capture_thumbnail();
+
+        assert!(app.frame_capture_thumbnail_load.is_none());
+        assert!(matches!(
+            app.state
+                .frame_capture
+                .as_ref()
+                .unwrap()
+                .lifecycle_ui
+                .thumbnail(),
+            FrameCaptureThumbnailState::Ready { request_id, .. }
+                if *request_id == request.request_id()
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn source_replacement_clears_thumbnail_and_rejects_stale_completion() {
+        let (first_directory, first_path) = temp_file("thumbnail-first-source");
+        let (second_directory, second_path) = temp_file("thumbnail-second-source");
+        let mut app = app();
+        app.load_media_path_with_probe(&first_path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let old_session = app.state.frame_capture.as_mut().unwrap();
+        let old_session_id = old_session.session_id;
+        let old_request = old_session
+            .lifecycle_ui
+            .begin_thumbnail(Path::new("old-capture.png"))
+            .unwrap();
+
+        app.load_media_path_with_probe(&second_path, |path| Ok(media(path)));
+        assert!(app.frame_capture_thumbnail_load.is_none());
+        let replacement = app.state.frame_capture.as_ref().unwrap();
+        assert_ne!(replacement.session_id, old_session_id);
+        assert!(matches!(
+            replacement.lifecycle_ui.thumbnail(),
+            FrameCaptureThumbnailState::Empty
+        ));
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
+            session_id: old_session_id,
+            request_id: old_request.request_id(),
+            receiver,
+        });
+        sender.send(Ok(thumbnail())).unwrap();
+        app.poll_frame_capture_thumbnail();
+        assert!(matches!(
+            app.state
+                .frame_capture
+                .as_ref()
+                .unwrap()
+                .lifecycle_ui
+                .thumbnail(),
+            FrameCaptureThumbnailState::Empty
+        ));
+
+        fs::remove_dir_all(first_directory).unwrap();
+        fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn close_source_releases_thumbnail_worker_and_session_state() {
+        let (directory, path) = temp_file("thumbnail-close-source");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let session = app.state.frame_capture.as_mut().unwrap();
+        let request = session
+            .lifecycle_ui
+            .begin_thumbnail(Path::new("capture.png"))
+            .unwrap();
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        app.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
+            session_id: session.session_id,
+            request_id: request.request_id(),
+            receiver,
+        });
+
+        app.handle_source_action(SourceAction::CloseSource);
+
+        assert!(app.frame_capture_thumbnail_load.is_none());
+        assert!(app.state.frame_capture.is_none());
+        assert_no_source(&app.state);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2993,6 +3272,66 @@ mod tests {
             assert!(!output_contains_text(&output, "← Back"));
         }
 
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn running_and_terminal_operation_states_hide_workspace_chrome() {
+        let non_ready_states = [
+            AudioMixExecutionState::Running,
+            AudioMixExecutionState::Completed {
+                output: PathBuf::from("finished.mp4"),
+            },
+            AudioMixExecutionState::Failed(MediaExecutionFailure::Process {
+                reason: MediaProcessFailure::Exit(Some(1)),
+                diagnostic: "failed".to_owned(),
+            }),
+            AudioMixExecutionState::Cancelled,
+        ];
+
+        assert!(operation_workspace_visible(
+            &AudioMixExecutionState::Idle,
+            true
+        ));
+        assert!(!operation_workspace_visible(
+            &AudioMixExecutionState::Idle,
+            false
+        ));
+        for state in non_ready_states {
+            assert!(!operation_workspace_visible(&state, true));
+        }
+    }
+
+    #[test]
+    fn standalone_operation_feedback_does_not_render_workspace_components() {
+        let (directory, path) = temp_file("standalone-operation-feedback");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        app.state.frame_capture.as_mut().unwrap().start_error =
+            Some(MediaError::invalid_request("simulated start failure"));
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+
+        let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
+        output.textures_delta.clear();
+
+        assert!(output_contains_text(
+            &output,
+            "Frame capture could not start"
+        ));
+        for workspace_label in [
+            "Change file",
+            "Close source",
+            "Audio Mix",
+            "Upscale",
+            "Remux",
+            "Audio Extract",
+            "Frame Capture",
+        ] {
+            assert!(!output_contains_text(&output, workspace_label));
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 

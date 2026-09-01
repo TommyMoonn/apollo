@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use egui::Ui;
+use egui::{ColorImage, Image, TextureHandle, TextureOptions, Ui, vec2};
 
 use crate::{
     frame_capture::{
@@ -8,6 +8,7 @@ use crate::{
             FrameCaptureExecutionFailure, FrameCaptureExecutionState, FrameCaptureExecutor,
         },
         model::FrameCaptureRequest,
+        thumbnail::FrameCaptureThumbnail,
     },
     media::{
         error::{MediaError, MediaOutputContainer},
@@ -36,9 +37,61 @@ const BACK_LABEL: &str = "Back";
 const CANCELLED_COPY: &str = "No final output was published.";
 const CANCELLED_CLEANUP: &str = "temporary output cleaned";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameCaptureThumbnailRequest {
+    request_id: u64,
+    output: PathBuf,
+}
+
+impl FrameCaptureThumbnailRequest {
+    pub fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    pub fn output(&self) -> &Path {
+        &self.output
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FrameCaptureThumbnailState {
+    #[default]
+    Empty,
+    Loading {
+        request_id: u64,
+    },
+    Ready {
+        request_id: u64,
+        preview: FrameCaptureThumbnail,
+    },
+    Failed {
+        request_id: u64,
+        diagnostic: String,
+    },
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct FrameCaptureThumbnailTexture {
+    request_id: u64,
+    handle: TextureHandle,
+}
+
+impl std::fmt::Debug for FrameCaptureThumbnailTexture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FrameCaptureThumbnailTexture")
+            .field("request_id", &self.request_id)
+            .field("texture_id", &self.handle.id())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FrameCaptureLifecycleUiState {
     details_open: bool,
+    next_thumbnail_request_id: u64,
+    thumbnail: FrameCaptureThumbnailState,
+    thumbnail_texture: Option<FrameCaptureThumbnailTexture>,
 }
 
 impl FrameCaptureLifecycleUiState {
@@ -46,8 +99,60 @@ impl FrameCaptureLifecycleUiState {
         self.details_open
     }
 
+    pub fn thumbnail(&self) -> &FrameCaptureThumbnailState {
+        &self.thumbnail
+    }
+
+    pub fn settle_thumbnail(
+        &mut self,
+        request_id: u64,
+        result: Result<FrameCaptureThumbnail, String>,
+    ) -> bool {
+        if !matches!(
+            self.thumbnail,
+            FrameCaptureThumbnailState::Loading {
+                request_id: active_request_id
+            } if active_request_id == request_id
+        ) {
+            return false;
+        }
+
+        self.thumbnail = match result {
+            Ok(preview) => FrameCaptureThumbnailState::Ready {
+                request_id,
+                preview,
+            },
+            Err(diagnostic) => FrameCaptureThumbnailState::Failed {
+                request_id,
+                diagnostic,
+            },
+        };
+        self.thumbnail_texture = None;
+        true
+    }
+
+    pub fn begin_thumbnail(&mut self, output: &Path) -> Option<FrameCaptureThumbnailRequest> {
+        if !matches!(self.thumbnail, FrameCaptureThumbnailState::Empty) {
+            return None;
+        }
+
+        self.next_thumbnail_request_id = self
+            .next_thumbnail_request_id
+            .checked_add(1)
+            .expect("frame capture thumbnail request identifier space is exhausted");
+        let request_id = self.next_thumbnail_request_id;
+        self.thumbnail = FrameCaptureThumbnailState::Loading { request_id };
+        self.thumbnail_texture = None;
+        Some(FrameCaptureThumbnailRequest {
+            request_id,
+            output: output.to_path_buf(),
+        })
+    }
+
     fn reset(&mut self) {
         self.details_open = false;
+        self.thumbnail = FrameCaptureThumbnailState::Empty;
+        self.thumbnail_texture = None;
     }
 }
 
@@ -56,6 +161,7 @@ pub enum FrameCaptureLifecycleAction {
     #[default]
     None,
     CancelRequested,
+    LoadThumbnail(FrameCaptureThumbnailRequest),
     OpenFolder(PathBuf),
     Done,
     Back,
@@ -76,7 +182,17 @@ pub fn show(
             show_running(ui, request, progress.as_ref(), executor)
         }
         FrameCaptureExecutionState::Completed { output } => {
-            show_completed(ui, request, &output, executor, ui_state)
+            let thumbnail_request = (!ui.is_sizing_pass())
+                .then(|| ui_state.begin_thumbnail(&output))
+                .flatten();
+            let action = show_completed(ui, request, &output, executor, ui_state);
+            if matches!(action, FrameCaptureLifecycleAction::None) {
+                thumbnail_request
+                    .map(FrameCaptureLifecycleAction::LoadThumbnail)
+                    .unwrap_or_default()
+            } else {
+                action
+            }
         }
         FrameCaptureExecutionState::Failed(failure) => {
             show_failed(ui, &failure, executor, ui_state)
@@ -123,6 +239,8 @@ fn show_completed(
         ui.spacing_mut().item_spacing.y = 0.0;
         heading(ui, COMPLETE_TITLE);
         ui.add_space(theme::SPACING.focal);
+        show_thumbnail(ui, ui_state);
+        ui.add_space(theme::SPACING.spacious);
         file_name(ui, output);
         ui.add_space(theme::SPACING.tight);
         technical_faint(ui, format_label(request.format));
@@ -145,6 +263,50 @@ fn show_completed(
         }
     });
     action
+}
+
+fn show_thumbnail(ui: &mut Ui, ui_state: &mut FrameCaptureLifecycleUiState) {
+    let (thumbnail, thumbnail_texture) = (&ui_state.thumbnail, &mut ui_state.thumbnail_texture);
+    match thumbnail {
+        FrameCaptureThumbnailState::Empty => {}
+        FrameCaptureThumbnailState::Loading { .. } => {
+            technical_faint(ui, "Loading preview...");
+        }
+        FrameCaptureThumbnailState::Failed { .. } => {
+            technical_faint(ui, "Preview unavailable");
+        }
+        FrameCaptureThumbnailState::Ready {
+            request_id,
+            preview,
+        } => {
+            let request_id = *request_id;
+            if !ui.is_sizing_pass()
+                && thumbnail_texture
+                    .as_ref()
+                    .is_none_or(|texture| texture.request_id != request_id)
+            {
+                let image = ColorImage::from_rgba_unmultiplied(preview.size(), preview.rgba());
+                let handle = ui.ctx().load_texture(
+                    format!("frame-capture-thumbnail-{request_id}"),
+                    image,
+                    TextureOptions::LINEAR,
+                );
+                *thumbnail_texture = Some(FrameCaptureThumbnailTexture { request_id, handle });
+            }
+
+            let [width, height] = preview.size();
+            let display_width = (width as f32).min(ui.available_width());
+            let display_size = vec2(display_width, display_width * height as f32 / width as f32);
+            if let Some(texture) = thumbnail_texture.as_ref() {
+                ui.add(
+                    Image::new((texture.handle.id(), display_size))
+                        .alt_text("Captured frame preview"),
+                );
+            } else {
+                ui.allocate_space(display_size);
+            }
+        }
+    }
 }
 
 fn show_failed(
@@ -211,11 +373,13 @@ mod tests {
     use crate::frame_capture::{
         execution::FrameCaptureExecutor,
         model::{FrameCaptureFormat, FrameCaptureRequest, FrameTimestamp},
+        thumbnail::FrameCaptureThumbnail,
     };
 
     use super::{
         CANCELLED_CLEANUP, CANCELLED_COPY, CANCELLED_TITLE, COMPLETE_TITLE, FAILED_TITLE,
-        FrameCaptureLifecycleUiState, RUNNING_TITLE, show_cancelled, show_completed, show_running,
+        FrameCaptureLifecycleUiState, FrameCaptureThumbnailState, RUNNING_TITLE, show_cancelled,
+        show_completed, show_running,
     };
 
     #[test]
@@ -269,6 +433,96 @@ mod tests {
         cancelled.drop_without_applying_deltas();
     }
 
+    #[test]
+    fn completed_capture_starts_exactly_one_thumbnail_request() {
+        let mut state = FrameCaptureLifecycleUiState::default();
+        let output = PathBuf::from("C:/media/recording-frame.png");
+
+        let request = state.begin_thumbnail(&output).unwrap();
+        assert_eq!(request.request_id(), 1);
+        assert_eq!(request.output(), output);
+        assert!(state.begin_thumbnail(&output).is_none());
+        assert!(matches!(
+            state.thumbnail(),
+            FrameCaptureThumbnailState::Loading { request_id: 1 }
+        ));
+    }
+
+    #[test]
+    fn stale_thumbnail_completion_cannot_replace_a_newer_capture() {
+        let mut state = FrameCaptureLifecycleUiState::default();
+        let first = state
+            .begin_thumbnail(PathBuf::from("first.png").as_path())
+            .unwrap();
+        state.reset();
+        let second = state
+            .begin_thumbnail(PathBuf::from("second.png").as_path())
+            .unwrap();
+
+        assert!(!state.settle_thumbnail(first.request_id(), Ok(preview([2, 1]))));
+        assert!(matches!(
+            state.thumbnail(),
+            FrameCaptureThumbnailState::Loading { request_id } if *request_id == second.request_id()
+        ));
+        assert!(state.settle_thumbnail(second.request_id(), Ok(preview([2, 1]))));
+        assert!(matches!(
+            state.thumbnail(),
+            FrameCaptureThumbnailState::Ready { request_id, .. }
+                if *request_id == second.request_id()
+        ));
+    }
+
+    #[test]
+    fn thumbnail_decode_failure_keeps_completed_capture_surface_successful() {
+        let request = request();
+        let mut executor = FrameCaptureExecutor::new();
+        let mut state = FrameCaptureLifecycleUiState::default();
+        let thumbnail = state.begin_thumbnail(&request.output).unwrap();
+        assert!(
+            state.settle_thumbnail(thumbnail.request_id(), Err("unsupported image".to_owned()))
+        );
+
+        let completed = render(|ui| {
+            let _ = show_completed(ui, &request, &request.output, &mut executor, &mut state);
+        });
+        assert!(contains(&completed, COMPLETE_TITLE));
+        assert!(contains(&completed, "Preview unavailable"));
+        assert!(!contains(&completed, FAILED_TITLE));
+        completed.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn ready_thumbnail_texture_is_reused_across_unrelated_repaints() {
+        let context = egui::Context::default();
+        context.set_fonts(egui::FontDefinitions::default());
+        let request = request();
+        let mut executor = FrameCaptureExecutor::new();
+        let mut state = FrameCaptureLifecycleUiState::default();
+        let thumbnail = state.begin_thumbnail(&request.output).unwrap();
+        assert!(state.settle_thumbnail(thumbnail.request_id(), Ok(preview([4, 2]))));
+
+        let first = render_with_context(&context, |ui| {
+            let _ = show_completed(ui, &request, &request.output, &mut executor, &mut state);
+        });
+        let texture_id = state.thumbnail_texture.as_ref().unwrap().handle.id();
+        assert!(!first.textures_delta.set.is_empty());
+        first.drop_without_applying_deltas();
+
+        let second = render_with_context(&context, |ui| {
+            let _ = show_completed(ui, &request, &request.output, &mut executor, &mut state);
+        });
+        assert_eq!(
+            state.thumbnail_texture.as_ref().unwrap().handle.id(),
+            texture_id
+        );
+        assert!(second.textures_delta.set.is_empty());
+        second.drop_without_applying_deltas();
+    }
+
+    fn preview(size: [usize; 2]) -> FrameCaptureThumbnail {
+        FrameCaptureThumbnail::from_rgba(size, vec![255; size[0] * size[1] * 4]).unwrap()
+    }
+
     fn request() -> FrameCaptureRequest {
         FrameCaptureRequest {
             input: PathBuf::from("C:/media/recording.mkv"),
@@ -278,9 +532,16 @@ mod tests {
         }
     }
 
-    fn render(mut add: impl FnMut(&mut egui::Ui)) -> egui::FullOutput {
+    fn render(add: impl FnMut(&mut egui::Ui)) -> egui::FullOutput {
         let context = egui::Context::default();
         context.set_fonts(egui::FontDefinitions::default());
+        render_with_context(&context, add)
+    }
+
+    fn render_with_context(
+        context: &egui::Context,
+        mut add: impl FnMut(&mut egui::Ui),
+    ) -> egui::FullOutput {
         context.run_ui(Default::default(), |ui| {
             let mut style = (**ui.style()).clone();
             style.text_styles.insert(

@@ -197,6 +197,7 @@ dependencies = [
  "eframe",
  "egui",
  "embed-resource",
+ "image",
  "raw-window-handle",
  "serde",
  "serde_json",
@@ -1523,6 +1524,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
