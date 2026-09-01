@@ -60,6 +60,8 @@ use apollo::{
     upscale::execution::{UpscaleExecutionState, UpscaleExecutor, UpscaleStartError},
 };
 
+// One-shot workers wake egui when they publish. This schedule is reserved for visibly changing
+// running-operation progress.
 const EXECUTION_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
 fn file_intake_enabled(
@@ -2127,6 +2129,18 @@ mod tests {
             .any(|clipped| shape_contains_text(&clipped.shape, needle))
     }
 
+    fn settled_navigation_repaint_delay(context: &egui::Context, app: &mut ApolloApp) -> Duration {
+        for _ in 0..8 {
+            let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
+            let repaint_delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+            output.textures_delta.clear();
+            if repaint_delay == Duration::MAX {
+                return repaint_delay;
+            }
+        }
+        Duration::ZERO
+    }
+
     fn shape_text_count(shape: &egui::Shape, needle: &str) -> usize {
         match shape {
             egui::Shape::Text(text) => usize::from(text.galley.job.text == needle),
@@ -2241,6 +2255,35 @@ mod tests {
         assert!(!output_contains_text(&output, "Audio Mix"));
         assert!(!output_contains_text(&output, "Upscale"));
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn idle_no_source_surface_schedules_no_application_repaint() {
+        let mut app = app();
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        theme::set_motion_durations(&context, theme::MotionDurations::DISABLED);
+
+        let repaint_delay = settled_navigation_repaint_delay(&context, &mut app);
+
+        assert_eq!(repaint_delay, Duration::MAX);
+    }
+
+    #[test]
+    fn idle_source_workspace_schedules_no_application_repaint() {
+        let (directory, path) = temp_file("idle-workspace-repaint");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        theme::set_motion_durations(&context, theme::MotionDurations::DISABLED);
+
+        let repaint_delay = settled_navigation_repaint_delay(&context, &mut app);
+
+        assert_eq!(repaint_delay, Duration::MAX);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
