@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-01
+
+Apollo 0.3.2 makes file selection and normal window interaction more responsive, and adds visual confirmation for completed frame captures.
+
+### Changed
+
+- Native Open and Browse dialogs now reuse one persistent service, reopen without whole-window dimming, and remember source and output directories separately.
+- Idle intake and loaded-source workspaces no longer run periodic Apollo repaint loops or repeat media and filesystem work solely because the window repainted.
+- Running operations now keep progress readable while bounding rapid visual updates, with cancellation and terminal results still appearing immediately.
+- Successful Frame Capture results now show an aspect-ratio-preserving preview while keeping the published full-resolution image unchanged. Preview failures do not invalidate a successful capture.
+
 ## [0.3.1] - 2026-09-01
 
 Apollo 0.3.1 reorganizes the existing media tools into a persistent source workspace with direct operation switching and consistent controls.
@@ -116,7 +127,8 @@ Apollo 0.1.0 is the first public Windows release, bringing focused Audio Mix and
 - Missing optional FFprobe metadata falls back to usable media and track labels instead of preventing intake or selection.
 - Upscale sizing preserves the source aspect ratio within the selected target boundary without default cropping, stretching, or black padding.
 
-[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/TommyMoonn/apollo/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/TommyMoonn/apollo/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/TommyMoonn/apollo/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TommyMoonn/apollo/compare/v0.1.2...v0.2.0

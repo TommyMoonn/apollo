@@ -41,11 +41,11 @@ See the [latest release notes](https://github.com/TommyMoonn/apollo/releases/lat
 - **Video Upscale** - upscale to 1440p, 4K, or 8K boundaries with Lanczos scaling and H.264 or H.265 output while preserving the source aspect ratio.
 - **Remux** - copy all compatible streams into MKV or MP4 without re-encoding, with incompatibilities reported before processing.
 - **Audio Extract** - save one selected audio track as an original MKA copy, 256 kbps AAC, or lossless FLAC.
-- **Frame Capture** - save one timestamped frame as lossless PNG or high-quality JPEG.
+- **Frame Capture** - save one timestamped frame as lossless PNG or high-quality JPEG, then confirm the result with a bounded image preview.
 - **Source workspace** - keep one source loaded while switching between media tools, or explicitly change or close it.
-- **Output control** - edit the output filename and choose the destination before starting any workflow.
+- **Output control** - edit the output filename, choose the destination, and return to the last-used source and output directories in native file dialogs.
 - **Safe publication** - work is written to an owned temporary location and published only after successful completion; failed or cancelled work does not leave a misleading final file.
-- **Responsive native interface** - the compact egui interface adapts across narrow, normal, wide, tall, and fullscreen windows.
+- **Responsive native interface** - the compact egui interface adapts across narrow, normal, wide, tall, and fullscreen windows while keeping idle and progress updates restrained.
 
 ## Requirements
 
