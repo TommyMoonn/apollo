@@ -2,6 +2,7 @@ use std::{
     fmt, io,
     path::{Path, PathBuf},
     process::{Child, Stdio},
+    sync::{Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -20,15 +21,65 @@ use std::{
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::SearchPathW;
 
-use super::process::background_command;
+use super::process::{
+    DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES, MediaProcess, MediaProcessCommand, MediaProcessFailure,
+    MediaProcessStartError, MediaProcessState, background_command,
+};
 
 const VERSION_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_QUERY_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const NVENC_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const ENCODER_INVENTORY_LIMIT_BYTES: usize = 256 * 1024;
+
+static NVENC_CAPABILITY_CACHE: OnceLock<Mutex<VideoEncoderCapabilityCache>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaTools {
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
+    pub video_encoders: VideoEncoderCapabilities,
+}
+
+impl MediaTools {
+    pub fn new(ffmpeg: impl Into<PathBuf>, ffprobe: impl Into<PathBuf>) -> Self {
+        Self {
+            ffmpeg: ffmpeg.into(),
+            ffprobe: ffprobe.into(),
+            video_encoders: VideoEncoderCapabilities::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoEncoderCapability {
+    Available,
+    EncoderNotCompiled,
+    RuntimeUnavailable { reason: String },
+}
+
+impl VideoEncoderCapability {
+    pub fn unavailable_reason(&self) -> Option<&str> {
+        match self {
+            Self::Available => None,
+            Self::EncoderNotCompiled => Some("the FFmpeg build does not include this encoder"),
+            Self::RuntimeUnavailable { reason } => Some(reason),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoEncoderCapabilities {
+    pub h264_nvenc: VideoEncoderCapability,
+    pub h265_nvenc: VideoEncoderCapability,
+}
+
+impl Default for VideoEncoderCapabilities {
+    fn default() -> Self {
+        Self {
+            h264_nvenc: VideoEncoderCapability::EncoderNotCompiled,
+            h265_nvenc: VideoEncoderCapability::EncoderNotCompiled,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -206,17 +257,208 @@ fn wait_for_version_query(
     }
 }
 
+trait VideoEncoderCapabilityDetector {
+    fn detect(&self, ffmpeg: &Path) -> VideoEncoderCapabilities;
+}
+
+#[derive(Debug, Default)]
+struct SystemVideoEncoderCapabilityDetector;
+
+impl VideoEncoderCapabilityDetector for SystemVideoEncoderCapabilityDetector {
+    fn detect(&self, ffmpeg: &Path) -> VideoEncoderCapabilities {
+        let inventory = match query_encoder_inventory(ffmpeg) {
+            Ok(inventory) => inventory,
+            Err(reason) => {
+                let reason = format!("FFmpeg encoder inventory could not be queried: {reason}");
+                return VideoEncoderCapabilities {
+                    h264_nvenc: VideoEncoderCapability::RuntimeUnavailable {
+                        reason: reason.clone(),
+                    },
+                    h265_nvenc: VideoEncoderCapability::RuntimeUnavailable { reason },
+                };
+            }
+        };
+
+        VideoEncoderCapabilities {
+            h264_nvenc: detect_nvenc_encoder(ffmpeg, &inventory, "h264_nvenc"),
+            h265_nvenc: detect_nvenc_encoder(ffmpeg, &inventory, "hevc_nvenc"),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct VideoEncoderCapabilityCache {
+    ffmpeg_identity: Option<PathBuf>,
+    capabilities: Option<VideoEncoderCapabilities>,
+}
+
+impl VideoEncoderCapabilityCache {
+    fn get_or_detect<D>(&mut self, ffmpeg: &Path, detector: &D) -> VideoEncoderCapabilities
+    where
+        D: VideoEncoderCapabilityDetector,
+    {
+        if self.ffmpeg_identity.as_deref() == Some(ffmpeg)
+            && let Some(capabilities) = self.capabilities.as_ref()
+        {
+            return capabilities.clone();
+        }
+
+        let capabilities = detector.detect(ffmpeg);
+        self.ffmpeg_identity = Some(ffmpeg.to_path_buf());
+        self.capabilities = Some(capabilities.clone());
+        capabilities
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CapabilityCommandError {
+    Start(MediaProcessStartError),
+    Failed {
+        failure: MediaProcessFailure,
+        diagnostic: String,
+    },
+    TimedOut,
+}
+
+impl fmt::Display for CapabilityCommandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Start(error) => write!(f, "{error}"),
+            Self::Failed {
+                failure: _,
+                diagnostic,
+            } if !diagnostic.trim().is_empty() => write!(f, "{}", diagnostic.trim()),
+            Self::Failed { failure, .. } => write!(f, "FFmpeg failed: {failure:?}"),
+            Self::TimedOut => write!(f, "FFmpeg capability query timed out"),
+        }
+    }
+}
+
+fn query_encoder_inventory(ffmpeg: &Path) -> Result<String, CapabilityCommandError> {
+    let command = MediaProcessCommand::new(ffmpeg)
+        .args(["-hide_banner", "-encoders"])
+        .captured_stdout_limit(ENCODER_INVENTORY_LIMIT_BYTES)
+        .diagnostic_stderr_limit(DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES);
+    run_capability_command(command, NVENC_QUERY_TIMEOUT)
+}
+
+fn detect_nvenc_encoder(
+    ffmpeg: &Path,
+    inventory: &str,
+    encoder: &'static str,
+) -> VideoEncoderCapability {
+    detect_nvenc_encoder_with(inventory, encoder, || {
+        let command = MediaProcessCommand::new(ffmpeg)
+            .args(nvenc_probe_arguments(encoder))
+            .diagnostic_stderr_limit(DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES);
+        run_capability_command(command, NVENC_QUERY_TIMEOUT).map(|_| ())
+    })
+}
+
+fn detect_nvenc_encoder_with<F>(inventory: &str, encoder: &str, probe: F) -> VideoEncoderCapability
+where
+    F: FnOnce() -> Result<(), CapabilityCommandError>,
+{
+    if !encoder_inventory_contains(inventory, encoder) {
+        return VideoEncoderCapability::EncoderNotCompiled;
+    }
+
+    match probe() {
+        Ok(()) => VideoEncoderCapability::Available,
+        Err(error) => VideoEncoderCapability::RuntimeUnavailable {
+            reason: error.to_string(),
+        },
+    }
+}
+
+fn nvenc_probe_arguments(encoder: &str) -> Vec<String> {
+    [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=256x256:r=1",
+        "-frames:v",
+        "1",
+        "-an",
+        "-c:v",
+        encoder,
+        "-preset",
+        "p5",
+        "-f",
+        "null",
+        "-",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn encoder_inventory_contains(inventory: &str, encoder: &str) -> bool {
+    inventory
+        .lines()
+        .any(|line| line.split_whitespace().any(|field| field == encoder))
+}
+
+fn run_capability_command(
+    command: MediaProcessCommand,
+    timeout: Duration,
+) -> Result<String, CapabilityCommandError> {
+    let process = MediaProcess::start(command).map_err(CapabilityCommandError::Start)?;
+    let started = Instant::now();
+
+    loop {
+        match process.state() {
+            MediaProcessState::Running if started.elapsed() < timeout => {
+                thread::sleep(VERSION_QUERY_POLL_INTERVAL);
+            }
+            MediaProcessState::Running => {
+                let _ = process.cancel();
+                while matches!(process.state(), MediaProcessState::Running) {
+                    thread::sleep(VERSION_QUERY_POLL_INTERVAL);
+                }
+                return Err(CapabilityCommandError::TimedOut);
+            }
+            MediaProcessState::Completed => return Ok(process.captured_stdout()),
+            MediaProcessState::Failed(failure) => {
+                return Err(CapabilityCommandError::Failed {
+                    failure,
+                    diagnostic: process.diagnostic_stderr(),
+                });
+            }
+            MediaProcessState::Cancelled => return Err(CapabilityCommandError::TimedOut),
+        }
+    }
+}
+
+fn cached_video_encoder_capabilities(ffmpeg: &Path) -> VideoEncoderCapabilities {
+    let cache =
+        NVENC_CAPABILITY_CACHE.get_or_init(|| Mutex::new(VideoEncoderCapabilityCache::default()));
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_or_detect(ffmpeg, &SystemVideoEncoderCapabilityDetector)
+}
+
 pub fn discover_media_tools() -> Result<MediaTools, MediaToolsError> {
     discover_with(
         &SystemExecutableResolver,
         &SystemVersionValidator::default(),
+        cached_video_encoder_capabilities,
     )
 }
 
-fn discover_with<R, V>(resolver: &R, validator: &V) -> Result<MediaTools, MediaToolsError>
+fn discover_with<R, V, C>(
+    resolver: &R,
+    validator: &V,
+    capabilities: C,
+) -> Result<MediaTools, MediaToolsError>
 where
     R: ExecutableResolver,
     V: VersionValidator,
+    C: FnOnce(&Path) -> VideoEncoderCapabilities,
 {
     let ffmpeg = resolver.resolve(MediaToolKind::Ffmpeg);
     let ffprobe = resolver.resolve(MediaToolKind::Ffprobe);
@@ -231,7 +473,13 @@ where
     validate_tool(validator, MediaToolKind::Ffmpeg, &ffmpeg)?;
     validate_tool(validator, MediaToolKind::Ffprobe, &ffprobe)?;
 
-    Ok(MediaTools { ffmpeg, ffprobe })
+    let video_encoders = capabilities(&ffmpeg);
+
+    Ok(MediaTools {
+        ffmpeg,
+        ffprobe,
+        video_encoders,
+    })
 }
 
 fn validate_tool<V>(validator: &V, tool: MediaToolKind, path: &Path) -> Result<(), MediaToolsError>
@@ -320,10 +568,13 @@ mod tests {
     };
 
     use super::{
-        ExecutableResolver, MediaToolKind, MediaToolValidationError, MediaTools, MediaToolsError,
-        SystemVersionValidator, VersionValidator, background_command, discover_with,
-        wait_for_version_query,
+        CapabilityCommandError, ExecutableResolver, MediaToolKind, MediaToolValidationError,
+        MediaTools, MediaToolsError, SystemVersionValidator, VersionValidator,
+        VideoEncoderCapabilities, VideoEncoderCapability, VideoEncoderCapabilityCache,
+        VideoEncoderCapabilityDetector, background_command, detect_nvenc_encoder_with,
+        discover_with, encoder_inventory_contains, nvenc_probe_arguments, wait_for_version_query,
     };
+    use crate::media::process::{MediaProcessCommand, MediaProcessFailure};
 
     #[derive(Default)]
     struct FakeResolver {
@@ -381,11 +632,150 @@ mod tests {
             .with(MediaToolKind::Ffprobe, "/tools/ffprobe")
     }
 
+    fn no_video_encoders(_: &Path) -> VideoEncoderCapabilities {
+        VideoEncoderCapabilities::default()
+    }
+
+    struct FakeCapabilityDetector {
+        calls: RefCell<Vec<PathBuf>>,
+        result: VideoEncoderCapabilities,
+    }
+
+    impl FakeCapabilityDetector {
+        fn new(result: VideoEncoderCapabilities) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                result,
+            }
+        }
+    }
+
+    impl VideoEncoderCapabilityDetector for FakeCapabilityDetector {
+        fn detect(&self, ffmpeg: &Path) -> VideoEncoderCapabilities {
+            self.calls.borrow_mut().push(ffmpeg.to_path_buf());
+            self.result.clone()
+        }
+    }
+
+    #[test]
+    fn encoder_inventory_matches_exact_compiled_encoder_names() {
+        let inventory = " V....D h264_nvenc NVIDIA NVENC H.264 encoder\n V....D hevc_nvenc NVIDIA NVENC hevc encoder\n";
+
+        assert!(encoder_inventory_contains(inventory, "h264_nvenc"));
+        assert!(encoder_inventory_contains(inventory, "hevc_nvenc"));
+        assert!(!encoder_inventory_contains(inventory, "av1_nvenc"));
+        assert!(!encoder_inventory_contains(inventory, "nvenc"));
+    }
+
+    #[test]
+    fn compiled_encoders_require_a_successful_runtime_probe() {
+        let inventory = " V....D h264_nvenc NVIDIA NVENC H.264 encoder\n";
+
+        assert_eq!(
+            detect_nvenc_encoder_with(inventory, "h264_nvenc", || Ok(())),
+            VideoEncoderCapability::Available
+        );
+        assert_eq!(
+            detect_nvenc_encoder_with(inventory, "hevc_nvenc", || {
+                panic!("an encoder absent from inventory must not be probed")
+            }),
+            VideoEncoderCapability::EncoderNotCompiled
+        );
+    }
+
+    #[test]
+    fn runtime_probe_failure_retains_ffmpeg_stderr_reason() {
+        let inventory = " V....D h264_nvenc NVIDIA NVENC H.264 encoder\n";
+        let diagnostic = "Driver does not support the required nvenc API version";
+
+        assert_eq!(
+            detect_nvenc_encoder_with(inventory, "h264_nvenc", || {
+                Err(CapabilityCommandError::Failed {
+                    failure: MediaProcessFailure::Exit(Some(1)),
+                    diagnostic: diagnostic.to_owned(),
+                })
+            }),
+            VideoEncoderCapability::RuntimeUnavailable {
+                reason: diagnostic.to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn nvenc_probe_uses_generated_input_and_null_output_only() {
+        let args = nvenc_probe_arguments("h264_nvenc");
+
+        assert!(args.windows(2).any(|pair| pair == ["-f", "lavfi"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-i", "color=c=black:s=256x256:r=1"])
+        );
+        assert!(args.windows(2).any(|pair| pair == ["-frames:v", "1"]));
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "h264_nvenc"]));
+        assert!(args.windows(2).any(|pair| pair == ["-f", "null"]));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+    }
+
+    #[test]
+    fn capability_cache_reuses_same_ffmpeg_and_invalidates_on_identity_change() {
+        let capabilities = VideoEncoderCapabilities {
+            h264_nvenc: VideoEncoderCapability::Available,
+            h265_nvenc: VideoEncoderCapability::RuntimeUnavailable {
+                reason: "HEVC initialization failed".to_owned(),
+            },
+        };
+        let detector = FakeCapabilityDetector::new(capabilities.clone());
+        let mut cache = VideoEncoderCapabilityCache::default();
+
+        assert_eq!(
+            cache.get_or_detect(Path::new("/tools/ffmpeg-a"), &detector),
+            capabilities
+        );
+        assert_eq!(
+            cache.get_or_detect(Path::new("/tools/ffmpeg-a"), &detector),
+            capabilities
+        );
+        assert_eq!(
+            cache.get_or_detect(Path::new("/tools/ffmpeg-b"), &detector),
+            capabilities
+        );
+        assert_eq!(
+            detector.calls.into_inner(),
+            vec![
+                PathBuf::from("/tools/ffmpeg-a"),
+                PathBuf::from("/tools/ffmpeg-b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn capability_commands_are_cancelled_when_the_bound_expires() {
+        let error = super::run_capability_command(
+            long_running_capability_command(),
+            Duration::from_millis(20),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, CapabilityCommandError::TimedOut);
+    }
+
+    fn long_running_capability_command() -> MediaProcessCommand {
+        #[cfg(windows)]
+        {
+            MediaProcessCommand::new("cmd.exe").args(["/D", "/S", "/C", "ping 127.0.0.1 -n 6 >NUL"])
+        }
+
+        #[cfg(not(windows))]
+        {
+            MediaProcessCommand::new("sh").args(["-c", "sleep 5"])
+        }
+    }
+
     #[test]
     fn valid_ffmpeg_and_ffprobe_are_validated() {
         let validator = FakeValidator::default();
 
-        discover_with(&complete_resolver(), &validator).unwrap();
+        discover_with(&complete_resolver(), &validator, no_video_encoders).unwrap();
 
         assert_eq!(
             validator.calls.into_inner(),
@@ -400,7 +790,8 @@ mod tests {
     fn missing_ffmpeg_is_distinct() {
         let resolver = FakeResolver::default().with(MediaToolKind::Ffprobe, "/tools/ffprobe");
 
-        let error = discover_with(&resolver, &FakeValidator::default()).unwrap_err();
+        let error =
+            discover_with(&resolver, &FakeValidator::default(), no_video_encoders).unwrap_err();
 
         assert_eq!(error, MediaToolsError::MissingFfmpeg);
     }
@@ -409,14 +800,20 @@ mod tests {
     fn missing_ffprobe_is_distinct() {
         let resolver = FakeResolver::default().with(MediaToolKind::Ffmpeg, "/tools/ffmpeg");
 
-        let error = discover_with(&resolver, &FakeValidator::default()).unwrap_err();
+        let error =
+            discover_with(&resolver, &FakeValidator::default(), no_video_encoders).unwrap_err();
 
         assert_eq!(error, MediaToolsError::MissingFfprobe);
     }
 
     #[test]
     fn missing_both_tools_is_reported_together() {
-        let error = discover_with(&FakeResolver::default(), &FakeValidator::default()).unwrap_err();
+        let error = discover_with(
+            &FakeResolver::default(),
+            &FakeValidator::default(),
+            no_video_encoders,
+        )
+        .unwrap_err();
 
         assert_eq!(error, MediaToolsError::MissingBoth);
     }
@@ -494,7 +891,7 @@ mod tests {
             MediaToolValidationError::NonZeroExit(Some(1)),
         );
 
-        let error = discover_with(&complete_resolver(), &validator).unwrap_err();
+        let error = discover_with(&complete_resolver(), &validator, no_video_encoders).unwrap_err();
 
         assert_eq!(
             error,
@@ -508,13 +905,19 @@ mod tests {
 
     #[test]
     fn discovered_paths_are_retained_in_media_tools() {
-        let tools = discover_with(&complete_resolver(), &FakeValidator::default()).unwrap();
+        let tools = discover_with(
+            &complete_resolver(),
+            &FakeValidator::default(),
+            no_video_encoders,
+        )
+        .unwrap();
 
         assert_eq!(
             tools,
             MediaTools {
                 ffmpeg: PathBuf::from("/tools/ffmpeg"),
                 ffprobe: PathBuf::from("/tools/ffprobe"),
+                video_encoders: VideoEncoderCapabilities::default(),
             }
         );
     }
@@ -525,7 +928,7 @@ mod tests {
             .with(MediaToolKind::Ffmpeg, "/media tools/ffmpeg")
             .with(MediaToolKind::Ffprobe, "/media tools/ffprobe");
 
-        let tools = discover_with(&resolver, &FakeValidator::default()).unwrap();
+        let tools = discover_with(&resolver, &FakeValidator::default(), no_video_encoders).unwrap();
 
         assert_eq!(tools.ffmpeg, PathBuf::from("/media tools/ffmpeg"));
         assert_eq!(tools.ffprobe, PathBuf::from("/media tools/ffprobe"));

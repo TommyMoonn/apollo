@@ -66,6 +66,7 @@ use apollo::{
         workspace::{self, Operation as Tool, WorkspaceAction},
     },
     upscale::execution::{UpscaleExecutionState, UpscaleExecutor, UpscaleStartError},
+    upscale::model::VideoCodec,
 };
 
 fn file_intake_enabled(
@@ -1179,7 +1180,13 @@ impl ApolloApp {
                 let Some(tools) = self.ready_media_tools().cloned() else {
                     return Ok(());
                 };
-                let request = upscale.selection.request(&upscale.media);
+                let nvenc_capability = match upscale.selection.codec() {
+                    VideoCodec::H264 => tools.video_encoders.h264_nvenc.clone(),
+                    VideoCodec::H265 => tools.video_encoders.h265_nvenc.clone(),
+                };
+                let request = upscale
+                    .selection
+                    .request_with_nvenc_capability(&upscale.media, nvenc_capability);
                 let wake = self.progress_repaint.begin();
                 self.upscale_executor
                     .start_with_wake(&tools, &upscale.media, &request, wake)?;
@@ -2119,10 +2126,10 @@ mod tests {
         let egui_context = egui::Context::default();
         ApolloApp {
             state: AppState::default(),
-            media_tools: MediaToolsState::Ready(MediaTools {
-                ffmpeg: PathBuf::from("missing-ffmpeg"),
-                ffprobe: PathBuf::from("missing-ffprobe"),
-            }),
+            media_tools: MediaToolsState::Ready(MediaTools::new(
+                "missing-ffmpeg",
+                "missing-ffprobe",
+            )),
             media_tools_discovery: None,
             audio_mix_executor: apollo::audio_mix::execution::AudioMixExecutor::new(),
             upscale_executor: apollo::upscale::execution::UpscaleExecutor::new(),
@@ -2177,14 +2184,37 @@ mod tests {
     }
 
     #[test]
+    fn media_tool_capability_work_runs_on_the_dedicated_discovery_worker() {
+        let mut app = app();
+        app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
+        let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
+
+        assert!(
+            app.start_media_tools_discovery_with(egui::Context::default(), move || {
+                thread_sender
+                    .send(std::thread::current().name().map(str::to_owned))
+                    .unwrap();
+                Err(MediaToolsError::MissingBoth)
+            },)
+        );
+
+        assert_eq!(
+            thread_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            Some("apollo-media-tools".to_owned())
+        );
+    }
+
+    #[test]
     fn media_tool_discovery_completion_requests_repaint_and_transitions_to_ready() {
         let mut app = app();
         app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
         app.tools_error_details_open = true;
-        let expected = MediaTools {
-            ffmpeg: PathBuf::from(r"C:\Media Tools\ffmpeg.exe"),
-            ffprobe: PathBuf::from(r"C:\Media Tools\ffprobe.exe"),
-        };
+        let expected = MediaTools::new(
+            PathBuf::from(r"C:\Media Tools\ffmpeg.exe"),
+            PathBuf::from(r"C:\Media Tools\ffprobe.exe"),
+        );
         let context = egui::Context::default();
         let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
         context.set_request_repaint_callback(move |_| {
@@ -2254,10 +2284,7 @@ mod tests {
     fn stale_media_tool_discovery_completion_is_rejected() {
         let mut app = app();
         app.media_tools = MediaToolsState::Checking { attempt_id: 7 };
-        let stale = MediaTools {
-            ffmpeg: PathBuf::from("stale-ffmpeg"),
-            ffprobe: PathBuf::from("stale-ffprobe"),
-        };
+        let stale = MediaTools::new("stale-ffmpeg", "stale-ffprobe");
 
         assert!(!app.complete_media_tools_discovery(6, Ok(stale)));
         assert_eq!(app.media_tools, MediaToolsState::Checking { attempt_id: 7 });

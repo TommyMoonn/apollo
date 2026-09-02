@@ -7,11 +7,9 @@ use std::{
 use egui::{RichText, Ui};
 
 use crate::{
-    media::{model::MediaFile, output::MediaOutputError},
+    media::{model::MediaFile, output::MediaOutputError, tools::VideoEncoderCapability},
     upscale::{
-        model::{
-            NvencCapability, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec,
-        },
+        model::{UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec},
         sizing::{OutputDimensions, calculate_output_dimensions, resolve_target_boundary},
         validation::{UpscaleValidationError, validate_upscale_request},
     },
@@ -169,13 +167,21 @@ impl UpscaleSelectionState {
 
     /// Build the current typed request without starting work or calculating command dimensions.
     pub fn request(&self, media: &MediaFile) -> UpscaleRequest {
+        self.request_with_nvenc_capability(media, VideoEncoderCapability::EncoderNotCompiled)
+    }
+
+    pub fn request_with_nvenc_capability(
+        &self,
+        media: &MediaFile,
+        nvenc_capability: VideoEncoderCapability,
+    ) -> UpscaleRequest {
         UpscaleRequest {
             input: media.path.clone(),
             output: self.output_path(),
             target: self.target,
             codec: self.codec,
             encoder_settings: self.encoder_settings.clone(),
-            nvenc_capability: NvencCapability::Unchecked,
+            nvenc_capability,
         }
     }
 

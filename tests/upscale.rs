@@ -10,12 +10,13 @@ use apollo::{
     media::{
         model::{AudioStream, MediaFile, VideoStream},
         output::{MediaOutputError, preflight_output_destination},
+        tools::VideoEncoderCapability,
     },
     upscale::{
         command::{UpscaleCommandError, build_upscale_invocation},
         model::{
-            CpuQuality, NvencCapability, NvencQuality, UpscaleEncoderSettings, UpscaleRequest,
-            UpscaleTarget, VideoCodec, VideoEncoderBackend, VideoEncoderSelection,
+            CpuQuality, NvencQuality, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget,
+            VideoCodec, VideoEncoderBackend, VideoEncoderSelection,
         },
         sizing::{
             OutputDimensions, UpscaleSizingError, calculate_output_dimensions,
@@ -165,7 +166,7 @@ fn nvenc_h264_uses_p5_vbr_and_typed_cq_without_cpu_options() {
     request
         .encoder_settings
         .set_selection(VideoEncoderSelection::NvidiaNvenc);
-    request.nvenc_capability = NvencCapability::Available;
+    request.nvenc_capability = VideoEncoderCapability::Available;
     let media = media(request.input.clone(), Some(1920), Some(1080));
 
     let args = invocation_args(
@@ -199,7 +200,7 @@ fn nvenc_h265_uses_hevc_encoder_and_selected_cq() {
     request
         .encoder_settings
         .set_nvenc_quality(VideoCodec::H265, NvencQuality::new(27).unwrap());
-    request.nvenc_capability = NvencCapability::Available;
+    request.nvenc_capability = VideoEncoderCapability::Available;
     let media = media(request.input.clone(), Some(1920), Some(1080));
 
     let args = invocation_args(
@@ -225,13 +226,15 @@ fn auto_resolves_to_nvenc_only_when_capability_is_available() {
         VideoEncoderBackend::Cpu
     );
 
-    request.nvenc_capability = NvencCapability::unavailable("driver initialization failed");
+    request.nvenc_capability = VideoEncoderCapability::RuntimeUnavailable {
+        reason: "driver initialization failed".to_owned(),
+    };
     assert_eq!(
         request.resolve_video_encoder().unwrap().backend,
         VideoEncoderBackend::Cpu
     );
 
-    request.nvenc_capability = NvencCapability::Available;
+    request.nvenc_capability = VideoEncoderCapability::Available;
     assert_eq!(
         request.resolve_video_encoder().unwrap().backend,
         VideoEncoderBackend::NvidiaNvenc
@@ -245,7 +248,9 @@ fn explicit_unavailable_nvenc_is_rejected_with_the_capability_reason() {
     request
         .encoder_settings
         .set_selection(VideoEncoderSelection::NvidiaNvenc);
-    request.nvenc_capability = NvencCapability::unavailable("installed NVIDIA driver is too old");
+    request.nvenc_capability = VideoEncoderCapability::RuntimeUnavailable {
+        reason: "installed NVIDIA driver is too old".to_owned(),
+    };
     let media = media(request.input.clone(), Some(1920), Some(1080));
 
     assert_eq!(
@@ -466,7 +471,7 @@ fn unusual_input_and_output_paths_remain_single_arguments() {
         target: UpscaleTarget::Uhd4k,
         codec: VideoCodec::H264,
         encoder_settings: UpscaleEncoderSettings::default(),
-        nvenc_capability: NvencCapability::Unchecked,
+        nvenc_capability: VideoEncoderCapability::EncoderNotCompiled,
     };
     let media = media_with_audio_codecs(
         request.input.clone(),
@@ -1130,7 +1135,7 @@ fn request(temp: &TestDirectory, target: UpscaleTarget) -> UpscaleRequest {
         target,
         codec: VideoCodec::H264,
         encoder_settings: UpscaleEncoderSettings::default(),
-        nvenc_capability: NvencCapability::Unchecked,
+        nvenc_capability: VideoEncoderCapability::EncoderNotCompiled,
     }
 }
 

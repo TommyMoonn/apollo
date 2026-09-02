@@ -73,6 +73,7 @@ pub struct MediaProcessCommand {
     program: PathBuf,
     args: Vec<OsString>,
     progress_source: ProcessProgressSource,
+    captured_stdout_limit: usize,
     diagnostic_stderr_limit: usize,
 }
 
@@ -82,6 +83,7 @@ impl MediaProcessCommand {
             program: program.into(),
             args: Vec::new(),
             progress_source: ProcessProgressSource::None,
+            captured_stdout_limit: 0,
             diagnostic_stderr_limit: DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES,
         }
     }
@@ -107,6 +109,11 @@ impl MediaProcessCommand {
 
     pub fn diagnostic_stderr_limit(mut self, bytes: usize) -> Self {
         self.diagnostic_stderr_limit = bytes;
+        self
+    }
+
+    pub fn captured_stdout_limit(mut self, bytes: usize) -> Self {
+        self.captured_stdout_limit = bytes;
         self
     }
 
@@ -173,6 +180,7 @@ impl std::error::Error for MediaProcessStartError {}
 
 pub struct MediaProcess {
     lifecycle: Arc<ProcessLifecycle>,
+    captured_stdout: Arc<Mutex<BoundedDiagnostic>>,
     diagnostics: Arc<Mutex<BoundedDiagnostic>>,
     stdout_rx: Receiver<String>,
     stderr_rx: Receiver<String>,
@@ -189,6 +197,9 @@ impl MediaProcess {
         wake: MediaProcessWake,
     ) -> Result<Self, MediaProcessStartError> {
         let lifecycle = Arc::new(ProcessLifecycle::new());
+        let captured_stdout = Arc::new(Mutex::new(BoundedDiagnostic::new(
+            command.captured_stdout_limit,
+        )));
         let diagnostics = Arc::new(Mutex::new(BoundedDiagnostic::new(
             command.diagnostic_stderr_limit,
         )));
@@ -199,6 +210,7 @@ impl MediaProcess {
         let (startup_tx, startup_rx) = sync_channel(1);
 
         let worker_lifecycle = Arc::clone(&lifecycle);
+        let worker_captured_stdout = Arc::clone(&captured_stdout);
         let worker_diagnostics = Arc::clone(&diagnostics);
         thread::Builder::new()
             .name("apollo-media-process".to_owned())
@@ -206,6 +218,7 @@ impl MediaProcess {
                 run_worker(
                     command,
                     worker_lifecycle,
+                    worker_captured_stdout,
                     worker_diagnostics,
                     wake,
                     WorkerChannels {
@@ -221,6 +234,7 @@ impl MediaProcess {
         match startup_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 lifecycle,
+                captured_stdout,
                 diagnostics,
                 stdout_rx,
                 stderr_rx,
@@ -253,6 +267,10 @@ impl MediaProcess {
 
     pub fn diagnostic_stderr(&self) -> String {
         lock_unpoisoned(&self.diagnostics).as_lossy_string()
+    }
+
+    pub fn captured_stdout(&self) -> String {
+        lock_unpoisoned(&self.captured_stdout).as_lossy_string()
     }
 }
 
@@ -449,6 +467,7 @@ struct WorkerChannels {
 fn run_worker(
     command: MediaProcessCommand,
     lifecycle: Arc<ProcessLifecycle>,
+    captured_stdout: Arc<Mutex<BoundedDiagnostic>>,
     diagnostics: Arc<Mutex<BoundedDiagnostic>>,
     wake: MediaProcessWake,
     channels: WorkerChannels,
@@ -484,8 +503,9 @@ fn run_worker(
         .then(|| (progress_tx.clone(), wake.clone()));
     drop(progress_tx);
 
+    let stdout_capture = (command.captured_stdout_limit > 0).then_some(captured_stdout);
     let stdout_reader =
-        match spawn_stream_reader("stdout", stdout, stdout_tx, stdout_progress, None) {
+        match spawn_stream_reader("stdout", stdout, stdout_tx, stdout_progress, stdout_capture) {
             Ok(reader) => reader,
             Err(error) => {
                 stop_owned_child(&mut child);
@@ -733,6 +753,16 @@ mod tests {
         assert_eq!(drain(process.stdout_channel()), ["stdout-line"]);
         assert_eq!(drain(process.progress_channel()), ["stdout-line"]);
         assert!(drain(process.stderr_channel()).is_empty());
+    }
+
+    #[test]
+    fn optional_stdout_capture_is_bounded_and_available_after_settlement() {
+        let process =
+            MediaProcess::start(shell_command(success_script()).captured_stdout_limit(64))
+                .expect("helper process should start");
+
+        assert_eq!(wait_for_process(&process), MediaProcessState::Completed);
+        assert_eq!(process.captured_stdout().trim(), "stdout-line");
     }
 
     #[test]

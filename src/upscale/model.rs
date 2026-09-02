@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::media::tools::VideoEncoderCapability;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UpscaleTarget {
     Qhd1440,
@@ -154,34 +156,6 @@ impl UpscaleEncoderSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum NvencCapability {
-    #[default]
-    Unchecked,
-    Available,
-    Unavailable {
-        reason: String,
-    },
-}
-
-impl NvencCapability {
-    const UNCHECKED_REASON: &'static str = "NVIDIA NVENC capability has not been checked";
-
-    pub fn unavailable(reason: impl Into<String>) -> Self {
-        Self::Unavailable {
-            reason: reason.into(),
-        }
-    }
-
-    pub fn unavailable_reason(&self) -> Option<&str> {
-        match self {
-            Self::Unchecked => Some(Self::UNCHECKED_REASON),
-            Self::Available => None,
-            Self::Unavailable { reason } => Some(reason),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedVideoEncoder {
     pub backend: VideoEncoderBackend,
@@ -200,7 +174,7 @@ pub struct UpscaleRequest {
     pub target: UpscaleTarget,
     pub codec: VideoCodec,
     pub encoder_settings: UpscaleEncoderSettings,
-    pub nvenc_capability: NvencCapability,
+    pub nvenc_capability: VideoEncoderCapability,
 }
 
 impl UpscaleRequest {
@@ -208,7 +182,7 @@ impl UpscaleRequest {
         let backend = match self.encoder_settings.selection() {
             VideoEncoderSelection::Cpu => VideoEncoderBackend::Cpu,
             VideoEncoderSelection::Auto => {
-                if self.nvenc_capability == NvencCapability::Available {
+                if self.nvenc_capability == VideoEncoderCapability::Available {
                     VideoEncoderBackend::NvidiaNvenc
                 } else {
                     VideoEncoderBackend::Cpu

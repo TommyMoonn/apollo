@@ -264,12 +264,11 @@ mod tests {
             model::{FrameRate, MediaFile, VideoStream},
             process::MediaProcessFailure,
             progress::MediaProgress,
+            tools::VideoEncoderCapability,
         },
         upscale::{
             execution::{UpscaleExecutionFailure, UpscaleExecutionState, UpscaleExecutor},
-            model::{
-                NvencCapability, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec,
-            },
+            model::{UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec},
         },
     };
 
@@ -496,7 +495,7 @@ mod tests {
             target: UpscaleTarget::Uhd4k,
             codec: VideoCodec::H264,
             encoder_settings: UpscaleEncoderSettings::default(),
-            nvenc_capability: NvencCapability::Unchecked,
+            nvenc_capability: VideoEncoderCapability::EncoderNotCompiled,
         }
     }
 

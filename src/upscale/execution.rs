@@ -230,12 +230,10 @@ mod tests {
             model::{AudioStream, MediaFile, VideoStream},
             output::MediaOutputError,
             process::{MediaProcessFailure, MediaProcessState},
-            tools::MediaTools,
+            tools::{MediaTools, VideoEncoderCapability},
         },
         upscale::{
-            model::{
-                NvencCapability, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec,
-            },
+            model::{UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec},
             validation::{UpscaleValidationError, validate_upscale_request},
         },
     };
@@ -554,7 +552,7 @@ mod tests {
             target: UpscaleTarget::Uhd4k,
             codec: VideoCodec::H264,
             encoder_settings: UpscaleEncoderSettings::default(),
-            nvenc_capability: NvencCapability::Unchecked,
+            nvenc_capability: VideoEncoderCapability::EncoderNotCompiled,
         };
         let media = MediaFile {
             path: input,
@@ -580,10 +578,10 @@ mod tests {
     }
 
     fn fake_tools(directory: &TestDirectory) -> MediaTools {
-        MediaTools {
-            ffmpeg: directory.path().join("fake-ffmpeg"),
-            ffprobe: directory.path().join("fake-ffprobe"),
-        }
+        MediaTools::new(
+            directory.path().join("fake-ffmpeg"),
+            directory.path().join("fake-ffprobe"),
+        )
     }
 
     fn temporary_output(executor: &UpscaleExecutor) -> PathBuf {

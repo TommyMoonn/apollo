@@ -567,10 +567,10 @@ mod tests {
     }
 
     fn fake_tools(directory: &TestDirectory) -> MediaTools {
-        MediaTools {
-            ffmpeg: directory.path().join("fake-ffmpeg"),
-            ffprobe: directory.path().join("fake-ffprobe"),
-        }
+        MediaTools::new(
+            directory.path().join("fake-ffmpeg"),
+            directory.path().join("fake-ffprobe"),
+        )
     }
 
     fn temporary_output(executor: &AudioMixExecutor) -> PathBuf {
