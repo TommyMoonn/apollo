@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-09
+
+### Added
+
+- Custom Upscale width and height boundaries alongside 1440p, 4K, and 8K presets, with a calculated output preview that preserves the source aspect ratio.
+- Auto, CPU, and NVIDIA NVENC encoder selection for H.264 and H.265. Auto uses NVENC when its runtime check succeeds, otherwise CPU; explicit unavailable NVENC shows the failure reason instead of silently switching encoders.
+- Numeric Upscale quality controls, with separate values retained for each codec and encoder backend.
+
+### Changed
+
+- Upscale explicitly preserves supported pixel formats and available color signaling, including supported 10-bit H.265 paths. Unsupported format combinations are rejected rather than silently reduced to 8-bit. Full HDR metadata preservation is not guaranteed.
+
 ## [0.3.2] - 2026-09-01
 
 Apollo 0.3.2 makes file selection and normal window interaction more responsive, and adds visual confirmation for completed frame captures.
@@ -127,7 +139,8 @@ Apollo 0.1.0 is the first public Windows release, bringing focused Audio Mix and
 - Missing optional FFprobe metadata falls back to usable media and track labels instead of preventing intake or selection.
 - Upscale sizing preserves the source aspect ratio within the selected target boundary without default cropping, stretching, or black padding.
 
-[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/TommyMoonn/apollo/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/TommyMoonn/apollo/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/TommyMoonn/apollo/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/TommyMoonn/apollo/compare/v0.2.0...v0.3.0

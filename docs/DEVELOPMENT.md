@@ -127,6 +127,44 @@ src/frame_capture/
 
 The corresponding ready and lifecycle surfaces live under `src/ui/`. Remux remains stream copy only, Audio Extract maps one selected audio stream, and Frame Capture maps one video stream for one still image. Do not broaden these focused workflows into conversion, stream-editing, or timeline tools without an explicit release plan.
 
+## Upscale Sizing, Encoding, and Format Policy
+
+`src/upscale/sizing.rs` owns exact aspect-preserving even output dimensions. Preset boundaries remain orientation-aware. Custom boundaries are explicit positive even width/height values and are never swapped. Sizing rejects boxes that cannot enlarge the source without boundary overshoot or source-edge downscale from quantization. Execution uses the calculated dimensions, not raw UI input.
+
+Scaling remains `scale=<width>:<height>:flags=lanczos`. Encoder selection does not enable hardware decoding or CUDA/NPP scaling.
+
+| Backend | H.264 | H.265 | Quality policy |
+| --- | --- | --- | --- |
+| CPU | `libx264`, CRF 18 default | `libx265`, CRF 20 default | CRF 0..51, `slow` preset |
+| NVIDIA NVENC | `h264_nvenc`, CQ 16 default | `hevc_nvenc`, CQ 16 default | CQ 1..51, `p5`, VBR, explicit CQ |
+
+Lower quality numbers favor quality over file size. CRF and CQ are not interchangeable scales. State retains values independently for each codec/backend, alongside the last custom boundary and manual output name.
+
+The shared media-tool owner checks compiled NVENC availability and runs bounded, hidden, minimal real encode probes off the egui thread. H.264 and H.265 results are independent and cached for the resolved FFmpeg identity. Base tool discovery can finish before these probes: normal workspace use and CPU Upscale remain available while Auto and explicit NVENC show checking state. Auto selects NVENC only after success; explicit unavailable NVENC retains diagnostics and never silently falls back. Do not probe on repaint or command construction.
+
+### Pixel Format and Color Limits
+
+The probe retains pixel format, derivable bit depth, range, matrix, transfer, and primaries. Shared Upscale validation resolves the output format for both ready feedback and execution:
+
+- 8-bit `yuv420p` is supported on CPU and NVENC. `nv12` uses `yuv420p` on CPU or `nv12` on NVENC; `yuvj420p` is CPU-only.
+- Supported 10-bit 4:2:0 sources require H.265, using `yuv420p10le` on CPU or `p010le` on NVENC. PQ/HLG signaling requires known compatible 10-bit input.
+- Unsupported or contradictory known format information is rejected. When both pixel identity and depth are absent, strict FFmpeg format selection preserves the filter output rather than guessing an 8-bit format.
+- Commands use strict `-pix_fmt` selection and map only available color values. External encoder/hardware limitations can still fail execution instead of silently choosing a different format.
+- This is not a guarantee of full HDR preservation: mastering-display/content-light side data is not explicitly preserved or verified, and format checks do not establish visual fidelity.
+
+### Runtime Regression Checks
+
+The normal Rust gate covers sizing, encoder resolution, quality bounds, command construction, and format validation without requiring GPU hardware. Opt-in tests exercise real CPU/NVENC encoding and FFprobe verification:
+
+```powershell
+cargo test --test upscale real_cpu_upscale -- --ignored --nocapture
+cargo test --test upscale real_nvenc_upscale -- --ignored --nocapture
+```
+
+These require FFmpeg/FFprobe, FFV1 fixture generation, and the corresponding working encoders. They check controlled 8-bit H.264/H.265 and 10-bit H.265 PQ/HLG output dimensions, bit depth, and color signaling. They do not replace native-window review or quality comparisons.
+
+Before release, smoke-test preset 1440p/4K output and 8K sizing, custom landscape/ultrawide/portrait boxes, both NVENC codecs at CQ 16 and custom CQ, Auto success/fallback, explicit unavailable NVENC, and supported/unsupported video formats. Compare a controlled source using the previous CPU defaults, the new equivalent CPU settings, and NVENC CQ 16 for regression sanity, not to claim one encoder is universally better. Record actual results and unavailable cases separately.
+
 ## Repository Scripts
 
 Apollo uses PowerShell 7 repository tooling with two shared owners:

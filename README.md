@@ -38,7 +38,7 @@ See the [latest release notes](https://github.com/TommyMoonn/apollo/releases/lat
 ## Features
 
 - **Audio Mix** - choose the embedded audio tracks to keep, mix them into one AAC stream, and write MP4 or MKV output without re-encoding the video.
-- **Video Upscale** - upscale to 1440p, 4K, or 8K boundaries with Lanczos scaling and H.264 or H.265 output while preserving the source aspect ratio.
+- **Video Upscale** - fit preset or custom boundaries while preserving the source aspect ratio, with H.264/H.265 output, CPU or NVIDIA encoding, and numeric quality controls.
 - **Remux** - copy all compatible streams into MKV or MP4 without re-encoding, with incompatibilities reported before processing.
 - **Audio Extract** - save one selected audio track as an original MKA copy, 256 kbps AAC, or lossless FLAC.
 - **Frame Capture** - save one timestamped frame as lossless PNG or high-quality JPEG, then confirm the result with a bounded image preview.
@@ -51,9 +51,19 @@ See the [latest release notes](https://github.com/TommyMoonn/apollo/releases/lat
 
 - Windows x64.
 - FFmpeg and FFprobe available on `PATH`.
-- For Upscale, the installed FFmpeg build must provide the selected `libx264` or `libx265` encoder.
+- CPU Upscale requires `libx264` for H.264 or `libx265` for H.265 in the installed FFmpeg build.
+- Optional NVIDIA encoding requires `h264_nvenc` or `hevc_nvenc` plus a compatible NVIDIA GPU and driver. Apollo checks whether each encoder can actually run.
 
 FFmpeg and FFprobe are external runtime requirements and are not bundled with either Apollo download.
+
+## Upscale controls
+
+- **Target:** choose 1440p, 4K, or 8K, or enter positive even Custom width and height boundaries. Presets adapt to source orientation; Custom uses the box exactly as entered. The calculated output fits inside it without cropping, padding, or stretching.
+- **Encoder:** Auto uses NVIDIA NVENC when its runtime check succeeds, otherwise CPU. Explicit NVIDIA NVENC selection never silently falls back. CPU remains usable while NVIDIA checks run.
+- **Quality:** lower values mean better quality and larger files. CPU defaults are CRF 18 for H.264 and CRF 20 for H.265, within 0..51. NVIDIA defaults to CQ 16, within 1..51. Values are retained separately for each codec and backend; CRF and CQ are not equivalent quality scales.
+- **Format:** supported 8-bit sources retain compatible pixel formats and available color signaling. Supported 10-bit sources require H.265 and a compatible encoder. Unsupported combinations are rejected, not silently downgraded. Mastering-display and content-light HDR metadata preservation is not guaranteed.
+
+Scaling remains Lanczos on the CPU. NVIDIA selection changes video encoding, not scaling or decoding.
 
 ## Native and focused
 
