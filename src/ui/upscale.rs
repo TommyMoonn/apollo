@@ -353,6 +353,7 @@ pub fn show(
 
 fn upscale_ready_feedback(error: &UpscaleValidationError) -> Option<Cow<'_, str>> {
     match error {
+        UpscaleValidationError::UnsupportedVideoFormat { reason } => Some(Cow::Borrowed(reason)),
         UpscaleValidationError::Output(MediaOutputError::InvalidOutputPath(_)) => {
             Some(Cow::Borrowed("Enter a usable output filename."))
         }
@@ -702,6 +703,7 @@ mod tests {
                 width,
                 height,
                 frame_rate: FrameRate::new(60, 1),
+                format: Default::default(),
             }],
             audio_streams: Vec::new(),
         }
@@ -1033,6 +1035,22 @@ mod tests {
         state.set_codec(VideoCodec::H265);
 
         assert_eq!(state.codec(), VideoCodec::H265);
+    }
+
+    #[test]
+    fn ten_bit_source_disables_h264_with_visible_guidance_and_accepts_h265() {
+        let mut source = media(Some(1920), Some(1080));
+        source.video_streams[0].format.pixel_format = Some("yuv420p10le".to_owned());
+        source.video_streams[0].format.bit_depth = Some(10);
+        let mut state = UpscaleSelectionState::new(&source);
+        let error = state.validation(&source).unwrap_err();
+        assert!(!state.can_upscale(&source));
+        assert_eq!(
+            upscale_ready_feedback(&error).as_deref(),
+            Some("Use H.265 to preserve this 10-bit source.")
+        );
+        state.set_codec(VideoCodec::H265);
+        assert!(state.can_upscale(&source));
     }
 
     #[test]

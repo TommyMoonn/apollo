@@ -29,6 +29,240 @@ use apollo::{
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+#[ignore = "requires FFmpeg/ffprobe with libx264, libx265 and FFV1 on PATH"]
+fn real_cpu_upscale_preserves_pixel_depth_and_color_signaling() {
+    real_video_format_smoke(VideoEncoderSelection::Cpu);
+}
+
+#[test]
+#[ignore = "requires FFmpeg/ffprobe and working NVIDIA H.264/10-bit HEVC NVENC"]
+fn real_nvenc_upscale_preserves_pixel_depth_and_color_signaling() {
+    real_video_format_smoke(VideoEncoderSelection::NvidiaNvenc);
+}
+
+fn real_video_format_smoke(backend: VideoEncoderSelection) {
+    use apollo::media::{probe::probe_media, process::MediaProcessCommand, tools::MediaTools};
+    let tools = MediaTools::new("ffmpeg", "ffprobe");
+    for (codec, pixel, transfer, space, primaries) in [
+        (VideoCodec::H264, "yuv420p", "bt709", "bt709", "bt709"),
+        (VideoCodec::H265, "yuv420p", "bt709", "bt709", "bt709"),
+        (
+            VideoCodec::H265,
+            "yuv420p10le",
+            "smpte2084",
+            "bt2020nc",
+            "bt2020",
+        ),
+        (
+            VideoCodec::H265,
+            "yuv420p10le",
+            "arib-std-b67",
+            "bt2020nc",
+            "bt2020",
+        ),
+    ] {
+        let temp = TestDirectory::new();
+        let mut request = request(&temp, custom_target(256, 144));
+        request.input = temp.path().join("source.mkv");
+        request.codec = codec;
+        request.encoder_settings.set_selection(backend);
+        request.nvenc_capability = VideoEncoderCapability::Available;
+        let generated = MediaProcessCommand::new(&tools.ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=128x72:rate=1",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "ffv1",
+                "-pix_fmt",
+                pixel,
+                "-color_range",
+                "tv",
+                "-colorspace",
+                space,
+                "-color_trc",
+                transfer,
+                "-color_primaries",
+                primaries,
+            ])
+            .arg(request.input.as_os_str());
+        run_smoke_process(generated);
+        let source = probe_media(&tools, &request.input).unwrap();
+        validate_upscale_request(&request, &source).unwrap();
+        let dimensions = calculate_output_dimensions(128, 72, request.target).unwrap();
+        let invocation = build_upscale_invocation(&request, &source, dimensions).unwrap();
+        let encoded = MediaProcessCommand::new(&tools.ffmpeg)
+            .args(["-v", "error", "-nostdin"])
+            .args(invocation.args);
+        run_smoke_process(encoded);
+        let output = probe_media(&tools, &request.output).unwrap();
+        let video = &output.video_streams[0];
+        assert_eq!(
+            (video.width, video.height),
+            (Some(dimensions.width), Some(dimensions.height))
+        );
+        assert_eq!(
+            video.format.bit_depth,
+            source.video_streams[0].format.bit_depth
+        );
+        assert_eq!(video.format.pixel_format.as_deref(), Some(pixel));
+        assert_eq!(video.format.color_range.as_deref(), Some("tv"));
+        assert_eq!(video.format.color_space.as_deref(), Some(space));
+        assert_eq!(video.format.color_transfer.as_deref(), Some(transfer));
+        assert_eq!(video.format.color_primaries.as_deref(), Some(primaries));
+    }
+}
+
+fn run_smoke_process(command: apollo::media::process::MediaProcessCommand) {
+    use apollo::media::process::{MediaProcess, MediaProcessState};
+    use std::time::{Duration, Instant};
+    let process = MediaProcess::start(command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !process.state().is_terminal() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if !process.state().is_terminal() {
+        process.cancel();
+        panic!("smoke process exceeded 20 seconds");
+    }
+    assert_eq!(
+        process.state(),
+        MediaProcessState::Completed,
+        "{}",
+        process.diagnostic_stderr()
+    );
+}
+
+#[test]
+fn video_format_policy_covers_sdr_and_ten_bit_on_each_backend() {
+    use apollo::media::model::VideoFormat;
+    let temp = TestDirectory::new();
+    for codec in [VideoCodec::H264, VideoCodec::H265] {
+        for backend in [
+            VideoEncoderSelection::Cpu,
+            VideoEncoderSelection::NvidiaNvenc,
+        ] {
+            for (pixel, depth) in [("yuv420p", 8), ("yuv420p10le", 10)] {
+                let mut request = request(&temp, UpscaleTarget::Uhd4k);
+                request.codec = codec;
+                request.encoder_settings.set_selection(backend);
+                request.nvenc_capability = VideoEncoderCapability::Available;
+                let mut media =
+                    media_with_audio_codecs(request.input.clone(), Some(1280), Some(720), &[]);
+                media.video_streams[0].format = VideoFormat {
+                    pixel_format: Some(pixel.to_owned()),
+                    bit_depth: Some(depth),
+                    color_range: Some("tv".to_owned()),
+                    color_space: Some("bt2020nc".to_owned()),
+                    color_transfer: Some(
+                        if depth == 10 { "smpte2084" } else { "bt709" }.to_owned(),
+                    ),
+                    color_primaries: Some("bt2020".to_owned()),
+                };
+                let dimensions = OutputDimensions {
+                    width: 3840,
+                    height: 2160,
+                };
+                if depth == 10 && codec == VideoCodec::H264 {
+                    assert!(matches!(
+                        validate_upscale_request(&request, &media),
+                        Err(UpscaleValidationError::UnsupportedVideoFormat { .. })
+                    ));
+                    assert!(matches!(
+                        build_upscale_invocation(&request, &media, dimensions),
+                        Err(UpscaleCommandError::VideoFormat(_))
+                    ));
+                    continue;
+                }
+                validate_upscale_request(&request, &media).unwrap();
+                let args = invocation_args(&request, &media, dimensions);
+                let expected = if depth == 8 {
+                    "+yuv420p"
+                } else if backend == VideoEncoderSelection::Cpu {
+                    "+yuv420p10le"
+                } else {
+                    "+p010le"
+                };
+                assert_eq!(option_values(&args, "-pix_fmt:v:0"), [expected]);
+                assert_eq!(option_values(&args, "-color_range:v:0"), ["tv"]);
+                assert_eq!(option_values(&args, "-colorspace:v:0"), ["bt2020nc"]);
+                assert_eq!(option_values(&args, "-color_primaries:v:0"), ["bt2020"]);
+                assert_eq!(
+                    option_values(&args, "-color_trc:v:0"),
+                    [if depth == 10 { "smpte2084" } else { "bt709" }]
+                );
+                assert_eq!(
+                    option_values(&args, "-vf"),
+                    ["scale=3840:2160:flags=lanczos"]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn unknown_format_is_strict_and_hdr_or_unsupported_depth_cannot_silently_downgrade() {
+    use apollo::media::model::VideoFormat;
+    let temp = TestDirectory::new();
+    let mut request = request(&temp, UpscaleTarget::Uhd4k);
+    request.codec = VideoCodec::H265;
+    let mut media = media_with_audio_codecs(request.input.clone(), Some(1280), Some(720), &[]);
+    let args = invocation_args(
+        &request,
+        &media,
+        OutputDimensions {
+            width: 3840,
+            height: 2160,
+        },
+    );
+    assert_eq!(option_values(&args, "-pix_fmt:v:0"), ["+"]);
+    for option in [
+        "-color_range:v:0",
+        "-colorspace:v:0",
+        "-color_trc:v:0",
+        "-color_primaries:v:0",
+    ] {
+        assert!(option_values(&args, option).is_empty());
+    }
+    for format in [
+        VideoFormat {
+            color_transfer: Some("arib-std-b67".into()),
+            ..Default::default()
+        },
+        VideoFormat {
+            pixel_format: Some("yuv420p12le".into()),
+            bit_depth: Some(12),
+            ..Default::default()
+        },
+        VideoFormat {
+            pixel_format: Some("yuv444p10le".into()),
+            ..Default::default()
+        },
+        VideoFormat {
+            pixel_format: Some("yuv420p".into()),
+            bit_depth: Some(10),
+            ..Default::default()
+        },
+        VideoFormat {
+            pixel_format: Some("future-format".into()),
+            ..Default::default()
+        },
+    ] {
+        media.video_streams[0].format = format;
+        assert!(matches!(
+            validate_upscale_request(&request, &media),
+            Err(UpscaleValidationError::UnsupportedVideoFormat { .. })
+        ));
+    }
+}
+
+#[test]
 fn supported_targets_build_the_planned_scale_filters() {
     let temp = TestDirectory::new();
     let media = media_with_audio_codecs(
@@ -1179,6 +1413,7 @@ fn media(path: PathBuf, width: Option<u32>, height: Option<u32>) -> MediaFile {
             width,
             height,
             frame_rate: None,
+            format: Default::default(),
         }],
         audio_streams: Vec::new(),
     }

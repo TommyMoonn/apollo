@@ -2398,6 +2398,7 @@ mod tests {
                 width: Some(1920),
                 height: Some(1080),
                 frame_rate: FrameRate::new(60, 1),
+                format: Default::default(),
             }],
             audio_streams: vec![AudioStream {
                 stream_index: 1,

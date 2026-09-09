@@ -30,6 +30,60 @@ fn parse_fixture(name: &str) -> apollo::media::model::MediaFile {
 }
 
 #[test]
+fn pixel_depth_and_color_signaling_are_retained_without_fabricating_missing_values() {
+    let media = parse_ffprobe_json(
+        Path::new("color.mkv"),
+        include_bytes!("fixtures/ffprobe/video_color.json"),
+    )
+    .unwrap();
+    let sdr = &media.video_streams[0].format;
+    assert_eq!(sdr.pixel_format.as_deref(), Some("yuv420p"));
+    assert_eq!(sdr.bit_depth, Some(8));
+    assert_eq!(sdr.color_range.as_deref(), Some("tv"));
+    assert_eq!(sdr.color_space.as_deref(), Some("bt709"));
+    assert_eq!(sdr.color_transfer.as_deref(), Some("bt709"));
+    assert_eq!(sdr.color_primaries.as_deref(), Some("bt709"));
+    let hdr = &media.video_streams[1].format;
+    assert_eq!(hdr.bit_depth, Some(10));
+    assert_eq!(hdr.color_transfer.as_deref(), Some("smpte2084"));
+    assert_eq!(hdr.color_space.as_deref(), Some("bt2020nc"));
+    assert_eq!(hdr.color_primaries.as_deref(), Some("bt2020"));
+    let unknown = &media.video_streams[2].format;
+    assert_eq!(unknown.bit_depth, Some(12));
+    assert_eq!(unknown.pixel_format.as_deref(), Some("future-format"));
+    assert_eq!(unknown.color_range, None);
+    assert_eq!(unknown.color_space, None);
+    assert_eq!(unknown.color_transfer, None);
+    assert_eq!(unknown.color_primaries, None);
+    assert_eq!(
+        parse_fixture("one_audio").video_streams[0].format,
+        Default::default()
+    );
+}
+
+#[test]
+fn bit_depth_derivation_handles_packed_planar_and_unknown_formats_conservatively() {
+    use apollo::media::model::pixel_format_bit_depth;
+    for (format, expected) in [
+        ("nv12", Some(8)),
+        ("p010le", Some(10)),
+        ("yuv420p10be", Some(10)),
+        ("yuv444p12le", Some(12)),
+        ("p016le", Some(16)),
+        ("unknown", None),
+        ("future10le", None),
+    ] {
+        assert_eq!(pixel_format_bit_depth(format), expected);
+    }
+    let missing = parse_ffprobe_json(
+        Path::new("unknown.mkv"),
+        br#"{"streams":[{"index":0,"codec_type":"video","bits_per_raw_sample":"N/A"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(missing.video_streams[0].format.bit_depth, None);
+}
+
+#[test]
 fn one_audio_stream_is_normalized_with_actual_stream_index() {
     let media = parse_fixture("one_audio");
 

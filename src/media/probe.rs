@@ -8,7 +8,10 @@ use std::{
 use serde::Deserialize;
 
 use super::{
-    model::{AudioStream, FrameRate, MediaFile, MediaStream, StreamKind, VideoStream},
+    model::{
+        AudioStream, FrameRate, MediaFile, MediaStream, StreamKind, VideoFormat, VideoStream,
+        pixel_format_bit_depth,
+    },
     process::background_command,
     tools::MediaTools,
 };
@@ -77,6 +80,12 @@ struct RawStream {
     avg_frame_rate: Option<String>,
     r_frame_rate: Option<String>,
     tags: Option<RawTags>,
+    pix_fmt: Option<String>,
+    bits_per_raw_sample: Option<String>,
+    color_range: Option<String>,
+    color_space: Option<String>,
+    color_transfer: Option<String>,
+    color_primaries: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -162,6 +171,25 @@ fn normalize_probe(path: &Path, raw: RawProbe) -> MediaFile {
                 codec,
                 width: stream.width,
                 height: stream.height,
+                format: VideoFormat {
+                    bit_depth: stream
+                        .pix_fmt
+                        .as_deref()
+                        .and_then(pixel_format_bit_depth)
+                        .or_else(|| {
+                            stream
+                                .bits_per_raw_sample
+                                .as_deref()?
+                                .parse::<u8>()
+                                .ok()
+                                .filter(|depth| *depth > 0)
+                        }),
+                    pixel_format: known_metadata(stream.pix_fmt),
+                    color_range: known_metadata(stream.color_range),
+                    color_space: known_metadata(stream.color_space),
+                    color_transfer: known_metadata(stream.color_transfer),
+                    color_primaries: known_metadata(stream.color_primaries),
+                },
                 frame_rate: stream
                     .avg_frame_rate
                     .as_deref()
@@ -215,6 +243,10 @@ fn parse_frame_rate(value: &str) -> Option<FrameRate> {
 
 fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
+}
+
+fn known_metadata(value: Option<String>) -> Option<String> {
+    value.filter(|value| !matches!(value.trim(), "" | "unknown" | "unspecified" | "N/A"))
 }
 
 #[cfg(test)]

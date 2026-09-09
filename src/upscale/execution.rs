@@ -59,7 +59,8 @@ impl UpscaleStartError {
                 | UpscaleValidationError::InvalidSourceDimensions { .. }
                 | UpscaleValidationError::InvalidTargetBoundary { .. }
                 | UpscaleValidationError::TargetNotLarger { .. }
-                | UpscaleValidationError::NvencUnavailable { .. } => {
+                | UpscaleValidationError::NvencUnavailable { .. }
+                | UpscaleValidationError::UnsupportedVideoFormat { .. } => {
                     MediaError::invalid_request(error.to_string())
                 }
             },
@@ -68,9 +69,10 @@ impl UpscaleStartError {
             Self::Command(UpscaleCommandError::MissingVideoStream) => {
                 MediaError::missing_stream("upscale command requires a video stream")
             }
-            Self::Command(error @ UpscaleCommandError::NvencUnavailable { .. }) => {
-                MediaError::invalid_request(error.to_string())
-            }
+            Self::Command(
+                error @ (UpscaleCommandError::NvencUnavailable { .. }
+                | UpscaleCommandError::VideoFormat(_)),
+            ) => MediaError::invalid_request(error.to_string()),
             Self::Process(error) => MediaError::from_process_start_error(error),
             Self::AlreadyRunning => MediaError::invalid_request(self.to_string()),
         }
@@ -564,6 +566,7 @@ mod tests {
                 width: Some(1920),
                 height: Some(1080),
                 frame_rate: None,
+                format: Default::default(),
             }],
             audio_streams: vec![AudioStream {
                 stream_index: 1,

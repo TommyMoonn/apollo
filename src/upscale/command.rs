@@ -8,6 +8,7 @@ use crate::media::{
 use super::{
     model::{EncoderQuality, UpscaleRequest, VideoCodec, VideoEncoderBackend},
     sizing::OutputDimensions,
+    validation::{UpscaleValidationError, resolve_output_pixel_format},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,11 +20,13 @@ pub struct FfmpegInvocation {
 pub enum UpscaleCommandError {
     MissingVideoStream,
     NvencUnavailable { reason: String },
+    VideoFormat(UpscaleValidationError),
 }
 
 impl fmt::Display for UpscaleCommandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::VideoFormat(error) => write!(f, "{error}"),
             Self::MissingVideoStream => write!(f, "upscale command requires a video stream"),
             Self::NvencUnavailable { reason } => {
                 write!(f, "NVIDIA NVENC is unavailable: {reason}")
@@ -47,8 +50,7 @@ pub fn build_upscale_invocation(
     let primary_video_stream = media
         .video_streams
         .first()
-        .ok_or(UpscaleCommandError::MissingVideoStream)?
-        .stream_index;
+        .ok_or(UpscaleCommandError::MissingVideoStream)?;
     let resolved_encoder =
         request
             .resolve_video_encoder()
@@ -61,12 +63,19 @@ pub fn build_upscale_invocation(
         (VideoEncoderBackend::NvidiaNvenc, VideoCodec::H264) => "h264_nvenc",
         (VideoEncoderBackend::NvidiaNvenc, VideoCodec::H265) => "hevc_nvenc",
     };
+    let pixel_format = resolve_output_pixel_format(
+        &primary_video_stream.format,
+        request.codec,
+        resolved_encoder.backend,
+    )
+    .map_err(UpscaleCommandError::VideoFormat)?;
+    let stream_index = primary_video_stream.stream_index;
 
     let mut args = vec![
         OsString::from("-i"),
         request.input.as_os_str().to_os_string(),
         OsString::from("-map"),
-        OsString::from(format!("0:{primary_video_stream}")),
+        OsString::from(format!("0:{stream_index}")),
         OsString::from("-map"),
         OsString::from("0:a?"),
         OsString::from("-vf"),
@@ -77,6 +86,19 @@ pub fn build_upscale_invocation(
         OsString::from("-c:v"),
         OsString::from(video_encoder),
     ];
+
+    args.extend([OsString::from("-pix_fmt:v:0"), OsString::from(pixel_format)]);
+    let format = &primary_video_stream.format;
+    for (option, value) in [
+        ("-color_range:v:0", &format.color_range),
+        ("-colorspace:v:0", &format.color_space),
+        ("-color_trc:v:0", &format.color_transfer),
+        ("-color_primaries:v:0", &format.color_primaries),
+    ] {
+        if let Some(value) = value {
+            args.extend([OsString::from(option), OsString::from(value)]);
+        }
+    }
 
     match resolved_encoder.quality {
         EncoderQuality::Cpu(quality) => args.extend([

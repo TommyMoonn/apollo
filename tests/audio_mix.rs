@@ -35,6 +35,7 @@ fn media(path: PathBuf) -> MediaFile {
             width: Some(1920),
             height: Some(1080),
             frame_rate: None,
+            format: Default::default(),
         }],
         audio_streams: vec![
             AudioStream {
@@ -693,6 +694,7 @@ fn mp4_maps_only_primary_video_and_mixed_audio() {
         width: Some(640),
         height: Some(480),
         frame_rate: None,
+        format: Default::default(),
     });
     let args = invocation_args(&request, &media);
 
@@ -865,6 +867,7 @@ fn command_builder_rejects_missing_structural_inputs_without_revalidating_reques
         width: Some(1920),
         height: Some(1080),
         frame_rate: None,
+        format: Default::default(),
     });
     assert_eq!(
         build_audio_mix_invocation(&request, &media),

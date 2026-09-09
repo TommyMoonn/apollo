@@ -916,6 +916,7 @@ mod tests {
                 width: Some(3840),
                 height: Some(2160),
                 frame_rate: None,
+                format: Default::default(),
             }],
             audio_streams: vec![
                 AudioStream {
