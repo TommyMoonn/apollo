@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cell::Cell,
     ffi::{OsStr, OsString},
     path::PathBuf,
@@ -7,9 +8,16 @@ use std::{
 use egui::{RichText, Ui};
 
 use crate::{
-    media::{model::MediaFile, output::MediaOutputError, tools::VideoEncoderCapability},
+    media::{
+        model::MediaFile,
+        output::MediaOutputError,
+        tools::{VideoEncoderCapabilities, VideoEncoderCapability},
+    },
     upscale::{
-        model::{UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec},
+        model::{
+            CpuQuality, NvencQuality, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget,
+            VideoCodec, VideoEncoderBackend, VideoEncoderSelection,
+        },
         sizing::{OutputDimensions, calculate_output_dimensions, resolve_target_boundary},
         validation::{UpscaleValidationError, validate_upscale_request},
     },
@@ -28,6 +36,15 @@ const OUTPUT_LABEL: &str = "Output";
 const BROWSE_LABEL: &str = "Browse";
 const UPSCALE_LABEL: &str = "Upscale";
 const CODEC_OPTIONS: [&str; 2] = ["H.264", "H.265"];
+const ENCODER_OPTIONS: [&str; 3] = ["Auto", "NVIDIA NVENC", "CPU"];
+const ENCODING_LABEL: &str = "Encoding";
+const QUALITY_GUIDANCE: &str = "Lower value = better quality / larger file";
+
+#[derive(Debug, Clone, Copy)]
+pub enum UpscaleEncoderCapabilities<'a> {
+    Checking,
+    Ready(&'a VideoEncoderCapabilities),
+}
 
 /// Pre-execution Upscale state. Sizing remains owned by `upscale::sizing`, while execution stays
 /// deferred to the shared process integration phase.
@@ -71,6 +88,30 @@ impl UpscaleSelectionState {
 
     pub fn codec(&self) -> VideoCodec {
         self.codec
+    }
+
+    pub fn encoder_selection(&self) -> VideoEncoderSelection {
+        self.encoder_settings.selection()
+    }
+
+    pub fn set_encoder_selection(&mut self, selection: VideoEncoderSelection) {
+        self.encoder_settings.set_selection(selection);
+    }
+
+    pub fn cpu_quality(&self, codec: VideoCodec) -> CpuQuality {
+        self.encoder_settings.cpu_quality(codec)
+    }
+
+    pub fn set_cpu_quality(&mut self, codec: VideoCodec, quality: CpuQuality) {
+        self.encoder_settings.set_cpu_quality(codec, quality);
+    }
+
+    pub fn nvenc_quality(&self, codec: VideoCodec) -> NvencQuality {
+        self.encoder_settings.nvenc_quality(codec)
+    }
+
+    pub fn set_nvenc_quality(&mut self, codec: VideoCodec, quality: NvencQuality) {
+        self.encoder_settings.set_nvenc_quality(codec, quality);
     }
 
     pub fn output_path(&self) -> PathBuf {
@@ -165,6 +206,28 @@ impl UpscaleSelectionState {
         validate_upscale_request(&self.request(media), media)
     }
 
+    fn ready_validation(
+        &self,
+        media: &MediaFile,
+        capabilities: UpscaleEncoderCapabilities<'_>,
+    ) -> Option<Result<(), UpscaleValidationError>> {
+        let capability = match capabilities {
+            UpscaleEncoderCapabilities::Checking
+                if self.encoder_selection() != VideoEncoderSelection::Cpu =>
+            {
+                return None;
+            }
+            UpscaleEncoderCapabilities::Checking => VideoEncoderCapability::EncoderNotCompiled,
+            UpscaleEncoderCapabilities::Ready(capabilities) => {
+                capability_for_codec(capabilities, self.codec).clone()
+            }
+        };
+        Some(validate_upscale_request(
+            &self.request_with_nvenc_capability(media, capability),
+            media,
+        ))
+    }
+
     /// Build the current typed request without starting work or calculating command dimensions.
     pub fn request(&self, media: &MediaFile) -> UpscaleRequest {
         self.request_with_nvenc_capability(media, VideoEncoderCapability::EncoderNotCompiled)
@@ -200,9 +263,10 @@ pub fn show(
     ui: &mut Ui,
     media: &MediaFile,
     state: &mut UpscaleSelectionState,
+    capabilities: UpscaleEncoderCapabilities<'_>,
 ) -> UpscaleSelectionAction {
     let action = Cell::new(UpscaleSelectionAction::None);
-    let validation = state.validation(media);
+    let validation = state.ready_validation(media, capabilities);
 
     layout::operation_surface(
         ui,
@@ -222,6 +286,11 @@ pub fn show(
                     let _ = show_custom_target_controls(ui, media, state);
                 },
             );
+            ui.add_space(theme::SPACING.section);
+
+            let _ = widgets::section_label(ui, ENCODING_LABEL);
+            ui.add_space(theme::SPACING.compact);
+            show_encoding_controls(ui, state, capabilities);
             ui.add_space(theme::SPACING.section);
 
             let _ = widgets::section_label(ui, OUTPUT_LABEL);
@@ -262,13 +331,18 @@ pub fn show(
                 action.set(UpscaleSelectionAction::BrowseOutput);
             }
 
-            if let Some(feedback) = validation.as_ref().err().and_then(upscale_ready_feedback) {
+            if let Some(feedback) = validation
+                .as_ref()
+                .and_then(|validation| validation.as_ref().err())
+                .and_then(upscale_ready_feedback)
+            {
                 ui.add_space(theme::SPACING.tight);
-                let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
+                let _ = widgets::inline_status(ui, &feedback, widgets::InlineStatusKind::Error);
             }
         },
         |ui| {
-            if widgets::primary_button_enabled(ui, UPSCALE_LABEL, validation.is_ok()).clicked() {
+            let runnable = matches!(validation, Some(Ok(())));
+            if widgets::primary_button_enabled(ui, UPSCALE_LABEL, runnable).clicked() {
                 action.set(UpscaleSelectionAction::UpscaleRequested);
             }
         },
@@ -277,12 +351,156 @@ pub fn show(
     action.get()
 }
 
-fn upscale_ready_feedback(error: &UpscaleValidationError) -> Option<&'static str> {
+fn upscale_ready_feedback(error: &UpscaleValidationError) -> Option<Cow<'_, str>> {
     match error {
         UpscaleValidationError::Output(MediaOutputError::InvalidOutputPath(_)) => {
-            Some("Enter a usable output filename.")
+            Some(Cow::Borrowed("Enter a usable output filename."))
         }
+        UpscaleValidationError::NvencUnavailable { reason } => Some(Cow::Owned(format!(
+            "NVIDIA NVENC is unavailable: {reason}."
+        ))),
         _ => None,
+    }
+}
+
+fn show_encoding_controls(
+    ui: &mut Ui,
+    state: &mut UpscaleSelectionState,
+    capabilities: UpscaleEncoderCapabilities<'_>,
+) {
+    let selection = state.encoder_selection();
+    let selected_label = encoder_selection_label(selection, state.codec(), capabilities);
+    let mut requested_selection = None;
+    widgets::labeled_control(ui, "Encoder", |ui| {
+        widgets::select_menu(ui, &selected_label, &ENCODER_OPTIONS, |ui| {
+            for candidate in [
+                VideoEncoderSelection::Auto,
+                VideoEncoderSelection::NvidiaNvenc,
+                VideoEncoderSelection::Cpu,
+            ] {
+                if widgets::select_menu_option(
+                    ui,
+                    encoder_option_label(candidate),
+                    selection == candidate,
+                )
+                .clicked()
+                {
+                    requested_selection = Some(candidate);
+                    ui.close();
+                }
+            }
+        });
+    });
+    if let Some(selection) = requested_selection {
+        state.set_encoder_selection(selection);
+    }
+
+    ui.add_space(theme::SPACING.compact);
+    match quality_backend(state.encoder_selection(), state.codec(), capabilities) {
+        Some(VideoEncoderBackend::Cpu) => {
+            let mut value = state.cpu_quality(state.codec()).value();
+            let response = widgets::labeled_control(ui, "Quality", |ui| {
+                widgets::encoder_quality_control(
+                    ui,
+                    "CPU quality",
+                    &mut value,
+                    CpuQuality::MIN..=CpuQuality::MAX,
+                    "CRF",
+                )
+            });
+            if response.changed() {
+                state.set_cpu_quality(
+                    state.codec(),
+                    CpuQuality::new(value).expect("quality control enforces CPU range"),
+                );
+            }
+        }
+        Some(VideoEncoderBackend::NvidiaNvenc) => {
+            let mut value = state.nvenc_quality(state.codec()).value();
+            let response = widgets::labeled_control(ui, "Quality", |ui| {
+                widgets::encoder_quality_control(
+                    ui,
+                    "NVIDIA NVENC quality",
+                    &mut value,
+                    NvencQuality::MIN..=NvencQuality::MAX,
+                    "CQ",
+                )
+            });
+            if response.changed() {
+                state.set_nvenc_quality(
+                    state.codec(),
+                    NvencQuality::new(value).expect("quality control enforces NVENC range"),
+                );
+            }
+        }
+        None => {
+            widgets::labeled_control(ui, "Quality", |ui| {
+                ui.label(
+                    RichText::new("Checking NVIDIA NVENC...")
+                        .text_style(fonts::technical_text_style()),
+                )
+            });
+        }
+    }
+    ui.add_space(theme::SPACING.tight);
+    ui.label(RichText::new(QUALITY_GUIDANCE).color(theme::SECONDARY));
+}
+
+fn capability_for_codec(
+    capabilities: &VideoEncoderCapabilities,
+    codec: VideoCodec,
+) -> &VideoEncoderCapability {
+    match codec {
+        VideoCodec::H264 => &capabilities.h264_nvenc,
+        VideoCodec::H265 => &capabilities.h265_nvenc,
+    }
+}
+
+fn quality_backend(
+    selection: VideoEncoderSelection,
+    codec: VideoCodec,
+    capabilities: UpscaleEncoderCapabilities<'_>,
+) -> Option<VideoEncoderBackend> {
+    match selection {
+        VideoEncoderSelection::Cpu => Some(VideoEncoderBackend::Cpu),
+        VideoEncoderSelection::NvidiaNvenc => match capabilities {
+            UpscaleEncoderCapabilities::Checking => None,
+            UpscaleEncoderCapabilities::Ready(_) => Some(VideoEncoderBackend::NvidiaNvenc),
+        },
+        VideoEncoderSelection::Auto => match capabilities {
+            UpscaleEncoderCapabilities::Checking => None,
+            UpscaleEncoderCapabilities::Ready(capabilities) => {
+                if *capability_for_codec(capabilities, codec) == VideoEncoderCapability::Available {
+                    Some(VideoEncoderBackend::NvidiaNvenc)
+                } else {
+                    Some(VideoEncoderBackend::Cpu)
+                }
+            }
+        },
+    }
+}
+
+fn encoder_selection_label(
+    selection: VideoEncoderSelection,
+    codec: VideoCodec,
+    capabilities: UpscaleEncoderCapabilities<'_>,
+) -> Cow<'static, str> {
+    match selection {
+        VideoEncoderSelection::Auto => match quality_backend(selection, codec, capabilities) {
+            Some(VideoEncoderBackend::Cpu) => Cow::Borrowed("Auto (CPU)"),
+            Some(VideoEncoderBackend::NvidiaNvenc) => Cow::Borrowed("Auto (NVIDIA NVENC)"),
+            None => Cow::Borrowed("Auto (checking...)"),
+        },
+        VideoEncoderSelection::Cpu => Cow::Borrowed("CPU"),
+        VideoEncoderSelection::NvidiaNvenc => Cow::Borrowed("NVIDIA NVENC"),
+    }
+}
+
+fn encoder_option_label(selection: VideoEncoderSelection) -> &'static str {
+    match selection {
+        VideoEncoderSelection::Auto => "Auto",
+        VideoEncoderSelection::Cpu => "CPU",
+        VideoEncoderSelection::NvidiaNvenc => "NVIDIA NVENC",
     }
 }
 
@@ -446,14 +664,32 @@ mod tests {
         media::{
             model::{FrameRate, MediaFile, VideoStream},
             output::MediaOutputError,
+            tools::{VideoEncoderCapabilities, VideoEncoderCapability},
         },
         upscale::{
-            model::{UpscaleTarget, VideoCodec},
+            model::{
+                CpuQuality, NvencQuality, UpscaleTarget, VideoCodec, VideoEncoderBackend,
+                VideoEncoderSelection,
+            },
             validation::UpscaleValidationError,
         },
     };
 
-    use super::{UpscaleSelectionState, show_custom_target_controls, upscale_ready_feedback};
+    use super::{
+        UpscaleEncoderCapabilities, UpscaleSelectionState, encoder_selection_label,
+        quality_backend, show_custom_target_controls, show_encoding_controls,
+        upscale_ready_feedback,
+    };
+
+    fn capabilities(
+        h264_nvenc: VideoEncoderCapability,
+        h265_nvenc: VideoEncoderCapability,
+    ) -> VideoEncoderCapabilities {
+        VideoEncoderCapabilities {
+            h264_nvenc,
+            h265_nvenc,
+        }
+    }
 
     fn media(width: Option<u32>, height: Option<u32>) -> MediaFile {
         MediaFile {
@@ -480,6 +716,167 @@ mod tests {
         assert_eq!(state.codec(), VideoCodec::H264);
         assert_eq!(state.output_path(), Path::new("captures/recording-4k.mp4"));
         assert!(!state.output_is_customized());
+        assert_eq!(state.encoder_selection(), VideoEncoderSelection::Auto);
+        assert_eq!(
+            state.cpu_quality(VideoCodec::H264),
+            CpuQuality::H264_DEFAULT
+        );
+        assert_eq!(
+            state.cpu_quality(VideoCodec::H265),
+            CpuQuality::H265_DEFAULT
+        );
+        assert_eq!(state.nvenc_quality(VideoCodec::H264), NvencQuality::DEFAULT);
+        assert_eq!(state.nvenc_quality(VideoCodec::H265), NvencQuality::DEFAULT);
+    }
+
+    #[test]
+    fn auto_label_and_quality_follow_the_selected_codec_capability() {
+        let available = capabilities(
+            VideoEncoderCapability::Available,
+            VideoEncoderCapability::EncoderNotCompiled,
+        );
+
+        assert_eq!(
+            encoder_selection_label(
+                VideoEncoderSelection::Auto,
+                VideoCodec::H264,
+                UpscaleEncoderCapabilities::Ready(&available),
+            ),
+            "Auto (NVIDIA NVENC)"
+        );
+        assert_eq!(
+            quality_backend(
+                VideoEncoderSelection::Auto,
+                VideoCodec::H264,
+                UpscaleEncoderCapabilities::Ready(&available),
+            ),
+            Some(VideoEncoderBackend::NvidiaNvenc)
+        );
+        assert_eq!(
+            encoder_selection_label(
+                VideoEncoderSelection::Auto,
+                VideoCodec::H265,
+                UpscaleEncoderCapabilities::Ready(&available),
+            ),
+            "Auto (CPU)"
+        );
+        assert_eq!(
+            quality_backend(
+                VideoEncoderSelection::Auto,
+                VideoCodec::H265,
+                UpscaleEncoderCapabilities::Ready(&available),
+            ),
+            Some(VideoEncoderBackend::Cpu)
+        );
+    }
+
+    #[test]
+    fn checking_capability_is_compact_and_keeps_cpu_ready() {
+        let source = media(Some(1920), Some(1080));
+        let mut state = UpscaleSelectionState::new(&source);
+
+        assert_eq!(
+            encoder_selection_label(
+                VideoEncoderSelection::Auto,
+                VideoCodec::H264,
+                UpscaleEncoderCapabilities::Checking,
+            ),
+            "Auto (checking...)"
+        );
+        assert_eq!(
+            quality_backend(
+                VideoEncoderSelection::Auto,
+                VideoCodec::H264,
+                UpscaleEncoderCapabilities::Checking,
+            ),
+            None
+        );
+        assert!(
+            state
+                .ready_validation(&source, UpscaleEncoderCapabilities::Checking)
+                .is_none()
+        );
+
+        state.set_encoder_selection(VideoEncoderSelection::Cpu);
+        assert!(matches!(
+            state.ready_validation(&source, UpscaleEncoderCapabilities::Checking),
+            Some(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn explicit_unavailable_nvenc_preserves_selection_and_reason() {
+        let source = media(Some(1920), Some(1080));
+        let mut state = UpscaleSelectionState::new(&source);
+        state.set_encoder_selection(VideoEncoderSelection::NvidiaNvenc);
+        let unavailable = capabilities(
+            VideoEncoderCapability::RuntimeUnavailable {
+                reason: "installed NVIDIA driver is too old".to_owned(),
+            },
+            VideoEncoderCapability::EncoderNotCompiled,
+        );
+
+        let error = state
+            .ready_validation(&source, UpscaleEncoderCapabilities::Ready(&unavailable))
+            .expect("capability check completed")
+            .unwrap_err();
+
+        assert_eq!(
+            state.encoder_selection(),
+            VideoEncoderSelection::NvidiaNvenc
+        );
+        assert_eq!(
+            upscale_ready_feedback(&error).as_deref(),
+            Some("NVIDIA NVENC is unavailable: installed NVIDIA driver is too old.")
+        );
+    }
+
+    #[test]
+    fn backend_and_codec_quality_values_are_preserved_independently() {
+        let source = media(Some(1920), Some(1080));
+        let mut state = UpscaleSelectionState::new(&source);
+        state.set_cpu_quality(VideoCodec::H264, CpuQuality::new(12).unwrap());
+        state.set_cpu_quality(VideoCodec::H265, CpuQuality::new(24).unwrap());
+        state.set_nvenc_quality(VideoCodec::H264, NvencQuality::new(8).unwrap());
+        state.set_nvenc_quality(VideoCodec::H265, NvencQuality::new(30).unwrap());
+
+        state.set_encoder_selection(VideoEncoderSelection::NvidiaNvenc);
+        state.set_codec(VideoCodec::H265);
+        state.set_encoder_selection(VideoEncoderSelection::Cpu);
+        state.set_codec(VideoCodec::H264);
+
+        assert_eq!(state.cpu_quality(VideoCodec::H264).value(), 12);
+        assert_eq!(state.cpu_quality(VideoCodec::H265).value(), 24);
+        assert_eq!(state.nvenc_quality(VideoCodec::H264).value(), 8);
+        assert_eq!(state.nvenc_quality(VideoCodec::H265).value(), 30);
+    }
+
+    #[test]
+    fn encoding_controls_fit_narrow_and_normal_ready_content_widths() {
+        let context = egui::Context::default();
+        crate::ui::fonts::install(&context);
+        let mut output = context.run_ui(Default::default(), |ui| {
+            for width in [344.0, 564.0] {
+                let source = media(Some(1920), Some(1080));
+                let mut state = UpscaleSelectionState::new(&source);
+                let capabilities = capabilities(
+                    VideoEncoderCapability::Available,
+                    VideoEncoderCapability::Available,
+                );
+                let rendered = ui.allocate_ui(egui::vec2(width, 160.0), |ui| {
+                    ui.set_width(width);
+                    show_encoding_controls(
+                        ui,
+                        &mut state,
+                        UpscaleEncoderCapabilities::Ready(&capabilities),
+                    );
+                });
+
+                assert!(rendered.response.rect.width() <= width);
+                assert!(rendered.response.rect.height() > 0.0);
+            }
+        });
+        output.textures_delta.clear();
     }
 
     #[test]
@@ -682,7 +1079,7 @@ mod tests {
             UpscaleValidationError::Output(MediaOutputError::InvalidOutputPath(_))
         ));
         assert_eq!(
-            upscale_ready_feedback(&error),
+            upscale_ready_feedback(&error).as_deref(),
             Some("Enter a usable output filename.")
         );
         assert!(!state.can_upscale(&source));
@@ -802,7 +1199,7 @@ mod tests {
             assert!(state.request(&media).output.as_os_str().is_empty());
             let error = state.validation(&media).unwrap_err();
             assert_eq!(
-                upscale_ready_feedback(&error),
+                upscale_ready_feedback(&error).as_deref(),
                 Some("Enter a usable output filename.")
             );
         }

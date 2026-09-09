@@ -39,6 +39,12 @@ pub const PIXEL_DIMENSION_CONTROL_WIDTH: f32 = 96.0;
 /// Mouse/keyboard adjustment increment for editable pixel boundaries.
 pub const PIXEL_DIMENSION_STEP: f64 = 2.0;
 
+/// Stable width for the numeric encoder-quality control.
+pub const ENCODER_QUALITY_CONTROL_WIDTH: f32 = 96.0;
+
+/// Encoder quality values change in whole-number steps.
+pub const ENCODER_QUALITY_STEP: f64 = 1.0;
+
 /// Minimum useful inline width for the editable output filename before the row stacks.
 pub const OUTPUT_FILENAME_MIN_INLINE_WIDTH: f32 = 180.0;
 
@@ -709,16 +715,16 @@ mod tests {
 
     use super::{
         ACTION_BAR_VERTICAL_PADDING, ActionLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT,
-        FIELD_PAIR_MIN_COLUMN_WIDTH, FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT,
-        FieldPairLayout, IntakeLayout, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE,
-        OUTPUT_FILENAME_MIN_INLINE_WIDTH, OutputRowLayout, PATH_TEXT_OVERFLOW,
-        PIXEL_DIMENSION_CONTROL_WIDTH, PIXEL_DIMENSION_STEP, PROGRESS_TRACK_HEIGHT,
-        REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE, TRACK_TEXT_MIN_INLINE_WIDTH,
-        TextOverflowPolicy, TrackRowLayout, WINDOW_CHROME_HEIGHT, WORKSPACE_METADATA_MIN_WIDTH,
-        action_group_size, action_layout, bounded_content_width, centered_action_group,
-        field_pair_layout, focus_content, intake_content, intake_layout_plan, operation_surface,
-        output_row_plan, surface_fade, track_row_plan, workspace_header_shows_metadata,
-        workspace_switcher_fits_one_line,
+        ENCODER_QUALITY_CONTROL_WIDTH, ENCODER_QUALITY_STEP, FIELD_PAIR_MIN_COLUMN_WIDTH,
+        FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, FieldPairLayout, IntakeLayout,
+        MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, OUTPUT_FILENAME_MIN_INLINE_WIDTH, OutputRowLayout,
+        PATH_TEXT_OVERFLOW, PIXEL_DIMENSION_CONTROL_WIDTH, PIXEL_DIMENSION_STEP,
+        PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
+        TRACK_TEXT_MIN_INLINE_WIDTH, TextOverflowPolicy, TrackRowLayout, WINDOW_CHROME_HEIGHT,
+        WORKSPACE_METADATA_MIN_WIDTH, action_group_size, action_layout, bounded_content_width,
+        centered_action_group, field_pair_layout, focus_content, intake_content,
+        intake_layout_plan, operation_surface, output_row_plan, surface_fade, track_row_plan,
+        workspace_header_shows_metadata, workspace_switcher_fits_one_line,
     };
     use crate::ui::theme;
 
@@ -734,6 +740,8 @@ mod tests {
         assert_eq!(FIELD_PAIR_MIN_COLUMN_WIDTH, 180.0);
         assert_eq!(PIXEL_DIMENSION_CONTROL_WIDTH, 96.0);
         assert_eq!(PIXEL_DIMENSION_STEP, 2.0);
+        assert_eq!(ENCODER_QUALITY_CONTROL_WIDTH, 96.0);
+        assert_eq!(ENCODER_QUALITY_STEP, 1.0);
         assert_eq!(OUTPUT_FILENAME_MIN_INLINE_WIDTH, 180.0);
         assert_eq!(WORKSPACE_METADATA_MIN_WIDTH, 220.0);
         assert_eq!(FOCUS_CONTENT_MAX_WIDTH, 470.0);

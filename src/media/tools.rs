@@ -433,7 +433,7 @@ fn run_capability_command(
     }
 }
 
-fn cached_video_encoder_capabilities(ffmpeg: &Path) -> VideoEncoderCapabilities {
+pub fn cached_video_encoder_capabilities(ffmpeg: &Path) -> VideoEncoderCapabilities {
     let cache =
         NVENC_CAPABILITY_CACHE.get_or_init(|| Mutex::new(VideoEncoderCapabilityCache::default()));
     cache
@@ -442,11 +442,12 @@ fn cached_video_encoder_capabilities(ffmpeg: &Path) -> VideoEncoderCapabilities 
         .get_or_detect(ffmpeg, &SystemVideoEncoderCapabilityDetector)
 }
 
-pub fn discover_media_tools() -> Result<MediaTools, MediaToolsError> {
+/// Establish normal operation readiness without waiting for optional hardware probes.
+pub fn discover_base_media_tools() -> Result<MediaTools, MediaToolsError> {
     discover_with(
         &SystemExecutableResolver,
         &SystemVersionValidator::default(),
-        cached_video_encoder_capabilities,
+        |_| VideoEncoderCapabilities::default(),
     )
 }
 

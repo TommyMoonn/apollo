@@ -38,7 +38,10 @@ use apollo::{
         intake::{MediaIntake, MediaIntakeRequest, MediaLoadStart, MediaProbeDisposition},
         model::MediaFile,
         probe::{MediaProbeError, probe_media},
-        tools::{MediaTools, MediaToolsError, discover_media_tools},
+        tools::{
+            MediaTools, MediaToolsError, VideoEncoderCapabilities, VideoEncoderCapability,
+            cached_video_encoder_capabilities, discover_base_media_tools,
+        },
     },
     remux::execution::{RemuxExecutionState, RemuxExecutor, RemuxStartError},
     ui::{
@@ -268,6 +271,7 @@ enum MediaToolsState {
 struct MediaToolsDiscovery {
     attempt_id: u64,
     receiver: Receiver<Result<MediaTools, MediaToolsError>>,
+    base_receiver: Option<Receiver<MediaTools>>,
 }
 
 impl MediaToolsDiscovery {
@@ -293,6 +297,7 @@ impl MediaToolsDiscovery {
         Ok(Self {
             attempt_id,
             receiver,
+            base_receiver: None,
         })
     }
 }
@@ -377,7 +382,11 @@ impl ApolloApp {
             next_session_id: 1,
             tools_error_details_open: false,
         };
-        app.start_media_tools_discovery_with(egui_context, discover_media_tools);
+        app.start_progressive_media_tools_discovery(
+            egui_context,
+            discover_base_media_tools,
+            cached_video_encoder_capabilities,
+        );
         app
     }
 
@@ -577,7 +586,50 @@ impl ApolloApp {
     }
 
     fn retry_media_tools(&mut self) {
-        self.start_media_tools_discovery_with(self.egui_context.clone(), discover_media_tools);
+        self.start_progressive_media_tools_discovery(
+            self.egui_context.clone(),
+            discover_base_media_tools,
+            cached_video_encoder_capabilities,
+        );
+    }
+
+    fn start_progressive_media_tools_discovery<B, C>(
+        &mut self,
+        context: Context,
+        base: B,
+        capabilities: C,
+    ) -> bool
+    where
+        B: FnOnce() -> Result<MediaTools, MediaToolsError> + Send + 'static,
+        C: FnOnce(&Path) -> VideoEncoderCapabilities + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let wake = context.clone();
+        if !self.start_media_tools_discovery_with(context, move || {
+            let mut tools = base()?;
+            let _ = sender.send(tools.clone());
+            wake.request_repaint();
+            tools.video_encoders = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                capabilities(&tools.ffmpeg)
+            }))
+            .unwrap_or_else(|_| {
+                let failure = VideoEncoderCapability::RuntimeUnavailable {
+                    reason: "The encoder capability worker stopped unexpectedly.".to_owned(),
+                };
+                VideoEncoderCapabilities {
+                    h264_nvenc: failure.clone(),
+                    h265_nvenc: failure,
+                }
+            });
+            Ok(tools)
+        }) {
+            return false;
+        }
+        self.media_tools_discovery
+            .as_mut()
+            .expect("discovery started")
+            .base_receiver = Some(receiver);
+        true
     }
 
     fn start_media_tools_discovery_with<F>(&mut self, context: Context, discover: F) -> bool
@@ -610,6 +662,16 @@ impl ApolloApp {
     }
 
     fn poll_media_tools_discovery(&mut self) {
+        if let Some(discovery) = self.media_tools_discovery.as_mut()
+            && let Some(receiver) = discovery.base_receiver.as_ref()
+            && let Ok(tools) = receiver.try_recv()
+        {
+            if matches!(self.media_tools, MediaToolsState::Checking { attempt_id } if attempt_id == discovery.attempt_id)
+            {
+                self.media_tools = MediaToolsState::Ready(tools);
+            }
+            discovery.base_receiver = None;
+        }
         let result = match self.media_tools_discovery.as_ref() {
             Some(discovery) => discovery.receiver.try_recv(),
             None => return,
@@ -617,25 +679,29 @@ impl ApolloApp {
 
         match result {
             Ok(result) => {
-                let discovery = self
+                let attempt_id = self
                     .media_tools_discovery
-                    .take()
-                    .expect("media tool discovery exists while its result is settled");
-                self.complete_media_tools_discovery(discovery.attempt_id, result);
+                    .as_ref()
+                    .expect("media tool discovery exists while its result is settled")
+                    .attempt_id;
+                self.complete_media_tools_discovery(attempt_id, result);
+                self.media_tools_discovery = None;
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
-                let discovery = self
+                let attempt_id = self
                     .media_tools_discovery
-                    .take()
-                    .expect("media tool discovery exists while disconnect is settled");
+                    .as_ref()
+                    .expect("media tool discovery exists while disconnect is settled")
+                    .attempt_id;
                 self.complete_media_tools_discovery(
-                    discovery.attempt_id,
+                    attempt_id,
                     Err(MediaToolsError::DiscoveryFailed(
                         "The media tool discovery worker stopped before returning a result."
                             .to_owned(),
                     )),
                 );
+                self.media_tools_discovery = None;
             }
         }
     }
@@ -645,12 +711,36 @@ impl ApolloApp {
         attempt_id: u64,
         result: Result<MediaTools, MediaToolsError>,
     ) -> bool {
-        if !matches!(
-            &self.media_tools,
-            MediaToolsState::Checking {
-                attempt_id: current
-            } if *current == attempt_id
-        ) {
+        if let MediaToolsState::Ready(tools) = &mut self.media_tools
+            && let Err(error) = &result
+            && self
+                .media_tools_discovery
+                .as_ref()
+                .is_some_and(|discovery| discovery.attempt_id == attempt_id)
+            && self.next_media_tools_attempt_id == attempt_id.wrapping_add(1)
+        {
+            let failure = VideoEncoderCapability::RuntimeUnavailable {
+                reason: error.to_string(),
+            };
+            tools.video_encoders = VideoEncoderCapabilities {
+                h264_nvenc: failure.clone(),
+                h265_nvenc: failure,
+            };
+            return true;
+        }
+        let pending_base_matches = matches!((&self.media_tools, &result),
+            (MediaToolsState::Ready(current), Ok(completed))
+                if self.next_media_tools_attempt_id == attempt_id.wrapping_add(1)
+                    && self.media_tools_discovery.as_ref().is_some_and(|discovery| discovery.attempt_id == attempt_id)
+                    && current.ffmpeg == completed.ffmpeg && current.ffprobe == completed.ffprobe);
+        if !pending_base_matches
+            && !matches!(
+                &self.media_tools,
+                MediaToolsState::Checking {
+                    attempt_id: current
+                } if *current == attempt_id
+            )
+        {
             return false;
         }
 
@@ -1111,14 +1201,21 @@ impl ApolloApp {
             return;
         }
 
+        let enabled = self.workspace_interaction_enabled();
+        let capabilities = match &self.media_tools {
+            MediaToolsState::Ready(tools) if self.media_tools_discovery.is_none() => {
+                upscale_ui::UpscaleEncoderCapabilities::Ready(&tools.video_encoders)
+            }
+            _ => upscale_ui::UpscaleEncoderCapabilities::Checking,
+        };
         let action = ui
-            .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
+            .add_enabled_ui(enabled, |ui| {
                 let upscale = self
                     .state
                     .upscale
                     .as_mut()
                     .expect("upscale source exists while ready surface is shown");
-                upscale_ui::show(ui, &upscale.media, &mut upscale.selection)
+                upscale_ui::show(ui, &upscale.media, &mut upscale.selection, capabilities)
             })
             .inner;
         if let Err(error) = self.handle_upscale_action(action)
@@ -1177,6 +1274,12 @@ impl ApolloApp {
                 let Some(upscale) = self.state.upscale.as_ref() else {
                     return Ok(());
                 };
+                if self.media_tools_discovery.is_some()
+                    && upscale.selection.encoder_selection()
+                        != apollo::upscale::model::VideoEncoderSelection::Cpu
+                {
+                    return Ok(());
+                }
                 let Some(tools) = self.ready_media_tools().cloned() else {
                     return Ok(());
                 };
@@ -2056,6 +2159,195 @@ mod tests {
     };
 
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_reset() {
+        use apollo::media::tools::{VideoEncoderCapabilities, VideoEncoderCapability};
+        use apollo::upscale::model::{CpuQuality, VideoEncoderSelection};
+        let (directory, path) = temp_file("pending-nvenc-workspace");
+        let mut app = app();
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let (wake_tx, wake_rx) = mpsc::channel();
+        context.set_request_repaint_callback(move |_| {
+            let _ = wake_tx.send(());
+        });
+        let (release_tx, release_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        assert!(app.start_progressive_media_tools_discovery(
+            context.clone(),
+            || Ok(MediaTools::new("missing-ffmpeg", "missing-ffprobe")),
+            move |_| {
+                started_tx
+                    .send(std::thread::current().name().map(str::to_owned))
+                    .unwrap();
+                release_rx.recv().unwrap();
+                VideoEncoderCapabilities {
+                    h264_nvenc: VideoEncoderCapability::Available,
+                    h265_nvenc: VideoEncoderCapability::RuntimeUnavailable {
+                        reason: "driver lacks HEVC".to_owned(),
+                    },
+                }
+            },
+        ));
+        assert_eq!(
+            started_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .as_deref(),
+            Some("apollo-media-tools")
+        );
+        app.poll_media_tools_discovery();
+        assert!(app.ready_media_tools().is_some());
+        assert!(app.media_tools_discovery.is_some());
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::VideoUpscale);
+        let render = |app: &mut ApolloApp| {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(730.0, 1000.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| app.show_navigation(ui),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = render(&mut app);
+        assert!(output_contains_text(&output, "Auto (checking...)"));
+        assert!(output_contains_text(&output, "Checking NVIDIA NVENC..."));
+        assert!(
+            app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested)
+                .is_ok()
+        );
+        assert!(matches!(
+            app.upscale_executor.state(),
+            UpscaleExecutionState::Idle
+        ));
+        app.state
+            .upscale
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_encoder_selection(VideoEncoderSelection::NvidiaNvenc);
+        let output = render(&mut app);
+        assert!(output_contains_text(&output, "Checking NVIDIA NVENC..."));
+        assert!(
+            app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested)
+                .is_ok()
+        );
+        assert!(matches!(
+            app.upscale_executor.state(),
+            UpscaleExecutionState::Idle
+        ));
+        app.state
+            .upscale
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_encoder_selection(VideoEncoderSelection::Cpu);
+        // The missing executable produces a start error only after CPU passes ready validation.
+        assert!(matches!(
+            app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested),
+            Err(apollo::upscale::execution::UpscaleStartError::Process(_))
+        ));
+        let session = app.state.upscale.as_mut().unwrap();
+        session
+            .selection
+            .set_encoder_selection(VideoEncoderSelection::Auto);
+        session
+            .selection
+            .set_cpu_quality(VideoCodec::H264, CpuQuality::new(22).unwrap());
+        session
+            .selection
+            .set_target(&session.media, UpscaleTarget::Uhd8k);
+        session
+            .selection
+            .set_output_filename_stem("retained-output".into());
+        let before = session.selection.clone();
+        assert_eq!(
+            settled_navigation_repaint_delay(&context, &mut app),
+            Duration::MAX
+        );
+        while wake_rx.try_recv().is_ok() {}
+        release_tx.send(()).unwrap();
+        wake_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("capability completion wakes egui");
+        app.poll_media_tools_discovery();
+        assert!(app.media_tools_discovery.is_none());
+        assert_eq!(app.state.upscale.as_ref().unwrap().selection, before);
+        assert!(output_contains_text(
+            &render(&mut app),
+            "Auto (NVIDIA NVENC)"
+        ));
+        app.state
+            .upscale
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_codec(VideoCodec::H265);
+        assert!(output_contains_text(&render(&mut app), "Auto (CPU)"));
+        app.state
+            .upscale
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_encoder_selection(VideoEncoderSelection::NvidiaNvenc);
+        assert!(output_contains_text(&render(&mut app), "driver lacks HEVC"));
+        assert_eq!(
+            settled_navigation_repaint_delay(&context, &mut app),
+            Duration::MAX
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_capability_attempt_or_path_cannot_replace_current_tools() {
+        let mut app = app();
+        app.next_media_tools_attempt_id = 3;
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        app.media_tools_discovery = Some(super::MediaToolsDiscovery {
+            attempt_id: 2,
+            receiver,
+            base_receiver: None,
+        });
+        let current = app.ready_media_tools().unwrap().clone();
+        assert!(!app.complete_media_tools_discovery(1, Ok(current.clone())));
+        assert!(!app.complete_media_tools_discovery(
+            2,
+            Ok(MediaTools::new("other-ffmpeg", "other-ffprobe"))
+        ));
+        assert_eq!(app.ready_media_tools(), Some(&current));
+        assert!(app.complete_media_tools_discovery(2, Ok(current)));
+    }
+
+    #[test]
+    fn capability_disconnect_preserves_base_tools_and_retires_pending_state() {
+        let mut app = app();
+        app.next_media_tools_attempt_id = 1;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.media_tools_discovery = Some(super::MediaToolsDiscovery {
+            attempt_id: 0,
+            receiver,
+            base_receiver: None,
+        });
+        drop(sender);
+        app.poll_media_tools_discovery();
+        let tools = app.ready_media_tools().expect("base tools remain usable");
+        assert!(matches!(&tools.video_encoders.h264_nvenc,
+            apollo::media::tools::VideoEncoderCapability::RuntimeUnavailable { reason }
+            if reason.contains("stopped before returning")));
+        assert_eq!(
+            tools.video_encoders.h264_nvenc,
+            tools.video_encoders.h265_nvenc
+        );
+        assert!(app.media_tools_discovery.is_none());
+    }
 
     #[derive(Debug)]
     struct TestDroppedFile {

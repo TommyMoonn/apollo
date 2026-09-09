@@ -3,6 +3,7 @@ use egui::{
     Rect, Response, RichText, Sense, Sides, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder,
     Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
+use std::ops::RangeInclusive;
 
 use super::{fonts, layout, theme};
 
@@ -260,6 +261,29 @@ pub fn pixel_dimension_control(ui: &mut Ui, label: &str, value: &mut u32) -> Res
             .range(0..=u32::MAX)
             .speed(layout::PIXEL_DIMENSION_STEP)
             .custom_parser(|text| Some(parse_pixel_dimension(text))),
+    );
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::DragValue, response.enabled(), label));
+    response
+}
+
+/// Whole-number quality input with the shared compact geometry.
+#[must_use]
+pub fn encoder_quality_control(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut u8,
+    range: RangeInclusive<u8>,
+    unit: &str,
+) -> Response {
+    let response = ui.add_sized(
+        [
+            layout::ENCODER_QUALITY_CONTROL_WIDTH,
+            theme::COMPACT_CONTROL_HEIGHT,
+        ],
+        DragValue::new(value)
+            .range(range)
+            .speed(layout::ENCODER_QUALITY_STEP)
+            .suffix(format!(" {unit}")),
     );
     response.widget_info(|| WidgetInfo::labeled(WidgetType::DragValue, response.enabled(), label));
     response
@@ -1015,9 +1039,9 @@ mod tests {
 
     use super::{
         BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
-        button_text_style, conditional_fade, displayed_progress_fraction, filename_field,
-        inline_status, inline_status_color, inline_status_height, labeled_control, mode_button,
-        mode_button_intrinsic_size, operation_output_row, parse_pixel_dimension,
+        button_text_style, conditional_fade, displayed_progress_fraction, encoder_quality_control,
+        filename_field, inline_status, inline_status_color, inline_status_height, labeled_control,
+        mode_button, mode_button_intrinsic_size, operation_output_row, parse_pixel_dimension,
         pixel_dimension_control, plain_button_text_style, primary_button_enabled, progress_bar,
         progress_rail_color, secondary_button, select_button, select_menu_intrinsic_width,
         select_menu_option, selectable_row, selectable_row_visuals, selectable_row_with_accessory,
@@ -1121,6 +1145,23 @@ mod tests {
         output.drop_without_applying_deltas();
 
         assert_eq!(stem, original);
+    }
+
+    #[test]
+    fn encoder_quality_control_shows_numeric_value_and_backend_unit() {
+        let context = egui::Context::default();
+        super::fonts::install(&context);
+        let mut value = 16_u8;
+
+        let mut output = context.run_ui(Default::default(), |ui| {
+            let response =
+                encoder_quality_control(ui, "NVIDIA NVENC quality", &mut value, 1..=51, "CQ");
+
+            assert_eq!(response.rect.width(), layout::ENCODER_QUALITY_CONTROL_WIDTH);
+            assert_eq!(response.rect.height(), theme::COMPACT_CONTROL_HEIGHT);
+            assert_eq!(value, 16);
+        });
+        output.textures_delta.clear();
     }
 
     #[test]
