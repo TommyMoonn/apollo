@@ -70,6 +70,7 @@ function Read-MediaToolsManifest {
         Assert-MediaRelativePath $item.destination
         Assert-MediaText $item.purpose 'redistribution purpose'
         if (-not $item.destination.StartsWith('licenses/ffmpeg/', [StringComparison]::Ordinal) -or
+            $item.destination -ieq 'licenses/ffmpeg/media-tools.json' -or
             -not $destinations.Add($item.destination)) { throw 'Redistribution destinations must be unique beneath licenses/ffmpeg/.' }
     }
     foreach ($required in @('licenses/ffmpeg/LICENSE', 'licenses/ffmpeg/README.txt')) {
@@ -126,6 +127,11 @@ function Assert-StagedMediaTools {
             throw "Staged FFmpeg lacks required encoder: $encoder"
         }
     }
+}
+
+function Get-MediaToolPayloadPaths {
+    param($Manifest)
+    @('ffmpeg.exe', 'ffprobe.exe') + @($Manifest.redistribution | ForEach-Object { $_.destination }) + @('licenses/ffmpeg/media-tools.json')
 }
 
 function Publish-MediaTools {
@@ -189,6 +195,7 @@ function Publish-MediaTools {
         }
         finally { $zip.Dispose() }
         Assert-StagedMediaTools $payload $manifest
+        Copy-Item -LiteralPath $ManifestPath -Destination (Join-Path $payload 'licenses/ffmpeg/media-tools.json')
         [IO.Directory]::Move($payload, $output)
     }
     finally {

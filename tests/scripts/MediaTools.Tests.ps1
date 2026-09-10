@@ -98,7 +98,8 @@ Invoke-TestCase 'offline cache hit stages only pair and byte-identical redistrib
         Write-MediaFixture $fixture
         $output = Invoke-FixtureStage
         $files = @(Get-ChildItem $output -Recurse -File | ForEach-Object { [IO.Path]::GetRelativePath($output, $_.FullName).Replace('\', '/') } | Sort-Object)
-        Assert-Equal @('ffmpeg.exe', 'ffprobe.exe', 'licenses/ffmpeg/LICENSE', 'licenses/ffmpeg/README.txt') $files 'Only allowlisted files may be staged.'
+        Assert-Equal @('ffmpeg.exe', 'ffprobe.exe', 'licenses/ffmpeg/LICENSE', 'licenses/ffmpeg/media-tools.json', 'licenses/ffmpeg/README.txt') $files 'Only allowlisted files and pinned metadata may be staged.'
+        Assert-Equal (Get-Content (Join-Path $fixture.Root 'manifest.json') -Raw) (Get-Content (Join-Path $output 'licenses/ffmpeg/media-tools.json') -Raw) 'Staged metadata must match the pinned manifest exactly.'
         foreach ($item in $fixture.Manifest.redistribution) {
             Assert-Equal "fixture bytes: $($item.source)" ([IO.File]::ReadAllText((Join-Path $output $item.destination))) 'Redistribution bytes must survive extraction.'
         }

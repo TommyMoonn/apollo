@@ -5,6 +5,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 . (Join-Path $PSScriptRoot 'Test.Common.ps1')
+. (Join-Path $PSScriptRoot 'MediaRelease.Common.ps1')
 . (Join-Path $projectRoot 'scripts/Repository.Common.ps1')
 
 $stageReleaseScript = Join-Path $projectRoot 'scripts/stage-windows-release.ps1'
@@ -21,6 +22,7 @@ function New-ReleaseStagingFixture {
     )
 
     $root = New-TestDirectory -Name $Name
+    New-ReleaseMediaFixture -Root $root
     New-Item -ItemType Directory -Path (Join-Path $root 'installer/windows') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $root 'assets') -Force | Out-Null
 
@@ -56,7 +58,7 @@ function Invoke-ReleaseStagingFixture {
         '--project', $Repository,
         '--makensis', $compiler
     ) + $Arguments
-    return Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments $scriptArguments
+    return Invoke-ReleaseScriptFixture -ScriptPath $stageReleaseScript -Arguments $scriptArguments
 }
 
 Invoke-TestCase 'windows release staging accepts a GUI x64 PE32+ executable and creates the expected archive and checksum' {
@@ -78,7 +80,8 @@ Invoke-TestCase 'windows release staging accepts a GUI x64 PE32+ executable and 
         Assert-Equal @('Apollo-Setup-x64.exe', 'Apollo-windows-x64.zip', 'SHA256SUMS.txt') $stagedFiles 'Staging should contain exactly the final release set.'
 
         $entries = @(Get-ZipEntryNames -Path $zipPath | Sort-Object)
-        Assert-Equal @('Apollo.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.md') $entries 'Release ZIP should contain only the expected payload.'
+        Assert-Equal @('Apollo.exe', 'ffmpeg.exe', 'ffprobe.exe', 'LICENSE', 'licenses/ffmpeg/LICENSE', 'licenses/ffmpeg/media-tools.json', 'licenses/ffmpeg/README.txt', 'THIRD_PARTY_NOTICES.md') $entries 'Release ZIP should contain only the expected payload.'
+        Assert-Equal (Get-Content (Join-Path $repo 'distribution/media-tools.json') -Raw) (Get-ZipEntryText -Path $zipPath -EntryName 'licenses/ffmpeg/media-tools.json') 'Release metadata must retain the exact pinned archive identity.'
         Assert-Contains (Get-ZipEntryText -Path $zipPath -EntryName 'LICENSE') 'Apollo project license' 'Project license should be copied unchanged into the archive.'
         Assert-Contains (Get-ZipEntryText -Path $zipPath -EntryName 'THIRD_PARTY_NOTICES.md') 'Apollo third-party notices' 'Third-party notices should be copied into the archive.'
 
@@ -387,10 +390,71 @@ Invoke-TestCase 'windows release staging validates release metadata before repla
 }
 
 Invoke-TestCase 'windows release staging exposes help without creating artifacts' {
-    $output = Invoke-ScriptCapture -ScriptPath $stageReleaseScript -Arguments @('--help')
+    $output = Invoke-ReleaseScriptFixture -ScriptPath $stageReleaseScript -Arguments @('--help')
     Assert-Contains $output 'Usage:' 'Staging help should show usage.'
     Assert-Contains $output '--executable' 'Staging help should describe the explicit executable option.'
     Assert-Contains $output '--makensis' 'Staging help should describe NSIS compiler selection.'
+}
+
+Invoke-TestCase 'installer and portable consume the same manifest-owned files including additional licenses' {
+    $repo = New-ReleaseStagingFixture
+    $originalPayloadLog = $env:APOLLO_TEST_NSIS_PAYLOAD_LOG
+    try {
+        New-ReleaseMediaFixture -Root $repo -ExtraLicense
+        $env:APOLLO_TEST_NSIS_PAYLOAD_LOG = Join-Path $repo 'installer-payload.json'
+        Invoke-ReleaseStagingFixture -Repository $repo | Out-Null
+        $compiler = Get-Content $env:APOLLO_TEST_NSIS_PAYLOAD_LOG -Raw | ConvertFrom-Json -AsHashtable
+        $zip = Join-Path $repo 'artifacts/windows/Apollo-windows-x64.zip'
+        foreach ($name in @('ffmpeg.exe','ffprobe.exe','LICENSE','README.txt','media-tools.json','NOTICE.txt')) {
+            $relative = switch ($name) {
+                'NOTICE.txt' { 'licenses/ffmpeg/extra/NOTICE.txt' }
+                { $_ -in @('LICENSE','README.txt','media-tools.json') } { "licenses/ffmpeg/$name" }
+                default { $name }
+            }
+            Assert-Equal $compiler.files[$name] (Get-ZipEntryText -Path $zip -EntryName $relative) "Both packagers must consume identical $relative bytes."
+            Assert-Contains $compiler.include ('Delete "$INSTDIR\' + $relative.Replace('/','\') + '"') 'Uninstall must own each staged file.'
+        }
+        Assert-Contains $compiler.include 'RMDir "$INSTDIR\licenses\ffmpeg\extra"' 'Generated uninstall must remove empty nested license directories.'
+        Assert-False ($compiler.include.Contains('RMDir /r')) 'Uninstall must preserve unrelated files.'
+        Assert-Equal 2 ([regex]::Matches($compiler.include, '(?m)^!macro ').Count) 'One generated include owns install and uninstall.'
+    }
+    finally {
+        $env:APOLLO_TEST_NSIS_PAYLOAD_LOG = $originalPayloadLog
+        Remove-Item -LiteralPath $repo -Recurse -Force
+    }
+}
+
+Invoke-TestCase 'media checksum failure preserves the release set and never invokes the installer' {
+    $repo = New-ReleaseStagingFixture
+    $originalMarker = $env:APOLLO_TEST_NSIS_MARKER
+    try {
+        $output = Join-Path $repo 'artifacts/windows'
+        New-Item -ItemType Directory -Path $output -Force | Out-Null
+        'previous release' | Set-Content (Join-Path $output 'keep.txt')
+        $manifest = Get-Content (Join-Path $repo 'distribution/media-tools.json') -Raw | ConvertFrom-Json
+        'corrupt ZIP' | Set-Content (Join-Path $repo ".scratch/media-tools-cache/$($manifest.archive.filename)")
+        $env:APOLLO_TEST_NSIS_MARKER = Join-Path $repo 'compiler-called'
+        Assert-Throws { Invoke-ReleaseStagingFixture -Repository $repo } '*SHA-256 mismatch*'
+        Assert-PathMissing $env:APOLLO_TEST_NSIS_MARKER 'Media staging must succeed before NSIS runs.'
+        Assert-Equal 'previous release' (Get-Content (Join-Path $output 'keep.txt')).Trim() 'Previous release must survive media staging failure.'
+        Assert-Equal @('windows') @(Get-ChildItem (Join-Path $repo 'artifacts') -Directory -Force | ForEach-Object Name) 'Failed staging must remove its owned scratch.'
+    }
+    finally { $env:APOLLO_TEST_NSIS_MARKER = $originalMarker; Remove-Item -LiteralPath $repo -Recurse -Force }
+}
+
+Invoke-TestCase 'portable ZIP and checksum coverage are deterministic for identical inputs' {
+    $repo = New-ReleaseStagingFixture
+    try {
+        Invoke-ReleaseStagingFixture -Repository $repo | Out-Null
+        $zip = Join-Path $repo 'artifacts/windows/Apollo-windows-x64.zip'
+        $before = (Get-FileHash $zip).Hash
+        $sums = Get-Content (Join-Path $repo 'artifacts/windows/SHA256SUMS.txt') -Raw
+        Invoke-ReleaseStagingFixture -Repository $repo | Out-Null
+        Assert-Equal $before (Get-FileHash $zip).Hash 'Identical inputs must produce byte-identical portable ZIPs.'
+        Assert-Equal $sums (Get-Content (Join-Path $repo 'artifacts/windows/SHA256SUMS.txt') -Raw) 'Checksums must cover the same two named artifacts.'
+        Assert-Throws { Invoke-ReleaseStagingFixture -Repository $repo -Arguments @('--media-cache','artifacts/windows/cache') } '*Media cache must be outside*'
+    }
+    finally { Remove-Item -LiteralPath $repo -Recurse -Force }
 }
 
 $env:APOLLO_TEST_NSIS_FAIL = $originalFail

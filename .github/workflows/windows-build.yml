@@ -144,6 +144,16 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File .\scripts\check-release.ps1
 
+      - name: Test repository PowerShell tooling
+        shell: pwsh
+        run: pwsh -NoProfile -File .\tests\scripts\run.ps1
+
+      - name: Cache pinned media archive
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .scratch/media-tools-cache
+          key: media-tools-${{ runner.os }}-${{ hashFiles('distribution/media-tools.json') }}
+
       - name: Install pinned NSIS compiler
         shell: pwsh
         run: |
@@ -169,7 +179,9 @@ jobs:
         run: |
           pwsh -NoProfile -File .\scripts\stage-windows-release.ps1 `
             --executable ".\target\$env:WINDOWS_TARGET\release\apollo.exe" `
-            --makensis "$env:MAKENSIS_PATH"
+            --makensis "$env:MAKENSIS_PATH" `
+            --media-cache ".scratch/media-tools-cache"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $expected = @(
             'Apollo-Setup-x64.exe',
@@ -182,6 +194,17 @@ jobs:
               throw "Expected staged release asset is missing: $path"
             }
           }
+
+      - name: Verify installed and portable payloads without PATH
+        shell: pwsh
+        run: |
+          $artifacts = @(cargo test --locked --test bundled_media_tools --no-run --message-format=json |
+            ForEach-Object { $_ | ConvertFrom-Json } |
+            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'bundled_media_tools' -and $_.executable })
+          if ($LASTEXITCODE -ne 0 -or $artifacts.Count -ne 1) { throw 'Discovery harness build failed.' }
+          pwsh -NoProfile -File .\tests\scripts\WindowsRelease.Smoke.ps1 `
+            -ReleaseDirectory artifacts/windows -DiscoveryHarness $artifacts[0].executable
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload Windows release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

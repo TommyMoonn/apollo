@@ -4,6 +4,25 @@ Apollo redistributes third-party software and font material. This file preserves
 
 For Rust packages that offer multiple alternative licenses, Apollo uses the Apache License 2.0 option when that option is present. Packages whose metadata requires additional or different terms are covered separately below. Build-only and proc-macro crates are not part of this binary-distribution inventory.
 
+## Bundled FFmpeg and FFprobe
+
+The Windows installer and portable archive include the Gyan Doshi Windows x64
+static essentials distribution `7.0.2-essentials_build-www.gyan.dev` (FFmpeg
+source version 7.0.2, source commit `e3a61e9103`).
+
+- Distributor: https://www.gyan.dev/ffmpeg/builds/
+- Exact archive: https://github.com/GyanD/codexffmpeg/releases/download/7.0.2/ffmpeg-7.0.2-essentials_build.zip
+- Archive SHA-256: `d5308d30872b2739cf53169df61faba8639d39a19b20b91e611c177ef676f64c`
+- Distribution license: GNU General Public License version 3, retained in `licenses/ffmpeg/LICENSE`.
+- Distributor attribution, source reference, configuration and library versions: `licenses/ffmpeg/README.txt`.
+- Exact pinned distribution metadata: `licenses/ffmpeg/media-tools.json`.
+- FFmpeg source reference: https://github.com/FFmpeg/FFmpeg/commit/e3a61e9103
+
+FFmpeg and FFprobe are separate executables. Their distribution includes external
+libraries such as x264 and x265; the distributor's README identifies those builds.
+The repository-owned `distribution/media-tools.json` controls binary selection.
+The license and distributor README are included unchanged in both release formats.
+
 ## Repository-embedded fonts
 
 ### IBM Plex Sans Regular

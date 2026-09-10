@@ -19,6 +19,10 @@ RequestExecutionLevel user
 !ifndef APP_ICON
     !error "APP_ICON define is required"
 !endif
+!ifndef MEDIA_TOOLS_INCLUDE
+    !error "MEDIA_TOOLS_INCLUDE define is required"
+!endif
+!include "${MEDIA_TOOLS_INCLUDE}"
 
 !define APP_NAME "Apollo"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Apollo"
@@ -57,6 +61,7 @@ Section "Apollo" SEC_APOLLO
     File /oname=Apollo.exe "${APOLLO_EXE}"
     File /oname=LICENSE "${PROJECT_ROOT}\LICENSE"
     File /oname=THIRD_PARTY_NOTICES.md "${PROJECT_ROOT}\THIRD_PARTY_NOTICES.md"
+    !insertmacro InstallMediaTools
 
     WriteUninstaller "$INSTDIR\Uninstall.exe"
     CreateShortcut "$SMPROGRAMS\Apollo.lnk" "$INSTDIR\Apollo.exe" "" "$INSTDIR\Apollo.exe" 0
@@ -128,6 +133,7 @@ Section "Uninstall"
     Delete "$INSTDIR\Apollo.exe"
     Delete "$INSTDIR\LICENSE"
     Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
+    !insertmacro UninstallMediaTools
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"
 SectionEnd

@@ -5,6 +5,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 . (Join-Path $PSScriptRoot 'Test.Common.ps1')
+. (Join-Path $PSScriptRoot 'MediaRelease.Common.ps1')
 
 $buildInstallerScript = Join-Path $projectRoot 'scripts/build-windows-installer.ps1'
 $installerDefinition = Join-Path $projectRoot 'installer/windows/apollo.nsi'
@@ -25,6 +26,7 @@ function New-InstallerFixture {
     )
 
     $root = New-TestDirectory -Name $Name
+    New-ReleaseMediaFixture -Root $root
     New-Item -ItemType Directory -Path (Join-Path $root 'installer/windows') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $root 'assets') -Force | Out-Null
 
@@ -64,7 +66,7 @@ Invoke-TestCase 'installer build passes Cargo version and repository paths to NS
         $log = Join-Path $fixture.Root 'makensis-args.txt'
         $env:APOLLO_TEST_NSIS_LOG = $log
 
-        Invoke-ScriptCapture -ScriptPath $buildInstallerScript -Arguments @(
+        Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
             '--project', $fixture.Root,
             '--makensis', $fixture.Compiler
         ) | Out-Null
@@ -86,7 +88,7 @@ Invoke-TestCase 'installer build rejects a missing NSIS compiler clearly' {
     $fixture = New-InstallerFixture
     try {
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $buildInstallerScript -Arguments @(
+            Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
                 '--project', $fixture.Root,
                 '--makensis', (Join-Path $fixture.Root 'missing/makensis.exe')
             ) | Out-Null
@@ -110,7 +112,7 @@ Invoke-TestCase 'installer build validates payload files before compiler invocat
             }
 
             Assert-Throws {
-                Invoke-ScriptCapture -ScriptPath $buildInstallerScript -Arguments @(
+                Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
                     '--project', $fixture.Root,
                     '--makensis', $fixture.Compiler
                 ) | Out-Null
@@ -139,7 +141,7 @@ Invoke-TestCase 'installer build rejects non-GUI or non-x64 payloads before comp
                 -Subsystem $case.Subsystem | Out-Null
 
             Assert-Throws {
-                Invoke-ScriptCapture -ScriptPath $buildInstallerScript -Arguments @(
+                Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
                     '--project', $fixture.Root,
                     '--makensis', $fixture.Compiler
                 ) | Out-Null
@@ -157,7 +159,7 @@ Invoke-TestCase 'installer build supports an output path containing spaces' {
     $fixture = New-InstallerFixture -Name 'apollo installer path with spaces'
     try {
         $output = Join-Path $fixture.Root 'release output with spaces/Apollo-Setup-x64.exe'
-        Invoke-ScriptCapture -ScriptPath $buildInstallerScript -Arguments @(
+        Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
             '--project', $fixture.Root,
             '--makensis', $fixture.Compiler,
             '--output', $output
@@ -171,7 +173,7 @@ Invoke-TestCase 'installer build supports an output path containing spaces' {
     }
 }
 
-Invoke-TestCase 'installer compiler failure propagates without leaving an installer artifact' {
+Invoke-TestCase 'installer compiler failure preserves the previous installer artifact' {
     $fixture = New-InstallerFixture
     try {
         $output = Join-Path $fixture.Root 'artifacts/windows-installer/Apollo-Setup-x64.exe'
@@ -180,12 +182,12 @@ Invoke-TestCase 'installer compiler failure propagates without leaving an instal
         $env:APOLLO_TEST_NSIS_FAIL = '1'
 
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $buildInstallerScript -Arguments @(
+            Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
                 '--project', $fixture.Root,
                 '--makensis', $fixture.Compiler
             ) | Out-Null
         } '*fake makensis failure*'
-        Assert-PathMissing $output 'A failed compiler run must not leave an old or partial installer at the requested output path.'
+        Assert-Equal 'stale installer' ([IO.File]::ReadAllText($output).Trim()) 'A failed compiler run must preserve the previous artifact.'
     }
     finally {
         Reset-NsisTestEnvironment
@@ -200,7 +202,7 @@ Invoke-TestCase 'installer build rejects unexpected output filenames' {
         $env:APOLLO_TEST_NSIS_MARKER = $marker
 
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $buildInstallerScript -Arguments @(
+            Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
                 '--project', $fixture.Root,
                 '--makensis', $fixture.Compiler,
                 '--output', (Join-Path $fixture.Root 'artifacts/windows-installer/Apollo-x64.exe')
@@ -210,7 +212,7 @@ Invoke-TestCase 'installer build rejects unexpected output filenames' {
 
         $env:APOLLO_TEST_NSIS_UNEXPECTED = '1'
         Assert-Throws {
-            Invoke-ScriptCapture -ScriptPath $buildInstallerScript -Arguments @(
+            Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
                 '--project', $fixture.Root,
                 '--makensis', $fixture.Compiler
             ) | Out-Null
@@ -235,7 +237,7 @@ Invoke-TestCase 'installer build does not mutate the source payload' {
             $before[$path] = [Convert]::ToHexString([System.IO.File]::ReadAllBytes($path))
         }
 
-        Invoke-ScriptCapture -ScriptPath $buildInstallerScript -Arguments @(
+        Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
             '--project', $fixture.Root,
             '--makensis', $fixture.Compiler
         ) | Out-Null
@@ -336,7 +338,7 @@ Invoke-TestCase 'installer definition uses Modern UI flow and stable per-user ap
 }
 
 Invoke-TestCase 'installer build exposes help without requiring NSIS or build payload' {
-    $output = Invoke-ScriptCapture -ScriptPath $buildInstallerScript -Arguments @('--help')
+    $output = Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @('--help')
     Assert-Contains $output 'Usage:' 'Installer build help should show usage.'
     Assert-Contains $output '--makensis' 'Installer build help should describe NSIS compiler selection.'
     Assert-Contains $output 'assets/apollo.ico' 'Installer build help should expose the required repository-owned icon input.'

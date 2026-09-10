@@ -279,6 +279,17 @@ $outputArgument = @($args | Where-Object { $_.StartsWith('/DOUTPUT_FILE=', [Syst
 if ($outputArgument.Count -ne 1) {
     throw 'fake makensis expected exactly one OUTPUT_FILE define'
 }
+if (-not [string]::IsNullOrWhiteSpace($env:APOLLO_TEST_NSIS_PAYLOAD_LOG)) {
+    $includeArgument = @($args | Where-Object { $_.StartsWith('/DMEDIA_TOOLS_INCLUDE=', [StringComparison]::Ordinal) })
+    if ($includeArgument.Count -ne 1) { throw 'expected one media tools include' }
+    $include = [IO.File]::ReadAllText($includeArgument[0].Substring('/DMEDIA_TOOLS_INCLUDE='.Length))
+    $payload = @{}
+    foreach ($match in [regex]::Matches($include, 'File "/oname=([^"]+)" "([^"]+)"')) {
+        $source = $match.Groups[2].Value.Replace('$$', '$')
+        $payload[$match.Groups[1].Value] = [IO.File]::ReadAllText($source)
+    }
+    @{ include = $include; files = $payload } | ConvertTo-Json -Depth 5 | Set-Content $env:APOLLO_TEST_NSIS_PAYLOAD_LOG
+}
 $outputPath = $outputArgument[0].Substring('/DOUTPUT_FILE='.Length)
 if ($env:APOLLO_TEST_NSIS_UNEXPECTED -eq '1') {
     $outputPath = Join-Path (Split-Path $outputPath -Parent) 'Unexpected-Setup.exe'

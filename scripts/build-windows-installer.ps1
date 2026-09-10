@@ -3,7 +3,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot 'stage-windows-release.ps1')
+. (Join-Path $PSScriptRoot 'WindowsRelease.Common.ps1')
+. (Join-Path $PSScriptRoot 'stage-media-tools.ps1')
 . (Join-Path $PSScriptRoot 'check-release.ps1')
 
 function Resolve-NsisCompilerPath {
@@ -70,11 +71,46 @@ function Assert-InstallerSourceFile {
     }
 }
 
+function Write-MediaToolsInstallerInclude {
+    param([string]$MediaToolsPath, $Manifest, [string]$OutputPath)
+    $install = [Collections.Generic.List[string]]::new()
+    $uninstall = [Collections.Generic.List[string]]::new()
+    $directories = [Collections.Generic.HashSet[string]]::new()
+    $install.Add('!macro InstallMediaTools')
+    $uninstall.Add('!macro UninstallMediaTools')
+    foreach ($relative in (Get-MediaToolPayloadPaths $Manifest)) {
+        $source = Join-Path $MediaToolsPath $relative
+        Assert-InstallerSourceFile -Path $source -Description 'Staged media-tool payload'
+        # Manifest paths are restricted portable names; escape the caller-owned absolute root.
+        if ($source.Contains("`n") -or $source.Contains("`r") -or $source.Contains('"')) { throw 'Unsupported NSIS source path.' }
+        $source = $source.Replace('$', '$$')
+        $windowsPath = $relative.Replace('/', '\')
+        $directory = [IO.Path]::GetDirectoryName($windowsPath)
+        $destination = if ($directory) { '$INSTDIR\' + $directory } else { '$INSTDIR' }
+        $install.Add('    SetOutPath "' + $destination + '"')
+        $install.Add('    File "/oname=' + [IO.Path]::GetFileName($windowsPath) + '" "' + $source + '"')
+        $uninstall.Add('    Delete "$INSTDIR\' + $windowsPath + '"')
+        while ($directory) {
+            [void]$directories.Add($directory)
+            $directory = [IO.Path]::GetDirectoryName($directory)
+        }
+    }
+    foreach ($directory in ($directories | Sort-Object Length -Descending)) {
+        $uninstall.Add('    RMDir "$INSTDIR\' + $directory + '"')
+    }
+    $install.Add('    SetOutPath "$INSTDIR"')
+    $install.Add('!macroend')
+    $uninstall.Add('!macroend')
+    [IO.File]::WriteAllLines($OutputPath, @($install) + @($uninstall), [Text.UTF8Encoding]::new($false))
+}
+
 function Invoke-BuildWindowsInstallerCli {
     param(
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
-        [object[]]$Arguments
+        [object[]]$Arguments,
+        # Internal release orchestration supplies the already validated shared pair.
+        [string]$MediaToolsPath
     )
 
     $cli = ConvertFrom-CliArguments -Arguments $Arguments -OptionSpecs @{
@@ -82,6 +118,8 @@ function Invoke-BuildWindowsInstallerCli {
         executable = @{ Aliases = @('-e', '-Executable') }
         makensis = @{ Aliases = @('-m', '-Makensis') }
         output = @{ Aliases = @('-o', '-Output') }
+        'media-cache' = @{}
+        offline = @{ Kind = 'Switch' }
     }
 
     if ($cli['help']) {
@@ -94,6 +132,8 @@ Options:
   -m, --makensis <path>         NSIS makensis compiler. Defaults to makensis.exe on PATH/standard install paths.
   -o, --output <path>           Installer file. Defaults to artifacts/windows-installer/Apollo-Setup-x64.exe.
   -h, --help                    Show this help.
+  --media-cache <path>          Pinned archive cache. Defaults to .scratch/media-tools-cache.
+  --offline                    Require a valid cached media archive.
 
 Relative executable, compiler, and output paths resolve from the project root.
 The repository-owned assets/apollo.ico file is required and validated before NSIS runs.
@@ -150,11 +190,16 @@ The output filename must be exactly Apollo-Setup-x64.exe.
     New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
     $temporaryInstaller = Join-Path $temporaryDirectory 'Apollo-Setup-x64.exe'
 
-    if (Test-Path -LiteralPath $outputPath) {
-        Remove-Item -LiteralPath $outputPath -Force
-    }
-
     try {
+        $manifestPath = Join-Path $projectRoot 'distribution/media-tools.json'
+        $manifest = Read-MediaToolsManifest $manifestPath
+        if ([string]::IsNullOrEmpty($MediaToolsPath)) {
+            $cacheValue = if ($null -eq $cli['media-cache']) { '.scratch/media-tools-cache' } else { [string]$cli['media-cache'] }
+            $cachePath = Resolve-ReleasePath -ProjectRoot $projectRoot -Path $cacheValue -OptionName '--media-cache'
+            $MediaToolsPath = Publish-MediaTools -ManifestPath $manifestPath -CachePath $cachePath -OutputPath (Join-Path $temporaryDirectory 'media-tools') -Offline:$cli['offline']
+        }
+        $includePath = Join-Path $temporaryDirectory 'media-tools.nsh'
+        Write-MediaToolsInstallerInclude -MediaToolsPath $MediaToolsPath -Manifest $manifest -OutputPath $includePath
         $compilerArguments = @(
             '/V2',
             "/DVERSION=$($release.Version)",
@@ -162,6 +207,7 @@ The output filename must be exactly Apollo-Setup-x64.exe.
             "/DAPOLLO_EXE=$executablePath",
             "/DAPP_ICON=$iconPath",
             "/DOUTPUT_FILE=$temporaryInstaller",
+            "/DMEDIA_TOOLS_INCLUDE=$includePath",
             $nsiPath
         )
 
@@ -180,7 +226,10 @@ The output filename must be exactly Apollo-Setup-x64.exe.
             throw "NSIS compiler did not produce the expected installer: $temporaryInstaller"
         }
 
-        Move-Item -LiteralPath $temporaryInstaller -Destination $outputPath
+        if (Test-Path -LiteralPath $outputPath) {
+            [IO.File]::Replace($temporaryInstaller, $outputPath, $null)
+        }
+        else { [IO.File]::Move($temporaryInstaller, $outputPath) }
     }
     finally {
         if (Test-Path -LiteralPath $temporaryDirectory) {

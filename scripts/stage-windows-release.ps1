@@ -3,153 +3,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot 'Cli.Common.ps1')
-. (Join-Path $PSScriptRoot 'Repository.Common.ps1')
-
-function Resolve-ReleasePath {
-    param(
-        [Parameter(Mandatory)]
-        [string]$ProjectRoot,
-
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [Parameter(Mandatory)]
-        [string]$OptionName
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        throw "Option '$OptionName' cannot be empty."
-    }
-
-    if ([System.IO.Path]::IsPathRooted($Path)) {
-        return [System.IO.Path]::GetFullPath($Path)
-    }
-
-    return [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot $Path))
-}
-
-function Test-PathAtOrBelow {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [Parameter(Mandatory)]
-        [string]$Parent
-    )
-
-    $comparison = Get-RepositoryPathComparison
-    $separator = [System.IO.Path]::DirectorySeparatorChar
-    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\', '/'))
-    $fullParent = [System.IO.Path]::GetFullPath($Parent).TrimEnd([char[]]@('\', '/'))
-
-    if ($fullPath.Equals($fullParent, $comparison)) {
-        return $true
-    }
-
-    return $fullPath.StartsWith("$fullParent$separator", $comparison)
-}
-
-function Assert-WindowsX64ApolloExecutable {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path
-    )
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        throw "Windows x64 Apollo release executable does not exist: $Path"
-    }
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "Release executable path must identify exactly one file: $Path"
-    }
-
-    $fileName = [System.IO.Path]::GetFileName($Path)
-    if (-not $fileName.Equals('apollo.exe', [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Release executable must be named 'apollo.exe', found '$fileName'."
-    }
-
-    $stream = [System.IO.File]::OpenRead($Path)
-    $reader = [System.IO.BinaryReader]::new($stream)
-    try {
-        if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5A4D) {
-            throw "Release executable is not a Windows PE file: $Path"
-        }
-
-        $stream.Position = 0x3C
-        $peOffset = $reader.ReadInt32()
-        if ($peOffset -lt 0 -or ([int64]$peOffset + 6) -gt $stream.Length) {
-            throw "Release executable has an invalid Windows PE header: $Path"
-        }
-
-        $stream.Position = $peOffset
-        if ($reader.ReadUInt32() -ne 0x00004550) {
-            throw "Release executable is not a Windows PE file: $Path"
-        }
-
-        $machine = $reader.ReadUInt16()
-        if ($machine -ne 0x8664) {
-            throw ("Release executable must target Windows x64 (AMD64); PE machine is 0x{0:x4}." -f $machine)
-        }
-
-        if (([int64]$peOffset + 24) -gt $stream.Length) {
-            throw "Release executable has a truncated Windows PE file header: $Path"
-        }
-
-        $stream.Position = $peOffset + 20
-        $optionalHeaderSize = $reader.ReadUInt16()
-        $optionalHeaderOffset = [int64]$peOffset + 24
-        $minimumOptionalHeaderSize = 70
-        if ($optionalHeaderSize -lt $minimumOptionalHeaderSize -or
-            ($optionalHeaderOffset + $optionalHeaderSize) -gt $stream.Length) {
-            throw "Release executable has a malformed Windows PE optional header: $Path"
-        }
-
-        $stream.Position = $optionalHeaderOffset
-        $optionalHeaderMagic = $reader.ReadUInt16()
-        if ($optionalHeaderMagic -ne 0x020B) {
-            throw ("Release executable must use PE32+; optional-header magic is 0x{0:x4}." -f $optionalHeaderMagic)
-        }
-
-        $stream.Position = $optionalHeaderOffset + 68
-        $subsystem = $reader.ReadUInt16()
-        if ($subsystem -ne 2) {
-            throw ("Release executable must use the Windows GUI subsystem; PE subsystem is {0}." -f $subsystem)
-        }
-    }
-    finally {
-        $reader.Dispose()
-        $stream.Dispose()
-    }
-}
-
-function Assert-SafeStagingDirectory {
-    param(
-        [Parameter(Mandatory)]
-        [string]$ProjectRoot,
-
-        [Parameter(Mandatory)]
-        [string]$ExecutablePath,
-
-        [Parameter(Mandatory)]
-        [string]$OutputPath
-    )
-
-    if (Test-RepositoryFileSystemRoot -Path $OutputPath) {
-        throw "Refusing to use a filesystem root as the staging directory: $OutputPath"
-    }
-
-    if (Test-PathAtOrBelow -Path $ProjectRoot -Parent $OutputPath) {
-        throw "Refusing to stage into the project root or one of its ancestors: $OutputPath"
-    }
-
-    if (Test-PathAtOrBelow -Path $ExecutablePath -Parent $OutputPath) {
-        throw "Refusing to stage into a directory that contains the release executable: $OutputPath"
-    }
-
-    if (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
-        throw "Release staging output must be a directory: $OutputPath"
-    }
-}
+. (Join-Path $PSScriptRoot 'build-windows-installer.ps1')
 
 function New-WindowsReleaseZip {
     param(
@@ -163,7 +17,9 @@ function New-WindowsReleaseZip {
         [string]$LicensePath,
 
         [Parameter(Mandatory)]
-        [string]$NoticesPath
+        [string]$NoticesPath,
+        [string]$MediaToolsPath,
+        $MediaManifest
     )
 
     Add-Type -AssemblyName System.IO.Compression
@@ -173,6 +29,9 @@ function New-WindowsReleaseZip {
         [pscustomobject]@{ Name = 'LICENSE'; Source = $LicensePath },
         [pscustomobject]@{ Name = 'THIRD_PARTY_NOTICES.md'; Source = $NoticesPath }
     )
+    $entries += @(Get-MediaToolPayloadPaths $MediaManifest | ForEach-Object {
+        [pscustomobject]@{ Name = $_; Source = (Join-Path $MediaToolsPath $_) }
+    })
 
     $stream = [System.IO.File]::Open($ZipPath, [System.IO.FileMode]::CreateNew)
     try {
@@ -221,6 +80,8 @@ function Invoke-StageWindowsReleaseCli {
         executable = @{ Aliases = @('-e', '-Executable') }
         makensis = @{ Aliases = @('-m', '-Makensis') }
         output = @{ Aliases = @('-o', '-Output') }
+        'media-cache' = @{}
+        offline = @{ Kind = 'Switch' }
     }
 
     if ($cli['help']) {
@@ -233,6 +94,8 @@ Options:
   -m, --makensis <path>         NSIS makensis compiler. Defaults to installer-build discovery.
   -o, --output <path>           Staging directory. Defaults to artifacts/windows.
   -h, --help                    Show this help.
+  --media-cache <path>          Pinned archive cache. Defaults to .scratch/media-tools-cache.
+  --offline                    Require a valid cached media archive.
 
 Relative executable, compiler, and output paths resolve from the project root.
 '@
@@ -251,6 +114,11 @@ Relative executable, compiler, and output paths resolve from the project root.
 
     Assert-WindowsX64ApolloExecutable -Path $executablePath
     Assert-SafeStagingDirectory -ProjectRoot $projectRoot -ExecutablePath $executablePath -OutputPath $outputPath
+    $cacheValue = if ($null -eq $cli['media-cache']) { '.scratch/media-tools-cache' } else { [string]$cli['media-cache'] }
+    $cachePath = Resolve-ReleasePath -ProjectRoot $projectRoot -Path $cacheValue -OptionName '--media-cache'
+    if (Test-PathAtOrBelow -Path $cachePath -Parent $outputPath) {
+        throw 'Media cache must be outside the release staging output.'
+    }
 
     $licensePath = Join-Path $projectRoot 'LICENSE'
     $noticesPath = Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md'
@@ -268,6 +136,9 @@ Relative executable, compiler, and output paths resolve from the project root.
     New-Item -ItemType Directory -Path $temporaryOutput | Out-Null
 
     try {
+        $manifestPath = Join-Path $projectRoot 'distribution/media-tools.json'
+        $mediaManifest = Read-MediaToolsManifest $manifestPath
+        $mediaPath = Publish-MediaTools -ManifestPath $manifestPath -CachePath $cachePath -OutputPath (Join-Path $temporaryOutput 'media-tools') -Offline:$cli['offline']
         $installerName = 'Apollo-Setup-x64.exe'
         $zipName = 'Apollo-windows-x64.zip'
         $installerPath = Join-Path $temporaryOutput $installerName
@@ -282,7 +153,7 @@ Relative executable, compiler, and output paths resolve from the project root.
         if ($null -ne $cli['makensis']) {
             $installerArguments += @('--makensis', [string]$cli['makensis'])
         }
-        & (Join-Path $PSScriptRoot 'build-windows-installer.ps1') @installerArguments
+        Invoke-BuildWindowsInstallerCli -Arguments $installerArguments -MediaToolsPath $mediaPath
 
         if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
             throw "Installer build did not produce the expected staged artifact: $installerPath"
@@ -292,7 +163,11 @@ Relative executable, compiler, and output paths resolve from the project root.
             -ZipPath $zipPath `
             -ExecutablePath $executablePath `
             -LicensePath $licensePath `
-            -NoticesPath $noticesPath
+            -NoticesPath $noticesPath `
+            -MediaToolsPath $mediaPath `
+            -MediaManifest $mediaManifest
+
+        Remove-Item -LiteralPath $mediaPath -Recurse -Force
 
         $checksumLines = foreach ($name in @($installerName, $zipName)) {
             $artifactPath = Join-Path $temporaryOutput $name
@@ -305,10 +180,15 @@ Relative executable, compiler, and output paths resolve from the project root.
             [System.Text.UTF8Encoding]::new($false)
         )
 
-        if (Test-Path -LiteralPath $outputPath) {
-            Remove-Item -LiteralPath $outputPath -Recurse -Force
+        $backupPath = Join-Path $outputParent (".$outputName.previous-" + [Guid]::NewGuid().ToString('N'))
+        $hadOutput = Test-Path -LiteralPath $outputPath
+        if ($hadOutput) { [IO.Directory]::Move($outputPath, $backupPath) }
+        try { [IO.Directory]::Move($temporaryOutput, $outputPath) }
+        catch {
+            if ($hadOutput) { [IO.Directory]::Move($backupPath, $outputPath) }
+            throw
         }
-        Move-Item -LiteralPath $temporaryOutput -Destination $outputPath
+        if ($hadOutput) { Remove-Item -LiteralPath $backupPath -Recurse -Force }
     }
     finally {
         if (Test-Path -LiteralPath $temporaryOutput) {
