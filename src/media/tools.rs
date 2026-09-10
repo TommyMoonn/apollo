@@ -1,14 +1,10 @@
 use std::{
-    fmt, io,
+    env, fmt, fs, io,
     path::{Path, PathBuf},
-    process::{Child, Stdio},
     sync::{Mutex, OnceLock},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
-
-#[cfg(not(windows))]
-use std::env;
 
 #[cfg(windows)]
 use std::{
@@ -23,7 +19,7 @@ use windows_sys::Win32::Storage::FileSystem::SearchPathW;
 
 use super::process::{
     DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES, MediaProcess, MediaProcessCommand, MediaProcessFailure,
-    MediaProcessStartError, MediaProcessState, background_command,
+    MediaProcessStartError, MediaProcessState,
 };
 
 const VERSION_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -110,6 +106,10 @@ pub enum MediaToolsError {
     MissingFfmpeg,
     MissingFfprobe,
     MissingBoth,
+    PartialBundle {
+        directory: PathBuf,
+        missing: MediaToolKind,
+    },
     ValidationFailed {
         tool: MediaToolKind,
         path: PathBuf,
@@ -124,6 +124,7 @@ impl MediaToolsError {
             Self::MissingFfmpeg => "FFmpeg could not be found.",
             Self::MissingFfprobe => "FFprobe could not be found.",
             Self::MissingBoth => "FFmpeg and FFprobe could not be found.",
+            Self::PartialBundle { .. } => "The bundled media tools are incomplete.",
             Self::ValidationFailed {
                 tool: MediaToolKind::Ffmpeg,
                 ..
@@ -145,6 +146,12 @@ impl fmt::Display for MediaToolsError {
             Self::MissingFfmpeg => write!(f, "FFmpeg could not be found"),
             Self::MissingFfprobe => write!(f, "FFprobe could not be found"),
             Self::MissingBoth => write!(f, "FFmpeg and FFprobe could not be found"),
+            Self::PartialBundle { directory, missing } => write!(
+                f,
+                "Bundled media tools in '{}' are incomplete: {} is missing",
+                directory.display(),
+                missing.display_name()
+            ),
             Self::ValidationFailed { tool, path, reason } => write!(
                 f,
                 "{} at '{}' could not be validated: {reason}",
@@ -161,7 +168,8 @@ impl std::error::Error for MediaToolsError {}
 pub enum MediaToolValidationError {
     LaunchFailed(io::ErrorKind),
     TimedOut,
-    NonZeroExit(Option<i32>),
+    QueryFailed(String),
+    UnexpectedVersionOutput(String),
 }
 
 impl fmt::Display for MediaToolValidationError {
@@ -169,16 +177,20 @@ impl fmt::Display for MediaToolValidationError {
         match self {
             Self::LaunchFailed(kind) => write!(f, "version query could not start ({kind:?})"),
             Self::TimedOut => write!(f, "version query timed out"),
-            Self::NonZeroExit(Some(code)) => {
-                write!(f, "version query exited with status code {code}")
+            Self::QueryFailed(diagnostic) => write!(f, "version query failed: {diagnostic}"),
+            Self::UnexpectedVersionOutput(output) => {
+                write!(f, "version query returned unexpected output: {output}")
             }
-            Self::NonZeroExit(None) => write!(f, "version query exited unsuccessfully"),
         }
     }
 }
 
 trait ExecutableResolver {
     fn resolve(&self, tool: MediaToolKind) -> Option<PathBuf>;
+
+    fn bundle_directory(&self) -> Result<Option<PathBuf>, MediaToolsError> {
+        Ok(None)
+    }
 }
 
 trait VersionValidator {
@@ -195,6 +207,20 @@ struct SystemExecutableResolver;
 impl ExecutableResolver for SystemExecutableResolver {
     fn resolve(&self, tool: MediaToolKind) -> Option<PathBuf> {
         resolve_executable(tool.executable_name())
+    }
+
+    fn bundle_directory(&self) -> Result<Option<PathBuf>, MediaToolsError> {
+        let executable = env::current_exe().map_err(|error| {
+            MediaToolsError::DiscoveryFailed(format!("Apollo executable location: {error}"))
+        })?;
+        executable
+            .parent()
+            .map(|path| Some(path.to_path_buf()))
+            .ok_or_else(|| {
+                MediaToolsError::DiscoveryFailed(
+                    "Apollo executable has no parent directory".to_owned(),
+                )
+            })
     }
 }
 
@@ -214,46 +240,27 @@ impl Default for SystemVersionValidator {
 impl VersionValidator for SystemVersionValidator {
     fn validate(
         &self,
-        _tool: MediaToolKind,
+        tool: MediaToolKind,
         executable: &Path,
     ) -> Result<(), MediaToolValidationError> {
-        let mut child = background_command(executable)
-            .arg("-version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| MediaToolValidationError::LaunchFailed(error.kind()))?;
-
-        wait_for_version_query(&mut child, self.timeout)
-    }
-}
-
-fn wait_for_version_query(
-    child: &mut Child,
-    timeout: Duration,
-) -> Result<(), MediaToolValidationError> {
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => {
-                return Err(MediaToolValidationError::NonZeroExit(status.code()));
+        let output = run_media_tool_query(
+            MediaProcessCommand::new(executable)
+                .arg("-version")
+                .captured_stdout_limit(DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES),
+            self.timeout,
+        )
+        .map_err(|error| match error {
+            MediaToolQueryError::Start(MediaProcessStartError::ProcessLaunchFailed(kind)) => {
+                MediaToolValidationError::LaunchFailed(kind)
             }
-            Ok(None) if started.elapsed() < timeout => {
-                thread::sleep(VERSION_QUERY_POLL_INTERVAL);
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(MediaToolValidationError::TimedOut);
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(MediaToolValidationError::LaunchFailed(error.kind()));
-            }
+            MediaToolQueryError::TimedOut => MediaToolValidationError::TimedOut,
+            other => MediaToolValidationError::QueryFailed(other.to_string()),
+        })?;
+        let prefix = format!("{} version ", tool.executable_name());
+        if !output.lines().any(|line| line.starts_with(&prefix)) {
+            return Err(MediaToolValidationError::UnexpectedVersionOutput(output));
         }
+        Ok(())
     }
 }
 
@@ -288,8 +295,28 @@ impl VideoEncoderCapabilityDetector for SystemVideoEncoderCapabilityDetector {
 
 #[derive(Debug, Default)]
 struct VideoEncoderCapabilityCache {
-    ffmpeg_identity: Option<PathBuf>,
+    ffmpeg_identity: Option<ExecutableIdentity>,
     capabilities: Option<VideoEncoderCapabilities>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ExecutableIdentity {
+    path: PathBuf,
+    file: Option<(u64, SystemTime)>,
+}
+
+impl ExecutableIdentity {
+    fn read(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            file: fs::metadata(path).ok().and_then(|metadata| {
+                metadata
+                    .modified()
+                    .ok()
+                    .map(|modified| (metadata.len(), modified))
+            }),
+        }
+    }
 }
 
 impl VideoEncoderCapabilityCache {
@@ -297,21 +324,22 @@ impl VideoEncoderCapabilityCache {
     where
         D: VideoEncoderCapabilityDetector,
     {
-        if self.ffmpeg_identity.as_deref() == Some(ffmpeg)
+        let identity = ExecutableIdentity::read(ffmpeg);
+        if self.ffmpeg_identity.as_ref() == Some(&identity)
             && let Some(capabilities) = self.capabilities.as_ref()
         {
             return capabilities.clone();
         }
 
         let capabilities = detector.detect(ffmpeg);
-        self.ffmpeg_identity = Some(ffmpeg.to_path_buf());
+        self.ffmpeg_identity = Some(identity);
         self.capabilities = Some(capabilities.clone());
         capabilities
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CapabilityCommandError {
+enum MediaToolQueryError {
     Start(MediaProcessStartError),
     Failed {
         failure: MediaProcessFailure,
@@ -320,7 +348,7 @@ enum CapabilityCommandError {
     TimedOut,
 }
 
-impl fmt::Display for CapabilityCommandError {
+impl fmt::Display for MediaToolQueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Start(error) => write!(f, "{error}"),
@@ -328,18 +356,18 @@ impl fmt::Display for CapabilityCommandError {
                 failure: _,
                 diagnostic,
             } if !diagnostic.trim().is_empty() => write!(f, "{}", diagnostic.trim()),
-            Self::Failed { failure, .. } => write!(f, "FFmpeg failed: {failure:?}"),
-            Self::TimedOut => write!(f, "FFmpeg capability query timed out"),
+            Self::Failed { failure, .. } => write!(f, "media tool query failed: {failure:?}"),
+            Self::TimedOut => write!(f, "media tool query timed out"),
         }
     }
 }
 
-fn query_encoder_inventory(ffmpeg: &Path) -> Result<String, CapabilityCommandError> {
+fn query_encoder_inventory(ffmpeg: &Path) -> Result<String, MediaToolQueryError> {
     let command = MediaProcessCommand::new(ffmpeg)
         .args(["-hide_banner", "-encoders"])
         .captured_stdout_limit(ENCODER_INVENTORY_LIMIT_BYTES)
         .diagnostic_stderr_limit(DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES);
-    run_capability_command(command, NVENC_QUERY_TIMEOUT)
+    run_media_tool_query(command, NVENC_QUERY_TIMEOUT)
 }
 
 fn detect_nvenc_encoder(
@@ -351,13 +379,13 @@ fn detect_nvenc_encoder(
         let command = MediaProcessCommand::new(ffmpeg)
             .args(nvenc_probe_arguments(encoder))
             .diagnostic_stderr_limit(DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES);
-        run_capability_command(command, NVENC_QUERY_TIMEOUT).map(|_| ())
+        run_media_tool_query(command, NVENC_QUERY_TIMEOUT).map(|_| ())
     })
 }
 
 fn detect_nvenc_encoder_with<F>(inventory: &str, encoder: &str, probe: F) -> VideoEncoderCapability
 where
-    F: FnOnce() -> Result<(), CapabilityCommandError>,
+    F: FnOnce() -> Result<(), MediaToolQueryError>,
 {
     if !encoder_inventory_contains(inventory, encoder) {
         return VideoEncoderCapability::EncoderNotCompiled;
@@ -402,11 +430,11 @@ fn encoder_inventory_contains(inventory: &str, encoder: &str) -> bool {
         .any(|line| line.split_whitespace().any(|field| field == encoder))
 }
 
-fn run_capability_command(
+fn run_media_tool_query(
     command: MediaProcessCommand,
     timeout: Duration,
-) -> Result<String, CapabilityCommandError> {
-    let process = MediaProcess::start(command).map_err(CapabilityCommandError::Start)?;
+) -> Result<String, MediaToolQueryError> {
+    let process = MediaProcess::start(command).map_err(MediaToolQueryError::Start)?;
     let started = Instant::now();
 
     loop {
@@ -419,16 +447,16 @@ fn run_capability_command(
                 while matches!(process.state(), MediaProcessState::Running) {
                     thread::sleep(VERSION_QUERY_POLL_INTERVAL);
                 }
-                return Err(CapabilityCommandError::TimedOut);
+                return Err(MediaToolQueryError::TimedOut);
             }
             MediaProcessState::Completed => return Ok(process.captured_stdout()),
             MediaProcessState::Failed(failure) => {
-                return Err(CapabilityCommandError::Failed {
+                return Err(MediaToolQueryError::Failed {
                     failure,
                     diagnostic: process.diagnostic_stderr(),
                 });
             }
-            MediaProcessState::Cancelled => return Err(CapabilityCommandError::TimedOut),
+            MediaProcessState::Cancelled => return Err(MediaToolQueryError::TimedOut),
         }
     }
 }
@@ -461,14 +489,22 @@ where
     V: VersionValidator,
     C: FnOnce(&Path) -> VideoEncoderCapabilities,
 {
-    let ffmpeg = resolver.resolve(MediaToolKind::Ffmpeg);
-    let ffprobe = resolver.resolve(MediaToolKind::Ffprobe);
-
-    let (ffmpeg, ffprobe) = match (ffmpeg, ffprobe) {
-        (Some(ffmpeg), Some(ffprobe)) => (ffmpeg, ffprobe),
-        (None, Some(_)) => return Err(MediaToolsError::MissingFfmpeg),
-        (Some(_), None) => return Err(MediaToolsError::MissingFfprobe),
-        (None, None) => return Err(MediaToolsError::MissingBoth),
+    let bundle = resolver
+        .bundle_directory()?
+        .map(|directory| resolve_bundle(&directory))
+        .transpose()?
+        .flatten();
+    let (ffmpeg, ffprobe) = match bundle {
+        Some(pair) => pair,
+        None => match (
+            resolver.resolve(MediaToolKind::Ffmpeg),
+            resolver.resolve(MediaToolKind::Ffprobe),
+        ) {
+            (Some(ffmpeg), Some(ffprobe)) => (ffmpeg, ffprobe),
+            (None, Some(_)) => return Err(MediaToolsError::MissingFfmpeg),
+            (Some(_), None) => return Err(MediaToolsError::MissingFfprobe),
+            (None, None) => return Err(MediaToolsError::MissingBoth),
+        },
     };
 
     validate_tool(validator, MediaToolKind::Ffmpeg, &ffmpeg)?;
@@ -481,6 +517,33 @@ where
         ffprobe,
         video_encoders,
     })
+}
+
+fn resolve_bundle(directory: &Path) -> Result<Option<(PathBuf, PathBuf)>, MediaToolsError> {
+    let ffmpeg = directory.join(format!("ffmpeg{}", env::consts::EXE_SUFFIX));
+    let ffprobe = directory.join(format!("ffprobe{}", env::consts::EXE_SUFFIX));
+    // A directory, broken symlink or inaccessible entry is not an absent bundle.
+    // Existing invalid entries must reach validation rather than enable PATH fallback.
+    let present = |path: &Path| match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(MediaToolsError::DiscoveryFailed(format!(
+            "{}: {error}",
+            path.display()
+        ))),
+    };
+    match (present(&ffmpeg)?, present(&ffprobe)?) {
+        (true, true) => Ok(Some((ffmpeg, ffprobe))),
+        (false, false) => Ok(None),
+        (ffmpeg_present, _) => Err(MediaToolsError::PartialBundle {
+            directory: directory.to_path_buf(),
+            missing: if ffmpeg_present {
+                MediaToolKind::Ffprobe
+            } else {
+                MediaToolKind::Ffmpeg
+            },
+        }),
+    }
 }
 
 fn validate_tool<V>(validator: &V, tool: MediaToolKind, path: &Path) -> Result<(), MediaToolsError>
@@ -503,7 +566,7 @@ fn resolve_executable(executable_name: &str) -> Option<PathBuf> {
     for directory in env::split_paths(&path) {
         let candidate = directory.join(executable_name);
         if candidate.is_file() {
-            return Some(candidate);
+            return std::path::absolute(candidate).ok();
         }
     }
 
@@ -512,15 +575,16 @@ fn resolve_executable(executable_name: &str) -> Option<PathBuf> {
 
 #[cfg(windows)]
 fn resolve_executable(executable_name: &str) -> Option<PathBuf> {
-    search_windows_executable(executable_name, None)
+    let path = env::var_os("PATH")?;
+    if path.is_empty() {
+        return None;
+    }
+    search_windows_executable(executable_name, &path)
 }
 
 #[cfg(windows)]
-fn search_windows_executable(
-    executable_name: &str,
-    search_path: Option<&OsStr>,
-) -> Option<PathBuf> {
-    let search_path = search_path.map(wide_nul);
+fn search_windows_executable(executable_name: &str, search_path: &OsStr) -> Option<PathBuf> {
+    let search_path = wide_nul(search_path);
     let executable_name = wide_nul(OsStr::new(executable_name));
     let executable_extension = wide_nul(OsStr::new(".exe"));
     let mut buffer = vec![0_u16; 260];
@@ -529,9 +593,7 @@ fn search_windows_executable(
         // SAFETY: every input is NUL-terminated and the output buffer is writable for its length.
         let length = unsafe {
             SearchPathW(
-                search_path
-                    .as_ref()
-                    .map_or(ptr::null(), |path| path.as_ptr()),
+                search_path.as_ptr(),
                 executable_name.as_ptr(),
                 executable_extension.as_ptr(),
                 buffer.len().try_into().ok()?,
@@ -559,21 +621,21 @@ fn wide_nul(value: &OsStr) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    mod bundled;
     use std::{
         cell::RefCell,
         collections::HashMap,
         env, io,
         path::{Path, PathBuf},
-        process::Stdio,
         time::Duration,
     };
 
     use super::{
-        CapabilityCommandError, ExecutableResolver, MediaToolKind, MediaToolValidationError,
+        ExecutableResolver, MediaToolKind, MediaToolQueryError, MediaToolValidationError,
         MediaTools, MediaToolsError, SystemVersionValidator, VersionValidator,
         VideoEncoderCapabilities, VideoEncoderCapability, VideoEncoderCapabilityCache,
-        VideoEncoderCapabilityDetector, background_command, detect_nvenc_encoder_with,
-        discover_with, encoder_inventory_contains, nvenc_probe_arguments, wait_for_version_query,
+        VideoEncoderCapabilityDetector, detect_nvenc_encoder_with, discover_with,
+        encoder_inventory_contains, nvenc_probe_arguments, run_media_tool_query,
     };
     use crate::media::process::{MediaProcessCommand, MediaProcessFailure};
 
@@ -691,7 +753,7 @@ mod tests {
 
         assert_eq!(
             detect_nvenc_encoder_with(inventory, "h264_nvenc", || {
-                Err(CapabilityCommandError::Failed {
+                Err(MediaToolQueryError::Failed {
                     failure: MediaProcessFailure::Exit(Some(1)),
                     diagnostic: diagnostic.to_owned(),
                 })
@@ -751,13 +813,13 @@ mod tests {
 
     #[test]
     fn capability_commands_are_cancelled_when_the_bound_expires() {
-        let error = super::run_capability_command(
+        let error = super::run_media_tool_query(
             long_running_capability_command(),
             Duration::from_millis(20),
         )
         .unwrap_err();
 
-        assert_eq!(error, CapabilityCommandError::TimedOut);
+        assert_eq!(error, MediaToolQueryError::TimedOut);
     }
 
     fn long_running_capability_command() -> MediaProcessCommand {
@@ -830,7 +892,7 @@ mod tests {
             .validate(MediaToolKind::Ffmpeg, &current_executable)
             .unwrap_err();
 
-        assert!(matches!(error, MediaToolValidationError::NonZeroExit(_)));
+        assert!(matches!(error, MediaToolValidationError::QueryFailed(_)));
     }
 
     #[test]
@@ -856,40 +918,31 @@ mod tests {
 
     #[test]
     fn version_query_that_finishes_within_bound_succeeds() {
-        let mut child = background_command(env::current_exe().unwrap())
-            .arg("--help")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-
-        let result = wait_for_version_query(&mut child, Duration::from_secs(1));
-
-        assert_eq!(result, Ok(()));
+        let output = run_media_tool_query(
+            MediaProcessCommand::new(env::current_exe().unwrap())
+                .arg("--help")
+                .captured_stdout_limit(4096),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(!output.is_empty());
     }
 
     #[cfg(unix)]
     #[test]
     fn version_query_that_exceeds_bound_is_terminated() {
-        let mut child = background_command("sh")
-            .args(["-c", "sleep 1"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-
-        let result = wait_for_version_query(&mut child, Duration::from_millis(20));
-
-        assert_eq!(result, Err(MediaToolValidationError::TimedOut));
+        let result = run_media_tool_query(
+            MediaProcessCommand::new("sh").args(["-c", "sleep 1"]),
+            Duration::from_millis(20),
+        );
+        assert_eq!(result, Err(MediaToolQueryError::TimedOut));
     }
 
     #[test]
     fn executable_version_failure_is_typed() {
         let validator = FakeValidator::failing(
             MediaToolKind::Ffmpeg,
-            MediaToolValidationError::NonZeroExit(Some(1)),
+            MediaToolValidationError::QueryFailed("exit status 1".to_owned()),
         );
 
         let error = discover_with(&complete_resolver(), &validator, no_video_encoders).unwrap_err();
@@ -899,7 +952,7 @@ mod tests {
             MediaToolsError::ValidationFailed {
                 tool: MediaToolKind::Ffmpeg,
                 path: PathBuf::from("/tools/ffmpeg"),
-                reason: MediaToolValidationError::NonZeroExit(Some(1)),
+                reason: MediaToolValidationError::QueryFailed("exit status 1".to_owned()),
             }
         );
     }
@@ -947,10 +1000,9 @@ mod tests {
         let executable = directory.join("ffmpeg.exe");
         fs::write(&executable, b"test executable placeholder").unwrap();
 
-        let resolved_without_extension =
-            search_windows_executable("ffmpeg", Some(directory.as_os_str()));
+        let resolved_without_extension = search_windows_executable("ffmpeg", directory.as_os_str());
         let resolved_with_extension =
-            search_windows_executable("ffmpeg.exe", Some(directory.as_os_str()));
+            search_windows_executable("ffmpeg.exe", directory.as_os_str());
 
         assert_eq!(
             resolved_without_extension.as_deref(),

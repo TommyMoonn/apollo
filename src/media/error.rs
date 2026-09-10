@@ -24,6 +24,7 @@ pub enum MediaErrorKind {
     FfmpegUnavailable,
     FfprobeUnavailable,
     MediaToolsUnavailable,
+    IncompleteMediaToolsBundle,
     FfmpegValidationFailed,
     FfprobeValidationFailed,
     ProbeFailure,
@@ -59,6 +60,7 @@ impl MediaError {
             MediaErrorKind::FfmpegUnavailable => "FFmpeg is unavailable.",
             MediaErrorKind::FfprobeUnavailable => "FFprobe is unavailable.",
             MediaErrorKind::MediaToolsUnavailable => "FFmpeg and FFprobe are unavailable.",
+            MediaErrorKind::IncompleteMediaToolsBundle => "The bundled media tools are incomplete.",
             MediaErrorKind::FfmpegValidationFailed => "FFmpeg could not be validated.",
             MediaErrorKind::FfprobeValidationFailed => "FFprobe could not be validated.",
             MediaErrorKind::ProbeFailure => "This file could not be inspected.",
@@ -81,6 +83,9 @@ impl MediaError {
     pub fn guidance(&self) -> Option<&'static str> {
         match self.kind {
             MediaErrorKind::MediaToolsCheckFailed => Some("Retry the media tool check."),
+            MediaErrorKind::IncompleteMediaToolsBundle => Some(
+                "Restore both FFmpeg and FFprobe beside Apollo, or reinstall Apollo, then retry.",
+            ),
             MediaErrorKind::FfmpegUnavailable => {
                 Some("Install FFmpeg and make sure it is available on PATH, then retry.")
             }
@@ -182,6 +187,7 @@ impl MediaError {
             MediaToolsError::MissingFfmpeg => MediaErrorKind::FfmpegUnavailable,
             MediaToolsError::MissingFfprobe => MediaErrorKind::FfprobeUnavailable,
             MediaToolsError::MissingBoth => MediaErrorKind::MediaToolsUnavailable,
+            MediaToolsError::PartialBundle { .. } => MediaErrorKind::IncompleteMediaToolsBundle,
             MediaToolsError::ValidationFailed {
                 tool: MediaToolKind::Ffmpeg,
                 ..
