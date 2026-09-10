@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "platform": "windows",
+  "architecture": "x86_64",
+  "sourceVersion": "7.0.2",
+  "buildIdentity": "7.0.2-essentials_build-www.gyan.dev",
+  "archive": {
+    "url": "https://github.com/GyanD/codexffmpeg/releases/download/7.0.2/ffmpeg-7.0.2-essentials_build.zip",
+    "filename": "ffmpeg-7.0.2-essentials_build.zip",
+    "sha256": "d5308d30872b2739cf53169df61faba8639d39a19b20b91e611c177ef676f64c"
+  },
+  "executables": {
+    "ffmpeg": "ffmpeg-7.0.2-essentials_build/bin/ffmpeg.exe",
+    "ffprobe": "ffmpeg-7.0.2-essentials_build/bin/ffprobe.exe"
+  },
+  "redistribution": [
+    {
+      "source": "ffmpeg-7.0.2-essentials_build/LICENSE",
+      "destination": "licenses/ffmpeg/LICENSE",
+      "purpose": "Distribution GPL v3 license, retained byte for byte."
+    },
+    {
+      "source": "ffmpeg-7.0.2-essentials_build/README.txt",
+      "destination": "licenses/ffmpeg/README.txt",
+      "purpose": "Distributor attribution, source commit, configuration and external library versions."
+    }
+  ],
+  "requiredEncoders": ["libx264", "libx265", "h264_nvenc", "hevc_nvenc", "aac", "flac", "png", "mjpeg"],
+  "compatibility": {
+    "nvencApi": "12.2",
+    "headersIdentity": "ffnvcodec n12.2.72.0-1-g9934f17",
+    "testedWindowsDriver": "566.14",
+    "testedGpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "evidence": "distribution/media-tools-acceptance.md",
+    "notes": "Tested baseline is Windows NVIDIA driver 566.14 on the recorded GPU, not a claim of the oldest usable driver. Header identity is from this archive's README; runtime encode acceptance is separate from GPU-free staging. Older drivers and other GPU models are not certified by this measurement. Installed and portable artifact acceptance remains a release gate."
+  }
+}
