@@ -1,7 +1,9 @@
 #requires -Version 7.0
 param(
     [Parameter(Mandatory)][string]$ReleaseDirectory,
-    [Parameter(Mandatory)][string]$DiscoveryHarness
+    [Parameter(Mandatory)][string]$DiscoveryHarness,
+    [string]$MediaCache = '.scratch/media-tools-cache',
+    [switch]$RequireNvenc
 )
 
 Set-StrictMode -Version Latest
@@ -33,13 +35,16 @@ foreach ($line in (Get-Content (Join-Path $release 'SHA256SUMS.txt'))) {
 }
 if ($checksumNames.Count -ne 2 -or @($checksumNames | Sort-Object -Unique).Count -ne 2) { throw 'Expected each artifact checksum exactly once.' }
 
-$scratch = Join-Path $projectRoot ('.scratch/release-smoke-' + [Guid]::NewGuid().ToString('N'))
+$scratchRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.scratch'))
+$scratch = [IO.Path]::GetFullPath((Join-Path $scratchRoot ('release-smoke-' + [Guid]::NewGuid().ToString('N'))))
+if ([IO.Path]::GetDirectoryName($scratch) -ne $scratchRoot) { throw 'Smoke scratch escaped its owned parent.' }
 New-Item -ItemType Directory -Path $scratch | Out-Null
 $portable = Join-Path $scratch 'portable'
 $installed = Join-Path $scratch 'installed'
 
 function Invoke-SmokeProcess {
-    param([string]$Executable, [string]$RawArguments, [switch]$Discovery)
+    param([string]$Executable, [string]$RawArguments, [switch]$Discovery,
+        [ValidateSet('cpu','nvenc','unavailable')][string]$Acceptance = 'cpu')
     $info = [Diagnostics.ProcessStartInfo]::new($Executable)
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
@@ -49,6 +54,9 @@ function Invoke-SmokeProcess {
     if ($Discovery) {
         $info.Environment['APOLLO_DISCOVERY_TEST_MODE'] = 'bundle'
         [void]$info.Environment.Remove('APOLLO_TEST_REQUIRE_NVENC')
+        $info.Environment['APOLLO_RELEASE_ACCEPTANCE'] = $Acceptance
+        $info.Environment['APOLLO_RELEASE_OUTPUT_DIRECTORY'] = Join-Path $scratch ([Guid]::NewGuid().ToString('N'))
+        if ($Acceptance -eq 'unavailable') { $info.Environment['CUDA_VISIBLE_DEVICES'] = '-1' }
         $info.RedirectStandardOutput = $true
         $info.RedirectStandardError = $true
     }
@@ -60,7 +68,7 @@ function Invoke-SmokeProcess {
             $stdout = $process.StandardOutput.ReadToEndAsync()
             $stderr = $process.StandardError.ReadToEndAsync()
         }
-        if (-not $process.WaitForExit(60000)) {
+        if (-not $process.WaitForExit(180000)) {
             $process.Kill($true)
             $process.WaitForExit()
             throw "Smoke process timed out: $Executable"
@@ -69,6 +77,7 @@ function Invoke-SmokeProcess {
         if ($process.ExitCode -ne 0) { throw "Smoke process failed ($($process.ExitCode)): $Executable`n$diagnostic" }
         if ($Discovery) {
             if ($diagnostic -notmatch 'Resolved .*ffmpeg.exe:' -or $diagnostic -notmatch '1 passed') { throw "Discovery harness did not run: $diagnostic" }
+            if (-not $diagnostic.Contains("PASS release acceptance: $Acceptance")) { throw "Operation acceptance did not run: $diagnostic" }
             Write-Host $diagnostic.Trim()
         }
     }
@@ -94,12 +103,16 @@ function Assert-Payload {
     }
     $probe = Join-Path $Directory 'discovery-test.exe'
     Copy-Item -LiteralPath $harness -Destination $probe
-    try { Invoke-SmokeProcess $probe '--exact discovery_subprocess --nocapture' -Discovery }
+    try {
+        Invoke-SmokeProcess $probe '--exact discovery_subprocess --nocapture' -Discovery -Acceptance cpu
+        Invoke-SmokeProcess $probe '--exact discovery_subprocess --nocapture' -Discovery -Acceptance unavailable
+        if ($RequireNvenc) { Invoke-SmokeProcess $probe '--exact discovery_subprocess --nocapture' -Discovery -Acceptance nvenc }
+    }
     finally { Remove-Item -LiteralPath $probe -Force }
 }
 
 try {
-    Publish-MediaTools -ManifestPath $manifestPath -CachePath (Join-Path $projectRoot '.scratch/media-tools-cache') -OutputPath (Join-Path $scratch 'reference') -Offline | Out-Null
+    Publish-MediaTools -ManifestPath $manifestPath -CachePath ([IO.Path]::GetFullPath($MediaCache, $projectRoot)) -OutputPath (Join-Path $scratch 'reference') -Offline | Out-Null
     [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $release 'Apollo-windows-x64.zip'), $portable)
     Assert-Payload $portable
     # NSIS requires /D= to be the final, unquoted command-line argument.
@@ -119,7 +132,7 @@ try {
     foreach ($name in @('keep.txt','licenses/ffmpeg/keep.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $installed $name))) { throw "Uninstall removed user file: $name" }
     }
-    Write-Host 'Windows release smoke passed: checksums, exact payload bytes, no-PATH production discovery, install, uninstall, and user-file preservation.'
+    Write-Host "Windows release smoke passed: checksums, exact payload bytes, no-PATH discovery and CPU operations, real NVENC failure and Auto fallback, install, uninstall, user-file preservation. Required NVIDIA success: $RequireNvenc"
 }
 finally {
     # All of these paths were absent before this isolated smoke and belong to this run.

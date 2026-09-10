@@ -33,6 +33,8 @@ Apollo is a small native desktop media utility for audio mixing, video upscaling
 
 The installer registers Apollo for the current Windows user, creates a Start Menu shortcut, and provides normal Windows uninstall behavior. The portable ZIP does not register or install Apollo.
 
+Starting with v0.5.0, both Windows packages include FFmpeg and FFprobe. Keep the portable folder intact, including `licenses/`. Older releases, including v0.4.0, still require the tools on PATH; check the downloaded release version.
+
 See the [latest release notes](https://github.com/TommyMoonn/apollo/releases/latest) or browse [all releases](https://github.com/TommyMoonn/apollo/releases).
 
 ## Features
@@ -50,11 +52,14 @@ See the [latest release notes](https://github.com/TommyMoonn/apollo/releases/lat
 ## Requirements
 
 - Windows x64.
-- FFmpeg and FFprobe available on `PATH`.
-- CPU Upscale requires `libx264` for H.264 or `libx265` for H.265 in the installed FFmpeg build.
+- No separate FFmpeg installation is needed for the v0.5.0 Windows packages. They include CPU H.264 (`libx264`) and H.265 (`libx265`) encoders.
 - Optional NVIDIA encoding requires `h264_nvenc` or `hevc_nvenc` plus a compatible NVIDIA GPU and driver. Apollo checks whether each encoder can actually run.
 
-FFmpeg and FFprobe are external runtime requirements and are not bundled with either Apollo download.
+The pinned Windows x64 distribution is FFmpeg 7.0.2, Gyan build `7.0.2-essentials_build-www.gyan.dev`. Its tested NVIDIA baseline is driver **566.14** on an **RTX 3060 Laptop GPU**, with NVENC API **12.2**. This is a tested configuration, not a minimum-driver claim or a guarantee for every NVIDIA GPU. CPU workflows do not require NVIDIA hardware.
+
+Apollo prefers the complete pair beside `Apollo.exe`. Only when both files are absent does it search PATH, which remains useful for development. A partial or invalid bundle is an error: restore the complete package, then use Retry. Apollo never mixes bundled and PATH tools.
+
+See the [pinned manifest](distribution/media-tools.json), [build compatibility evidence](distribution/media-tools-acceptance.md), and [redistribution notices](THIRD_PARTY_NOTICES.md#bundled-ffmpeg-and-ffprobe).
 
 ## Upscale controls
 

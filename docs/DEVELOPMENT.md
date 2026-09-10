@@ -13,7 +13,29 @@ Required development tools:
 
 Rustup is the recommended way to install the pinned Rust toolchain. From the repository root, the toolchain file should select the required version automatically.
 
-FFmpeg and FFprobe are external runtime tools. Apollo discovers and validates them through one shared application owner rather than feature-specific checks.
+FFmpeg and FFprobe run as separate processes. The v0.5.0 Windows packages include the pinned pair; `cargo build` does not download or copy media tools. Apollo discovers and validates them through one shared application owner rather than feature-specific checks.
+
+### Pinned media tools for development
+
+`distribution/media-tools.json` owns the exact Windows x64 archive URL, SHA-256, build identity, encoder inventory, redistribution paths and tested compatibility baseline. The pin is FFmpeg 7.0.2, Gyan build `7.0.2-essentials_build-www.gyan.dev`, not an arbitrary 7.0.2 binary.
+
+Stage a verified development pair from the repository root:
+
+```powershell
+pwsh -NoProfile -File .\scripts\stage-media-tools.ps1 --output .scratch/dev-media
+# A second, new destination can use the existing archive without network access:
+pwsh -NoProfile -File .\scripts\stage-media-tools.ps1 --offline --output .scratch/dev-media-offline
+```
+
+The default cache is `.scratch/media-tools-cache`; `--cache <path>` selects another cache. A checksum mismatch fails before extraction. Offline cache misses fail without a download. Existing staging destinations are refused. The stager validates both versions and required encoders, but never attempts a GPU encode.
+
+For `cargo run`, prepend the staged directory to PATH in that development shell, or copy the complete staged payload beside the built Apollo executable. Do not copy just one executable. The runtime policy is:
+
+1. Validate and use the complete adjacent pair.
+2. If neither adjacent file exists, resolve both via explicit PATH.
+3. If the bundle is partial or invalid, retain its path and diagnostic; do not fall back. Retry repeats this policy.
+
+Capability results are keyed by resolved FFmpeg path, file size and modification time. Changing from PATH to the bundle invalidates the cached result. This is a runtime cache identity, not a cryptographic release attestation; release staging verifies the pinned archive hash separately.
 
 ## Releases
 
@@ -142,6 +164,8 @@ Lower quality numbers favor quality over file size. CRF and CQ are not interchan
 
 The shared media-tool owner checks compiled NVENC availability and runs bounded, hidden, minimal real encode probes off the egui thread. H.264 and H.265 results are independent and cached for the resolved FFmpeg identity. Base tool discovery can finish before these probes: normal workspace use and CPU Upscale remain available while Auto and explicit NVENC show checking state. Auto selects NVENC only after success; explicit unavailable NVENC retains diagnostics and never silently falls back. Do not probe on repaint or command construction.
 
+The pinned build uses `ffnvcodec n12.2.72.0-1-g9934f17` (NVENC API 12.2). Its measured baseline is Windows NVIDIA driver 566.14 on an RTX 3060 Laptop GPU. Neither the FFmpeg source version nor `-encoders` proves driver compatibility. Older drivers and other GPUs remain unverified by that measurement. If initialization fails, Auto resolves to CPU; explicit NVIDIA selection retains the real probe error. An error after an encode has started remains a job failure, not a silent CPU rerun.
+
 ### Pixel Format and Color Limits
 
 The probe retains pixel format, derivable bit depth, range, matrix, transfer, and primaries. Shared Upscale validation resolves the output format for both ready feedback and execution:
@@ -162,6 +186,8 @@ cargo test --test upscale real_nvenc_upscale -- --ignored --nocapture
 ```
 
 These require FFmpeg/FFprobe, FFV1 fixture generation, and the corresponding working encoders. They check controlled 8-bit H.264/H.265 and 10-bit H.265 PQ/HLG output dimensions, bit depth, and color signaling. They do not replace native-window review or quality comparisons.
+
+For release artifacts, use the [installed/portable acceptance gate](RELEASES.md#self-contained-media-acceptance) instead of relying on PATH-based tests. It runs the production discovery, probe, feature executors, command builders and output publication against each extracted/installed pair with an empty PATH. Its default CPU and failure-path checks need no NVIDIA GPU. `-RequireNvenc` additionally requires both real probes and H.264/H.265 CQ 16 Upscale to succeed on the recorded baseline.
 
 Before release, smoke-test preset 1440p/4K output and 8K sizing, custom landscape/ultrawide/portrait boxes, both NVENC codecs at CQ 16 and custom CQ, Auto success/fallback, explicit unavailable NVENC, and supported/unsupported video formats. Compare a controlled source using the previous CPU defaults, the new equivalent CPU settings, and NVENC CQ 16 for regression sanity, not to claim one encoder is universally better. Record actual results and unavailable cases separately.
 

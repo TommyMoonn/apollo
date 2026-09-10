@@ -23,6 +23,18 @@ libraries such as x264 and x265; the distributor's README identifies those build
 The repository-owned `distribution/media-tools.json` controls binary selection.
 The license and distributor README are included unchanged in both release formats.
 
+Bundled executables are not covered by Apollo's Rust dependency inventory below.
+The selected build includes GPL components such as x264 and x265. Keep its license,
+README and pinned metadata together when redistributing either package. The
+FFmpeg project documents its [licensing considerations](https://ffmpeg.org/legal.html).
+
+The source commit link above identifies FFmpeg itself, not the complete
+corresponding source of every statically included library. Before public binary
+distribution, the release operator must verify the applicable corresponding-source
+delivery and build-material obligations for this exact build and its dependencies,
+and record the source locations in the release notes. Shipping this notice and a
+license file alone is not evidence that this review has been completed.
+
 ## Repository-embedded fonts
 
 ### IBM Plex Sans Regular

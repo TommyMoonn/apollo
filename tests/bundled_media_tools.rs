@@ -1,5 +1,7 @@
 //! Opt-in runtime check against a staged distribution, without mutating the test runner's PATH.
 use std::env;
+#[path = "support/release_media_acceptance.rs"]
+mod release_media_acceptance;
 #[cfg(windows)]
 use std::{fs, path::PathBuf, process::Command};
 
@@ -30,6 +32,9 @@ fn discovery_subprocess() {
                 use apollo::media::tools::VideoEncoderCapability;
                 assert_eq!(capabilities.h264_nvenc, VideoEncoderCapability::Available);
                 assert_eq!(capabilities.h265_nvenc, VideoEncoderCapability::Available);
+            }
+            if let Ok(acceptance) = env::var("APOLLO_RELEASE_ACCEPTANCE") {
+                release_media_acceptance::run(&tools, &capabilities, &acceptance);
             }
         }
         "partial" => assert_eq!(

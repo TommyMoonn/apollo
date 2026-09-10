@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Self-contained Windows installer and portable payloads with the exact FFmpeg/FFprobe 7.0.2 Gyan essentials build, pinned archive SHA-256, and redistribution material.
+- Verified archive caching and offline release staging through one shared media-tool staging owner.
+- Installed and portable no-PATH media acceptance, real NVENC failure/CPU fallback checks, and an opt-in NVIDIA CQ 16 release gate.
+
+### Changed
+
+- Media discovery prefers the complete pair beside Apollo. PATH remains a development fallback only when neither bundled executable exists; partial or invalid bundles retain actionable errors.
+- Documented the pinned build's NVENC API 12.2 and tested Windows driver 566.14 / RTX 3060 Laptop GPU baseline, without claiming compatibility for every driver or GPU.
+
 ## [0.4.0] - 2026-09-09
 
 ### Added
