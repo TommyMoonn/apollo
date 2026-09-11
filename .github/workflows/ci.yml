@@ -107,3 +107,17 @@ jobs:
 
       - name: Test Rust
         run: cargo test --locked --all-targets
+
+      - name: Test repository PowerShell tooling
+        shell: pwsh
+        run: pwsh -NoProfile -File .\tests\scripts\run.ps1
+
+      - name: Test PowerShell tooling in a tagged-release environment
+        shell: pwsh
+        run: |
+          # Exercise tag-only fixture isolation before a real release tag is pushed.
+          $env:GITHUB_REF_TYPE = 'tag'
+          $env:GITHUB_REF_NAME = 'v9.9.9'
+          $env:GITHUB_REF = 'refs/tags/v9.9.9'
+          pwsh -NoProfile -File .\tests\scripts\run.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

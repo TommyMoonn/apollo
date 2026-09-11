@@ -195,6 +195,28 @@ Invoke-TestCase 'installer compiler failure preserves the previous installer art
     }
 }
 
+Invoke-TestCase 'installer build replaces the previous artifact after successful compilation' {
+    $fixture = New-InstallerFixture
+    try {
+        $output = Join-Path $fixture.Root 'artifacts/windows-installer/Apollo-Setup-x64.exe'
+        New-Item -ItemType Directory -Path (Split-Path $output -Parent) -Force | Out-Null
+        'stale installer' | Set-Content -LiteralPath $output -Encoding utf8
+
+        Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
+            '--project', $fixture.Root, '--makensis', $fixture.Compiler
+        ) | Out-Null
+
+        Assert-Equal 'fake Apollo installer' ([IO.File]::ReadAllText($output)) 'The successful compiler output must replace the old installer.'
+        Assert-Equal @('Apollo-Setup-x64.exe') @(Get-ChildItem -LiteralPath (Split-Path $output -Parent) | ForEach-Object Name) 'Publication must not leave backup files or scratch directories.'
+    }
+    finally {
+        if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($fixture.Root)) -ne [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetTempPath())) {
+            throw 'Fixture cleanup escaped the temporary directory.'
+        }
+        Remove-Item -LiteralPath $fixture.Root -Recurse -Force
+    }
+}
+
 Invoke-TestCase 'installer build rejects unexpected output filenames' {
     $fixture = New-InstallerFixture
     try {
@@ -343,6 +365,53 @@ Invoke-TestCase 'installer build exposes help without requiring NSIS or build pa
     Assert-Contains $output '--makensis' 'Installer build help should describe NSIS compiler selection.'
     Assert-Contains $output 'assets/apollo.ico' 'Installer build help should expose the required repository-owned icon input.'
     Assert-Contains $output 'Apollo-Setup-x64.exe' 'Installer build help should state the stable installer filename.'
+}
+
+Invoke-TestCase 'release fixtures isolate GitHub refs and restore them after success and failure' {
+    $fixture = New-InstallerFixture
+    $refNames = @('GITHUB_REF_TYPE', 'GITHUB_REF_NAME', 'GITHUB_REF')
+    $savedRefs = @{}
+    foreach ($name in $refNames) { $savedRefs[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+    try {
+        foreach ($context in @(
+            @{ GITHUB_REF_TYPE = 'tag'; GITHUB_REF_NAME = 'v9.9.9'; GITHUB_REF = 'refs/tags/v9.9.9' },
+            @{ GITHUB_REF_TYPE = $null; GITHUB_REF_NAME = $null; GITHUB_REF = 'refs/tags/v9.9.9' },
+            @{ GITHUB_REF_TYPE = 'branch'; GITHUB_REF_NAME = 'main'; GITHUB_REF = 'refs/heads/main' }
+        )) {
+            foreach ($name in $refNames) { [Environment]::SetEnvironmentVariable($name, ($context[$name] ?? [NullString]::Value), 'Process') }
+            Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
+                '--project', $fixture.Root, '--makensis', $fixture.Compiler
+            ) | Out-Null
+            foreach ($name in $refNames) {
+                Assert-Equal $context[$name] ([Environment]::GetEnvironmentVariable($name, 'Process')) "Success must restore $name."
+            }
+
+            Assert-Throws {
+                Invoke-ReleaseScriptFixture -ScriptPath $buildInstallerScript -Arguments @(
+                    '--project', $fixture.Root, '--makensis', (Join-Path $fixture.Root 'missing/makensis.exe')
+                ) | Out-Null
+            } '*NSIS compiler does not exist*'
+            foreach ($name in $refNames) {
+                Assert-Equal $context[$name] ([Environment]::GetEnvironmentVariable($name, 'Process')) "Failure must restore $name."
+            }
+
+            if ($context.GITHUB_REF.StartsWith('refs/tags/')) {
+                # Outside the fixture boundary, the real release guard must still reject this tag.
+                Assert-Throws {
+                    Invoke-ScriptCapture -ScriptPath (Join-Path $projectRoot 'scripts/check-release.ps1') -Arguments @(
+                        '--project', $fixture.Root
+                    ) | Out-Null
+                } '*expected ''v0.1.0''*'
+            }
+        }
+    }
+    finally {
+        foreach ($name in $refNames) { [Environment]::SetEnvironmentVariable($name, ($savedRefs[$name] ?? [NullString]::Value), 'Process') }
+        if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($fixture.Root)) -ne [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetTempPath())) {
+            throw 'Fixture cleanup escaped the temporary directory.'
+        }
+        Remove-Item -LiteralPath $fixture.Root -Recurse -Force
+    }
 }
 
 Reset-NsisTestEnvironment

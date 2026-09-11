@@ -227,7 +227,8 @@ The output filename must be exactly Apollo-Setup-x64.exe.
         }
 
         if (Test-Path -LiteralPath $outputPath) {
-            [IO.File]::Replace($temporaryInstaller, $outputPath, $null)
+            # A nullable .NET string needs NullString; PowerShell casts $null to an empty path.
+            [IO.File]::Replace($temporaryInstaller, $outputPath, [NullString]::Value)
         }
         else { [IO.File]::Move($temporaryInstaller, $outputPath) }
     }

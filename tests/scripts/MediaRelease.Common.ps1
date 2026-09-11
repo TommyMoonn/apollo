@@ -21,20 +21,32 @@ function New-ReleaseMediaFixture {
 
 function Invoke-ReleaseScriptFixture {
     param([string]$ScriptPath, [object[]]$Arguments = @())
-    # Substitute only native media execution; manifest, ZIP, checksums and packaging are real.
-    $captured = @(& {
-        . $ScriptPath
-        function Invoke-MediaTool {
-            param([string]$Path, [string[]]$Arguments)
-            $name = [IO.Path]::GetFileNameWithoutExtension($Path)
-            Assert-Equal "$name fixture" ([IO.File]::ReadAllText($Path)) 'Validate the staged fixture executable.'
-            if ($Arguments -contains '-version') { return "$name version 7.0.2-essentials_build-www.gyan.dev Copyright" }
-            return (@('libx264','libx265','h264_nvenc','hevc_nvenc','aac','flac','png','mjpeg') | ForEach-Object { " V....D $_ fixture" }) -join "`n"
-        }
-        if ([IO.Path]::GetFileName($ScriptPath) -eq 'stage-windows-release.ps1') {
-            Invoke-StageWindowsReleaseCli -Arguments (@($Arguments) + '--offline')
-        }
-        else { Invoke-BuildWindowsInstallerCli -Arguments (@($Arguments) + '--offline') }
-    } 6>&1)
-    return ($captured | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+    # Synthetic package versions belong to the fixture, not the hosting CI release tag.
+    # Keep the actual release validator intact and restore the caller even on failure.
+    $savedRefs = @{}
+    foreach ($name in @('GITHUB_REF_TYPE', 'GITHUB_REF_NAME', 'GITHUB_REF')) {
+        $savedRefs[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+    try {
+        foreach ($name in $savedRefs.Keys) { [Environment]::SetEnvironmentVariable($name, [NullString]::Value, 'Process') }
+        # Substitute only native media execution; manifest, ZIP, checksums and packaging are real.
+        $captured = @(& {
+            . $ScriptPath
+            function Invoke-MediaTool {
+                param([string]$Path, [string[]]$Arguments)
+                $name = [IO.Path]::GetFileNameWithoutExtension($Path)
+                Assert-Equal "$name fixture" ([IO.File]::ReadAllText($Path)) 'Validate the staged fixture executable.'
+                if ($Arguments -contains '-version') { return "$name version 7.0.2-essentials_build-www.gyan.dev Copyright" }
+                return (@('libx264','libx265','h264_nvenc','hevc_nvenc','aac','flac','png','mjpeg') | ForEach-Object { " V....D $_ fixture" }) -join "`n"
+            }
+            if ([IO.Path]::GetFileName($ScriptPath) -eq 'stage-windows-release.ps1') {
+                Invoke-StageWindowsReleaseCli -Arguments (@($Arguments) + '--offline')
+            }
+            else { Invoke-BuildWindowsInstallerCli -Arguments (@($Arguments) + '--offline') }
+        } 6>&1)
+        return ($captured | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+    }
+    finally {
+        foreach ($name in $savedRefs.Keys) { [Environment]::SetEnvironmentVariable($name, ($savedRefs[$name] ?? [NullString]::Value), 'Process') }
+    }
 }
