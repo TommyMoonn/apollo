@@ -128,6 +128,17 @@ pub fn preflight_output_destination(input: &Path, output: &Path) -> Result<(), M
     validated_output_destination(input, output).map(|_| ())
 }
 
+pub(crate) fn normalized_output_destination(
+    input: &Path,
+    output: &Path,
+) -> Result<PathBuf, MediaOutputError> {
+    validated_output_destination(input, output).map(|destination| destination.final_path)
+}
+
+pub(crate) fn output_paths_equal(left: &Path, right: &Path) -> bool {
+    paths_equal(left, right)
+}
+
 fn validated_output_destination(
     input: &Path,
     output: &Path,

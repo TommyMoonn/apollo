@@ -54,14 +54,14 @@ impl fmt::Display for MediaIntakeError {
 impl std::error::Error for MediaIntakeError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FileIdentity {
+pub(crate) struct SourceIdentity {
     canonical_path: PathBuf,
     len: u64,
     modified: Option<SystemTime>,
 }
 
-impl FileIdentity {
-    fn read(path: &Path) -> Result<Self, MediaIntakeError> {
+impl SourceIdentity {
+    pub(crate) fn read(path: &Path) -> Result<Self, MediaIntakeError> {
         let metadata = fs::metadata(path).map_err(|error| match error.kind() {
             io::ErrorKind::NotFound => MediaIntakeError::Missing,
             kind => MediaIntakeError::Metadata(kind),
@@ -79,7 +79,7 @@ impl FileIdentity {
         })
     }
 
-    fn is_reliably_same(&self, other: &Self) -> bool {
+    pub(crate) fn is_reliably_same(&self, other: &Self) -> bool {
         self.canonical_path == other.canonical_path
             && self.len == other.len
             && self.modified.is_some()
@@ -89,14 +89,14 @@ impl FileIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CachedMedia {
-    identity: FileIdentity,
+    identity: SourceIdentity,
     media: MediaFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingProbe {
     id: u64,
-    identity: FileIdentity,
+    identity: SourceIdentity,
 }
 
 /// Owns the one reusable successful probe used by both media tools.
@@ -120,7 +120,7 @@ impl MediaIntake {
             .as_ref()
             .map(|cached| (cached.media.path.clone(), cached.identity.clone()))?;
         let unchanged =
-            FileIdentity::read(&path).is_ok_and(|identity| expected.is_reliably_same(&identity));
+            SourceIdentity::read(&path).is_ok_and(|identity| expected.is_reliably_same(&identity));
         if !unchanged {
             self.clear_current();
         }
@@ -132,7 +132,7 @@ impl MediaIntake {
     /// the current source stays authoritative if validation or inspection fails.
     pub fn begin_load(&mut self, path: &Path) -> Result<MediaLoadStart, MediaIntakeError> {
         self.pending_probe = None;
-        let identity = FileIdentity::read(path)?;
+        let identity = SourceIdentity::read(path)?;
 
         if self
             .current
