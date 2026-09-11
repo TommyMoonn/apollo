@@ -20,8 +20,65 @@ pub mod upscale_progress;
 pub mod widgets;
 pub mod workspace;
 
+use crate::queue::JobId;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceAction {
     ChangeFile,
     CloseSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueueAction {
+    Start,
+    CancelCurrent,
+    Stop,
+    Remove(JobId),
+    ClearFinished,
+    Back,
+    #[default]
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessExecutionArbitration {
+    immediate_running: bool,
+    queue_running: bool,
+}
+
+impl ProcessExecutionArbitration {
+    pub fn new(immediate_running: bool, queue_running: bool) -> Self {
+        Self {
+            immediate_running,
+            queue_running,
+        }
+    }
+
+    pub fn immediate_start_allowed(self) -> bool {
+        !self.queue_running
+    }
+
+    pub fn queue_start_allowed(self) -> bool {
+        !self.immediate_running
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProcessExecutionArbitration;
+
+    #[test]
+    fn process_execution_owners_block_only_the_opposite_start_path() {
+        let idle = ProcessExecutionArbitration::new(false, false);
+        assert!(idle.immediate_start_allowed());
+        assert!(idle.queue_start_allowed());
+
+        let immediate = ProcessExecutionArbitration::new(true, false);
+        assert!(immediate.immediate_start_allowed());
+        assert!(!immediate.queue_start_allowed());
+
+        let queue = ProcessExecutionArbitration::new(false, true);
+        assert!(!queue.immediate_start_allowed());
+        assert!(queue.queue_start_allowed());
+    }
 }

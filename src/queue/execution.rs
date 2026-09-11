@@ -26,6 +26,12 @@ impl Default for MediaQueue {
     }
 }
 
+impl Drop for MediaQueue {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 impl MediaQueue {
     pub fn new() -> Self {
         Self {
@@ -95,13 +101,21 @@ impl MediaQueue {
         Ok(id)
     }
 
-    pub fn start(&mut self, tools: &MediaTools, wake: MediaProcessWake) -> bool {
-        let mut launcher = |command| MediaProcess::start_with_wake(command, wake.clone());
+    pub fn start<F>(&mut self, tools: &MediaTools, mut wake_for_job: F) -> bool
+    where
+        F: FnMut(JobId) -> MediaProcessWake,
+    {
+        let mut launcher =
+            |job_id, command| MediaProcess::start_with_wake(command, wake_for_job(job_id));
         self.start_with_launcher(tools, &mut launcher)
     }
 
-    pub fn poll(&mut self, tools: &MediaTools, wake: MediaProcessWake) {
-        let mut launcher = |command| MediaProcess::start_with_wake(command, wake.clone());
+    pub fn poll<F>(&mut self, tools: &MediaTools, mut wake_for_job: F)
+    where
+        F: FnMut(JobId) -> MediaProcessWake,
+    {
+        let mut launcher =
+            |job_id, command| MediaProcess::start_with_wake(command, wake_for_job(job_id));
         self.poll_with_launcher(tools, &mut launcher);
     }
 
@@ -141,7 +155,7 @@ impl MediaQueue {
 
     fn start_with_launcher<F, P>(&mut self, tools: &MediaTools, launcher: &mut F) -> bool
     where
-        F: FnMut(MediaProcessCommand) -> Result<P, MediaProcessStartError>,
+        F: FnMut(JobId, MediaProcessCommand) -> Result<P, MediaProcessStartError>,
         P: ProcessControl + 'static,
     {
         if self.started || self.active_job.is_some() {
@@ -155,7 +169,7 @@ impl MediaQueue {
 
     fn poll_with_launcher<F, P>(&mut self, tools: &MediaTools, launcher: &mut F)
     where
-        F: FnMut(MediaProcessCommand) -> Result<P, MediaProcessStartError>,
+        F: FnMut(JobId, MediaProcessCommand) -> Result<P, MediaProcessStartError>,
         P: ProcessControl + 'static,
     {
         let Some(active_job) = self.active_job else {
@@ -191,7 +205,7 @@ impl MediaQueue {
 
     fn advance_with_launcher<F, P>(&mut self, tools: &MediaTools, launcher: &mut F)
     where
-        F: FnMut(MediaProcessCommand) -> Result<P, MediaProcessStartError>,
+        F: FnMut(JobId, MediaProcessCommand) -> Result<P, MediaProcessStartError>,
         P: ProcessControl + 'static,
     {
         while let Some(index) = self
@@ -229,7 +243,7 @@ impl MediaQueue {
             };
             match self
                 .execution
-                .start_prepared_with_launcher(prepared, &mut *launcher)
+                .start_prepared_with_launcher(prepared, |command| launcher(job_id, command))
             {
                 Ok(()) => {
                     self.jobs[index].set_state(QueueJobState::Running);
@@ -393,7 +407,7 @@ mod tests {
             }
             let launches = Arc::new(AtomicUsize::new(0));
             let launch_count = Arc::clone(&launches);
-            let mut launcher = move |_| {
+            let mut launcher = move |_, _| {
                 launch_count.fetch_add(1, Ordering::Relaxed);
                 Ok(FakeProcessControl::running())
             };
@@ -432,7 +446,7 @@ mod tests {
             )
             .unwrap();
         fs::write(first_output, b"external output").unwrap();
-        let mut launcher = |_| Ok(FakeProcessControl::running());
+        let mut launcher = |_, _| Ok(FakeProcessControl::running());
 
         assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
         assert_eq!(queue.active_job(), Some(second));
@@ -468,7 +482,7 @@ mod tests {
             let mut processes = VecDeque::from([first_process, second_process]);
             let launches = Arc::new(AtomicUsize::new(0));
             let launch_count = Arc::clone(&launches);
-            let mut launcher = move |_| {
+            let mut launcher = move |_, _| {
                 launch_count.fetch_add(1, Ordering::Relaxed);
                 Ok(processes.pop_front().expect("one fake per queued start"))
             };
@@ -517,7 +531,7 @@ mod tests {
             .unwrap();
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempt_count = Arc::clone(&attempts);
-        let mut launcher = move |_| {
+        let mut launcher = move |_, _| {
             if attempt_count.fetch_add(1, Ordering::Relaxed) == 0 {
                 Err(MediaProcessStartError::ProcessLaunchFailed(
                     std::io::ErrorKind::NotFound,
@@ -556,7 +570,7 @@ mod tests {
             .unwrap();
         let launches = Arc::new(AtomicUsize::new(0));
         let launch_count = Arc::clone(&launches);
-        let mut launcher = move |_| {
+        let mut launcher = move |_, _| {
             launch_count.fetch_add(1, Ordering::Relaxed);
             Ok(FakeProcessControl::running())
         };
@@ -588,7 +602,7 @@ mod tests {
         let process = FakeProcessControl::running();
         let handle = process.clone();
         let mut process = Some(process);
-        let mut launcher = move |_| Ok(process.take().expect("one process launch"));
+        let mut launcher = move |_, _| Ok(process.take().expect("one process launch"));
         assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
         fs::write(queue.temporary_output_path().unwrap(), b"published").unwrap();
         handle.set_state(MediaProcessState::Completed);
@@ -604,6 +618,25 @@ mod tests {
         ));
         assert_eq!(queue.clear_finished(), 1);
         assert!(queue.jobs().is_empty());
+    }
+
+    #[test]
+    fn dropping_queue_requests_cancellation_from_the_active_process_owner() {
+        let directory = TestDirectory::new("drop-cancel");
+        let media = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        queue
+            .enqueue(&media, remux(&media, directory.path().join("output.mkv")))
+            .unwrap();
+        let process = FakeProcessControl::running();
+        let handle = process.clone();
+        let mut process = Some(process);
+        let mut launcher = move |_, _| Ok(process.take().expect("one process launch"));
+        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+
+        drop(queue);
+
+        assert_eq!(handle.state(), MediaProcessState::Cancelled);
     }
 
     fn media(directory: &TestDirectory, file_name: &str) -> MediaFile {
