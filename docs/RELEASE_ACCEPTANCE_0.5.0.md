@@ -6,8 +6,9 @@ Recorded on **2026-09-10** for phase 0.5.0.4. This is local candidate evidence,
 not approval of a published v0.5.0 release. Source baseline:
 `2b4e7554b29b534c3f97311e0d0c920578637dc0`, plus the phase's documentation and
 acceptance-test changes. Production Rust code and the media manifest were
-unchanged. Cargo and the installer still identify Apollo as **0.4.0**; version
-preparation/tagging remain separate operator actions.
+unchanged. At the time of this run, Cargo and the tested installer identified
+Apollo as **0.4.0**. This historical record does not certify artifacts rebuilt
+after the version was set to **0.5.0**; those need fresh artifact acceptance.
 
 Environment: Windows build **26200.9168** (25H2), x64 MSVC target, NSIS **3.11**,
 **NVIDIA GeForce RTX 3060 Laptop GPU**, Windows driver **566.14**. GPU and driver

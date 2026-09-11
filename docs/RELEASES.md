@@ -53,6 +53,8 @@ Finalize `CHANGELOG.md` before tagging:
 - move or curate the shipped changes into that release section;
 - add the matching `[<version>]` comparison link and make sure it references `v<version>`.
 
+Prepare a concise, user-facing release description with version-specific installer and portable download links. In the local workspace, `.planning/release/RELEASE_NOTE_TEMPLATE.md` is the template and `.project/release/RELEASE_NOTE_v<version>.md` is the draft location. These ignored local files are authoring aids, not clean-clone build prerequisites or automatically uploaded release notes. Copy the reviewed description into the GitHub draft before publication.
+
 Validate the version, intended tag, and dated changelog entry together:
 
 ```powershell

@@ -95,8 +95,8 @@ The only initial cleanup targets are `target/` and `.dev/chatgpt/bundles/`. Trac
 
 ```powershell
 .\scripts\check-release.ps1
-.\scripts\check-release.ps1 --tag v0.1.0
-.\scripts\check-release.ps1 --tag v0.1.0 --release-changelog
+.\scripts\check-release.ps1 --tag v0.5.0
+.\scripts\check-release.ps1 --tag v0.5.0 --release-changelog
 ```
 
 Checks the `Cargo.toml` package version against the root `apollo` entry in `Cargo.lock`. An explicit release tag must equal `v<version>`. In a GitHub tag workflow, `GITHUB_REF_NAME` is used when no tag is supplied. `--release-changelog` additionally requires a dated release heading and matching version link in `CHANGELOG.md`. Validation is read-only.
@@ -104,10 +104,19 @@ Checks the `Cargo.toml` package version against the root `apollo` entry in `Carg
 ### Set the release version
 
 ```powershell
-.\scripts\set-version.ps1 0.2.0
+.\scripts\set-version.ps1 0.5.0
 ```
 
 Updates the `[package].version` in `Cargo.toml`, lets Cargo refresh the root package entry in `Cargo.lock`, verifies the result with locked Cargo metadata, and runs the shared release validator. If any step fails, both version files are restored.
+
+### Stage pinned media tools
+
+```powershell
+.\scripts\stage-media-tools.ps1 --output .scratch/media-payload
+.\scripts\stage-media-tools.ps1 --offline --output .scratch/media-payload-offline
+```
+
+Uses the exact archive URL and SHA-256 in `distribution/media-tools.json`. The default cache is `.scratch/media-tools-cache`; `--cache` selects another cache. Staging verifies the archive before extraction, validates both executable versions and required encoders, and publishes only the pair, required redistribution material and pinned metadata. It requires a new output directory and no NVIDIA GPU. Offline mode requires a valid cached archive and never downloads. Explicit relative paths resolve from the current directory.
 
 ### Stage Windows release artifacts
 
@@ -123,10 +132,11 @@ Apollo-windows-x64.zip
 SHA256SUMS.txt
 ```
 
-The installer is the primary Windows distribution artifact. The portable ZIP remains available as a secondary option and still contains only `Apollo.exe`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`. `SHA256SUMS.txt` contains lowercase SHA-256 entries for the installer and ZIP in stable filename order. FFmpeg and FFprobe remain external runtime requirements and are not bundled.
+The installer is the primary Windows distribution artifact. Both packages include `Apollo.exe`, `ffmpeg.exe`, `ffprobe.exe`, the root `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `licenses/ffmpeg/{LICENSE,README.txt,media-tools.json}`. Release staging supplies one verified media-tool payload to both packaging consumers through `stage-media-tools.ps1`. `SHA256SUMS.txt` contains lowercase SHA-256 entries for the installer and ZIP, in that order.
 
 By default the executable is read from `target/x86_64-pc-windows-msvc/release/apollo.exe`; use `--executable` and `--output` for explicit paths. Installer creation uses the same `build-windows-installer.ps1` owner described below; pass `--makensis` when the NSIS compiler is not discoverable automatically. Relative paths resolve from the selected project root. A failed installer, ZIP, or checksum build leaves any previously staged release directory unchanged. The generated `artifacts/` tree is ignored by Git and full-project snapshots.
 
+Use `--media-cache <path>` to select the archive cache and `--offline` to require a valid cached archive. These options also apply to standalone installer builds. Media-tool staging failure leaves the previous release output intact.
 
 ### Build the Windows installer
 
@@ -140,9 +150,9 @@ Builds Apollo's per-user NSIS installer from the validated Windows GUI x64 relea
 artifacts/windows-installer/Apollo-Setup-x64.exe
 ```
 
-Install [NSIS](https://nsis.sourceforge.io/) so `makensis.exe` is available on `PATH`, or pass its path explicitly with `--makensis`. The wrapper derives the installer version from `Cargo.toml`, validates the release executable through the same PE32+/x64/GUI-subsystem owner used by release staging, and passes the root `LICENSE` and `THIRD_PARTY_NOTICES.md` to the installer definition. Use `--executable` and `--output` to override the build input or destination; the destination filename must remain `Apollo-Setup-x64.exe`.
+Install NSIS 3.11 so `makensis.exe` is available on `PATH`, or pass its path explicitly with `--makensis`. The wrapper derives the installer version from `Cargo.toml`, validates the release executable through the same PE32+/x64/GUI-subsystem owner used by release staging, and includes the verified media-tool pair and license material. Use `--executable` and `--output` to override the build input or destination; the destination filename must remain `Apollo-Setup-x64.exe`.
 
-The installer is per-user, installs under `%LOCALAPPDATA%\Programs\Apollo`, creates an Apollo Start Menu shortcut and Installed Apps entry, and does not bundle FFmpeg/FFprobe or create a desktop shortcut. The installer, uninstaller, installed executable, Start Menu shortcut, and Installed Apps entry use the repository-owned Apollo icon.
+The installer is per-user, installs under `%LOCALAPPDATA%\Programs\Apollo`, and creates an Apollo Start Menu shortcut and Installed Apps entry, but no desktop shortcut. Uninstall removes its owned media tools and license files without removing unrelated user files. The installer, uninstaller, installed executable, Start Menu shortcut, and Installed Apps entry use the repository-owned Apollo icon.
 
 ## Tests
 

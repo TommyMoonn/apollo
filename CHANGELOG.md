@@ -2,16 +2,20 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-11
+
+Apollo 0.5.0 includes the media tools needed to use the Windows installer and portable package without a separate FFmpeg installation.
+
 ### Added
 
-- Self-contained Windows installer and portable payloads with the exact FFmpeg/FFprobe 7.0.2 Gyan essentials build, pinned archive SHA-256, and redistribution material.
-- Verified archive caching and offline release staging through one shared media-tool staging owner.
-- Installed and portable no-PATH media acceptance, real NVENC failure/CPU fallback checks, and an opt-in NVIDIA CQ 16 release gate.
+- FFmpeg and FFprobe 7.0.2 in both Windows packages, including CPU H.264/H.265 encoders and the distribution's license material.
 
 ### Changed
 
-- Media discovery prefers the complete pair beside Apollo. PATH remains a development fallback only when neither bundled executable exists; partial or invalid bundles retain actionable errors.
-- Documented the pinned build's NVENC API 12.2 and tested Windows driver 566.14 / RTX 3060 Laptop GPU baseline, without claiming compatibility for every driver or GPU.
+- Apollo uses the complete FFmpeg/FFprobe pair beside the application before searching PATH. PATH fallback remains available when neither bundled tool is present.
+- An incomplete or invalid bundled pair produces a recovery message instead of mixing bundled tools with another installation.
+
+NVIDIA encoding still requires a compatible GPU and driver. The bundled build uses NVENC API 12.2 and was tested on an RTX 3060 Laptop GPU with Windows driver 566.14; this is not a minimum-driver claim. Auto uses CPU when the real NVIDIA encoding check fails.
 
 ## [0.4.0] - 2026-09-09
 
@@ -150,7 +154,8 @@ Apollo 0.1.0 is the first public Windows release, bringing focused Audio Mix and
 - Missing optional FFprobe metadata falls back to usable media and track labels instead of preventing intake or selection.
 - Upscale sizing preserves the source aspect ratio within the selected target boundary without default cropping, stretching, or black padding.
 
-[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/TommyMoonn/apollo/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/TommyMoonn/apollo/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/TommyMoonn/apollo/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/TommyMoonn/apollo/compare/v0.3.0...v0.3.1

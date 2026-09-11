@@ -33,7 +33,7 @@ Apollo is a small native desktop media utility for audio mixing, video upscaling
 
 The installer registers Apollo for the current Windows user, creates a Start Menu shortcut, and provides normal Windows uninstall behavior. The portable ZIP does not register or install Apollo.
 
-Starting with v0.5.0, both Windows packages include FFmpeg and FFprobe. Keep the portable folder intact, including `licenses/`. Older releases, including v0.4.0, still require the tools on PATH; check the downloaded release version.
+Apollo v0.5.0 includes FFmpeg and FFprobe in both Windows packages, so no separate media-tool installation is needed. Keep the portable folder intact, including `licenses/`. Older releases, including v0.4.0, still require the tools on PATH; check the downloaded release version.
 
 See the [latest release notes](https://github.com/TommyMoonn/apollo/releases/latest) or browse [all releases](https://github.com/TommyMoonn/apollo/releases).
 
