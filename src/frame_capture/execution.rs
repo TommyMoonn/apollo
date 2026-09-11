@@ -7,6 +7,7 @@ use crate::media::{
         ProcessControl,
     },
     model::MediaFile,
+    operation::PreparedMediaOperation,
     output::{MediaOutput, MediaOutputError},
     process::{
         MediaProcessCommand, MediaProcessStartError, MediaProcessWake, ProcessProgressSource,
@@ -164,28 +165,35 @@ impl FrameCaptureExecutor {
         if self.execution.is_running() {
             return Err(FrameCaptureStartError::AlreadyRunning);
         }
-        validate_frame_capture_request(request, media)
-            .map_err(FrameCaptureStartError::Validation)?;
-        let primary_video_stream_index = media
-            .video_streams
-            .first()
-            .expect("validated frame capture media owns a video stream")
-            .stream_index;
-
-        let output = MediaOutput::prepare(&request.input, &request.output)
-            .map_err(FrameCaptureStartError::Output)?;
-        let mut staged_request = request.clone();
-        staged_request.output = output.temporary_path().to_path_buf();
-        let invocation =
-            build_frame_capture_invocation(&staged_request, primary_video_stream_index);
-        let command = MediaProcessCommand::new(&tools.ffmpeg)
-            .args(invocation.args)
-            .progress_source(ProcessProgressSource::Stdout);
-
+        let operation = prepare_frame_capture_operation(tools, media, request)?;
         self.execution
-            .start_with_launcher(output, command, None, launcher)
+            .start_prepared_with_launcher(operation, launcher)
             .map_err(map_execution_start_error)
     }
+}
+
+pub(crate) fn prepare_frame_capture_operation(
+    tools: &MediaTools,
+    media: &MediaFile,
+    request: &FrameCaptureRequest,
+) -> Result<PreparedMediaOperation, FrameCaptureStartError> {
+    validate_frame_capture_request(request, media).map_err(FrameCaptureStartError::Validation)?;
+    let primary_video_stream_index = media
+        .video_streams
+        .first()
+        .expect("validated frame capture media owns a video stream")
+        .stream_index;
+
+    let output = MediaOutput::prepare(&request.input, &request.output)
+        .map_err(FrameCaptureStartError::Output)?;
+    let mut staged_request = request.clone();
+    staged_request.output = output.temporary_path().to_path_buf();
+    let invocation = build_frame_capture_invocation(&staged_request, primary_video_stream_index);
+    let command = MediaProcessCommand::new(&tools.ffmpeg)
+        .args(invocation.args)
+        .progress_source(ProcessProgressSource::Stdout);
+
+    Ok(PreparedMediaOperation::new(output, command, None))
 }
 
 fn map_execution_start_error(error: MediaExecutionStartError) -> FrameCaptureStartError {

@@ -8,6 +8,7 @@ use crate::media::{
         ProcessControl,
     },
     model::MediaFile,
+    operation::PreparedMediaOperation,
     output::{MediaOutput, MediaOutputError},
     process::{
         MediaProcessCommand, MediaProcessStartError, MediaProcessWake, ProcessProgressSource,
@@ -160,21 +161,30 @@ impl RemuxExecutor {
             return Err(RemuxStartError::AlreadyRunning);
         }
 
-        validate_remux_request(request, media).map_err(RemuxStartError::Validation)?;
-
-        let output = MediaOutput::prepare(&request.input, &request.output)
-            .map_err(RemuxStartError::Output)?;
-        let mut staged_request = request.clone();
-        staged_request.output = output.temporary_path().to_path_buf();
-        let invocation = build_remux_invocation(&staged_request);
-        let command = MediaProcessCommand::new(&tools.ffmpeg)
-            .args(invocation.args)
-            .progress_source(ProcessProgressSource::Stdout);
-
+        let operation = prepare_remux_operation(tools, media, request)?;
         self.execution
-            .start_with_launcher(output, command, media.duration, launcher)
+            .start_prepared_with_launcher(operation, launcher)
             .map_err(map_execution_start_error)
     }
+}
+
+pub(crate) fn prepare_remux_operation(
+    tools: &MediaTools,
+    media: &MediaFile,
+    request: &RemuxRequest,
+) -> Result<PreparedMediaOperation, RemuxStartError> {
+    validate_remux_request(request, media).map_err(RemuxStartError::Validation)?;
+
+    let output =
+        MediaOutput::prepare(&request.input, &request.output).map_err(RemuxStartError::Output)?;
+    let mut staged_request = request.clone();
+    staged_request.output = output.temporary_path().to_path_buf();
+    let invocation = build_remux_invocation(&staged_request);
+    let command = MediaProcessCommand::new(&tools.ffmpeg)
+        .args(invocation.args)
+        .progress_source(ProcessProgressSource::Stdout);
+
+    Ok(PreparedMediaOperation::new(output, command, media.duration))
 }
 
 fn map_execution_start_error(error: MediaExecutionStartError) -> RemuxStartError {

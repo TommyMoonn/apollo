@@ -7,6 +7,7 @@ use crate::media::{
         ProcessControl,
     },
     model::MediaFile,
+    operation::PreparedMediaOperation,
     output::{MediaOutput, MediaOutputError},
     process::{
         MediaProcessCommand, MediaProcessStartError, MediaProcessWake, ProcessProgressSource,
@@ -158,29 +159,37 @@ impl AudioExtractExecutor {
             return Err(AudioExtractStartError::AlreadyRunning);
         }
 
-        validate_audio_extract_request(request, media)
-            .map_err(AudioExtractStartError::Validation)?;
-
-        let metadata = media
-            .audio_streams
-            .iter()
-            .find(|stream| stream.stream_index == request.audio_stream_index)
-            .map(AudioExtractMetadata::from)
-            .unwrap_or_default();
-
-        let output = MediaOutput::prepare(&request.input, &request.output)
-            .map_err(AudioExtractStartError::Output)?;
-        let mut staged_request = request.clone();
-        staged_request.output = output.temporary_path().to_path_buf();
-        let invocation = build_audio_extract_invocation(&staged_request, &metadata);
-        let command = MediaProcessCommand::new(&tools.ffmpeg)
-            .args(invocation.args)
-            .progress_source(ProcessProgressSource::Stdout);
-
+        let operation = prepare_audio_extract_operation(tools, media, request)?;
         self.execution
-            .start_with_launcher(output, command, media.duration, launcher)
+            .start_prepared_with_launcher(operation, launcher)
             .map_err(map_execution_start_error)
     }
+}
+
+pub(crate) fn prepare_audio_extract_operation(
+    tools: &MediaTools,
+    media: &MediaFile,
+    request: &AudioExtractRequest,
+) -> Result<PreparedMediaOperation, AudioExtractStartError> {
+    validate_audio_extract_request(request, media).map_err(AudioExtractStartError::Validation)?;
+
+    let metadata = media
+        .audio_streams
+        .iter()
+        .find(|stream| stream.stream_index == request.audio_stream_index)
+        .map(AudioExtractMetadata::from)
+        .unwrap_or_default();
+
+    let output = MediaOutput::prepare(&request.input, &request.output)
+        .map_err(AudioExtractStartError::Output)?;
+    let mut staged_request = request.clone();
+    staged_request.output = output.temporary_path().to_path_buf();
+    let invocation = build_audio_extract_invocation(&staged_request, &metadata);
+    let command = MediaProcessCommand::new(&tools.ffmpeg)
+        .args(invocation.args)
+        .progress_source(ProcessProgressSource::Stdout);
+
+    Ok(PreparedMediaOperation::new(output, command, media.duration))
 }
 
 fn map_execution_start_error(error: MediaExecutionStartError) -> AudioExtractStartError {

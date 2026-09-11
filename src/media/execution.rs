@@ -1,6 +1,7 @@
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
 
 use super::{
+    operation::PreparedMediaOperation,
     output::{MediaOutput, MediaOutputDisposition, MediaOutputError},
     process::{
         MediaProcess, MediaProcessCommand, MediaProcessFailure, MediaProcessStartError,
@@ -131,11 +132,9 @@ impl MediaExecution {
         &self.state
     }
 
-    pub(crate) fn start_with_launcher<F, P>(
+    pub(crate) fn start_prepared_with_launcher<F, P>(
         &mut self,
-        output: MediaOutput,
-        command: MediaProcessCommand,
-        duration: Option<Duration>,
+        operation: PreparedMediaOperation,
         launcher: F,
     ) -> Result<(), MediaExecutionStartError>
     where
@@ -146,6 +145,7 @@ impl MediaExecution {
             return Err(MediaExecutionStartError::AlreadyRunning);
         }
 
+        let (output, command, duration) = operation.into_parts();
         let process = launcher(command).map_err(MediaExecutionStartError::Process)?;
         self.operation = Some(RunningMediaOperation {
             process: Box::new(process),

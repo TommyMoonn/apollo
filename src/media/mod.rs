@@ -3,6 +3,7 @@ pub mod error;
 pub mod execution;
 pub mod intake;
 pub mod model;
+pub(crate) mod operation;
 pub mod output;
 pub mod probe;
 pub mod process;

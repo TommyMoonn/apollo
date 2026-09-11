@@ -7,6 +7,7 @@ use crate::media::{
         ProcessControl,
     },
     model::MediaFile,
+    operation::PreparedMediaOperation,
     output::{MediaOutput, MediaOutputError},
     process::{
         MediaProcessCommand, MediaProcessStartError, MediaProcessWake, ProcessProgressSource,
@@ -174,35 +175,44 @@ impl UpscaleExecutor {
             return Err(UpscaleStartError::AlreadyRunning);
         }
 
-        validate_upscale_request(request, media).map_err(UpscaleStartError::Validation)?;
-
-        let video = media
-            .video_streams
-            .first()
-            .expect("validated upscale request has a primary video stream");
-        let width = video
-            .width
-            .expect("validated upscale request has a source width");
-        let height = video
-            .height
-            .expect("validated upscale request has a source height");
-        let dimensions = calculate_output_dimensions(width, height, request.target)
-            .map_err(UpscaleStartError::Sizing)?;
-
-        let output = MediaOutput::prepare(&request.input, &request.output)
-            .map_err(UpscaleStartError::Output)?;
-        let mut staged_request = request.clone();
-        staged_request.output = output.temporary_path().to_path_buf();
-        let invocation = build_upscale_invocation(&staged_request, media, dimensions)
-            .map_err(UpscaleStartError::Command)?;
-        let command = MediaProcessCommand::new(&tools.ffmpeg)
-            .args(invocation.args)
-            .progress_source(ProcessProgressSource::Stdout);
-
+        let operation = prepare_upscale_operation(tools, media, request)?;
         self.execution
-            .start_with_launcher(output, command, media.duration, launcher)
+            .start_prepared_with_launcher(operation, launcher)
             .map_err(map_execution_start_error)
     }
+}
+
+pub(crate) fn prepare_upscale_operation(
+    tools: &MediaTools,
+    media: &MediaFile,
+    request: &UpscaleRequest,
+) -> Result<PreparedMediaOperation, UpscaleStartError> {
+    validate_upscale_request(request, media).map_err(UpscaleStartError::Validation)?;
+
+    let video = media
+        .video_streams
+        .first()
+        .expect("validated upscale request has a primary video stream");
+    let width = video
+        .width
+        .expect("validated upscale request has a source width");
+    let height = video
+        .height
+        .expect("validated upscale request has a source height");
+    let dimensions = calculate_output_dimensions(width, height, request.target)
+        .map_err(UpscaleStartError::Sizing)?;
+
+    let output =
+        MediaOutput::prepare(&request.input, &request.output).map_err(UpscaleStartError::Output)?;
+    let mut staged_request = request.clone();
+    staged_request.output = output.temporary_path().to_path_buf();
+    let invocation = build_upscale_invocation(&staged_request, media, dimensions)
+        .map_err(UpscaleStartError::Command)?;
+    let command = MediaProcessCommand::new(&tools.ffmpeg)
+        .args(invocation.args)
+        .progress_source(ProcessProgressSource::Stdout);
+
+    Ok(PreparedMediaOperation::new(output, command, media.duration))
 }
 
 fn map_execution_start_error(error: MediaExecutionStartError) -> UpscaleStartError {
