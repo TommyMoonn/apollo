@@ -3,7 +3,7 @@ use egui::{
     Rect, Response, RichText, Sense, Sides, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder,
     Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
-use std::ops::RangeInclusive;
+use std::{ops::RangeInclusive, path::Path};
 
 use super::{fonts, layout, theme};
 
@@ -155,6 +155,13 @@ pub fn plain_button_intrinsic_size(ui: &Ui, label: &str) -> Vec2 {
         galley.size().x,
         theme::COMPACT_CONTROL_HEIGHT.max(galley.size().y),
     )
+}
+
+/// Truncate a one-line identity while retaining its complete path on hover.
+#[must_use]
+pub fn truncated_identity(ui: &mut Ui, text: RichText, complete_path: &Path) -> Response {
+    ui.add(Label::new(text).truncate().selectable(false))
+        .on_hover_text(complete_path.display().to_string())
 }
 
 /// Compact selector trigger used by simple container/codec dropdowns.

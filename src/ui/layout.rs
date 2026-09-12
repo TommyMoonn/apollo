@@ -51,8 +51,15 @@ pub const OUTPUT_FILENAME_MIN_INLINE_WIDTH: f32 = 180.0;
 /// Minimum title/metadata width retained beside an inline Audio Mix gain control.
 pub const TRACK_TEXT_MIN_INLINE_WIDTH: f32 = 240.0;
 
-/// Queue rows keep all identity and state columns inline only while each column remains readable.
-pub const QUEUE_ROW_INLINE_MIN_WIDTH: f32 = 520.0;
+/// Minimum useful width retained for the flexible source/output identity region.
+pub const QUEUE_IDENTITY_MIN_WIDTH: f32 = 180.0;
+
+/// Bounded queue operation and state widths keep the shared wide-row rhythm stable.
+pub const QUEUE_OPERATION_WIDTH: f32 = 104.0;
+pub const QUEUE_STATE_WIDTH: f32 = 78.0;
+
+/// Shared wide-row height vertically centers bounded cells while identity uses two lines.
+pub const QUEUE_ROW_HEIGHT: f32 = 44.0;
 
 /// Useful source identity width retained beside workspace source actions before compact metadata
 /// is omitted at narrow widths.
@@ -101,6 +108,16 @@ pub enum TrackRowLayout {
 pub enum QueueRowLayout {
     Inline,
     Stacked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QueueRowPlan {
+    pub layout: QueueRowLayout,
+    pub row_height: f32,
+    pub identity_width: f32,
+    pub operation_width: f32,
+    pub state_width: f32,
+    pub action_width: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -575,11 +592,28 @@ pub fn field_pair_layout(available_width: f32) -> FieldPairLayout {
     }
 }
 
-pub fn queue_row_layout(available_width: f32) -> QueueRowLayout {
-    if safe_dimension(available_width) >= QUEUE_ROW_INLINE_MIN_WIDTH {
+pub fn queue_row_plan(available_width: f32, action_width: f32) -> QueueRowPlan {
+    let available_width = safe_dimension(available_width);
+    let action_width = safe_dimension(action_width);
+    let gap_count = if action_width > 0.0 { 3.0 } else { 2.0 };
+    let fixed_width = QUEUE_OPERATION_WIDTH
+        + QUEUE_STATE_WIDTH
+        + action_width
+        + gap_count * theme::SPACING.related;
+    let identity_width = (available_width - fixed_width).max(0.0);
+    let layout = if identity_width >= QUEUE_IDENTITY_MIN_WIDTH {
         QueueRowLayout::Inline
     } else {
         QueueRowLayout::Stacked
+    };
+
+    QueueRowPlan {
+        layout,
+        row_height: QUEUE_ROW_HEIGHT,
+        identity_width,
+        operation_width: QUEUE_OPERATION_WIDTH,
+        state_width: QUEUE_STATE_WIDTH,
+        action_width,
     }
 }
 
@@ -736,13 +770,13 @@ mod tests {
         FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, FieldPairLayout, IntakeLayout,
         MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, OUTPUT_FILENAME_MIN_INLINE_WIDTH, OutputRowLayout,
         PATH_TEXT_OVERFLOW, PIXEL_DIMENSION_CONTROL_WIDTH, PIXEL_DIMENSION_STEP,
-        PROGRESS_TRACK_HEIGHT, QUEUE_ROW_INLINE_MIN_WIDTH, QueueRowLayout, REFERENCE_CONTENT_SIZE,
-        REFERENCE_WINDOW_SIZE, TRACK_TEXT_MIN_INLINE_WIDTH, TextOverflowPolicy, TrackRowLayout,
-        WINDOW_CHROME_HEIGHT, WORKSPACE_METADATA_MIN_WIDTH, action_group_size, action_layout,
-        bounded_content_width, centered_action_group, field_pair_layout, focus_content,
-        intake_content, intake_layout_plan, operation_surface, output_row_plan, queue_row_layout,
-        surface_fade, track_row_plan, workspace_header_shows_metadata,
-        workspace_switcher_fits_one_line,
+        PROGRESS_TRACK_HEIGHT, QUEUE_IDENTITY_MIN_WIDTH, QUEUE_OPERATION_WIDTH, QUEUE_ROW_HEIGHT,
+        QUEUE_STATE_WIDTH, QueueRowLayout, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
+        TRACK_TEXT_MIN_INLINE_WIDTH, TextOverflowPolicy, TrackRowLayout, WINDOW_CHROME_HEIGHT,
+        WORKSPACE_METADATA_MIN_WIDTH, action_group_size, action_layout, bounded_content_width,
+        centered_action_group, field_pair_layout, focus_content, intake_content,
+        intake_layout_plan, operation_surface, output_row_plan, queue_row_plan, surface_fade,
+        track_row_plan, workspace_header_shows_metadata, workspace_switcher_fits_one_line,
     };
     use crate::ui::theme;
 
@@ -759,7 +793,10 @@ mod tests {
         assert_eq!(PIXEL_DIMENSION_CONTROL_WIDTH, 96.0);
         assert_eq!(PIXEL_DIMENSION_STEP, 2.0);
         assert_eq!(ENCODER_QUALITY_CONTROL_WIDTH, 96.0);
-        assert_eq!(QUEUE_ROW_INLINE_MIN_WIDTH, 520.0);
+        assert_eq!(QUEUE_IDENTITY_MIN_WIDTH, 180.0);
+        assert_eq!(QUEUE_OPERATION_WIDTH, 104.0);
+        assert_eq!(QUEUE_STATE_WIDTH, 78.0);
+        assert_eq!(QUEUE_ROW_HEIGHT, 44.0);
         assert_eq!(ENCODER_QUALITY_STEP, 1.0);
         assert_eq!(OUTPUT_FILENAME_MIN_INLINE_WIDTH, 180.0);
         assert_eq!(WORKSPACE_METADATA_MIN_WIDTH, 220.0);
@@ -779,11 +816,22 @@ mod tests {
     }
 
     #[test]
-    fn queue_rows_reflow_before_identity_columns_become_unreadable() {
-        assert_eq!(queue_row_layout(519.0), QueueRowLayout::Stacked);
-        assert_eq!(queue_row_layout(520.0), QueueRowLayout::Inline);
-        assert_eq!(queue_row_layout(900.0), QueueRowLayout::Inline);
-        assert_eq!(queue_row_layout(f32::NAN), QueueRowLayout::Stacked);
+    fn queue_rows_keep_bounded_cells_and_reflow_before_identity_becomes_unreadable() {
+        let action_width = 72.0;
+        let wide = queue_row_plan(620.0, action_width);
+        assert_eq!(wide.layout, QueueRowLayout::Inline);
+        assert_eq!(wide.operation_width, QUEUE_OPERATION_WIDTH);
+        assert_eq!(wide.state_width, QUEUE_STATE_WIDTH);
+        assert_eq!(wide.action_width, action_width);
+        assert!(wide.identity_width >= QUEUE_IDENTITY_MIN_WIDTH);
+
+        let narrow = queue_row_plan(420.0, action_width);
+        assert_eq!(narrow.layout, QueueRowLayout::Stacked);
+        assert!(narrow.identity_width < QUEUE_IDENTITY_MIN_WIDTH);
+        assert_eq!(
+            queue_row_plan(f32::NAN, action_width).layout,
+            QueueRowLayout::Stacked
+        );
     }
 
     #[test]

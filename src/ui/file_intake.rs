@@ -113,7 +113,7 @@ fn show_queue_action(ui: &mut Ui, inspecting: bool, queue_count: usize) -> FileI
 }
 
 fn queue_label(queue_count: usize) -> String {
-    format!("Queue ({queue_count})")
+    super::queue_count_label(queue_count)
 }
 
 fn show_wordmark(ui: &mut Ui) {

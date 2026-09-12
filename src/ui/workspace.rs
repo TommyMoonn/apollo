@@ -4,7 +4,7 @@ use egui::{Label, RichText, Sides, TextStyle, Ui};
 
 use crate::media::model::MediaFile;
 
-use super::{SourceAction, fonts, layout, media_lifecycle, theme, widgets};
+use super::{SourceAction, fonts, layout, media_lifecycle, queue_count_label, theme, widgets};
 
 const CHANGE_FILE_LABEL: &str = "Change file";
 const CLOSE_SOURCE_LABEL: &str = "Close source";
@@ -43,6 +43,7 @@ pub enum WorkspaceAction {
     None,
     Source(SourceAction),
     SelectOperation(Operation),
+    OpenQueue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,12 +65,13 @@ pub fn show(
     ui: &mut Ui,
     presentation: &WorkspacePresentation,
     active_operation: Operation,
+    queue_count: usize,
     enabled: bool,
 ) -> WorkspaceAction {
     let action = Cell::new(WorkspaceAction::None);
 
     ui.add_enabled_ui(enabled, |ui| {
-        show_source_header(ui, presentation, &action);
+        show_source_header(ui, presentation, queue_count, &action);
         ui.add_space(theme::SPACING.related);
         show_operation_switcher(ui, active_operation, &action);
     });
@@ -80,9 +82,12 @@ pub fn show(
 fn show_source_header(
     ui: &mut Ui,
     presentation: &WorkspacePresentation,
+    queue_count: usize,
     action: &Cell<WorkspaceAction>,
 ) {
+    let queue_label = queue_count_label(queue_count);
     let action_sizes = [
+        widgets::plain_button_intrinsic_size(ui, &queue_label),
         widgets::plain_button_intrinsic_size(ui, CHANGE_FILE_LABEL),
         widgets::plain_button_intrinsic_size(ui, CLOSE_SOURCE_LABEL),
     ];
@@ -128,6 +133,9 @@ fn show_source_header(
             |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = theme::INLINE_ACTION_GAP;
+                    if widgets::plain_button(ui, &queue_label).clicked() {
+                        action.set(WorkspaceAction::OpenQueue);
+                    }
                     if widgets::plain_button(ui, CHANGE_FILE_LABEL).clicked() {
                         action.set(WorkspaceAction::Source(SourceAction::ChangeFile));
                     }
@@ -266,21 +274,21 @@ mod tests {
         fonts::install(&context);
         theme::install(&context);
         let mut initial = context.run_ui(Default::default(), |ui| {
-            let _ = show(ui, &presentation(), Operation::AudioMix, false);
+            let _ = show(ui, &presentation(), Operation::AudioMix, 3, false);
         });
         let position = output_text_rect(&initial, label).center();
         initial.textures_delta.clear();
 
         let mut pressed_action = WorkspaceAction::None;
         let mut pressed = context.run_ui(pointer_button_input(position, true), |ui| {
-            pressed_action = show(ui, &presentation(), Operation::AudioMix, false);
+            pressed_action = show(ui, &presentation(), Operation::AudioMix, 3, false);
         });
         pressed.textures_delta.clear();
         assert_eq!(pressed_action, WorkspaceAction::None);
 
         let mut released_action = WorkspaceAction::None;
         let mut released = context.run_ui(pointer_button_input(position, false), |ui| {
-            released_action = show(ui, &presentation(), Operation::AudioMix, false);
+            released_action = show(ui, &presentation(), Operation::AudioMix, 3, false);
         });
         released.textures_delta.clear();
         released_action
@@ -340,7 +348,7 @@ mod tests {
         theme::install(&context);
         let output = context.run_ui(Default::default(), |ui| {
             assert_eq!(
-                show(ui, &presentation(), Operation::Remux, true),
+                show(ui, &presentation(), Operation::Remux, 3, true),
                 WorkspaceAction::None
             );
         });
@@ -348,6 +356,7 @@ mod tests {
 
         for label in [
             "recording.mkv",
+            "Queue (3)",
             "Change file",
             "Close source",
             "Audio Mix",
@@ -386,7 +395,7 @@ mod tests {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
-            let _ = show(&mut child, &presentation(), Operation::AudioMix, true);
+            let _ = show(&mut child, &presentation(), Operation::AudioMix, 3, true);
         });
 
         let debug = format!("{:?}", output.shapes);
@@ -403,7 +412,7 @@ mod tests {
             assert!(rect.left() >= 0.0);
             assert!(rect.right() <= width + 0.5, "{label} overflowed: {rect:?}");
         }
-        for label in ["Change file", "Close source"] {
+        for label in ["Queue (3)", "Change file", "Close source"] {
             assert!(output_text_rect(&output, label).right() <= width + 0.5);
         }
     }
@@ -420,7 +429,7 @@ mod tests {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
-            let _ = show(&mut child, &presentation(), Operation::AudioMix, true);
+            let _ = show(&mut child, &presentation(), Operation::AudioMix, 3, true);
         });
 
         let first = output_text_rect(&output, "Audio Mix");

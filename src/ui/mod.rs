@@ -25,6 +25,10 @@ use crate::queue::JobId;
 
 pub const ADD_TO_QUEUE_LABEL: &str = "Add to queue";
 
+pub fn queue_count_label(count: usize) -> String {
+    format!("Queue ({count})")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceAction {
     ChangeFile,
@@ -37,6 +41,7 @@ pub enum QueueAction {
     CancelCurrent,
     Stop,
     Remove(JobId),
+    OpenFolder(JobId),
     ClearFinished,
     Back,
     #[default]
