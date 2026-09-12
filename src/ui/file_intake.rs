@@ -15,6 +15,7 @@ pub enum FileIntakeAction {
     #[default]
     None,
     OpenFile,
+    OpenQueue,
 }
 
 pub fn show_drag_hover(ui: &Ui) {
@@ -29,15 +30,17 @@ pub fn show_drag_hover(ui: &Ui) {
 pub fn show(
     ui: &mut Ui,
     inspecting: bool,
+    queue_count: usize,
     error: Option<&MediaError>,
     error_details_open: &mut bool,
 ) -> FileIntakeAction {
-    show_with_layout_plan(ui, inspecting, error, error_details_open).0
+    show_with_layout_plan(ui, inspecting, queue_count, error, error_details_open).0
 }
 
 fn show_with_layout_plan(
     ui: &mut Ui,
     inspecting: bool,
+    queue_count: usize,
     error: Option<&MediaError>,
     error_details_open: &mut bool,
 ) -> (FileIntakeAction, layout::IntakeLayoutPlan) {
@@ -59,7 +62,12 @@ fn show_with_layout_plan(
                 action.set(next);
             }
         },
-        |_| {},
+        |ui| {
+            let next = show_queue_action(ui, inspecting, queue_count);
+            if next != FileIntakeAction::None {
+                action.set(next);
+            }
+        },
     );
 
     (action.get(), plan)
@@ -73,7 +81,7 @@ fn intake_region_heights(
     error_details_open: bool,
 ) -> [f32; 3] {
     let top = ui.text_style_height(&fonts::wordmark_text_style());
-    let bottom = 0.0;
+    let bottom = theme::PRIMARY_CONTROL_HEIGHT;
     let middle = if inspecting {
         ui.text_style_height(&TextStyle::Body)
     } else {
@@ -89,6 +97,23 @@ fn intake_region_heights(
     };
 
     [top, middle, bottom]
+}
+
+fn show_queue_action(ui: &mut Ui, inspecting: bool, queue_count: usize) -> FileIntakeAction {
+    let label = queue_label(queue_count);
+    if ui
+        .add_enabled_ui(!inspecting, |ui| widgets::secondary_button(ui, &label))
+        .inner
+        .clicked()
+    {
+        FileIntakeAction::OpenQueue
+    } else {
+        FileIntakeAction::None
+    }
+}
+
+fn queue_label(queue_count: usize) -> String {
+    format!("Queue ({queue_count})")
 }
 
 fn show_wordmark(ui: &mut Ui) {
@@ -146,7 +171,7 @@ mod tests {
     };
 
     use super::{
-        DROP_HINT, INSPECTING_LABEL, OPEN_LABEL, WORDMARK, intake_region_heights,
+        DROP_HINT, INSPECTING_LABEL, OPEN_LABEL, WORDMARK, intake_region_heights, queue_label,
         show_with_layout_plan,
     };
 
@@ -156,6 +181,8 @@ mod tests {
         assert_eq!(OPEN_LABEL, "Open files");
         assert_eq!(DROP_HINT, "or drop a video anywhere");
         assert_eq!(INSPECTING_LABEL, "Inspecting media…");
+        assert_eq!(queue_label(0), "Queue (0)");
+        assert_eq!(queue_label(12), "Queue (12)");
     }
 
     #[test]
@@ -250,7 +277,7 @@ mod tests {
                         .max_rect(rect)
                         .layout(egui::Layout::top_down(egui::Align::Center)),
                     |ui| {
-                        show_with_layout_plan(ui, false, error, &mut details_open)
+                        show_with_layout_plan(ui, false, 0, error, &mut details_open)
                             .1
                             .layout
                     },

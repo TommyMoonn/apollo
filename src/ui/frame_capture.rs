@@ -20,7 +20,7 @@ use crate::{
     media::{model::MediaFile, output::MediaOutputError},
 };
 
-use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
+use super::{ADD_TO_QUEUE_LABEL, fonts, layout, output_name::OutputNameState, theme, widgets};
 
 const TIMESTAMP_LABEL: &str = "Timestamp";
 const OUTPUT_LABEL: &str = "Output";
@@ -55,6 +55,7 @@ pub enum FrameCaptureSelectionAction {
     #[default]
     None,
     BrowseOutput,
+    QueueRequested,
     CaptureRequested,
 }
 
@@ -149,6 +150,7 @@ pub fn show(
     media: &MediaFile,
     presentation: &FrameCapturePresentation,
     state: &mut FrameCaptureSelectionState,
+    immediate_start_allowed: bool,
 ) -> FrameCaptureSelectionAction {
     let action = Cell::new(FrameCaptureSelectionAction::None);
     let validation = state.validation(media);
@@ -207,8 +209,23 @@ pub fn show(
             }
         },
         |ui| {
-            if widgets::primary_button_enabled(ui, CAPTURE_LABEL, validation.is_ok()).clicked() {
+            if widgets::primary_button_enabled(
+                ui,
+                CAPTURE_LABEL,
+                validation.is_ok() && immediate_start_allowed,
+            )
+            .clicked()
+            {
                 action.set(FrameCaptureSelectionAction::CaptureRequested);
+            }
+            if ui
+                .add_enabled_ui(validation.is_ok(), |ui| {
+                    widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
+                })
+                .inner
+                .clicked()
+            {
+                action.set(FrameCaptureSelectionAction::QueueRequested);
             }
         },
     );
@@ -391,7 +408,7 @@ mod tests {
         let presentation = FrameCapturePresentation::new(&media);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &presentation, &mut state);
+            let _ = super::show(ui, &media, &presentation, &mut state, true);
         });
         assert!(output.shapes.iter().any(|shape| {
             shape_contains(&shape.shape, "Enter a timestamp using HH:MM:SS.mmm.")
@@ -441,7 +458,7 @@ mod tests {
         let mut state = FrameCaptureSelectionState::new(&media);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &presentation, &mut state);
+            let _ = super::show(ui, &media, &presentation, &mut state, true);
         });
 
         assert!(

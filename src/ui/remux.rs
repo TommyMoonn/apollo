@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-use super::{layout, output_name::OutputNameState, theme, widgets};
+use super::{ADD_TO_QUEUE_LABEL, layout, output_name::OutputNameState, theme, widgets};
 
 const OUTPUT_LABEL: &str = "Output";
 const BROWSE_LABEL: &str = "Browse";
@@ -86,6 +86,7 @@ pub enum RemuxSelectionAction {
     #[default]
     None,
     BrowseOutput,
+    QueueRequested,
     RemuxRequested,
 }
 
@@ -147,6 +148,7 @@ pub fn show(
     media: &MediaFile,
     presentation: &RemuxPresentation,
     state: &mut RemuxSelectionState,
+    immediate_start_allowed: bool,
 ) -> RemuxSelectionAction {
     let action = Cell::new(RemuxSelectionAction::None);
     let validation = state.validation(media);
@@ -184,8 +186,23 @@ pub fn show(
             }
         },
         |ui| {
-            if widgets::primary_button_enabled(ui, REMUX_LABEL, validation.is_ok()).clicked() {
+            if widgets::primary_button_enabled(
+                ui,
+                REMUX_LABEL,
+                validation.is_ok() && immediate_start_allowed,
+            )
+            .clicked()
+            {
                 action.set(RemuxSelectionAction::RemuxRequested);
+            }
+            if ui
+                .add_enabled_ui(validation.is_ok(), |ui| {
+                    widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
+                })
+                .inner
+                .clicked()
+            {
+                action.set(RemuxSelectionAction::QueueRequested);
             }
         },
     );

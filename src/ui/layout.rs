@@ -51,6 +51,9 @@ pub const OUTPUT_FILENAME_MIN_INLINE_WIDTH: f32 = 180.0;
 /// Minimum title/metadata width retained beside an inline Audio Mix gain control.
 pub const TRACK_TEXT_MIN_INLINE_WIDTH: f32 = 240.0;
 
+/// Queue rows keep all identity and state columns inline only while each column remains readable.
+pub const QUEUE_ROW_INLINE_MIN_WIDTH: f32 = 520.0;
+
 /// Useful source identity width retained beside workspace source actions before compact metadata
 /// is omitted at narrow widths.
 pub const WORKSPACE_METADATA_MIN_WIDTH: f32 = 220.0;
@@ -90,6 +93,12 @@ pub enum OutputRowLayout {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackRowLayout {
+    Inline,
+    Stacked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueRowLayout {
     Inline,
     Stacked,
 }
@@ -566,6 +575,14 @@ pub fn field_pair_layout(available_width: f32) -> FieldPairLayout {
     }
 }
 
+pub fn queue_row_layout(available_width: f32) -> QueueRowLayout {
+    if safe_dimension(available_width) >= QUEUE_ROW_INLINE_MIN_WIDTH {
+        QueueRowLayout::Inline
+    } else {
+        QueueRowLayout::Stacked
+    }
+}
+
 /// Intrinsic bounds of an action group for the selected responsive arrangement.
 ///
 /// The group size is derived only from intrinsic action sizes and the supplied shared gap. It does
@@ -719,12 +736,13 @@ mod tests {
         FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, FieldPairLayout, IntakeLayout,
         MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, OUTPUT_FILENAME_MIN_INLINE_WIDTH, OutputRowLayout,
         PATH_TEXT_OVERFLOW, PIXEL_DIMENSION_CONTROL_WIDTH, PIXEL_DIMENSION_STEP,
-        PROGRESS_TRACK_HEIGHT, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
-        TRACK_TEXT_MIN_INLINE_WIDTH, TextOverflowPolicy, TrackRowLayout, WINDOW_CHROME_HEIGHT,
-        WORKSPACE_METADATA_MIN_WIDTH, action_group_size, action_layout, bounded_content_width,
-        centered_action_group, field_pair_layout, focus_content, intake_content,
-        intake_layout_plan, operation_surface, output_row_plan, surface_fade, track_row_plan,
-        workspace_header_shows_metadata, workspace_switcher_fits_one_line,
+        PROGRESS_TRACK_HEIGHT, QUEUE_ROW_INLINE_MIN_WIDTH, QueueRowLayout, REFERENCE_CONTENT_SIZE,
+        REFERENCE_WINDOW_SIZE, TRACK_TEXT_MIN_INLINE_WIDTH, TextOverflowPolicy, TrackRowLayout,
+        WINDOW_CHROME_HEIGHT, WORKSPACE_METADATA_MIN_WIDTH, action_group_size, action_layout,
+        bounded_content_width, centered_action_group, field_pair_layout, focus_content,
+        intake_content, intake_layout_plan, operation_surface, output_row_plan, queue_row_layout,
+        surface_fade, track_row_plan, workspace_header_shows_metadata,
+        workspace_switcher_fits_one_line,
     };
     use crate::ui::theme;
 
@@ -741,6 +759,7 @@ mod tests {
         assert_eq!(PIXEL_DIMENSION_CONTROL_WIDTH, 96.0);
         assert_eq!(PIXEL_DIMENSION_STEP, 2.0);
         assert_eq!(ENCODER_QUALITY_CONTROL_WIDTH, 96.0);
+        assert_eq!(QUEUE_ROW_INLINE_MIN_WIDTH, 520.0);
         assert_eq!(ENCODER_QUALITY_STEP, 1.0);
         assert_eq!(OUTPUT_FILENAME_MIN_INLINE_WIDTH, 180.0);
         assert_eq!(WORKSPACE_METADATA_MIN_WIDTH, 220.0);
@@ -757,6 +776,14 @@ mod tests {
         assert_eq!(theme::SOURCE_HEADER_GAP, 14.0);
         assert_eq!(theme::INLINE_ACTION_GAP, 10.0);
         assert_eq!(PROGRESS_TRACK_HEIGHT, 4.0);
+    }
+
+    #[test]
+    fn queue_rows_reflow_before_identity_columns_become_unreadable() {
+        assert_eq!(queue_row_layout(519.0), QueueRowLayout::Stacked);
+        assert_eq!(queue_row_layout(520.0), QueueRowLayout::Inline);
+        assert_eq!(queue_row_layout(900.0), QueueRowLayout::Inline);
+        assert_eq!(queue_row_layout(f32::NAN), QueueRowLayout::Stacked);
     }
 
     #[test]
@@ -1464,6 +1491,7 @@ mod tests {
     #[test]
     fn operation_surface_anchors_action_and_keeps_content_above_it_at_all_heights() {
         egui::__run_test_ui(|ui| {
+            let mut previous_content_height = 0.0;
             for height in [204.0, 323.0, 700.0] {
                 let (rect, _) =
                     ui.allocate_exact_size(Vec2::new(620.0, height), egui::Sense::hover());
@@ -1490,6 +1518,8 @@ mod tests {
 
                 assert_eq!(response.content_viewport.left(), rect.left());
                 assert_eq!(response.content_viewport.right(), rect.right());
+                assert!(response.content_viewport.height() > previous_content_height);
+                previous_content_height = response.content_viewport.height();
                 assert!(response.content_viewport.bottom() <= response.action_bar.top());
                 assert!((response.action_bar.bottom() - rect.bottom()).abs() <= 0.5);
                 assert_eq!(

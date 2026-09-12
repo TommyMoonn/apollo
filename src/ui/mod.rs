@@ -11,6 +11,7 @@ pub mod layout;
 pub mod media_error;
 mod media_lifecycle;
 mod output_name;
+pub mod queue;
 pub mod remux;
 pub mod remux_progress;
 pub mod source_presentation;
@@ -21,6 +22,8 @@ pub mod widgets;
 pub mod workspace;
 
 use crate::queue::JobId;
+
+pub const ADD_TO_QUEUE_LABEL: &str = "Add to queue";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceAction {

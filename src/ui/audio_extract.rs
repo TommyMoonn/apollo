@@ -14,7 +14,7 @@ use crate::{
     media::{model::MediaFile, output::MediaOutputError},
 };
 
-use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
+use super::{ADD_TO_QUEUE_LABEL, fonts, layout, output_name::OutputNameState, theme, widgets};
 
 const AUDIO_TRACK_LABEL: &str = "Audio track";
 const OUTPUT_LABEL: &str = "Output";
@@ -69,6 +69,7 @@ pub enum AudioExtractSelectionAction {
     #[default]
     None,
     BrowseOutput,
+    QueueRequested,
     ExtractRequested,
 }
 
@@ -173,6 +174,7 @@ pub fn show(
     media: &MediaFile,
     presentation: &AudioExtractPresentation,
     state: &mut AudioExtractSelectionState,
+    immediate_start_allowed: bool,
 ) -> AudioExtractSelectionAction {
     let action = Cell::new(AudioExtractSelectionAction::None);
     let validation = state.validation(media);
@@ -222,8 +224,23 @@ pub fn show(
             }
         },
         |ui| {
-            if widgets::primary_button_enabled(ui, EXTRACT_LABEL, validation.is_ok()).clicked() {
+            if widgets::primary_button_enabled(
+                ui,
+                EXTRACT_LABEL,
+                validation.is_ok() && immediate_start_allowed,
+            )
+            .clicked()
+            {
                 action.set(AudioExtractSelectionAction::ExtractRequested);
+            }
+            if ui
+                .add_enabled_ui(validation.is_ok(), |ui| {
+                    widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
+                })
+                .inner
+                .clicked()
+            {
+                action.set(AudioExtractSelectionAction::QueueRequested);
             }
         },
     );

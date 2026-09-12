@@ -21,7 +21,7 @@ use crate::{
     },
 };
 
-use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
+use super::{ADD_TO_QUEUE_LABEL, fonts, layout, output_name::OutputNameState, theme, widgets};
 
 const UNTITLED_AUDIO: &str = "Untitled audio";
 const AUDIO_TRACKS_LABEL: &str = "Audio tracks";
@@ -75,6 +75,7 @@ pub enum AudioMixSelectionAction {
     #[default]
     None,
     BrowseOutput,
+    QueueRequested,
     MixRequested,
 }
 
@@ -356,6 +357,7 @@ pub fn show(
     media: &MediaFile,
     presentation: &AudioMixPresentation,
     state: &mut AudioMixSelectionState,
+    immediate_start_allowed: bool,
 ) -> AudioMixSelectionAction {
     let action = Cell::new(AudioMixSelectionAction::None);
     let (can_mix, feedback) = {
@@ -406,8 +408,19 @@ pub fn show(
             }
         },
         |ui| {
-            if widgets::primary_button_enabled(ui, MIX_LABEL, can_mix).clicked() {
+            if widgets::primary_button_enabled(ui, MIX_LABEL, can_mix && immediate_start_allowed)
+                .clicked()
+            {
                 action.set(AudioMixSelectionAction::MixRequested);
+            }
+            if ui
+                .add_enabled_ui(can_mix, |ui| {
+                    widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
+                })
+                .inner
+                .clicked()
+            {
+                action.set(AudioMixSelectionAction::QueueRequested);
             }
         },
     );
@@ -1011,7 +1024,7 @@ mod tests {
         for _ in 0..2 {
             let output = context.run_ui(Default::default(), |ui| {
                 assert_eq!(
-                    super::show(ui, &media, &presentation, &mut state),
+                    super::show(ui, &media, &presentation, &mut state, true),
                     AudioMixSelectionAction::None
                 );
             });

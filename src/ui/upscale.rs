@@ -23,7 +23,7 @@ use crate::{
     },
 };
 
-use super::{fonts, layout, output_name::OutputNameState, theme, widgets};
+use super::{ADD_TO_QUEUE_LABEL, fonts, layout, output_name::OutputNameState, theme, widgets};
 
 const PRESET_TARGETS: [UpscaleTarget; 3] = [
     UpscaleTarget::Qhd1440,
@@ -62,6 +62,7 @@ pub enum UpscaleSelectionAction {
     #[default]
     None,
     BrowseOutput,
+    QueueRequested,
     UpscaleRequested,
 }
 
@@ -264,6 +265,7 @@ pub fn show(
     media: &MediaFile,
     state: &mut UpscaleSelectionState,
     capabilities: UpscaleEncoderCapabilities<'_>,
+    immediate_start_allowed: bool,
 ) -> UpscaleSelectionAction {
     let action = Cell::new(UpscaleSelectionAction::None);
     let validation = state.ready_validation(media, capabilities);
@@ -342,8 +344,23 @@ pub fn show(
         },
         |ui| {
             let runnable = matches!(validation, Some(Ok(())));
-            if widgets::primary_button_enabled(ui, UPSCALE_LABEL, runnable).clicked() {
+            if widgets::primary_button_enabled(
+                ui,
+                UPSCALE_LABEL,
+                runnable && immediate_start_allowed,
+            )
+            .clicked()
+            {
                 action.set(UpscaleSelectionAction::UpscaleRequested);
+            }
+            if ui
+                .add_enabled_ui(runnable, |ui| {
+                    widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
+                })
+                .inner
+                .clicked()
+            {
+                action.set(UpscaleSelectionAction::QueueRequested);
             }
         },
     );
