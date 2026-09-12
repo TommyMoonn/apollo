@@ -9,13 +9,14 @@ use crate::media::{
 };
 
 use super::model::{
-    JobId, QueueEnqueueError, QueueJobFailure, QueueJobState, QueuedJob, QueuedOperation,
+    JobId, QueueEnqueueError, QueueJobFailure, QueueJobState, QueueMutationError, QueueRunState,
+    QueuedJob, QueuedOperation, WaitingJobMove,
 };
 
 pub struct MediaQueue {
     jobs: Vec<QueuedJob>,
     next_job_id: Option<u64>,
-    started: bool,
+    run_state: QueueRunState,
     active_job: Option<JobId>,
     execution: MediaExecution,
 }
@@ -28,7 +29,7 @@ impl Default for MediaQueue {
 
 impl Drop for MediaQueue {
     fn drop(&mut self) {
-        self.stop();
+        self.cancel_for_shutdown();
     }
 }
 
@@ -37,7 +38,7 @@ impl MediaQueue {
         Self {
             jobs: Vec::new(),
             next_job_id: Some(1),
-            started: false,
+            run_state: QueueRunState::Stopped,
             active_job: None,
             execution: MediaExecution::new(),
         }
@@ -56,7 +57,11 @@ impl MediaQueue {
     }
 
     pub fn is_started(&self) -> bool {
-        self.started
+        self.run_state != QueueRunState::Stopped
+    }
+
+    pub fn run_state(&self) -> QueueRunState {
+        self.run_state
     }
 
     pub fn is_running(&self) -> bool {
@@ -80,13 +85,8 @@ impl MediaQueue {
         let normalized_output =
             normalized_output_destination(operation.input(), operation.output())
                 .map_err(QueueEnqueueError::Output)?;
-        if let Some(existing) = self.jobs.iter().find(|job| {
-            !job.state().is_terminal()
-                && output_paths_equal(job.normalized_output(), &normalized_output)
-        }) {
-            return Err(QueueEnqueueError::DuplicateDestination {
-                existing_job: existing.id(),
-            });
+        if let Some(existing_job) = self.duplicate_destination(&normalized_output, None) {
+            return Err(QueueEnqueueError::DuplicateDestination { existing_job });
         }
 
         let id = JobId::new(raw_id);
@@ -123,8 +123,22 @@ impl MediaQueue {
         self.execution.cancel()
     }
 
-    pub fn stop(&mut self) -> bool {
-        self.started = false;
+    pub fn stop_after_current(&mut self) -> bool {
+        match (self.run_state, self.active_job) {
+            (QueueRunState::Running, Some(_)) => {
+                self.run_state = QueueRunState::StoppingAfterCurrent;
+                true
+            }
+            (QueueRunState::Running, None) => {
+                self.run_state = QueueRunState::Stopped;
+                true
+            }
+            (QueueRunState::Stopped | QueueRunState::StoppingAfterCurrent, _) => false,
+        }
+    }
+
+    pub fn cancel_queue(&mut self) -> bool {
+        self.run_state = QueueRunState::Stopped;
         let mut changed = false;
         for job in &mut self.jobs {
             if matches!(job.state(), QueueJobState::Waiting) {
@@ -133,6 +147,59 @@ impl MediaQueue {
             }
         }
         self.execution.cancel() || changed
+    }
+
+    pub fn replace_waiting_operation(
+        &mut self,
+        id: JobId,
+        operation: QueuedOperation,
+    ) -> Result<(), QueueMutationError> {
+        self.require_mutation_stopped()?;
+        let index = self.waiting_job_index(id)?;
+        let job = &self.jobs[index];
+
+        let replacement_identity = SourceIdentity::read(operation.input())
+            .map_err(QueueMutationError::SourceUnavailable)?;
+        if operation.input() != job.operation().input()
+            || !job
+                .source_identity()
+                .is_reliably_same(&replacement_identity)
+        {
+            return Err(QueueMutationError::SourceChanged);
+        }
+
+        let normalized_output =
+            normalized_output_destination(operation.input(), operation.output())
+                .map_err(QueueMutationError::Output)?;
+        if let Some(existing_job) = self.duplicate_destination(&normalized_output, Some(id)) {
+            return Err(QueueMutationError::DuplicateDestination { existing_job });
+        }
+
+        self.jobs[index].replace_operation(operation, normalized_output);
+        Ok(())
+    }
+
+    pub fn move_waiting(
+        &mut self,
+        id: JobId,
+        direction: WaitingJobMove,
+    ) -> Result<bool, QueueMutationError> {
+        self.require_mutation_stopped()?;
+        let index = self.waiting_job_index(id)?;
+        let adjacent = match direction {
+            WaitingJobMove::Earlier => self.jobs[..index]
+                .iter()
+                .rposition(|job| matches!(job.state(), QueueJobState::Waiting)),
+            WaitingJobMove::Later => self.jobs[index + 1..]
+                .iter()
+                .position(|job| matches!(job.state(), QueueJobState::Waiting))
+                .map(|offset| index + 1 + offset),
+        };
+        let Some(adjacent) = adjacent else {
+            return Ok(false);
+        };
+        self.jobs.swap(index, adjacent);
+        Ok(true)
     }
 
     pub fn remove_waiting(&mut self, id: JobId) -> bool {
@@ -158,11 +225,11 @@ impl MediaQueue {
         F: FnMut(JobId, MediaProcessCommand) -> Result<P, MediaProcessStartError>,
         P: ProcessControl + 'static,
     {
-        if self.started || self.active_job.is_some() {
+        if self.run_state != QueueRunState::Stopped || self.active_job.is_some() {
             return false;
         }
 
-        self.started = true;
+        self.run_state = QueueRunState::Running;
         self.advance_with_launcher(tools, launcher);
         self.active_job.is_some()
     }
@@ -198,8 +265,10 @@ impl MediaQueue {
             "terminal queue execution must reset before advancing"
         );
 
-        if self.started {
-            self.advance_with_launcher(tools, launcher);
+        match self.run_state {
+            QueueRunState::Running => self.advance_with_launcher(tools, launcher),
+            QueueRunState::StoppingAfterCurrent => self.run_state = QueueRunState::Stopped,
+            QueueRunState::Stopped => {}
         }
     }
 
@@ -260,7 +329,46 @@ impl MediaQueue {
             }
         }
 
-        self.started = false;
+        self.run_state = QueueRunState::Stopped;
+    }
+
+    fn require_mutation_stopped(&self) -> Result<(), QueueMutationError> {
+        if self.run_state == QueueRunState::Stopped && self.active_job.is_none() {
+            Ok(())
+        } else {
+            Err(QueueMutationError::AutomaticAdvancementActive)
+        }
+    }
+
+    fn waiting_job_index(&self, id: JobId) -> Result<usize, QueueMutationError> {
+        let index = self
+            .jobs
+            .iter()
+            .position(|job| job.id() == id)
+            .ok_or(QueueMutationError::JobNotFound(id))?;
+        if !matches!(self.jobs[index].state(), QueueJobState::Waiting) {
+            return Err(QueueMutationError::JobNotWaiting(id));
+        }
+        Ok(index)
+    }
+
+    fn duplicate_destination(
+        &self,
+        normalized_output: &std::path::Path,
+        excluded_job: Option<JobId>,
+    ) -> Option<JobId> {
+        self.jobs
+            .iter()
+            .find(|job| {
+                Some(job.id()) != excluded_job
+                    && !job.state().is_terminal()
+                    && output_paths_equal(job.normalized_output(), normalized_output)
+            })
+            .map(QueuedJob::id)
+    }
+
+    fn cancel_for_shutdown(&mut self) {
+        let _ = self.cancel_queue();
     }
 
     fn job_mut(&mut self, id: JobId) -> &mut QueuedJob {
@@ -289,6 +397,7 @@ mod tests {
     };
 
     use crate::{
+        audio_extract::model::{AudioExtractFormat, AudioExtractRequest},
         media::{
             container::MediaContainer,
             execution::ProcessControl,
@@ -296,7 +405,10 @@ mod tests {
             process::{MediaProcessFailure, MediaProcessStartError, MediaProcessState},
             tools::MediaTools,
         },
-        queue::model::{QueueEnqueueError, QueueJobFailure, QueueJobState, QueuedOperation},
+        queue::model::{
+            QueueEnqueueError, QueueJobFailure, QueueJobState, QueueMutationError, QueueRunState,
+            QueuedOperation, WaitingJobMove,
+        },
         remux::model::RemuxRequest,
     };
 
@@ -363,6 +475,165 @@ mod tests {
     }
 
     #[test]
+    fn waiting_replacement_preserves_identity_snapshot_position_and_job_id() {
+        let directory = TestDirectory::new("replace-operation");
+        let media = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let first = queue
+            .enqueue(&media, remux(&media, directory.path().join("first.mkv")))
+            .unwrap();
+        let second = queue
+            .enqueue(&media, remux(&media, directory.path().join("second.mkv")))
+            .unwrap();
+        let source_identity = queue.jobs()[0].source_identity().clone();
+        let media_snapshot = queue.jobs()[0].media().clone();
+        let adjusted_output = directory.path().join("first-adjusted.mkv");
+        let replacement_output = directory.path().join("first-audio.m4a");
+
+        queue
+            .replace_waiting_operation(first, remux(&media, adjusted_output.clone()))
+            .unwrap();
+        assert!(matches!(
+            queue.jobs()[0].operation(),
+            QueuedOperation::Remux(request) if request.output == adjusted_output
+        ));
+
+        queue
+            .replace_waiting_operation(first, audio_extract(&media, replacement_output.clone()))
+            .unwrap();
+
+        assert_eq!(
+            queue.jobs().iter().map(|job| job.id()).collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        assert_eq!(queue.jobs()[0].source_identity(), &source_identity);
+        assert_eq!(queue.jobs()[0].media(), &media_snapshot);
+        assert!(matches!(
+            queue.jobs()[0].operation(),
+            QueuedOperation::AudioExtract(request) if request.output == replacement_output
+        ));
+    }
+
+    #[test]
+    fn waiting_replacement_revalidates_source_and_is_atomic_on_failure() {
+        let directory = TestDirectory::new("replace-atomic");
+        let source_media = media(&directory, "source.mkv");
+        let other_media = media(&directory, "other.mkv");
+        let first_output = directory.path().join("first.mkv");
+        let second_output = directory.path().join("second.mkv");
+        let mut queue = MediaQueue::new();
+        let first = queue
+            .enqueue(&source_media, remux(&source_media, first_output.clone()))
+            .unwrap();
+        let second = queue
+            .enqueue(&source_media, remux(&source_media, second_output.clone()))
+            .unwrap();
+        let original_operation = queue.jobs()[0].operation().clone();
+        let original_normalized_output = queue.jobs()[0].normalized_output().to_path_buf();
+
+        assert_eq!(
+            queue.replace_waiting_operation(
+                first,
+                remux(&other_media, directory.path().join("other-output.mkv"))
+            ),
+            Err(QueueMutationError::SourceChanged)
+        );
+        assert_eq!(queue.jobs()[0].operation(), &original_operation);
+        assert_eq!(
+            queue.jobs()[0].normalized_output(),
+            original_normalized_output
+        );
+
+        assert_eq!(
+            queue.replace_waiting_operation(first, remux(&source_media, second_output)),
+            Err(QueueMutationError::DuplicateDestination {
+                existing_job: second
+            })
+        );
+        assert_eq!(queue.jobs()[0].operation(), &original_operation);
+        assert_eq!(
+            queue.jobs()[0].normalized_output(),
+            original_normalized_output
+        );
+
+        assert_eq!(
+            queue.replace_waiting_operation(first, remux(&source_media, source_media.path.clone())),
+            Err(QueueMutationError::Output(
+                crate::media::output::MediaOutputError::SameInputAndOutput(
+                    source_media.path.clone()
+                )
+            ))
+        );
+        assert_eq!(queue.jobs()[0].operation(), &original_operation);
+        assert_eq!(
+            queue.jobs()[0].normalized_output(),
+            original_normalized_output
+        );
+
+        queue
+            .replace_waiting_operation(first, remux(&source_media, first_output))
+            .unwrap();
+    }
+
+    #[test]
+    fn waiting_replacement_rejects_a_source_changed_after_enqueue() {
+        let directory = TestDirectory::new("replace-changed-source");
+        let media = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let id = queue
+            .enqueue(&media, remux(&media, directory.path().join("first.mkv")))
+            .unwrap();
+        let original = queue.jobs()[0].operation().clone();
+        fs::write(&media.path, b"changed source with a different length").unwrap();
+
+        assert_eq!(
+            queue.replace_waiting_operation(
+                id,
+                remux(&media, directory.path().join("replacement.mkv"))
+            ),
+            Err(QueueMutationError::SourceChanged)
+        );
+        assert_eq!(queue.jobs()[0].operation(), &original);
+    }
+
+    #[test]
+    fn waiting_reorder_moves_only_waiting_jobs_without_recreating_them() {
+        let directory = TestDirectory::new("reorder");
+        let media = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let terminal = queue
+            .enqueue(&media, remux(&media, directory.path().join("terminal.mkv")))
+            .unwrap();
+        assert!(queue.cancel_queue());
+        let first = queue
+            .enqueue(&media, remux(&media, directory.path().join("first.mkv")))
+            .unwrap();
+        let second = queue
+            .enqueue(&media, remux(&media, directory.path().join("second.mkv")))
+            .unwrap();
+        let third = queue
+            .enqueue(&media, remux(&media, directory.path().join("third.mkv")))
+            .unwrap();
+        let operations = queue
+            .jobs()
+            .iter()
+            .map(|job| (job.id(), job.operation().clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert!(queue.move_waiting(third, WaitingJobMove::Earlier).unwrap());
+        assert!(queue.move_waiting(first, WaitingJobMove::Later).unwrap());
+        assert!(!queue.move_waiting(second, WaitingJobMove::Later).unwrap());
+        assert_eq!(
+            queue.jobs().iter().map(|job| job.id()).collect::<Vec<_>>(),
+            vec![terminal, third, first, second]
+        );
+        assert!(matches!(queue.jobs()[0].state(), QueueJobState::Cancelled));
+        for job in &queue.jobs()[1..] {
+            assert_eq!(job.operation(), &operations[&job.id()]);
+        }
+    }
+
+    #[test]
     fn terminal_job_no_longer_reserves_its_destination() {
         let directory = TestDirectory::new("terminal-output");
         let media = media(&directory, "source.mkv");
@@ -371,7 +642,7 @@ mod tests {
         let first = queue
             .enqueue(&media, remux(&media, output.clone()))
             .unwrap();
-        assert!(queue.stop());
+        assert!(queue.cancel_queue());
         assert!(matches!(queue.jobs()[0].state(), QueueJobState::Cancelled));
 
         let second = queue.enqueue(&media, remux(&media, output)).unwrap();
@@ -512,6 +783,149 @@ mod tests {
     }
 
     #[test]
+    fn running_and_terminal_jobs_reject_waiting_mutation() {
+        let directory = TestDirectory::new("mutation-state");
+        let media = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let running = queue
+            .enqueue(&media, remux(&media, directory.path().join("running.mkv")))
+            .unwrap();
+        let waiting = queue
+            .enqueue(&media, remux(&media, directory.path().join("waiting.mkv")))
+            .unwrap();
+        let mut launcher = |_, _| Ok(FakeProcessControl::running());
+        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+
+        assert_eq!(
+            queue.replace_waiting_operation(
+                running,
+                remux(&media, directory.path().join("replacement.mkv"))
+            ),
+            Err(QueueMutationError::AutomaticAdvancementActive)
+        );
+        assert_eq!(
+            queue.move_waiting(waiting, WaitingJobMove::Earlier),
+            Err(QueueMutationError::AutomaticAdvancementActive)
+        );
+
+        assert!(queue.cancel_queue());
+        queue.poll_with_launcher(&tools(&directory), &mut launcher);
+        assert_eq!(
+            queue.replace_waiting_operation(
+                running,
+                remux(&media, directory.path().join("terminal-replacement.mkv"))
+            ),
+            Err(QueueMutationError::JobNotWaiting(running))
+        );
+        assert_eq!(
+            queue.move_waiting(waiting, WaitingJobMove::Earlier),
+            Err(QueueMutationError::JobNotWaiting(waiting))
+        );
+    }
+
+    #[test]
+    fn stop_after_current_completes_active_then_preserves_and_restarts_waiting() {
+        let directory = TestDirectory::new("stop-after-current");
+        let first_media = media(&directory, "first-source.mkv");
+        let second_media = media(&directory, "second-source.mkv");
+        let mut queue = MediaQueue::new();
+        let first = queue
+            .enqueue(
+                &first_media,
+                remux(&first_media, directory.path().join("first-output.mkv")),
+            )
+            .unwrap();
+        let second = queue
+            .enqueue(
+                &second_media,
+                remux(&second_media, directory.path().join("second-output.mkv")),
+            )
+            .unwrap();
+        let first_process = FakeProcessControl::running();
+        let first_handle = first_process.clone();
+        let second_process = FakeProcessControl::running();
+        let mut processes = VecDeque::from([first_process, second_process]);
+        let launches = Arc::new(AtomicUsize::new(0));
+        let launch_count = Arc::clone(&launches);
+        let mut launcher = move |_, _| {
+            launch_count.fetch_add(1, Ordering::Relaxed);
+            Ok(processes.pop_front().expect("one fake per queued start"))
+        };
+
+        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert_eq!(queue.run_state(), QueueRunState::Running);
+        assert!(queue.stop_after_current());
+        assert_eq!(queue.run_state(), QueueRunState::StoppingAfterCurrent);
+        assert!(!queue.stop_after_current());
+        fs::write(queue.temporary_output_path().unwrap(), b"complete").unwrap();
+        first_handle.set_state(MediaProcessState::Completed);
+
+        queue.poll_with_launcher(&tools(&directory), &mut launcher);
+
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(queue.active_job(), None);
+        assert_eq!(launches.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            queue.jobs()[0].state(),
+            QueueJobState::Completed { .. }
+        ));
+        assert!(matches!(queue.jobs()[1].state(), QueueJobState::Waiting));
+
+        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert_eq!(queue.active_job(), Some(second));
+        assert_eq!(launches.load(Ordering::Relaxed), 2);
+        assert_eq!(queue.jobs()[0].id(), first);
+    }
+
+    #[test]
+    fn stop_after_current_without_an_active_job_stops_and_preserves_waiting() {
+        let directory = TestDirectory::new("stop-without-active");
+        let media = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let waiting = queue
+            .enqueue(&media, remux(&media, directory.path().join("waiting.mkv")))
+            .unwrap();
+        queue.run_state = QueueRunState::Running;
+
+        assert!(queue.stop_after_current());
+
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(queue.jobs()[0].id(), waiting);
+        assert!(matches!(queue.jobs()[0].state(), QueueJobState::Waiting));
+    }
+
+    #[test]
+    fn cancel_queue_leaves_existing_terminal_history_unchanged() {
+        let directory = TestDirectory::new("cancel-terminal-history");
+        let media = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let terminal = queue
+            .enqueue(&media, remux(&media, directory.path().join("terminal.mkv")))
+            .unwrap();
+        queue.jobs[0].set_state(QueueJobState::Failed(QueueJobFailure::SourceChanged));
+        let terminal_state = queue.jobs()[0].state().clone();
+        let active = queue
+            .enqueue(&media, remux(&media, directory.path().join("active.mkv")))
+            .unwrap();
+        let waiting = queue
+            .enqueue(&media, remux(&media, directory.path().join("waiting.mkv")))
+            .unwrap();
+        let mut launcher = |_, _| Ok(FakeProcessControl::running());
+        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+
+        assert!(queue.cancel_queue());
+        queue.poll_with_launcher(&tools(&directory), &mut launcher);
+
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(queue.jobs()[0].id(), terminal);
+        assert_eq!(queue.jobs()[0].state(), &terminal_state);
+        assert_eq!(queue.jobs()[1].id(), active);
+        assert!(matches!(queue.jobs()[1].state(), QueueJobState::Cancelled));
+        assert_eq!(queue.jobs()[2].id(), waiting);
+        assert!(matches!(queue.jobs()[2].state(), QueueJobState::Cancelled));
+    }
+
+    #[test]
     fn process_start_failure_advances_without_owning_two_processes() {
         let directory = TestDirectory::new("launch-failure");
         let first_media = media(&directory, "first-source.mkv");
@@ -551,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_cancels_active_and_waiting_jobs_without_advancing() {
+    fn cancel_queue_cancels_active_and_waiting_jobs_without_advancing() {
         let directory = TestDirectory::new("stop");
         let first_media = media(&directory, "first-source.mkv");
         let second_media = media(&directory, "second-source.mkv");
@@ -576,7 +990,7 @@ mod tests {
         };
 
         assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
-        assert!(queue.stop());
+        assert!(queue.cancel_queue());
         queue.poll_with_launcher(&tools(&directory), &mut launcher);
 
         assert_eq!(launches.load(Ordering::Relaxed), 1);
@@ -660,6 +1074,15 @@ mod tests {
             input: media.path.clone(),
             output,
             container: MediaContainer::Matroska,
+        })
+    }
+
+    fn audio_extract(media: &MediaFile, output: PathBuf) -> QueuedOperation {
+        QueuedOperation::AudioExtract(AudioExtractRequest {
+            input: media.path.clone(),
+            output,
+            audio_stream_index: 0,
+            format: AudioExtractFormat::Aac,
         })
     }
 

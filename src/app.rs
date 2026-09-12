@@ -477,7 +477,7 @@ impl ApolloApp {
         }
 
         let Some(tools) = self.ready_media_tools().cloned() else {
-            self.media_queue.stop();
+            self.media_queue.cancel_queue();
             return;
         };
         let sender = self.queue_event_sender.clone();
@@ -491,7 +491,7 @@ impl ApolloApp {
         match action {
             QueueAction::Start => self.start_media_queue(),
             QueueAction::CancelCurrent => self.media_queue.cancel_current(),
-            QueueAction::Stop => self.media_queue.stop(),
+            QueueAction::Stop => self.media_queue.cancel_queue(),
             QueueAction::Remove(job_id) => self.media_queue.remove_waiting(job_id),
             QueueAction::ClearFinished => self.media_queue.clear_finished() > 0,
             QueueAction::OpenFolder(job_id) => {

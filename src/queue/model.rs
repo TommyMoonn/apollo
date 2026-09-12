@@ -200,6 +200,54 @@ impl fmt::Display for QueueEnqueueError {
 impl std::error::Error for QueueEnqueueError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueMutationError {
+    AutomaticAdvancementActive,
+    JobNotFound(JobId),
+    JobNotWaiting(JobId),
+    SourceUnavailable(MediaIntakeError),
+    SourceChanged,
+    Output(MediaOutputError),
+    DuplicateDestination { existing_job: JobId },
+}
+
+impl fmt::Display for QueueMutationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AutomaticAdvancementActive => {
+                formatter.write_str("queue mutation is unavailable during automatic advancement")
+            }
+            Self::JobNotFound(id) => write!(formatter, "queue job {id} was not found"),
+            Self::JobNotWaiting(id) => write!(formatter, "queue job {id} is not waiting"),
+            Self::SourceUnavailable(error) => {
+                write!(formatter, "queued source is unavailable: {error}")
+            }
+            Self::SourceChanged => formatter.write_str("queued source changed"),
+            Self::Output(error) => write!(formatter, "replacement output is invalid: {error}"),
+            Self::DuplicateDestination { existing_job } => write!(
+                formatter,
+                "queue job {existing_job} already targets this output"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for QueueMutationError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitingJobMove {
+    Earlier,
+    Later,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueueRunState {
+    #[default]
+    Stopped,
+    Running,
+    StoppingAfterCurrent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedJob {
     id: JobId,
     source_identity: SourceIdentity,
@@ -253,5 +301,15 @@ impl QueuedJob {
 
     pub(crate) fn set_state(&mut self, state: QueueJobState) {
         self.state = state;
+    }
+
+    pub(crate) fn replace_operation(
+        &mut self,
+        operation: QueuedOperation,
+        normalized_output: std::path::PathBuf,
+    ) {
+        debug_assert!(matches!(self.state, QueueJobState::Waiting));
+        self.operation = operation;
+        self.normalized_output = normalized_output;
     }
 }
