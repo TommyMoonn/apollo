@@ -14,7 +14,10 @@ use crate::{
     media::{model::MediaFile, output::MediaOutputError},
 };
 
-use super::{ADD_TO_QUEUE_LABEL, fonts, layout, output_name::OutputNameState, theme, widgets};
+use super::{
+    ADD_TO_QUEUE_LABEL, CANCEL_QUEUE_EDIT_LABEL, OperationSurfaceMode, SAVE_QUEUE_CHANGES_LABEL,
+    fonts, layout, output_name::OutputNameState, theme, widgets,
+};
 
 const AUDIO_TRACK_LABEL: &str = "Audio track";
 const OUTPUT_LABEL: &str = "Output";
@@ -71,6 +74,8 @@ pub enum AudioExtractSelectionAction {
     BrowseOutput,
     QueueRequested,
     ExtractRequested,
+    SaveQueueChanges,
+    CancelQueueEdit,
 }
 
 impl AudioExtractSelectionState {
@@ -91,6 +96,23 @@ impl AudioExtractSelectionState {
                 ),
             ),
         }
+    }
+
+    pub fn from_request(media: &MediaFile, request: &AudioExtractRequest) -> Self {
+        let mut state = Self {
+            selected_stream_index: Some(request.audio_stream_index),
+            format: request.format,
+            output_name: OutputNameState::new(
+                &media.path,
+                default_output_stem(
+                    &media.path,
+                    media.audio_streams.len(),
+                    Some(request.audio_stream_index),
+                ),
+            ),
+        };
+        state.output_name.set_custom_path(request.output.clone());
+        state
     }
 
     pub fn selected_stream_index(&self) -> Option<u32> {
@@ -174,8 +196,9 @@ pub fn show(
     media: &MediaFile,
     presentation: &AudioExtractPresentation,
     state: &mut AudioExtractSelectionState,
-    immediate_start_allowed: bool,
+    mode: impl Into<OperationSurfaceMode>,
 ) -> AudioExtractSelectionAction {
+    let mode = mode.into();
     let action = Cell::new(AudioExtractSelectionAction::None);
     let validation = state.validation(media);
     let feedback = validation.as_ref().err().and_then(ready_feedback);
@@ -223,24 +246,36 @@ pub fn show(
                 let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
             }
         },
-        |ui| {
-            if widgets::primary_button_enabled(
-                ui,
-                EXTRACT_LABEL,
-                validation.is_ok() && immediate_start_allowed,
-            )
-            .clicked()
-            {
-                action.set(AudioExtractSelectionAction::ExtractRequested);
-            }
-            if ui
-                .add_enabled_ui(validation.is_ok(), |ui| {
-                    widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
-                })
-                .inner
+        |ui| match mode {
+            OperationSurfaceMode::Immediate { start_allowed } => {
+                if widgets::primary_button_enabled(
+                    ui,
+                    EXTRACT_LABEL,
+                    validation.is_ok() && start_allowed,
+                )
                 .clicked()
-            {
-                action.set(AudioExtractSelectionAction::QueueRequested);
+                {
+                    action.set(AudioExtractSelectionAction::ExtractRequested);
+                }
+                if ui
+                    .add_enabled_ui(validation.is_ok(), |ui| {
+                        widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    action.set(AudioExtractSelectionAction::QueueRequested);
+                }
+            }
+            OperationSurfaceMode::QueueEdit => {
+                if widgets::primary_button_enabled(ui, SAVE_QUEUE_CHANGES_LABEL, validation.is_ok())
+                    .clicked()
+                {
+                    action.set(AudioExtractSelectionAction::SaveQueueChanges);
+                }
+                if widgets::secondary_button(ui, CANCEL_QUEUE_EDIT_LABEL).clicked() {
+                    action.set(AudioExtractSelectionAction::CancelQueueEdit);
+                }
             }
         },
     );

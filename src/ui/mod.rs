@@ -24,6 +24,20 @@ pub mod workspace;
 use crate::queue::JobId;
 
 pub const ADD_TO_QUEUE_LABEL: &str = "Add to queue";
+pub const SAVE_QUEUE_CHANGES_LABEL: &str = "Save changes";
+pub const CANCEL_QUEUE_EDIT_LABEL: &str = "Cancel edit";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationSurfaceMode {
+    Immediate { start_allowed: bool },
+    QueueEdit,
+}
+
+impl From<bool> for OperationSurfaceMode {
+    fn from(start_allowed: bool) -> Self {
+        Self::Immediate { start_allowed }
+    }
+}
 
 pub fn queue_count_label(count: usize) -> String {
     format!("Queue ({count})")
@@ -39,7 +53,11 @@ pub enum SourceAction {
 pub enum QueueAction {
     Start,
     CancelCurrent,
-    Stop,
+    StopAfterCurrent,
+    CancelQueue,
+    Edit(JobId),
+    MoveEarlier(JobId),
+    MoveLater(JobId),
     Remove(JobId),
     OpenFolder(JobId),
     ClearFinished,

@@ -20,7 +20,10 @@ use crate::{
     media::{model::MediaFile, output::MediaOutputError},
 };
 
-use super::{ADD_TO_QUEUE_LABEL, fonts, layout, output_name::OutputNameState, theme, widgets};
+use super::{
+    ADD_TO_QUEUE_LABEL, CANCEL_QUEUE_EDIT_LABEL, OperationSurfaceMode, SAVE_QUEUE_CHANGES_LABEL,
+    fonts, layout, output_name::OutputNameState, theme, widgets,
+};
 
 const TIMESTAMP_LABEL: &str = "Timestamp";
 const OUTPUT_LABEL: &str = "Output";
@@ -57,6 +60,8 @@ pub enum FrameCaptureSelectionAction {
     BrowseOutput,
     QueueRequested,
     CaptureRequested,
+    SaveQueueChanges,
+    CancelQueueEdit,
 }
 
 impl FrameCaptureSelectionState {
@@ -69,6 +74,19 @@ impl FrameCaptureSelectionState {
                 default_output_stem(&media.path, FrameTimestamp::ZERO),
             ),
         }
+    }
+
+    pub fn from_request(media: &MediaFile, request: &FrameCaptureRequest) -> Self {
+        let mut state = Self {
+            timestamp_text: request.timestamp.to_string(),
+            format: request.format,
+            output_name: OutputNameState::new(
+                &media.path,
+                default_output_stem(&media.path, request.timestamp),
+            ),
+        };
+        state.output_name.set_custom_path(request.output.clone());
+        state
     }
 
     pub fn timestamp_text(&self) -> &str {
@@ -150,8 +168,9 @@ pub fn show(
     media: &MediaFile,
     presentation: &FrameCapturePresentation,
     state: &mut FrameCaptureSelectionState,
-    immediate_start_allowed: bool,
+    mode: impl Into<OperationSurfaceMode>,
 ) -> FrameCaptureSelectionAction {
+    let mode = mode.into();
     let action = Cell::new(FrameCaptureSelectionAction::None);
     let validation = state.validation(media);
     let feedback = validation.as_ref().err().and_then(ready_feedback);
@@ -208,24 +227,36 @@ pub fn show(
                 let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
             }
         },
-        |ui| {
-            if widgets::primary_button_enabled(
-                ui,
-                CAPTURE_LABEL,
-                validation.is_ok() && immediate_start_allowed,
-            )
-            .clicked()
-            {
-                action.set(FrameCaptureSelectionAction::CaptureRequested);
-            }
-            if ui
-                .add_enabled_ui(validation.is_ok(), |ui| {
-                    widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
-                })
-                .inner
+        |ui| match mode {
+            OperationSurfaceMode::Immediate { start_allowed } => {
+                if widgets::primary_button_enabled(
+                    ui,
+                    CAPTURE_LABEL,
+                    validation.is_ok() && start_allowed,
+                )
                 .clicked()
-            {
-                action.set(FrameCaptureSelectionAction::QueueRequested);
+                {
+                    action.set(FrameCaptureSelectionAction::CaptureRequested);
+                }
+                if ui
+                    .add_enabled_ui(validation.is_ok(), |ui| {
+                        widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    action.set(FrameCaptureSelectionAction::QueueRequested);
+                }
+            }
+            OperationSurfaceMode::QueueEdit => {
+                if widgets::primary_button_enabled(ui, SAVE_QUEUE_CHANGES_LABEL, validation.is_ok())
+                    .clicked()
+                {
+                    action.set(FrameCaptureSelectionAction::SaveQueueChanges);
+                }
+                if widgets::secondary_button(ui, CANCEL_QUEUE_EDIT_LABEL).clicked() {
+                    action.set(FrameCaptureSelectionAction::CancelQueueEdit);
+                }
             }
         },
     );

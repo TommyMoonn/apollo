@@ -8,6 +8,13 @@ use super::{SourceAction, fonts, layout, media_lifecycle, queue_count_label, the
 
 const CHANGE_FILE_LABEL: &str = "Change file";
 const CLOSE_SOURCE_LABEL: &str = "Close source";
+const QUEUE_EDIT_CONTEXT: &str = "Editing queued item";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceMode {
+    Source { queue_count: usize, enabled: bool },
+    QueueEdit { enabled: bool },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
@@ -65,18 +72,53 @@ pub fn show(
     ui: &mut Ui,
     presentation: &WorkspacePresentation,
     active_operation: Operation,
-    queue_count: usize,
-    enabled: bool,
+    mode: WorkspaceMode,
 ) -> WorkspaceAction {
     let action = Cell::new(WorkspaceAction::None);
+    let enabled = match mode {
+        WorkspaceMode::Source { enabled, .. } | WorkspaceMode::QueueEdit { enabled } => enabled,
+    };
 
     ui.add_enabled_ui(enabled, |ui| {
-        show_source_header(ui, presentation, queue_count, &action);
+        match mode {
+            WorkspaceMode::Source { queue_count, .. } => {
+                show_source_header(ui, presentation, queue_count, &action);
+            }
+            WorkspaceMode::QueueEdit { .. } => show_queue_edit_header(ui, presentation),
+        }
         ui.add_space(theme::SPACING.related);
         show_operation_switcher(ui, active_operation, &action);
     });
 
     action.get()
+}
+
+fn show_queue_edit_header(ui: &mut Ui, presentation: &WorkspacePresentation) {
+    ui.spacing_mut().item_spacing.y = theme::SPACING.tight;
+    ui.add(
+        Label::new(
+            RichText::new(QUEUE_EDIT_CONTEXT)
+                .text_style(fonts::technical_text_style())
+                .color(theme::SECONDARY_FAINT),
+        )
+        .selectable(false),
+    );
+    ui.add(
+        Label::new(RichText::new(&presentation.file_name).text_style(TextStyle::Body))
+            .truncate()
+            .selectable(false),
+    );
+    if let Some(metadata) = presentation.metadata.as_deref() {
+        ui.add(
+            Label::new(
+                RichText::new(metadata)
+                    .text_style(fonts::technical_text_style())
+                    .color(theme::SECONDARY_FAINT),
+            )
+            .truncate()
+            .selectable(false),
+        );
+    }
 }
 
 fn show_source_header(
@@ -232,7 +274,9 @@ mod tests {
         ui::{fonts, theme},
     };
 
-    use super::{Operation, WorkspaceAction, WorkspacePresentation, show, source_metadata};
+    use super::{
+        Operation, WorkspaceAction, WorkspaceMode, WorkspacePresentation, show, source_metadata,
+    };
 
     fn shape_text_rect(shape: &egui::Shape, text: &str) -> Option<egui::Rect> {
         match shape {
@@ -274,21 +318,45 @@ mod tests {
         fonts::install(&context);
         theme::install(&context);
         let mut initial = context.run_ui(Default::default(), |ui| {
-            let _ = show(ui, &presentation(), Operation::AudioMix, 3, false);
+            let _ = show(
+                ui,
+                &presentation(),
+                Operation::AudioMix,
+                WorkspaceMode::Source {
+                    queue_count: 3,
+                    enabled: false,
+                },
+            );
         });
         let position = output_text_rect(&initial, label).center();
         initial.textures_delta.clear();
 
         let mut pressed_action = WorkspaceAction::None;
         let mut pressed = context.run_ui(pointer_button_input(position, true), |ui| {
-            pressed_action = show(ui, &presentation(), Operation::AudioMix, 3, false);
+            pressed_action = show(
+                ui,
+                &presentation(),
+                Operation::AudioMix,
+                WorkspaceMode::Source {
+                    queue_count: 3,
+                    enabled: false,
+                },
+            );
         });
         pressed.textures_delta.clear();
         assert_eq!(pressed_action, WorkspaceAction::None);
 
         let mut released_action = WorkspaceAction::None;
         let mut released = context.run_ui(pointer_button_input(position, false), |ui| {
-            released_action = show(ui, &presentation(), Operation::AudioMix, 3, false);
+            released_action = show(
+                ui,
+                &presentation(),
+                Operation::AudioMix,
+                WorkspaceMode::Source {
+                    queue_count: 3,
+                    enabled: false,
+                },
+            );
         });
         released.textures_delta.clear();
         released_action
@@ -348,7 +416,15 @@ mod tests {
         theme::install(&context);
         let output = context.run_ui(Default::default(), |ui| {
             assert_eq!(
-                show(ui, &presentation(), Operation::Remux, 3, true),
+                show(
+                    ui,
+                    &presentation(),
+                    Operation::Remux,
+                    WorkspaceMode::Source {
+                        queue_count: 3,
+                        enabled: true,
+                    },
+                ),
                 WorkspaceAction::None
             );
         });
@@ -395,7 +471,15 @@ mod tests {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
-            let _ = show(&mut child, &presentation(), Operation::AudioMix, 3, true);
+            let _ = show(
+                &mut child,
+                &presentation(),
+                Operation::AudioMix,
+                WorkspaceMode::Source {
+                    queue_count: 3,
+                    enabled: true,
+                },
+            );
         });
 
         let debug = format!("{:?}", output.shapes);
@@ -429,7 +513,15 @@ mod tests {
                     .max_rect(rect)
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
-            let _ = show(&mut child, &presentation(), Operation::AudioMix, 3, true);
+            let _ = show(
+                &mut child,
+                &presentation(),
+                Operation::AudioMix,
+                WorkspaceMode::Source {
+                    queue_count: 3,
+                    enabled: true,
+                },
+            );
         });
 
         let first = output_text_rect(&output, "Audio Mix");

@@ -23,7 +23,10 @@ use crate::{
     },
 };
 
-use super::{ADD_TO_QUEUE_LABEL, fonts, layout, output_name::OutputNameState, theme, widgets};
+use super::{
+    ADD_TO_QUEUE_LABEL, CANCEL_QUEUE_EDIT_LABEL, OperationSurfaceMode, SAVE_QUEUE_CHANGES_LABEL,
+    fonts, layout, output_name::OutputNameState, theme, widgets,
+};
 
 const PRESET_TARGETS: [UpscaleTarget; 3] = [
     UpscaleTarget::Qhd1440,
@@ -64,6 +67,8 @@ pub enum UpscaleSelectionAction {
     BrowseOutput,
     QueueRequested,
     UpscaleRequested,
+    SaveQueueChanges,
+    CancelQueueEdit,
 }
 
 impl UpscaleSelectionState {
@@ -81,6 +86,29 @@ impl UpscaleSelectionState {
                     .expect("the default preset has a valid generated output name"),
             ),
         }
+    }
+
+    pub fn from_request(media: &MediaFile, request: &UpscaleRequest) -> Self {
+        let custom_boundary = request
+            .target
+            .is_custom()
+            .then(|| request.target.boundary());
+        let mut state = Self {
+            target: request.target,
+            custom_boundary,
+            codec: request.codec,
+            encoder_settings: request.encoder_settings.clone(),
+            output_name: OutputNameState::new(
+                &media.path,
+                request
+                    .output
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_os_string(),
+            ),
+        };
+        state.output_name.set_custom_path(request.output.clone());
+        state
     }
 
     pub fn target(&self) -> UpscaleTarget {
@@ -265,8 +293,9 @@ pub fn show(
     media: &MediaFile,
     state: &mut UpscaleSelectionState,
     capabilities: UpscaleEncoderCapabilities<'_>,
-    immediate_start_allowed: bool,
+    mode: impl Into<OperationSurfaceMode>,
 ) -> UpscaleSelectionAction {
+    let mode = mode.into();
     let action = Cell::new(UpscaleSelectionAction::None);
     let validation = state.ready_validation(media, capabilities);
 
@@ -344,23 +373,33 @@ pub fn show(
         },
         |ui| {
             let runnable = matches!(validation, Some(Ok(())));
-            if widgets::primary_button_enabled(
-                ui,
-                UPSCALE_LABEL,
-                runnable && immediate_start_allowed,
-            )
-            .clicked()
-            {
-                action.set(UpscaleSelectionAction::UpscaleRequested);
-            }
-            if ui
-                .add_enabled_ui(runnable, |ui| {
-                    widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
-                })
-                .inner
-                .clicked()
-            {
-                action.set(UpscaleSelectionAction::QueueRequested);
+            match mode {
+                OperationSurfaceMode::Immediate { start_allowed } => {
+                    if widgets::primary_button_enabled(ui, UPSCALE_LABEL, runnable && start_allowed)
+                        .clicked()
+                    {
+                        action.set(UpscaleSelectionAction::UpscaleRequested);
+                    }
+                    if ui
+                        .add_enabled_ui(runnable, |ui| {
+                            widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        action.set(UpscaleSelectionAction::QueueRequested);
+                    }
+                }
+                OperationSurfaceMode::QueueEdit => {
+                    if widgets::primary_button_enabled(ui, SAVE_QUEUE_CHANGES_LABEL, runnable)
+                        .clicked()
+                    {
+                        action.set(UpscaleSelectionAction::SaveQueueChanges);
+                    }
+                    if widgets::secondary_button(ui, CANCEL_QUEUE_EDIT_LABEL).clicked() {
+                        action.set(UpscaleSelectionAction::CancelQueueEdit);
+                    }
+                }
             }
         },
     );

@@ -44,10 +44,14 @@ use apollo::{
             cached_video_encoder_capabilities, discover_base_media_tools,
         },
     },
-    queue::{JobId, MediaQueue, QueueEnqueueError, QueueJobState, QueuedOperation},
+    queue::{
+        JobId, MediaQueue, QueueEnqueueError, QueueJobState, QueueRunState, QueuedJob,
+        QueuedOperation, WaitingJobMove,
+    },
     remux::execution::{RemuxExecutionState, RemuxExecutor, RemuxStartError},
     ui::{
-        ProcessExecutionArbitration, QueueAction, SourceAction, audio_extract as audio_extract_ui,
+        OperationSurfaceMode, ProcessExecutionArbitration, QueueAction, SourceAction,
+        audio_extract as audio_extract_ui,
         audio_extract::{AudioExtractSelectionAction, AudioExtractSelectionState},
         audio_extract_progress::{self, AudioExtractLifecycleAction, AudioExtractLifecycleUiState},
         audio_mix as audio_mix_ui,
@@ -68,7 +72,7 @@ use apollo::{
         upscale::{UpscaleSelectionAction, UpscaleSelectionState},
         upscale_progress::{self, UpscaleLifecycleAction, UpscaleLifecycleUiState},
         widgets,
-        workspace::{self, Operation as Tool, WorkspaceAction},
+        workspace::{self, Operation as Tool, WorkspaceAction, WorkspaceMode},
     },
     upscale::execution::{UpscaleExecutionState, UpscaleExecutor, UpscaleStartError},
     upscale::{model::VideoCodec, validation::validate_upscale_request},
@@ -101,6 +105,9 @@ enum NavigationState {
     #[default]
     NoSource,
     Queue {
+        origin: QueueOrigin,
+    },
+    QueueEdit {
         origin: QueueOrigin,
     },
     SourceWorkspace {
@@ -162,6 +169,70 @@ struct FrameCaptureToolState {
     lifecycle_ui: FrameCaptureLifecycleUiState,
     start_error: Option<MediaError>,
     start_error_details_open: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueueEditState {
+    session_id: u64,
+    job_id: JobId,
+    media: MediaFile,
+    presentation: Arc<SourcePresentation>,
+    active_operation: Tool,
+    audio_mix: AudioMixSelectionState,
+    upscale: UpscaleSelectionState,
+    remux: RemuxSelectionState,
+    audio_extract: AudioExtractSelectionState,
+    frame_capture: FrameCaptureSelectionState,
+    error: Option<MediaError>,
+    error_details_open: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueEditAction {
+    None,
+    BrowseOutput,
+    Save,
+    Cancel,
+}
+
+impl QueueEditState {
+    fn new(session_id: u64, job: &QueuedJob) -> Self {
+        let media = job.media().clone();
+        let mut state = Self {
+            session_id,
+            job_id: job.id(),
+            presentation: Arc::new(SourcePresentation::new(&media)),
+            active_operation: queued_operation_tool(job.operation()),
+            audio_mix: AudioMixSelectionState::new(&media),
+            upscale: UpscaleSelectionState::new(&media),
+            remux: RemuxSelectionState::new(&media),
+            audio_extract: AudioExtractSelectionState::new(&media),
+            frame_capture: FrameCaptureSelectionState::new(&media),
+            media,
+            error: None,
+            error_details_open: false,
+        };
+        match job.operation() {
+            QueuedOperation::AudioMix(request) => {
+                state.audio_mix = AudioMixSelectionState::from_request(&state.media, request);
+            }
+            QueuedOperation::Upscale(request) => {
+                state.upscale = UpscaleSelectionState::from_request(&state.media, request);
+            }
+            QueuedOperation::Remux(request) => {
+                state.remux = RemuxSelectionState::from_request(&state.media, request);
+            }
+            QueuedOperation::AudioExtract(request) => {
+                state.audio_extract =
+                    AudioExtractSelectionState::from_request(&state.media, request);
+            }
+            QueuedOperation::FrameCapture(request) => {
+                state.frame_capture =
+                    FrameCaptureSelectionState::from_request(&state.media, request);
+            }
+        }
+        state
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,7 +393,9 @@ impl MediaToolsDiscovery {
 impl AppState {
     fn active_operation(&self) -> Option<Tool> {
         match self.navigation {
-            NavigationState::NoSource | NavigationState::Queue { .. } => None,
+            NavigationState::NoSource
+            | NavigationState::Queue { .. }
+            | NavigationState::QueueEdit { .. } => None,
             NavigationState::SourceWorkspace { active_operation } => Some(active_operation),
         }
     }
@@ -340,6 +413,7 @@ impl AppState {
                 QueueOrigin::SourceWorkspace { active_operation }
             }
             NavigationState::Queue { origin } => origin,
+            NavigationState::QueueEdit { origin } => origin,
         };
         self.navigation = NavigationState::Queue { origin };
         self.intake_error = None;
@@ -374,6 +448,7 @@ pub(crate) struct ApolloApp {
     audio_extract_executor: AudioExtractExecutor,
     frame_capture_executor: FrameCaptureExecutor,
     media_queue: MediaQueue,
+    queue_edit: Option<QueueEditState>,
     queue_event_sender: mpsc::Sender<QueueExecutionEvent>,
     queue_event_receiver: Receiver<QueueExecutionEvent>,
     frame_capture_thumbnail_load: Option<FrameCaptureThumbnailLoad>,
@@ -407,6 +482,7 @@ impl ApolloApp {
             audio_extract_executor: AudioExtractExecutor::new(),
             frame_capture_executor: FrameCaptureExecutor::new(),
             media_queue: MediaQueue::new(),
+            queue_edit: None,
             queue_event_sender,
             queue_event_receiver,
             frame_capture_thumbnail_load: None,
@@ -491,7 +567,17 @@ impl ApolloApp {
         match action {
             QueueAction::Start => self.start_media_queue(),
             QueueAction::CancelCurrent => self.media_queue.cancel_current(),
-            QueueAction::Stop => self.media_queue.cancel_queue(),
+            QueueAction::StopAfterCurrent => self.media_queue.stop_after_current(),
+            QueueAction::CancelQueue => self.media_queue.cancel_queue(),
+            QueueAction::Edit(job_id) => self.begin_queue_edit(job_id),
+            QueueAction::MoveEarlier(job_id) => self
+                .media_queue
+                .move_waiting(job_id, WaitingJobMove::Earlier)
+                .is_ok(),
+            QueueAction::MoveLater(job_id) => self
+                .media_queue
+                .move_waiting(job_id, WaitingJobMove::Later)
+                .is_ok(),
             QueueAction::Remove(job_id) => self.media_queue.remove_waiting(job_id),
             QueueAction::ClearFinished => self.media_queue.clear_finished() > 0,
             QueueAction::OpenFolder(job_id) => {
@@ -523,6 +609,96 @@ impl ApolloApp {
                 true
             }
             QueueAction::None => false,
+        }
+    }
+
+    fn begin_queue_edit(&mut self, job_id: JobId) -> bool {
+        if self.media_queue.run_state() != QueueRunState::Stopped {
+            return false;
+        }
+        let Some(job) = self
+            .media_queue
+            .jobs()
+            .iter()
+            .find(|job| job.id() == job_id && matches!(job.state(), QueueJobState::Waiting))
+            .cloned()
+        else {
+            return false;
+        };
+        let NavigationState::Queue { origin } = self.state.navigation else {
+            return false;
+        };
+        let session_id = self.take_session_id();
+        self.queue_edit = Some(QueueEditState::new(session_id, &job));
+        self.state.navigation = NavigationState::QueueEdit { origin };
+        true
+    }
+
+    fn finish_queue_edit(&mut self) -> bool {
+        let NavigationState::QueueEdit { origin } = self.state.navigation else {
+            return false;
+        };
+        self.queue_edit = None;
+        self.state.navigation = NavigationState::Queue { origin };
+        true
+    }
+
+    fn save_queue_edit(&mut self) -> bool {
+        let nvenc_capabilities = self
+            .ready_media_tools()
+            .map(|tools| tools.video_encoders.clone());
+        let Some(edit) = self.queue_edit.as_mut() else {
+            return false;
+        };
+        let operation = match edit.active_operation {
+            Tool::AudioMix if edit.audio_mix.can_mix(&edit.media) => {
+                QueuedOperation::AudioMix(edit.audio_mix.request(&edit.media))
+            }
+            Tool::VideoUpscale => {
+                let Some(capabilities) = nvenc_capabilities else {
+                    return false;
+                };
+                let capability = match edit.upscale.codec() {
+                    VideoCodec::H264 => capabilities.h264_nvenc,
+                    VideoCodec::H265 => capabilities.h265_nvenc,
+                };
+                let request = edit
+                    .upscale
+                    .request_with_nvenc_capability(&edit.media, capability);
+                if validate_upscale_request(&request, &edit.media).is_err() {
+                    return false;
+                }
+                QueuedOperation::Upscale(request)
+            }
+            Tool::Remux if edit.remux.can_remux(&edit.media) => {
+                QueuedOperation::Remux(edit.remux.request(&edit.media))
+            }
+            Tool::AudioExtract if edit.audio_extract.can_extract(&edit.media) => {
+                let Some(request) = edit.audio_extract.request(&edit.media) else {
+                    return false;
+                };
+                QueuedOperation::AudioExtract(request)
+            }
+            Tool::FrameCapture if edit.frame_capture.can_capture(&edit.media) => {
+                let Some(request) = edit.frame_capture.request(&edit.media) else {
+                    return false;
+                };
+                QueuedOperation::FrameCapture(request)
+            }
+            _ => return false,
+        };
+        match self
+            .media_queue
+            .replace_waiting_operation(edit.job_id, operation)
+        {
+            Ok(()) => self.finish_queue_edit(),
+            Err(error) => {
+                edit.error = Some(MediaError::invalid_request(format!(
+                    "Could not save queue changes: {error}"
+                )));
+                edit.error_details_open = false;
+                false
+            }
         }
     }
 
@@ -1006,8 +1182,14 @@ impl ApolloApp {
     }
 
     fn show_navigation(&mut self, ui: &mut Ui) {
+        if matches!(self.state.navigation, NavigationState::QueueEdit { .. }) {
+            self.show_queue_edit(ui);
+            return;
+        }
         if matches!(self.state.navigation, NavigationState::Queue { .. }) {
-            layout::surface_fade(ui, "queue-surface".into(), |ui| self.show_queue(ui));
+            layout::surface_fade(ui, "queue-surface".into(), |ui| {
+                ui.push_id("queue-list", |ui| self.show_queue(ui));
+            });
             return;
         }
 
@@ -1034,15 +1216,17 @@ impl ApolloApp {
                     ui,
                     &source_presentation.workspace,
                     active_operation,
-                    self.media_queue.jobs().len(),
-                    self.media_inspection.is_none()
-                        && file_intake_enabled(
-                            self.audio_mix_executor.state(),
-                            self.upscale_executor.state(),
-                            self.remux_executor.state(),
-                            self.audio_extract_executor.state(),
-                            self.frame_capture_executor.state(),
-                        ),
+                    WorkspaceMode::Source {
+                        queue_count: self.media_queue.jobs().len(),
+                        enabled: self.media_inspection.is_none()
+                            && file_intake_enabled(
+                                self.audio_mix_executor.state(),
+                                self.upscale_executor.state(),
+                                self.remux_executor.state(),
+                                self.audio_extract_executor.state(),
+                                self.frame_capture_executor.state(),
+                            ),
+                    },
                 )
             })
             .inner;
@@ -1121,10 +1305,143 @@ impl ApolloApp {
             self.media_queue.jobs(),
             self.media_queue.active_job(),
             self.media_queue.active_progress(),
-            self.media_queue.is_started(),
+            self.media_queue.run_state(),
             arbitration.queue_start_allowed(),
         );
         self.handle_queue_action(action);
+    }
+
+    fn show_queue_edit(&mut self, ui: &mut Ui) {
+        let Some(edit) = self.queue_edit.as_ref() else {
+            let _ = self.finish_queue_edit();
+            return;
+        };
+        let presentation = edit.presentation.clone();
+        let active_operation = edit.active_operation;
+        let enabled = !self.file_dialog.is_pending();
+        let workspace_action = layout::workspace_chrome(ui, |ui| {
+            workspace::show(
+                ui,
+                &presentation.workspace,
+                active_operation,
+                WorkspaceMode::QueueEdit { enabled },
+            )
+        })
+        .inner;
+        if let WorkspaceAction::SelectOperation(operation) = workspace_action
+            && let Some(edit) = self.queue_edit.as_mut()
+        {
+            edit.active_operation = operation;
+            edit.error = None;
+            edit.error_details_open = false;
+        }
+
+        let Some(edit) = self.queue_edit.as_mut() else {
+            return;
+        };
+        let active_operation = edit.active_operation;
+        if let Some(error) = edit.error.as_ref() {
+            layout::content_gutter(ui, |ui| {
+                media_error::show_inline(ui, error, &mut edit.error_details_open);
+                ui.add_space(theme::SPACING.section);
+            });
+        }
+        let capabilities = match &self.media_tools {
+            MediaToolsState::Ready(tools) if self.media_tools_discovery.is_none() => {
+                upscale_ui::UpscaleEncoderCapabilities::Ready(&tools.video_encoders)
+            }
+            _ => upscale_ui::UpscaleEncoderCapabilities::Checking,
+        };
+        let action = layout::surface_fade(
+            ui,
+            egui::Id::new(("queue-edit", edit.job_id.get(), active_operation.label())),
+            |ui| {
+                ui.push_id(("queue-editor", edit.job_id.get()), |ui| {
+                    ui.add_enabled_ui(enabled, |ui| match active_operation {
+                        Tool::AudioMix => match audio_mix_ui::show(
+                            ui,
+                            &edit.media,
+                            &edit.presentation.audio_mix,
+                            &mut edit.audio_mix,
+                            OperationSurfaceMode::QueueEdit,
+                        ) {
+                            AudioMixSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
+                            AudioMixSelectionAction::SaveQueueChanges => QueueEditAction::Save,
+                            AudioMixSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
+                            _ => QueueEditAction::None,
+                        },
+                        Tool::VideoUpscale => match upscale_ui::show(
+                            ui,
+                            &edit.media,
+                            &mut edit.upscale,
+                            capabilities,
+                            OperationSurfaceMode::QueueEdit,
+                        ) {
+                            UpscaleSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
+                            UpscaleSelectionAction::SaveQueueChanges => QueueEditAction::Save,
+                            UpscaleSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
+                            _ => QueueEditAction::None,
+                        },
+                        Tool::Remux => match remux_ui::show(
+                            ui,
+                            &edit.media,
+                            &edit.presentation.remux,
+                            &mut edit.remux,
+                            OperationSurfaceMode::QueueEdit,
+                        ) {
+                            RemuxSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
+                            RemuxSelectionAction::SaveQueueChanges => QueueEditAction::Save,
+                            RemuxSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
+                            _ => QueueEditAction::None,
+                        },
+                        Tool::AudioExtract => match audio_extract_ui::show(
+                            ui,
+                            &edit.media,
+                            &edit.presentation.audio_extract,
+                            &mut edit.audio_extract,
+                            OperationSurfaceMode::QueueEdit,
+                        ) {
+                            AudioExtractSelectionAction::BrowseOutput => {
+                                QueueEditAction::BrowseOutput
+                            }
+                            AudioExtractSelectionAction::SaveQueueChanges => QueueEditAction::Save,
+                            AudioExtractSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
+                            _ => QueueEditAction::None,
+                        },
+                        Tool::FrameCapture => match frame_capture_ui::show(
+                            ui,
+                            &edit.media,
+                            &edit.presentation.frame_capture,
+                            &mut edit.frame_capture,
+                            OperationSurfaceMode::QueueEdit,
+                        ) {
+                            FrameCaptureSelectionAction::BrowseOutput => {
+                                QueueEditAction::BrowseOutput
+                            }
+                            FrameCaptureSelectionAction::SaveQueueChanges => QueueEditAction::Save,
+                            FrameCaptureSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
+                            _ => QueueEditAction::None,
+                        },
+                    })
+                    .inner
+                })
+                .inner
+            },
+        );
+        match action {
+            QueueEditAction::BrowseOutput => {
+                if let Some(edit) = self.queue_edit.as_ref() {
+                    self.start_file_dialog(queue_edit_output_dialog_request(edit));
+                }
+            }
+            QueueEditAction::Save => {
+                self.save_queue_edit();
+            }
+            QueueEditAction::Cancel => {
+                self.finish_queue_edit();
+            }
+            QueueEditAction::None => {}
+        }
     }
 
     fn load_media_path(&mut self, path: &Path) {
@@ -1336,7 +1653,9 @@ impl ApolloApp {
                     &session.media,
                     &presentation.audio_mix,
                     &mut session.selection,
-                    immediate_start_allowed,
+                    OperationSurfaceMode::Immediate {
+                        start_allowed: immediate_start_allowed,
+                    },
                 )
             })
             .inner;
@@ -1410,7 +1729,9 @@ impl ApolloApp {
                 self.audio_mix_executor
                     .start_with_wake(&tools, &session.media, &request, wake)?;
             }
-            AudioMixSelectionAction::None => {}
+            AudioMixSelectionAction::SaveQueueChanges
+            | AudioMixSelectionAction::CancelQueueEdit
+            | AudioMixSelectionAction::None => {}
         }
         Ok(())
     }
@@ -1468,7 +1789,9 @@ impl ApolloApp {
                     &upscale.media,
                     &mut upscale.selection,
                     capabilities,
-                    immediate_start_allowed,
+                    OperationSurfaceMode::Immediate {
+                        start_allowed: immediate_start_allowed,
+                    },
                 )
             })
             .inner;
@@ -1554,7 +1877,9 @@ impl ApolloApp {
                 self.upscale_executor
                     .start_with_wake(&tools, &upscale.media, &request, wake)?;
             }
-            UpscaleSelectionAction::None => {}
+            UpscaleSelectionAction::SaveQueueChanges
+            | UpscaleSelectionAction::CancelQueueEdit
+            | UpscaleSelectionAction::None => {}
         }
         Ok(())
     }
@@ -1610,7 +1935,9 @@ impl ApolloApp {
                     &remux.media,
                     &presentation.remux,
                     &mut remux.selection,
-                    immediate_start_allowed,
+                    OperationSurfaceMode::Immediate {
+                        start_allowed: immediate_start_allowed,
+                    },
                 )
             })
             .inner;
@@ -1680,7 +2007,9 @@ impl ApolloApp {
                 self.remux_executor
                     .start_with_wake(&tools, &remux.media, &request, wake)?;
             }
-            RemuxSelectionAction::None => {}
+            RemuxSelectionAction::SaveQueueChanges
+            | RemuxSelectionAction::CancelQueueEdit
+            | RemuxSelectionAction::None => {}
         }
         Ok(())
     }
@@ -1739,7 +2068,9 @@ impl ApolloApp {
                     &session.media,
                     &presentation.audio_extract,
                     &mut session.selection,
-                    immediate_start_allowed,
+                    OperationSurfaceMode::Immediate {
+                        start_allowed: immediate_start_allowed,
+                    },
                 )
             })
             .inner;
@@ -1818,7 +2149,9 @@ impl ApolloApp {
                     wake,
                 )?;
             }
-            AudioExtractSelectionAction::None => {}
+            AudioExtractSelectionAction::SaveQueueChanges
+            | AudioExtractSelectionAction::CancelQueueEdit
+            | AudioExtractSelectionAction::None => {}
         }
         Ok(())
     }
@@ -1877,7 +2210,9 @@ impl ApolloApp {
                     &session.media,
                     &presentation.frame_capture,
                     &mut session.selection,
-                    immediate_start_allowed,
+                    OperationSurfaceMode::Immediate {
+                        start_allowed: immediate_start_allowed,
+                    },
                 )
             })
             .inner;
@@ -1957,7 +2292,9 @@ impl ApolloApp {
                 )?;
                 self.frame_capture_thumbnail_load = None;
             }
-            FrameCaptureSelectionAction::None => {}
+            FrameCaptureSelectionAction::SaveQueueChanges
+            | FrameCaptureSelectionAction::CancelQueueEdit
+            | FrameCaptureSelectionAction::None => {}
         }
         Ok(())
     }
@@ -2059,19 +2396,70 @@ impl ApolloApp {
                 self.state.intake_error = Some(MediaError::file_picker_unavailable(diagnostic));
                 self.state.intake_error_details_open = false;
             }
-            (target, outcome) => settle_output_file_dialog(
-                &mut self.state,
-                ToolExecutionStates {
-                    audio_mix: self.audio_mix_executor.state(),
-                    upscale: self.upscale_executor.state(),
-                    remux: self.remux_executor.state(),
-                    audio_extract: self.audio_extract_executor.state(),
-                    frame_capture: self.frame_capture_executor.state(),
-                },
-                target,
-                outcome,
-            ),
+            (target, outcome) => {
+                settle_queue_edit_output_file_dialog(
+                    self.queue_edit.as_mut(),
+                    target,
+                    outcome.clone(),
+                );
+                settle_output_file_dialog(
+                    &mut self.state,
+                    ToolExecutionStates {
+                        audio_mix: self.audio_mix_executor.state(),
+                        upscale: self.upscale_executor.state(),
+                        remux: self.remux_executor.state(),
+                        audio_extract: self.audio_extract_executor.state(),
+                        frame_capture: self.frame_capture_executor.state(),
+                    },
+                    target,
+                    outcome,
+                );
+            }
         }
+    }
+}
+
+fn settle_queue_edit_output_file_dialog(
+    edit: Option<&mut QueueEditState>,
+    target: DialogTarget,
+    outcome: DialogOutcome,
+) {
+    let Some(edit) = edit else {
+        return;
+    };
+    let target_session_id = match target {
+        DialogTarget::MediaInput => return,
+        DialogTarget::AudioMixOutput { session_id }
+        | DialogTarget::UpscaleOutput { session_id }
+        | DialogTarget::RemuxOutput { session_id }
+        | DialogTarget::AudioExtractOutput { session_id }
+        | DialogTarget::FrameCaptureOutput { session_id } => session_id,
+    };
+    if target_session_id != edit.session_id {
+        return;
+    }
+    match (target, outcome) {
+        (DialogTarget::AudioMixOutput { .. }, DialogOutcome::Selected(path)) => {
+            edit.audio_mix.set_custom_output_path(path);
+        }
+        (DialogTarget::UpscaleOutput { .. }, DialogOutcome::Selected(path)) => {
+            edit.upscale.set_custom_output_path(path);
+        }
+        (DialogTarget::RemuxOutput { .. }, DialogOutcome::Selected(path)) => {
+            edit.remux.set_custom_output_path(path);
+        }
+        (DialogTarget::AudioExtractOutput { .. }, DialogOutcome::Selected(path)) => {
+            edit.audio_extract.set_custom_output_path(path);
+        }
+        (DialogTarget::FrameCaptureOutput { .. }, DialogOutcome::Selected(path)) => {
+            edit.frame_capture.set_custom_output_path(path);
+        }
+        (_, DialogOutcome::Failed(diagnostic)) => {
+            edit.error = Some(MediaError::output_picker_unavailable(diagnostic));
+            edit.error_details_open = false;
+        }
+        (_, DialogOutcome::Cancelled) => {}
+        (DialogTarget::MediaInput, DialogOutcome::Selected(_)) => {}
     }
 }
 
@@ -2244,6 +2632,81 @@ fn output_dialog_request(
     }
 }
 
+fn queue_edit_output_dialog_request(edit: &QueueEditState) -> FileDialogRequest {
+    match edit.active_operation {
+        Tool::AudioMix => {
+            let format = match edit.audio_mix.container() {
+                OutputContainer::Mp4 => OutputFormat::Mp4,
+                OutputContainer::Mkv => OutputFormat::Mkv,
+            };
+            output_dialog_request(
+                DialogTarget::AudioMixOutput {
+                    session_id: edit.session_id,
+                },
+                &edit.audio_mix.output_path(),
+                format,
+            )
+        }
+        Tool::VideoUpscale => output_dialog_request(
+            DialogTarget::UpscaleOutput {
+                session_id: edit.session_id,
+            },
+            &edit.upscale.output_path(),
+            OutputFormat::Mp4,
+        ),
+        Tool::Remux => {
+            let format = match edit.remux.container() {
+                MediaContainer::Mp4 => OutputFormat::Mp4,
+                MediaContainer::Matroska => OutputFormat::Mkv,
+            };
+            output_dialog_request(
+                DialogTarget::RemuxOutput {
+                    session_id: edit.session_id,
+                },
+                &edit.remux.output_path(),
+                format,
+            )
+        }
+        Tool::AudioExtract => {
+            let format = match edit.audio_extract.format() {
+                AudioExtractFormat::Original => OutputFormat::Mka,
+                AudioExtractFormat::Aac => OutputFormat::M4a,
+                AudioExtractFormat::Flac => OutputFormat::Flac,
+            };
+            output_dialog_request(
+                DialogTarget::AudioExtractOutput {
+                    session_id: edit.session_id,
+                },
+                &edit.audio_extract.output_path(),
+                format,
+            )
+        }
+        Tool::FrameCapture => {
+            let format = match edit.frame_capture.format() {
+                FrameCaptureFormat::Png => OutputFormat::Png,
+                FrameCaptureFormat::Jpeg => OutputFormat::Jpeg,
+            };
+            output_dialog_request(
+                DialogTarget::FrameCaptureOutput {
+                    session_id: edit.session_id,
+                },
+                &edit.frame_capture.output_path(),
+                format,
+            )
+        }
+    }
+}
+
+fn queued_operation_tool(operation: &QueuedOperation) -> Tool {
+    match operation {
+        QueuedOperation::AudioMix(_) => Tool::AudioMix,
+        QueuedOperation::Upscale(_) => Tool::VideoUpscale,
+        QueuedOperation::Remux(_) => Tool::Remux,
+        QueuedOperation::AudioExtract(_) => Tool::AudioExtract,
+        QueuedOperation::FrameCapture(_) => Tool::FrameCapture,
+    }
+}
+
 fn audio_mix_output_dialog_request(session: &AudioMixToolState) -> FileDialogRequest {
     let format = match session.selection.container() {
         OutputContainer::Mp4 => OutputFormat::Mp4,
@@ -2381,7 +2844,7 @@ fn completed_output_folder(state: &QueueJobState) -> Option<&Path> {
 
 impl Drop for ApolloApp {
     fn drop(&mut self) {
-        self.handle_queue_action(QueueAction::Stop);
+        self.handle_queue_action(QueueAction::CancelQueue);
     }
 }
 
@@ -2755,6 +3218,7 @@ mod tests {
             audio_extract_executor: apollo::audio_extract::execution::AudioExtractExecutor::new(),
             frame_capture_executor: apollo::frame_capture::execution::FrameCaptureExecutor::new(),
             media_queue: MediaQueue::new(),
+            queue_edit: None,
             queue_event_sender,
             queue_event_receiver,
             frame_capture_thumbnail_load: None,
@@ -5023,6 +5487,249 @@ mod tests {
     }
 
     #[test]
+    fn queue_edit_hydrates_the_queued_request_and_cancel_preserves_it() {
+        let (directory, path) = temp_file("queue-edit-cancel");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
+        let custom_output = directory.join("queued-custom.mp4");
+        let selection = &mut app.state.remux.as_mut().unwrap().selection;
+        selection.set_container(MediaContainer::Mp4);
+        selection.set_custom_output_path(custom_output);
+        let job_id = app.enqueue_current_operation(Tool::Remux).unwrap().unwrap();
+        let original = app.media_queue.jobs()[0].operation().clone();
+        app.state.enter_queue();
+
+        assert!(app.handle_queue_action(QueueAction::Edit(job_id)));
+        let edit = app.queue_edit.as_mut().unwrap();
+        assert_eq!(edit.active_operation, Tool::Remux);
+        assert_eq!(
+            QueuedOperation::Remux(edit.remux.request(&edit.media)),
+            original
+        );
+        edit.remux.set_container(MediaContainer::Matroska);
+
+        assert!(app.finish_queue_edit());
+        assert_eq!(app.media_queue.jobs()[0].id(), job_id);
+        assert_eq!(app.media_queue.jobs()[0].operation(), &original);
+        assert!(matches!(
+            app.state.navigation,
+            NavigationState::Queue { .. }
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn queue_edit_hydrates_each_operation_from_its_immutable_request() {
+        let (directory, path) = temp_file("queue-edit-hydration");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let mut job_ids = Vec::new();
+        for operation in [
+            Tool::AudioMix,
+            Tool::VideoUpscale,
+            Tool::Remux,
+            Tool::AudioExtract,
+            Tool::FrameCapture,
+        ] {
+            app.select_tool(operation);
+            job_ids.push(app.enqueue_current_operation(operation).unwrap().unwrap());
+        }
+        app.state.enter_queue();
+
+        for job_id in job_ids {
+            let original = app
+                .media_queue
+                .jobs()
+                .iter()
+                .find(|job| job.id() == job_id)
+                .unwrap()
+                .operation()
+                .clone();
+            assert!(app.handle_queue_action(QueueAction::Edit(job_id)));
+            let edit = app.queue_edit.as_mut().unwrap();
+            let hydrated = match &original {
+                QueuedOperation::AudioMix(_) => {
+                    QueuedOperation::AudioMix(edit.audio_mix.request(&edit.media))
+                }
+                QueuedOperation::Upscale(request) => {
+                    QueuedOperation::Upscale(edit.upscale.request_with_nvenc_capability(
+                        &edit.media,
+                        request.nvenc_capability.clone(),
+                    ))
+                }
+                QueuedOperation::Remux(_) => {
+                    QueuedOperation::Remux(edit.remux.request(&edit.media))
+                }
+                QueuedOperation::AudioExtract(_) => {
+                    QueuedOperation::AudioExtract(edit.audio_extract.request(&edit.media).unwrap())
+                }
+                QueuedOperation::FrameCapture(_) => {
+                    QueuedOperation::FrameCapture(edit.frame_capture.request(&edit.media).unwrap())
+                }
+            };
+            assert_eq!(hydrated, original);
+            assert!(app.finish_queue_edit());
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn queue_edit_can_change_operation_with_atomic_same_id_replacement() {
+        let (directory, path) = temp_file("queue-edit-replace");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        let job_id = app
+            .enqueue_current_operation(Tool::AudioMix)
+            .unwrap()
+            .unwrap();
+        app.state.enter_queue();
+        assert!(app.handle_queue_action(QueueAction::Edit(job_id)));
+        app.queue_edit.as_mut().unwrap().active_operation = Tool::FrameCapture;
+
+        assert!(app.save_queue_edit());
+
+        assert_eq!(app.media_queue.jobs().len(), 1);
+        assert_eq!(app.media_queue.jobs()[0].id(), job_id);
+        assert!(matches!(
+            app.media_queue.jobs()[0].operation(),
+            QueuedOperation::FrameCapture(_)
+        ));
+        assert!(matches!(
+            app.state.navigation,
+            NavigationState::Queue { .. }
+        ));
+        assert!(app.queue_edit.is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn queue_edit_reuses_workspace_without_source_or_execution_actions() {
+        let (directory, path) = temp_file("queue-edit-surface");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
+        let job_id = app.enqueue_current_operation(Tool::Remux).unwrap().unwrap();
+        app.state.enter_queue();
+        assert!(app.handle_queue_action(QueueAction::Edit(job_id)));
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+
+        let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
+
+        for label in [
+            "Editing queued item",
+            "Audio Mix",
+            "Upscale",
+            "Remux",
+            "Audio Extract",
+            "Frame Capture",
+            "Save changes",
+            "Cancel edit",
+        ] {
+            assert!(output_contains_text(&output, label), "missing {label:?}");
+        }
+        for label in ["Change file", "Close source", "Add to queue"] {
+            assert!(
+                !output_contains_text(&output, label),
+                "unexpected {label:?}"
+            );
+        }
+        output.textures_delta.clear();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stopped_queue_surface_exposes_edit_remove_and_bounded_reorder_controls() {
+        let (directory, path) = temp_file("queue-controls-surface");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
+        app.enqueue_current_operation(Tool::Remux).unwrap().unwrap();
+        app.state.enter_queue();
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+
+        let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
+
+        for label in [
+            "Edit",
+            "Remove",
+            "Move up",
+            "Move down",
+            "Start queue",
+            "Back",
+        ] {
+            assert!(output_contains_text(&output, label), "missing {label:?}");
+        }
+        output.textures_delta.clear();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn queue_edit_failed_replacement_keeps_original_job_and_editor() {
+        let (directory, path) = temp_file("queue-edit-failure");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
+        let first = app.enqueue_current_operation(Tool::Remux).unwrap().unwrap();
+        app.state
+            .remux
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_custom_output_path(directory.join("second.mkv"));
+        let second = app.enqueue_current_operation(Tool::Remux).unwrap().unwrap();
+        let original = app.media_queue.jobs()[0].operation().clone();
+        let duplicate_output = app.media_queue.jobs()[1].operation().output().to_path_buf();
+        app.state.enter_queue();
+        assert!(app.handle_queue_action(QueueAction::Edit(first)));
+        app.queue_edit
+            .as_mut()
+            .unwrap()
+            .remux
+            .set_custom_output_path(duplicate_output);
+
+        assert!(!app.save_queue_edit());
+
+        assert_eq!(app.media_queue.jobs()[0].id(), first);
+        assert_eq!(app.media_queue.jobs()[0].operation(), &original);
+        assert_eq!(app.media_queue.jobs()[1].id(), second);
+        assert!(app.queue_edit.as_ref().unwrap().error.is_some());
+        assert!(matches!(
+            app.state.navigation,
+            NavigationState::QueueEdit { .. }
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn queue_reorder_actions_move_only_the_requested_waiting_item() {
+        let (directory, path) = temp_file("queue-reorder-actions");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
+        let first = app.enqueue_current_operation(Tool::Remux).unwrap().unwrap();
+        app.state
+            .remux
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_custom_output_path(directory.join("later.mkv"));
+        let second = app.enqueue_current_operation(Tool::Remux).unwrap().unwrap();
+
+        assert!(app.handle_queue_action(QueueAction::MoveEarlier(second)));
+        assert_eq!(app.media_queue.jobs()[0].id(), second);
+        assert_eq!(app.media_queue.jobs()[1].id(), first);
+        assert!(app.handle_queue_action(QueueAction::MoveLater(second)));
+        assert_eq!(app.media_queue.jobs()[0].id(), first);
+        assert_eq!(app.media_queue.jobs()[1].id(), second);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn completed_queue_output_resolves_its_parent_folder_only_for_success() {
         let completed = QueueJobState::Completed {
             output: PathBuf::from("exports/output.mkv"),
@@ -5055,7 +5762,7 @@ mod tests {
             .enqueue_current_operation(Tool::AudioMix)
             .unwrap()
             .unwrap();
-        assert!(app.handle_queue_action(QueueAction::Stop));
+        assert!(app.handle_queue_action(QueueAction::CancelQueue));
         assert!(!app.handle_queue_action(QueueAction::Remove(terminal)));
         assert!(app.handle_queue_action(QueueAction::ClearFinished));
         assert!(app.media_queue.jobs().is_empty());
@@ -5125,7 +5832,7 @@ mod tests {
         app.select_tool(Tool::Remux);
         app.enqueue_current_operation(Tool::Remux).unwrap().unwrap();
 
-        assert!(app.handle_queue_action(QueueAction::Stop));
+        assert!(app.handle_queue_action(QueueAction::CancelQueue));
 
         assert!(matches!(
             app.media_queue.jobs()[0].state(),

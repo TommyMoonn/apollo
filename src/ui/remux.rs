@@ -18,7 +18,10 @@ use crate::{
     },
 };
 
-use super::{ADD_TO_QUEUE_LABEL, layout, output_name::OutputNameState, theme, widgets};
+use super::{
+    ADD_TO_QUEUE_LABEL, CANCEL_QUEUE_EDIT_LABEL, OperationSurfaceMode, SAVE_QUEUE_CHANGES_LABEL,
+    layout, output_name::OutputNameState, theme, widgets,
+};
 
 const OUTPUT_LABEL: &str = "Output";
 const BROWSE_LABEL: &str = "Browse";
@@ -88,6 +91,8 @@ pub enum RemuxSelectionAction {
     BrowseOutput,
     QueueRequested,
     RemuxRequested,
+    SaveQueueChanges,
+    CancelQueueEdit,
 }
 
 impl RemuxSelectionState {
@@ -96,6 +101,15 @@ impl RemuxSelectionState {
             container: MediaContainer::Matroska,
             output_name: OutputNameState::new(&media.path, default_output_stem(&media.path)),
         }
+    }
+
+    pub fn from_request(media: &MediaFile, request: &RemuxRequest) -> Self {
+        let mut state = Self {
+            container: request.container,
+            output_name: OutputNameState::new(&media.path, default_output_stem(&media.path)),
+        };
+        state.output_name.set_custom_path(request.output.clone());
+        state
     }
 
     pub fn container(&self) -> MediaContainer {
@@ -148,8 +162,9 @@ pub fn show(
     media: &MediaFile,
     presentation: &RemuxPresentation,
     state: &mut RemuxSelectionState,
-    immediate_start_allowed: bool,
+    mode: impl Into<OperationSurfaceMode>,
 ) -> RemuxSelectionAction {
+    let mode = mode.into();
     let action = Cell::new(RemuxSelectionAction::None);
     let validation = state.validation(media);
     let feedback = validation
@@ -185,24 +200,36 @@ pub fn show(
                 let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
             }
         },
-        |ui| {
-            if widgets::primary_button_enabled(
-                ui,
-                REMUX_LABEL,
-                validation.is_ok() && immediate_start_allowed,
-            )
-            .clicked()
-            {
-                action.set(RemuxSelectionAction::RemuxRequested);
-            }
-            if ui
-                .add_enabled_ui(validation.is_ok(), |ui| {
-                    widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
-                })
-                .inner
+        |ui| match mode {
+            OperationSurfaceMode::Immediate { start_allowed } => {
+                if widgets::primary_button_enabled(
+                    ui,
+                    REMUX_LABEL,
+                    validation.is_ok() && start_allowed,
+                )
                 .clicked()
-            {
-                action.set(RemuxSelectionAction::QueueRequested);
+                {
+                    action.set(RemuxSelectionAction::RemuxRequested);
+                }
+                if ui
+                    .add_enabled_ui(validation.is_ok(), |ui| {
+                        widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    action.set(RemuxSelectionAction::QueueRequested);
+                }
+            }
+            OperationSurfaceMode::QueueEdit => {
+                if widgets::primary_button_enabled(ui, SAVE_QUEUE_CHANGES_LABEL, validation.is_ok())
+                    .clicked()
+                {
+                    action.set(RemuxSelectionAction::SaveQueueChanges);
+                }
+                if widgets::secondary_button(ui, CANCEL_QUEUE_EDIT_LABEL).clicked() {
+                    action.set(RemuxSelectionAction::CancelQueueEdit);
+                }
             }
         },
     );

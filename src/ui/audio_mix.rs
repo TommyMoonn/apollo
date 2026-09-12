@@ -21,7 +21,10 @@ use crate::{
     },
 };
 
-use super::{ADD_TO_QUEUE_LABEL, fonts, layout, output_name::OutputNameState, theme, widgets};
+use super::{
+    ADD_TO_QUEUE_LABEL, CANCEL_QUEUE_EDIT_LABEL, OperationSurfaceMode, SAVE_QUEUE_CHANGES_LABEL,
+    fonts, layout, output_name::OutputNameState, theme, widgets,
+};
 
 const UNTITLED_AUDIO: &str = "Untitled audio";
 const AUDIO_TRACKS_LABEL: &str = "Audio tracks";
@@ -77,6 +80,8 @@ pub enum AudioMixSelectionAction {
     BrowseOutput,
     QueueRequested,
     MixRequested,
+    SaveQueueChanges,
+    CancelQueueEdit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +134,29 @@ impl AudioMixSelectionState {
             ready_validation: AudioMixReadyValidationCache::default(),
         };
         let _ = state.validation(media);
+        state
+    }
+
+    pub fn from_request(media: &MediaFile, request: &AudioMixRequest) -> Self {
+        let mut state = Self::new(media);
+        state.selected_streams = request
+            .selected_tracks
+            .iter()
+            .map(|track| track.stream_index)
+            .collect();
+        for track in &request.selected_tracks {
+            state.track_gains.insert(track.stream_index, track.gain);
+        }
+        match request.normalization {
+            LoudnessNormalization::Off => state.normalization_enabled = false,
+            LoudnessNormalization::Enabled(targets) => {
+                state.normalization_enabled = true;
+                state.normalization_targets = targets;
+            }
+        }
+        state.container = request.container;
+        state.output_name.set_custom_path(request.output.clone());
+        state.invalidate_ready_validation();
         state
     }
 
@@ -357,8 +385,9 @@ pub fn show(
     media: &MediaFile,
     presentation: &AudioMixPresentation,
     state: &mut AudioMixSelectionState,
-    immediate_start_allowed: bool,
+    mode: impl Into<OperationSurfaceMode>,
 ) -> AudioMixSelectionAction {
+    let mode = mode.into();
     let action = Cell::new(AudioMixSelectionAction::None);
     let (can_mix, feedback) = {
         let validation = state.validation(media);
@@ -407,20 +436,31 @@ pub fn show(
                 let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
             }
         },
-        |ui| {
-            if widgets::primary_button_enabled(ui, MIX_LABEL, can_mix && immediate_start_allowed)
-                .clicked()
-            {
-                action.set(AudioMixSelectionAction::MixRequested);
+        |ui| match mode {
+            OperationSurfaceMode::Immediate { start_allowed } => {
+                if widgets::primary_button_enabled(ui, MIX_LABEL, can_mix && start_allowed)
+                    .clicked()
+                {
+                    action.set(AudioMixSelectionAction::MixRequested);
+                }
+                if ui
+                    .add_enabled_ui(can_mix, |ui| {
+                        widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    action.set(AudioMixSelectionAction::QueueRequested);
+                }
             }
-            if ui
-                .add_enabled_ui(can_mix, |ui| {
-                    widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
-                })
-                .inner
-                .clicked()
-            {
-                action.set(AudioMixSelectionAction::QueueRequested);
+            OperationSurfaceMode::QueueEdit => {
+                if widgets::primary_button_enabled(ui, SAVE_QUEUE_CHANGES_LABEL, can_mix).clicked()
+                {
+                    action.set(AudioMixSelectionAction::SaveQueueChanges);
+                }
+                if widgets::secondary_button(ui, CANCEL_QUEUE_EDIT_LABEL).clicked() {
+                    action.set(AudioMixSelectionAction::CancelQueueEdit);
+                }
             }
         },
     );

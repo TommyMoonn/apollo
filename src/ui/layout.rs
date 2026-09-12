@@ -276,6 +276,17 @@ pub fn operation_surface<Content, Action>(
     add_content: impl FnOnce(&mut Ui) -> Content,
     add_action: impl FnOnce(&mut Ui) -> Action,
 ) -> OperationSurfaceResponse<Content, Action> {
+    operation_surface_with_action_rows(ui, 1, add_content, add_action)
+}
+
+/// Render an operation surface whose responsive bottom controls require multiple rows.
+/// Existing ready surfaces use one row; queue controls may request two at compact widths.
+pub fn operation_surface_with_action_rows<Content, Action>(
+    ui: &mut Ui,
+    action_rows: usize,
+    add_content: impl FnOnce(&mut Ui) -> Content,
+    add_action: impl FnOnce(&mut Ui) -> Action,
+) -> OperationSurfaceResponse<Content, Action> {
     let available = safe_available_size(
         ui.available_rect_before_wrap()
             .intersect(ui.clip_rect())
@@ -283,7 +294,9 @@ pub fn operation_surface<Content, Action>(
     );
     let previous_item_spacing_y = ui.spacing().item_spacing.y;
     ui.spacing_mut().item_spacing.y = 0.0;
-    let action_height = theme::PRIMARY_CONTROL_HEIGHT
+    let action_rows = action_rows.max(1) as f32;
+    let action_height = theme::PRIMARY_CONTROL_HEIGHT * action_rows
+        + theme::SPACING.compact * (action_rows - 1.0)
         + f32::from(ACTION_BAR_VERTICAL_PADDING) * 2.0
         + theme::SEPARATOR_WIDTH;
     let content_height = (available.y - action_height).max(0.0);
@@ -340,10 +353,15 @@ pub fn operation_surface<Content, Action>(
         [action_bar.left_top(), action_bar.right_top()],
         egui::Stroke::new(theme::SEPARATOR_WIDTH, theme::SEPARATOR),
     );
+    let action_layout = if action_rows > 1.0 {
+        Layout::top_down(Align::Max)
+    } else {
+        Layout::right_to_left(Align::Center)
+    };
     let mut action_ui = action_bar_ui.new_child(
         UiBuilder::new()
             .max_rect(action_content)
-            .layout(Layout::right_to_left(Align::Center)),
+            .layout(action_layout),
     );
     let action = add_action(&mut action_ui);
     ui.spacing_mut().item_spacing.y = previous_item_spacing_y;
