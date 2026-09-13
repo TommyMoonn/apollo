@@ -192,10 +192,15 @@ pub fn select_menu_intrinsic_width(ui: &Ui, option_labels: &[&str]) -> f32 {
 /// Compact quiet action for output rows such as Browse.
 #[must_use]
 pub fn compact_secondary_button(ui: &mut Ui, label: &str) -> Response {
+    compact_secondary_button_enabled(ui, label, true)
+}
+
+#[must_use]
+pub fn compact_secondary_button_enabled(ui: &mut Ui, label: &str, enabled: bool) -> Response {
     button(
         ui,
         label,
-        true,
+        enabled,
         ButtonKind {
             tone: theme::ControlTone::Standard,
             selected: false,
@@ -205,7 +210,11 @@ pub fn compact_secondary_button(ui: &mut Ui, label: &str) -> Response {
 }
 
 fn compact_secondary_button_intrinsic_width(ui: &Ui, label: &str) -> f32 {
-    button_intrinsic_size(ui, label, true, BUTTON_HORIZONTAL_PADDING).x
+    compact_secondary_button_intrinsic_size(ui, label).x
+}
+
+pub fn compact_secondary_button_intrinsic_size(ui: &Ui, label: &str) -> Vec2 {
+    button_intrinsic_size(ui, label, true, BUTTON_HORIZONTAL_PADDING)
 }
 
 /// Unframed secondary text action for low-priority operations such as Change, Select all, Clear,
@@ -224,7 +233,9 @@ pub fn plain_button(ui: &mut Ui, label: &str) -> Response {
     let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
     let state = interaction_state(&response);
     let foreground = match state {
-        theme::InteractionState::Disabled => theme::DISABLED,
+        // A disabled parent Ui already owns final opacity. Reusing the normal quiet foreground
+        // avoids applying a second disabled alpha in this custom-painted action.
+        theme::InteractionState::Disabled => theme::SECONDARY,
         theme::InteractionState::Hovered | theme::InteractionState::Pressed => theme::FOREGROUND,
         theme::InteractionState::Idle => theme::SECONDARY,
     };
@@ -809,84 +820,111 @@ fn button_with_horizontal_padding(
     kind: ButtonKind,
     horizontal_padding: f32,
 ) -> Response {
-    let effective_enabled = enabled && ui.is_enabled();
-    ui.add_enabled_ui(effective_enabled, |ui| {
-        let height = if kind.compact {
-            theme::COMPACT_CONTROL_HEIGHT
-        } else {
-            theme::PRIMARY_CONTROL_HEIGHT
-        };
-        let desired_size = button_intrinsic_size(ui, label, kind.compact, horizontal_padding);
-        debug_assert_eq!(desired_size.y, height);
-        let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
-        let state = interaction_state(&response);
-        let state_colors = if kind.selected {
-            theme::operation_mode_colors(state, true)
-        } else {
-            theme::control_colors(kind.tone, state)
-        };
-        let idle_colors = if kind.selected {
-            theme::operation_mode_colors(theme::InteractionState::Idle, true)
-        } else {
-            theme::control_colors(kind.tone, theme::InteractionState::Idle)
-        };
-        let hover_colors = if kind.selected {
-            theme::operation_mode_colors(theme::InteractionState::Hovered, true)
-        } else {
-            theme::control_colors(kind.tone, theme::InteractionState::Hovered)
-        };
-        let hover_target = matches!(
-            state,
-            theme::InteractionState::Hovered | theme::InteractionState::Pressed
-        );
-        let hover_progress = if matches!(state, theme::InteractionState::Disabled) {
-            0.0
-        } else {
-            ui.ctx().animate_bool_with_time(
-                response.id.with("hover-shade"),
-                hover_target,
-                theme::motion_durations(ui.ctx()).button_hover,
-            )
-        };
-        let colors = if matches!(
-            state,
-            theme::InteractionState::Pressed | theme::InteractionState::Disabled
-        ) {
-            state_colors
-        } else {
-            lerp_control_colors(idle_colors, hover_colors, hover_progress)
-        };
+    let parent_enabled = ui.is_enabled();
+    if parent_enabled && !enabled {
+        ui.scope(|ui| {
+            // Custom control colors own explicit disabled presentation. Keep egui responsible
+            // only for interaction suppression so the palette is not multiplied a second time.
+            ui.visuals_mut().disabled_alpha = theme::EXPLICIT_DISABLED_CONTROL_OPACITY;
+            ui.add_enabled_ui(false, |ui| {
+                paint_button(ui, label, kind, horizontal_padding, true)
+            })
+            .inner
+        })
+        .inner
+    } else {
+        // If an ancestor disabled this Ui, its painter already owns the disabled opacity.
+        paint_button(ui, label, kind, horizontal_padding, false)
+    }
+}
 
-        ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(theme::CONTROL_RADIUS),
-            colors.background,
-        );
-        ui.painter().rect_stroke(
-            rect,
-            CornerRadius::same(theme::CONTROL_RADIUS),
-            Stroke::new(theme::SEPARATOR_WIDTH, colors.border),
-            StrokeKind::Inside,
-        );
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            label,
-            button_text_style().resolve(ui.style()),
-            colors.foreground,
-        );
-        paint_keyboard_focus(ui, &response, rect);
+fn paint_button(
+    ui: &mut Ui,
+    label: &str,
+    kind: ButtonKind,
+    horizontal_padding: f32,
+    use_custom_disabled_palette: bool,
+) -> Response {
+    let height = if kind.compact {
+        theme::COMPACT_CONTROL_HEIGHT
+    } else {
+        theme::PRIMARY_CONTROL_HEIGHT
+    };
+    let desired_size = button_intrinsic_size(ui, label, kind.compact, horizontal_padding);
+    debug_assert_eq!(desired_size.y, height);
+    let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
+    let state = interaction_state(&response);
+    let visual_state =
+        if matches!(state, theme::InteractionState::Disabled) && !use_custom_disabled_palette {
+            theme::InteractionState::Idle
+        } else {
+            state
+        };
+    let state_colors = if kind.selected {
+        theme::operation_mode_colors(visual_state, true)
+    } else {
+        theme::control_colors(kind.tone, visual_state)
+    };
+    let idle_colors = if kind.selected {
+        theme::operation_mode_colors(theme::InteractionState::Idle, true)
+    } else {
+        theme::control_colors(kind.tone, theme::InteractionState::Idle)
+    };
+    let hover_colors = if kind.selected {
+        theme::operation_mode_colors(theme::InteractionState::Hovered, true)
+    } else {
+        theme::control_colors(kind.tone, theme::InteractionState::Hovered)
+    };
+    let hover_target = matches!(
+        state,
+        theme::InteractionState::Hovered | theme::InteractionState::Pressed
+    );
+    let hover_progress = if matches!(state, theme::InteractionState::Disabled) {
+        0.0
+    } else {
+        ui.ctx().animate_bool_with_time(
+            response.id.with("hover-shade"),
+            hover_target,
+            theme::motion_durations(ui.ctx()).button_hover,
+        )
+    };
+    let colors = if matches!(
+        state,
+        theme::InteractionState::Pressed | theme::InteractionState::Disabled
+    ) {
+        state_colors
+    } else {
+        lerp_control_colors(idle_colors, hover_colors, hover_progress)
+    };
 
-        response.widget_info(|| {
-            if kind.selected {
-                WidgetInfo::selected(WidgetType::Button, response.enabled(), true, label)
-            } else {
-                WidgetInfo::labeled(WidgetType::Button, response.enabled(), label)
-            }
-        });
-        response
-    })
-    .inner
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(theme::CONTROL_RADIUS),
+        colors.background,
+    );
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(theme::CONTROL_RADIUS),
+        Stroke::new(theme::SEPARATOR_WIDTH, colors.border),
+        StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        button_text_style().resolve(ui.style()),
+        colors.foreground,
+    );
+    paint_keyboard_focus(ui, &response, rect);
+
+    response.widget_info(|| {
+        if kind.selected {
+            WidgetInfo::selected(WidgetType::Button, response.enabled(), true, label)
+        } else {
+            WidgetInfo::labeled(WidgetType::Button, response.enabled(), label)
+        }
+    });
+    response
 }
 
 fn lerp_control_colors(
@@ -1046,9 +1084,10 @@ mod tests {
 
     use super::{
         BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
-        button_text_style, conditional_fade, displayed_progress_fraction, encoder_quality_control,
-        filename_field, inline_status, inline_status_color, inline_status_height, labeled_control,
-        mode_button, mode_button_intrinsic_size, operation_output_row, parse_pixel_dimension,
+        button_text_style, compact_secondary_button_enabled, conditional_fade,
+        displayed_progress_fraction, encoder_quality_control, filename_field, inline_status,
+        inline_status_color, inline_status_height, labeled_control, mode_button,
+        mode_button_intrinsic_size, operation_output_row, parse_pixel_dimension,
         pixel_dimension_control, plain_button_text_style, primary_button_enabled, progress_bar,
         progress_rail_color, secondary_button, select_button, select_menu_intrinsic_width,
         select_menu_option, selectable_row, selectable_row_visuals, selectable_row_with_accessory,
@@ -1498,6 +1537,39 @@ mod tests {
     }
 
     #[test]
+    fn explicit_disabled_buttons_keep_geometry_and_use_one_palette_owner() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let mut enabled_rect = egui::Rect::NOTHING;
+        let mut disabled_rect = egui::Rect::NOTHING;
+        let mut output = context.run_ui(Default::default(), |ui| {
+            enabled_rect = compact_secondary_button_enabled(ui, "↑", true).rect;
+            let response = compact_secondary_button_enabled(ui, "↑", false);
+            disabled_rect = response.rect;
+            assert!(!response.enabled());
+            assert!(!response.clicked());
+        });
+        let disabled_foreground = output
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|shape| shape_text_color(&shape.shape, "↑"))
+            .expect("disabled button text is painted");
+        let disabled_border = output
+            .shapes
+            .iter()
+            .find_map(|shape| shape_rect_stroke(&shape.shape, disabled_rect))
+            .expect("disabled button border is painted");
+        output.textures_delta.clear();
+
+        assert_eq!(enabled_rect.size(), disabled_rect.size());
+        assert_eq!(disabled_rect.height(), theme::COMPACT_CONTROL_HEIGHT);
+        assert_eq!(disabled_foreground, theme::DISABLED);
+        assert_eq!(disabled_border, theme::DISABLED);
+    }
+
+    #[test]
     fn shared_button_hover_interpolates_on_entry_and_exit_without_geometry_change() {
         let context = egui::Context::default();
         fonts::install(&context);
@@ -1732,7 +1804,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_selected_operation_paints_the_selected_palette() {
+    fn ancestor_disabled_selected_operation_preserves_selected_fill_and_border() {
         let context = egui::Context::default();
         fonts::install(&context);
         theme::install(&context);
@@ -1766,7 +1838,7 @@ mod tests {
 
         assert_ne!(find_fill(selected_rect), find_fill(unselected_rect));
         assert_ne!(find_stroke(selected_rect), find_stroke(unselected_rect));
-        assert_ne!(find_text("Audio Mix"), find_text("Upscale"));
+        assert_eq!(find_text("Audio Mix"), find_text("Upscale"));
     }
 
     #[test]

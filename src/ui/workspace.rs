@@ -11,7 +11,7 @@ const CLOSE_SOURCE_LABEL: &str = "Close source";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceMode {
     Source {
-        queue_count: usize,
+        pending_queue_count: usize,
         enabled: bool,
     },
     FixedSourceEdit {
@@ -88,8 +88,11 @@ pub fn show(
 
     ui.add_enabled_ui(enabled, |ui| {
         match mode {
-            WorkspaceMode::Source { queue_count, .. } => {
-                show_source_header(ui, presentation, queue_count, &action);
+            WorkspaceMode::Source {
+                pending_queue_count,
+                ..
+            } => {
+                show_source_header(ui, presentation, pending_queue_count, &action);
             }
             WorkspaceMode::FixedSourceEdit { context, .. } => {
                 show_fixed_source_header(ui, presentation, context)
@@ -142,10 +145,10 @@ fn show_fixed_source_header(ui: &mut Ui, presentation: &WorkspacePresentation, c
 fn show_source_header(
     ui: &mut Ui,
     presentation: &WorkspacePresentation,
-    queue_count: usize,
+    pending_queue_count: usize,
     action: &Cell<WorkspaceAction>,
 ) {
-    let queue_label = queue_count_label(queue_count);
+    let queue_label = queue_count_label(pending_queue_count);
     let action_sizes = [
         widgets::plain_button_intrinsic_size(ui, &queue_label),
         widgets::plain_button_intrinsic_size(ui, CHANGE_FILE_LABEL),
@@ -341,7 +344,7 @@ mod tests {
                 &presentation(),
                 Operation::AudioMix,
                 WorkspaceMode::Source {
-                    queue_count: 3,
+                    pending_queue_count: 3,
                     enabled: false,
                 },
             );
@@ -356,7 +359,7 @@ mod tests {
                 &presentation(),
                 Operation::AudioMix,
                 WorkspaceMode::Source {
-                    queue_count: 3,
+                    pending_queue_count: 3,
                     enabled: false,
                 },
             );
@@ -371,7 +374,7 @@ mod tests {
                 &presentation(),
                 Operation::AudioMix,
                 WorkspaceMode::Source {
-                    queue_count: 3,
+                    pending_queue_count: 3,
                     enabled: false,
                 },
             );
@@ -439,7 +442,7 @@ mod tests {
                     &presentation(),
                     Operation::Remux,
                     WorkspaceMode::Source {
-                        queue_count: 3,
+                        pending_queue_count: 3,
                         enabled: true,
                     },
                 ),
@@ -494,7 +497,7 @@ mod tests {
                 &presentation(),
                 Operation::AudioMix,
                 WorkspaceMode::Source {
-                    queue_count: 3,
+                    pending_queue_count: 3,
                     enabled: true,
                 },
             );
@@ -536,7 +539,7 @@ mod tests {
                 &presentation(),
                 Operation::AudioMix,
                 WorkspaceMode::Source {
-                    queue_count: 3,
+                    pending_queue_count: 3,
                     enabled: true,
                 },
             );

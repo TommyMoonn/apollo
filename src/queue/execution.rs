@@ -48,6 +48,13 @@ impl MediaQueue {
         &self.jobs
     }
 
+    pub fn pending_count(&self) -> usize {
+        self.jobs
+            .iter()
+            .filter(|job| job.state().is_pending())
+            .count()
+    }
+
     pub fn active_job(&self) -> Option<JobId> {
         self.active_job
     }
@@ -302,6 +309,12 @@ impl MediaQueue {
     pub fn clear_finished(&mut self) -> usize {
         let previous_len = self.jobs.len();
         self.jobs.retain(|job| !job.state().is_terminal());
+        previous_len - self.jobs.len()
+    }
+
+    pub fn clear_disposable_history(&mut self) -> usize {
+        let previous_len = self.jobs.len();
+        self.jobs.retain(|job| !job.state().is_disposable_history());
         previous_len - self.jobs.len()
     }
 
@@ -1191,6 +1204,42 @@ mod tests {
         ));
         assert_eq!(queue.clear_finished(), 1);
         assert!(queue.jobs().is_empty());
+    }
+
+    #[test]
+    fn disposable_history_cleanup_preserves_failed_and_pending_jobs() {
+        let directory = TestDirectory::new("disposable-history");
+        let media = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        for index in 0..5 {
+            queue
+                .enqueue(
+                    &media,
+                    remux(&media, directory.path().join(format!("output-{index}.mkv"))),
+                )
+                .unwrap();
+        }
+        queue.jobs[0].set_state(QueueJobState::Completed {
+            output: directory.path().join("output-0.mkv"),
+        });
+        queue.jobs[1].set_state(QueueJobState::Cancelled);
+        queue.jobs[2].set_state(QueueJobState::Failed(QueueJobFailure::SourceChanged));
+        queue.jobs[3].set_state(QueueJobState::Running);
+
+        assert_eq!(queue.pending_count(), 2);
+        assert_eq!(queue.clear_disposable_history(), 2);
+        assert_eq!(queue.jobs().len(), 3);
+        assert!(matches!(
+            queue.jobs()[0].state(),
+            QueueJobState::Failed(QueueJobFailure::SourceChanged)
+        ));
+        assert!(matches!(queue.jobs()[1].state(), QueueJobState::Running));
+        assert!(matches!(queue.jobs()[2].state(), QueueJobState::Waiting));
+        assert_eq!(queue.pending_count(), 2);
+
+        assert_eq!(queue.clear_finished(), 1);
+        assert_eq!(queue.jobs().len(), 2);
+        assert!(queue.jobs().iter().all(|job| job.state().is_pending()));
     }
 
     #[test]

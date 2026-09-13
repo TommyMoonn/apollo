@@ -40,6 +40,9 @@ pub const FOCUS: Color32 = FOREGROUND;
 pub const PROGRESS: Color32 = FOREGROUND;
 pub const DANGER_INTERACTIVE: Color32 = Color32::from_rgb(0x7E, 0x30, 0x30);
 pub const SURFACE_ENTER_START_OPACITY: f32 = 0.2;
+/// Explicitly disabled custom controls use their disabled palette at full paint opacity.
+/// Ancestor-disabled controls instead inherit egui's one existing painter-opacity owner.
+pub const EXPLICIT_DISABLED_CONTROL_OPACITY: f32 = 1.0;
 
 // Primary-button hover/press are white-alpha interaction treatments, not neutral-gray roles.
 pub const PRIMARY_HOVER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 224);

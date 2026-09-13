@@ -1,6 +1,6 @@
 use std::{cell::Cell, path::Path};
 
-use egui::{Align, Label, Layout, RichText, Sides, TextStyle, Ui};
+use egui::{Align, Label, Layout, RichText, TextStyle, Ui};
 
 use super::{fonts, layout, media_lifecycle, theme, widgets, workspace::Operation};
 
@@ -99,17 +99,11 @@ fn show_header(
     action: &Cell<BatchAction>,
 ) {
     let included = items.iter().filter(|item| item.included).count();
-    Sides::new().height(theme::COMPACT_CONTROL_HEIGHT).show(
+    let summary = format!("{included} of {} included", items.len());
+    layout::collection_header(
         ui,
         |ui| {
-            ui.add(
-                Label::new(RichText::new(TITLE).text_style(TextStyle::Heading)).selectable(false),
-            );
-            ui.add_space(theme::SPACING.compact);
-            media_lifecycle::technical_faint(
-                ui,
-                &format!("{included} of {} included", items.len()),
-            );
+            let _ = layout::collection_heading(ui, TITLE, &summary);
         },
         |ui| {
             if ui
@@ -224,12 +218,62 @@ fn show_item(ui: &mut Ui, index: usize, item: &BatchItemView<'_>, action: &Cell<
 
 #[cfg(test)]
 mod tests {
-    use super::BatchReadiness;
+    use std::path::Path;
+
+    use super::{BatchItemView, BatchReadiness, DEFAULTS_LABEL, TITLE, show};
+    use crate::ui::{fonts, theme, workspace::Operation};
+
+    fn output_text_baseline(output: &egui::FullOutput, text: &str) -> Option<f32> {
+        for clipped in &output.shapes {
+            let mut pending = vec![&clipped.shape];
+            while let Some(shape) = pending.pop() {
+                match shape {
+                    egui::Shape::Text(shape) if shape.galley.job.text == text => {
+                        let row = shape.galley.rows.first()?;
+                        let glyph = row.glyphs.first()?;
+                        return Some(shape.pos.y + row.pos.y + glyph.pos.y);
+                    }
+                    egui::Shape::Vec(shapes) => pending.extend(shapes.iter().rev()),
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
 
     #[test]
     fn readiness_copy_is_explicit() {
         assert_eq!(BatchReadiness::Inspecting.label(), "Inspecting");
         assert_eq!(BatchReadiness::NeedsAttention.label(), "Needs attention");
         assert_eq!(BatchReadiness::Incompatible.label(), "Incompatible");
+    }
+
+    #[test]
+    fn batch_collection_header_aligns_title_and_summary_on_one_glyph_baseline() {
+        let paths = ["first.mp4", "second.mp4", "third.mp4"];
+        let items = paths.map(|path| BatchItemView {
+            source: Path::new(path),
+            output: None,
+            readiness: BatchReadiness::Ready,
+            reason: None,
+            included: true,
+        });
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let mut output = context.run_ui(Default::default(), |ui| {
+            ui.set_width(760.0);
+            let _ = show(ui, Operation::Remux, &items, true, true, None);
+        });
+
+        let title_baseline = output_text_baseline(&output, TITLE).unwrap();
+        let summary_baseline = output_text_baseline(&output, "3 of 3 included").unwrap();
+        assert!(output_text_baseline(&output, DEFAULTS_LABEL).is_some());
+        output.textures_delta.clear();
+
+        assert!(
+            (title_baseline - summary_baseline).abs() <= 0.25,
+            "title baseline={title_baseline}, summary baseline={summary_baseline}"
+        );
     }
 }

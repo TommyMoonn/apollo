@@ -158,11 +158,19 @@ pub enum QueueJobState {
 }
 
 impl QueueJobState {
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Waiting | Self::Running)
+    }
+
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
             Self::Completed { .. } | Self::Failed(_) | Self::Cancelled
         )
+    }
+
+    pub fn is_disposable_history(&self) -> bool {
+        matches!(self, Self::Completed { .. } | Self::Cancelled)
     }
 }
 

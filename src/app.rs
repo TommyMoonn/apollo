@@ -708,6 +708,7 @@ impl ApolloApp {
     fn handle_queue_action(&mut self, action: QueueAction) -> bool {
         match action {
             QueueAction::AddFiles => {
+                self.media_queue.clear_disposable_history();
                 self.start_file_dialog(FileDialogRequest::OpenSources {
                     initial_directory: None,
                 });
@@ -748,6 +749,7 @@ impl ApolloApp {
                 let NavigationState::Queue { origin } = self.state.navigation else {
                     return false;
                 };
+                self.media_queue.clear_disposable_history();
                 self.state.navigation = match origin {
                     QueueOrigin::NoSource => NavigationState::NoSource,
                     QueueOrigin::SourceWorkspace { active_operation } => {
@@ -1341,7 +1343,7 @@ impl ApolloApp {
                     &source_presentation.workspace,
                     active_operation,
                     WorkspaceMode::Source {
-                        queue_count: self.media_queue.jobs().len(),
+                        pending_queue_count: self.media_queue.pending_count(),
                         enabled: self.media_inspection.is_none()
                             && file_intake_enabled(
                                 self.audio_mix_executor.state(),
@@ -1407,7 +1409,7 @@ impl ApolloApp {
         let action = file_intake::show(
             ui,
             self.media_inspection.is_some(),
-            self.media_queue.jobs().len(),
+            self.media_queue.pending_count(),
             self.state.intake_error.as_ref(),
             &mut self.state.intake_error_details_open,
         );
@@ -4015,6 +4017,34 @@ mod tests {
         assert!(!app.frame_capture_executor.is_running());
     }
 
+    fn populate_cancelled_and_failed_queue_history(
+        app: &mut ApolloApp,
+        path: &Path,
+        directory: &Path,
+    ) {
+        app.load_media_path_with_probe(path, |path| Ok(media(path)));
+        app.select_tool(Tool::Remux);
+        app.enqueue_current_operation(Tool::Remux).unwrap().unwrap();
+        assert!(app.media_queue.cancel_queue());
+        app.state
+            .remux
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_custom_output_path(directory.join("failed-output.mkv"));
+        app.enqueue_current_operation(Tool::Remux).unwrap().unwrap();
+        assert!(!app.start_media_queue());
+        assert_eq!(app.media_queue.pending_count(), 0);
+        assert!(matches!(
+            app.media_queue.jobs()[0].state(),
+            QueueJobState::Cancelled
+        ));
+        assert!(matches!(
+            app.media_queue.jobs()[1].state(),
+            QueueJobState::Failed(_)
+        ));
+    }
+
     fn assert_no_source(state: &AppState) {
         assert_eq!(state.navigation, NavigationState::NoSource);
         assert!(state.media_intake.current().is_none());
@@ -4202,13 +4232,15 @@ mod tests {
     }
 
     fn shape_contains_text(shape: &egui::Shape, needle: &str) -> bool {
-        match shape {
-            egui::Shape::Text(text) => text.galley.job.text.contains(needle),
-            egui::Shape::Vec(shapes) => shapes
-                .iter()
-                .any(|shape| shape_contains_text(shape, needle)),
-            _ => false,
+        let mut pending = vec![shape];
+        while let Some(shape) = pending.pop() {
+            match shape {
+                egui::Shape::Text(text) if text.galley.job.text.contains(needle) => return true,
+                egui::Shape::Vec(shapes) => pending.extend(shapes),
+                _ => {}
+            }
         }
+        false
     }
 
     fn output_contains_text(output: &egui::FullOutput, needle: &str) -> bool {
@@ -4231,14 +4263,16 @@ mod tests {
     }
 
     fn shape_text_count(shape: &egui::Shape, needle: &str) -> usize {
-        match shape {
-            egui::Shape::Text(text) => usize::from(text.galley.job.text == needle),
-            egui::Shape::Vec(shapes) => shapes
-                .iter()
-                .map(|shape| shape_text_count(shape, needle))
-                .sum(),
-            _ => 0,
+        let mut count = 0;
+        let mut pending = vec![shape];
+        while let Some(shape) = pending.pop() {
+            match shape {
+                egui::Shape::Text(text) => count += usize::from(text.galley.job.text == needle),
+                egui::Shape::Vec(shapes) => pending.extend(shapes),
+                _ => {}
+            }
         }
+        count
     }
 
     fn output_text_count(output: &egui::FullOutput, needle: &str) -> usize {
@@ -4250,15 +4284,17 @@ mod tests {
     }
 
     fn shape_text_rect(shape: &egui::Shape, text: &str) -> Option<egui::Rect> {
-        match shape {
-            egui::Shape::Text(shape) if shape.galley.job.text == text => {
-                Some(egui::Rect::from_min_size(shape.pos, shape.galley.size()))
+        let mut pending = vec![shape];
+        while let Some(shape) = pending.pop() {
+            match shape {
+                egui::Shape::Text(shape) if shape.galley.job.text == text => {
+                    return Some(egui::Rect::from_min_size(shape.pos, shape.galley.size()));
+                }
+                egui::Shape::Vec(shapes) => pending.extend(shapes.iter().rev()),
+                _ => {}
             }
-            egui::Shape::Vec(shapes) => {
-                shapes.iter().find_map(|shape| shape_text_rect(shape, text))
-            }
-            _ => None,
         }
+        None
     }
 
     fn output_text_rect(output: &egui::FullOutput, text: &str) -> egui::Rect {
@@ -4270,23 +4306,18 @@ mod tests {
     }
 
     fn output_bottom_text_rect(output: &egui::FullOutput, text: &str) -> egui::Rect {
-        fn collect(shape: &egui::Shape, text: &str, matches: &mut Vec<egui::Rect>) {
-            match shape {
-                egui::Shape::Text(shape) if shape.galley.job.text == text => {
-                    matches.push(egui::Rect::from_min_size(shape.pos, shape.galley.size()))
-                }
-                egui::Shape::Vec(shapes) => {
-                    for shape in shapes {
-                        collect(shape, text, matches);
-                    }
-                }
-                _ => {}
-            }
-        }
-
         let mut matches = Vec::new();
         for clipped in &output.shapes {
-            collect(&clipped.shape, text, &mut matches);
+            let mut pending = vec![&clipped.shape];
+            while let Some(shape) = pending.pop() {
+                match shape {
+                    egui::Shape::Text(shape) if shape.galley.job.text == text => {
+                        matches.push(egui::Rect::from_min_size(shape.pos, shape.galley.size()))
+                    }
+                    egui::Shape::Vec(shapes) => pending.extend(shapes),
+                    _ => {}
+                }
+            }
         }
         matches
             .into_iter()
@@ -6537,6 +6568,42 @@ mod tests {
     }
 
     #[test]
+    fn queue_back_clears_disposable_history_and_retains_failures() {
+        let (directory, path) = temp_file("queue-back-history");
+        let mut app = app();
+        populate_cancelled_and_failed_queue_history(&mut app, &path, &directory);
+        app.state.enter_queue();
+
+        assert!(app.handle_queue_action(QueueAction::Back));
+
+        assert_eq!(app.media_queue.jobs().len(), 1);
+        assert!(matches!(
+            app.media_queue.jobs()[0].state(),
+            QueueJobState::Failed(_)
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn queue_add_files_clears_disposable_history_before_opening_intake() {
+        let (directory, path) = temp_file("queue-add-files-history");
+        let mut app = app();
+        populate_cancelled_and_failed_queue_history(&mut app, &path, &directory);
+        app.state.enter_queue();
+
+        assert!(app.handle_queue_action(QueueAction::AddFiles));
+
+        assert_eq!(app.media_queue.jobs().len(), 1);
+        assert!(matches!(
+            app.media_queue.jobs()[0].state(),
+            QueueJobState::Failed(_)
+        ));
+        assert!(app.handle_queue_action(QueueAction::ClearFinished));
+        assert!(app.media_queue.jobs().is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn queue_edit_hydrates_the_queued_request_and_cancel_preserves_it() {
         let (directory, path) = temp_file("queue-edit-cancel");
         let mut app = app();
@@ -6704,14 +6771,7 @@ mod tests {
 
         let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
 
-        for label in [
-            "Edit",
-            "Remove",
-            "Move up",
-            "Move down",
-            "Start queue",
-            "Back",
-        ] {
+        for label in ["Edit", "Remove", "↑", "↓", "Start queue", "Back"] {
             assert!(output_contains_text(&output, label), "missing {label:?}");
         }
         output.textures_delta.clear();

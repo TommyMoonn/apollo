@@ -1,8 +1,9 @@
 use egui::{
-    Align, Frame, InnerResponse, Layout, Margin, Rect, ScrollArea, Style, Ui, UiBuilder, Vec2, vec2,
+    Align, Frame, InnerResponse, Layout, Margin, Rect, Response, ScrollArea, Sense, Sides, Style,
+    TextStyle, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 
-use super::theme;
+use super::{fonts, theme};
 
 /// Reference outer-window geometry selected by `.project/design/LAYOUT.md`.
 pub const REFERENCE_WINDOW_SIZE: Vec2 = Vec2::new(730.0, 520.0);
@@ -121,6 +122,49 @@ pub struct QueueRowPlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QueueRowColumns {
+    pub identity: Rect,
+    pub operation: Rect,
+    pub state: Rect,
+    pub actions: Option<Rect>,
+}
+
+impl QueueRowPlan {
+    /// Resolve the shared wide-row plan into exact cells. Callers allocate the row once and render
+    /// each cell inside these rectangles so child content cannot move a later column.
+    pub fn columns(self, row: Rect) -> QueueRowColumns {
+        debug_assert_eq!(self.layout, QueueRowLayout::Inline);
+        let height = row.height();
+        let gap = theme::SPACING.related;
+        let identity = Rect::from_min_size(row.min, vec2(self.identity_width, height));
+        let operation = Rect::from_min_size(
+            identity.right_top() + vec2(gap, 0.0),
+            vec2(self.operation_width, height),
+        );
+        let state = Rect::from_min_size(
+            operation.right_top() + vec2(gap, 0.0),
+            vec2(self.state_width, height),
+        );
+        let actions = (self.action_width > 0.0).then(|| {
+            Rect::from_min_size(
+                state.right_top() + vec2(gap, 0.0),
+                vec2(self.action_width, height),
+            )
+        });
+
+        debug_assert!(
+            (actions.map_or(state.right(), |actions| actions.right()) - row.right()).abs() <= 0.5
+        );
+        QueueRowColumns {
+            identity,
+            operation,
+            state,
+            actions,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrackRowPlan {
     pub layout: TrackRowLayout,
     pub row_height: f32,
@@ -228,6 +272,85 @@ pub fn content_gutter<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -
             ui.set_min_width((available_width - f32::from(CONTENT_PADDING) * 2.0).max(0.0));
             add_contents(ui)
         })
+}
+
+/// Align a collection title/summary and its trailing controls to one compact header axis.
+/// Queue establishes this pattern; Batch can reuse it when its presentation is corrected.
+pub fn collection_header<Leading, Actions>(
+    ui: &mut Ui,
+    add_leading: impl FnOnce(&mut Ui) -> Leading,
+    add_actions: impl FnOnce(&mut Ui) -> Actions,
+) {
+    Sides::new()
+        .height(theme::COMPACT_CONTROL_HEIGHT)
+        .spacing(theme::SPACING.related)
+        .shrink_left()
+        .truncate()
+        .show(
+            ui,
+            |ui| {
+                ui.with_layout(Layout::left_to_right(Align::Center), add_leading);
+            },
+            |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), add_actions);
+            },
+        );
+}
+
+/// Render a collection title and summary on one typographic baseline.
+///
+/// Centering separate egui labels aligns their logical line boxes, not their glyph baselines. Keep
+/// the two galleys in one allocation and derive their relative y positions from the first glyph in
+/// each installed font.
+pub fn collection_heading(ui: &mut Ui, title: &str, summary: &str) -> Response {
+    let title_color = ui.visuals().text_color();
+    let title_galley = ui.painter().layout_no_wrap(
+        title.to_owned(),
+        TextStyle::Heading.resolve(ui.style()),
+        title_color,
+    );
+    let summary_galley = ui.painter().layout_no_wrap(
+        summary.to_owned(),
+        fonts::technical_text_style().resolve(ui.style()),
+        theme::SECONDARY_FAINT,
+    );
+
+    let glyph_baseline = |galley: &egui::Galley| {
+        let row = galley.rows.first().expect("single-line text has one row");
+        row.pos.y
+            + row
+                .glyphs
+                .first()
+                .expect("collection heading text is non-empty")
+                .pos
+                .y
+    };
+    let title_baseline = glyph_baseline(&title_galley);
+    let summary_baseline = glyph_baseline(&summary_galley);
+    let summary_y_from_title = title_baseline - summary_baseline;
+    let content_top = summary_y_from_title.min(0.0);
+    let content_bottom = title_galley
+        .size()
+        .y
+        .max(summary_y_from_title + summary_galley.size().y);
+    let content_size = vec2(
+        title_galley.size().x + theme::SPACING.compact + summary_galley.size().x,
+        content_bottom - content_top,
+    );
+    let (rect, response) = ui.allocate_exact_size(content_size, Sense::hover());
+    let title_position = pos2(rect.left(), rect.top() - content_top);
+    let summary_position = pos2(
+        title_position.x + title_galley.size().x + theme::SPACING.compact,
+        title_position.y + summary_y_from_title,
+    );
+    ui.painter()
+        .galley(title_position, title_galley, title_color);
+    ui.painter()
+        .galley(summary_position, summary_galley, theme::SECONDARY_FAINT);
+    response.widget_info(|| {
+        WidgetInfo::labeled(WidgetType::Label, true, format!("{title}, {summary}"))
+    });
+    response
 }
 
 /// Fade a replacement operation surface without moving or resizing its layout.
@@ -780,7 +903,7 @@ fn safe_dimension(value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use egui::Vec2;
+    use egui::{Rect, Vec2, pos2};
 
     use super::{
         ACTION_BAR_VERTICAL_PADDING, ActionLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT,
@@ -849,6 +972,33 @@ mod tests {
         assert_eq!(
             queue_row_plan(f32::NAN, action_width).layout,
             QueueRowLayout::Stacked
+        );
+    }
+
+    #[test]
+    fn inline_queue_plan_resolves_one_exact_shared_column_geometry() {
+        let plan = queue_row_plan(620.0, 144.0);
+        assert_eq!(plan.layout, QueueRowLayout::Inline);
+        let row = Rect::from_min_size(pos2(17.0, 23.0), Vec2::new(620.0, plan.row_height));
+        let columns = plan.columns(row);
+
+        assert_eq!(columns.identity.left(), row.left());
+        assert_eq!(columns.identity.width(), plan.identity_width);
+        assert_eq!(columns.operation.width(), QUEUE_OPERATION_WIDTH);
+        assert_eq!(columns.state.width(), QUEUE_STATE_WIDTH);
+        assert_eq!(columns.actions.unwrap().width(), plan.action_width);
+        assert_eq!(columns.actions.unwrap().right(), row.right());
+        assert_eq!(
+            columns.operation.left() - columns.identity.right(),
+            theme::SPACING.related
+        );
+        assert_eq!(
+            columns.state.left() - columns.operation.right(),
+            theme::SPACING.related
+        );
+        assert_eq!(
+            columns.actions.unwrap().left() - columns.state.right(),
+            theme::SPACING.related
         );
     }
 
