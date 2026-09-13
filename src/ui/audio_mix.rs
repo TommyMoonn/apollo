@@ -22,13 +22,14 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, CANCEL_QUEUE_EDIT_LABEL, OperationSurfaceMode, SAVE_QUEUE_CHANGES_LABEL,
-    fonts, layout, output_name::OutputNameState, theme, widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, output_name::OutputNameState, theme,
+    widgets,
 };
 
 const UNTITLED_AUDIO: &str = "Untitled audio";
 const AUDIO_TRACKS_LABEL: &str = "Audio tracks";
 const OUTPUT_LABEL: &str = "Output";
+const OUTPUT_CONTAINER_LABEL: &str = "Output container";
 const SELECT_ALL_LABEL: &str = "Select all";
 const CLEAR_LABEL: &str = "Clear";
 const RESET_GAINS_LABEL: &str = "Reset gains";
@@ -388,6 +389,7 @@ pub fn show(
     mode: impl Into<OperationSurfaceMode>,
 ) -> AudioMixSelectionAction {
     let mode = mode.into();
+    let shared_defaults = matches!(mode, OperationSurfaceMode::BatchDefaults { .. });
     let action = Cell::new(AudioMixSelectionAction::None);
     let (can_mix, feedback) = {
         let validation = state.validation(media);
@@ -402,12 +404,14 @@ pub fn show(
         |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
 
-            show_track_header(ui, media, state);
-            ui.add_space(theme::SPACING.compact);
-            show_track_list(ui, media, state, &presentation.tracks);
-            ui.add_space(theme::INLINE_ACTION_GAP);
-            show_track_footer(ui, state);
-            ui.add_space(theme::SPACING.related);
+            if !shared_defaults {
+                show_track_header(ui, media, state);
+                ui.add_space(theme::SPACING.compact);
+                show_track_list(ui, media, state, &presentation.tracks);
+                ui.add_space(theme::INLINE_ACTION_GAP);
+                show_track_footer(ui, state);
+                ui.add_space(theme::SPACING.related);
+            }
 
             show_loudness_header(ui, state);
             ui.add_space(theme::SPACING.compact);
@@ -424,11 +428,17 @@ pub fn show(
             );
             ui.add_space(theme::SPACING.section);
 
-            let _ = widgets::section_label(ui, OUTPUT_LABEL);
-            ui.add_space(theme::SPACING.compact);
-            let output_action = show_output_row(ui, media, state);
-            if output_action != AudioMixSelectionAction::None {
-                action.set(output_action);
+            if shared_defaults {
+                let _ = widgets::section_label(ui, OUTPUT_CONTAINER_LABEL);
+                ui.add_space(theme::SPACING.compact);
+                show_container_selector(ui, media, state);
+            } else {
+                let _ = widgets::section_label(ui, OUTPUT_LABEL);
+                ui.add_space(theme::SPACING.compact);
+                let output_action = show_output_row(ui, media, state);
+                if output_action != AudioMixSelectionAction::None {
+                    action.set(output_action);
+                }
             }
 
             if let Some(feedback) = feedback {
@@ -453,12 +463,18 @@ pub fn show(
                     action.set(AudioMixSelectionAction::QueueRequested);
                 }
             }
-            OperationSurfaceMode::QueueEdit => {
-                if widgets::primary_button_enabled(ui, SAVE_QUEUE_CHANGES_LABEL, can_mix).clicked()
-                {
+            edit_mode => {
+                let (save_label, cancel_label) = edit_mode
+                    .edit_labels()
+                    .expect("non-immediate operation mode has edit labels");
+                let save_allowed = match edit_mode {
+                    OperationSurfaceMode::BatchDefaults { save_allowed } => save_allowed,
+                    _ => can_mix,
+                };
+                if widgets::primary_button_enabled(ui, save_label, save_allowed).clicked() {
                     action.set(AudioMixSelectionAction::SaveQueueChanges);
                 }
-                if widgets::secondary_button(ui, CANCEL_QUEUE_EDIT_LABEL).clicked() {
+                if widgets::secondary_button(ui, cancel_label).clicked() {
                     action.set(AudioMixSelectionAction::CancelQueueEdit);
                 }
             }
@@ -728,35 +744,7 @@ fn show_output_row(
         state.container().extension(),
         BROWSE_LABEL,
         selector_width,
-        |ui| {
-            widgets::select_menu(
-                ui,
-                container_label(state.container()),
-                &CONTAINER_OPTIONS,
-                |ui| {
-                    if widgets::select_menu_option(
-                        ui,
-                        "MP4",
-                        state.container() == OutputContainer::Mp4,
-                    )
-                    .clicked()
-                    {
-                        requested_container = Some(OutputContainer::Mp4);
-                        ui.close();
-                    }
-                    if widgets::select_menu_option(
-                        ui,
-                        "MKV",
-                        state.container() == OutputContainer::Mkv,
-                    )
-                    .clicked()
-                    {
-                        requested_container = Some(OutputContainer::Mkv);
-                        ui.close();
-                    }
-                },
-            );
-        },
+        |ui| select_container(ui, state, &mut requested_container),
     );
 
     if row.filename.changed() {
@@ -771,6 +759,36 @@ fn show_output_row(
     } else {
         AudioMixSelectionAction::None
     }
+}
+
+fn show_container_selector(ui: &mut Ui, media: &MediaFile, state: &mut AudioMixSelectionState) {
+    let mut requested = None;
+    select_container(ui, state, &mut requested);
+    if let Some(container) = requested {
+        state.set_container(media, container);
+    }
+}
+
+fn select_container(
+    ui: &mut Ui,
+    state: &AudioMixSelectionState,
+    requested: &mut Option<OutputContainer>,
+) {
+    widgets::select_menu(
+        ui,
+        container_label(state.container()),
+        &CONTAINER_OPTIONS,
+        |ui| {
+            for (label, container) in [("MP4", OutputContainer::Mp4), ("MKV", OutputContainer::Mkv)]
+            {
+                if widgets::select_menu_option(ui, label, state.container() == container).clicked()
+                {
+                    *requested = Some(container);
+                    ui.close();
+                }
+            }
+        },
+    );
 }
 
 fn track_presentations(media: &MediaFile) -> Vec<TrackPresentation> {

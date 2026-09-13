@@ -24,8 +24,8 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, CANCEL_QUEUE_EDIT_LABEL, OperationSurfaceMode, SAVE_QUEUE_CHANGES_LABEL,
-    fonts, layout, output_name::OutputNameState, theme, widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, output_name::OutputNameState, theme,
+    widgets,
 };
 
 const PRESET_TARGETS: [UpscaleTarget; 3] = [
@@ -41,6 +41,7 @@ const UPSCALE_LABEL: &str = "Upscale";
 const CODEC_OPTIONS: [&str; 2] = ["H.264", "H.265"];
 const ENCODER_OPTIONS: [&str; 3] = ["Auto", "NVIDIA NVENC", "CPU"];
 const ENCODING_LABEL: &str = "Encoding";
+const CODEC_LABEL: &str = "Codec";
 const QUALITY_GUIDANCE: &str = "Lower value = better quality / larger file";
 
 #[derive(Debug, Clone, Copy)]
@@ -121,6 +122,10 @@ impl UpscaleSelectionState {
 
     pub fn encoder_selection(&self) -> VideoEncoderSelection {
         self.encoder_settings.selection()
+    }
+
+    pub fn encoder_settings(&self) -> &UpscaleEncoderSettings {
+        &self.encoder_settings
     }
 
     pub fn set_encoder_selection(&mut self, selection: VideoEncoderSelection) {
@@ -296,6 +301,7 @@ pub fn show(
     mode: impl Into<OperationSurfaceMode>,
 ) -> UpscaleSelectionAction {
     let mode = mode.into();
+    let shared_defaults = matches!(mode, OperationSurfaceMode::BatchDefaults { .. });
     let action = Cell::new(UpscaleSelectionAction::None);
     let validation = state.ready_validation(media, capabilities);
 
@@ -319,47 +325,41 @@ pub fn show(
             );
             ui.add_space(theme::SPACING.section);
 
+            if shared_defaults {
+                let _ = widgets::section_label(ui, CODEC_LABEL);
+                ui.add_space(theme::SPACING.compact);
+                show_codec_selector(ui, state);
+                ui.add_space(theme::SPACING.section);
+            }
+
             let _ = widgets::section_label(ui, ENCODING_LABEL);
             ui.add_space(theme::SPACING.compact);
             show_encoding_controls(ui, state, capabilities);
-            ui.add_space(theme::SPACING.section);
+            if !shared_defaults {
+                ui.add_space(theme::SPACING.section);
 
-            let _ = widgets::section_label(ui, OUTPUT_LABEL);
-            ui.add_space(theme::SPACING.compact);
-            let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
-            let selector_width = widgets::select_menu_intrinsic_width(ui, &CODEC_OPTIONS);
-            let mut requested_codec = None;
-            let row = widgets::operation_output_row(
-                ui,
-                &mut output_stem,
-                "mp4",
-                BROWSE_LABEL,
-                selector_width,
-                |ui| {
-                    widgets::select_menu(ui, codec_label(state.codec()), &CODEC_OPTIONS, |ui| {
-                        for codec in [VideoCodec::H264, VideoCodec::H265] {
-                            if widgets::select_menu_option(
-                                ui,
-                                codec_label(codec),
-                                state.codec() == codec,
-                            )
-                            .clicked()
-                            {
-                                requested_codec = Some(codec);
-                                ui.close();
-                            }
-                        }
-                    });
-                },
-            );
-            if row.filename.changed() {
-                state.set_output_filename_stem(OsString::from(output_stem));
-            }
-            if let Some(codec) = requested_codec {
-                state.set_codec(codec);
-            }
-            if row.browse.clicked() {
-                action.set(UpscaleSelectionAction::BrowseOutput);
+                let _ = widgets::section_label(ui, OUTPUT_LABEL);
+                ui.add_space(theme::SPACING.compact);
+                let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
+                let selector_width = widgets::select_menu_intrinsic_width(ui, &CODEC_OPTIONS);
+                let mut requested_codec = None;
+                let row = widgets::operation_output_row(
+                    ui,
+                    &mut output_stem,
+                    "mp4",
+                    BROWSE_LABEL,
+                    selector_width,
+                    |ui| select_codec(ui, state, &mut requested_codec),
+                );
+                if row.filename.changed() {
+                    state.set_output_filename_stem(OsString::from(output_stem));
+                }
+                if let Some(codec) = requested_codec {
+                    state.set_codec(codec);
+                }
+                if row.browse.clicked() {
+                    action.set(UpscaleSelectionAction::BrowseOutput);
+                }
             }
 
             if let Some(feedback) = validation
@@ -390,13 +390,18 @@ pub fn show(
                         action.set(UpscaleSelectionAction::QueueRequested);
                     }
                 }
-                OperationSurfaceMode::QueueEdit => {
-                    if widgets::primary_button_enabled(ui, SAVE_QUEUE_CHANGES_LABEL, runnable)
-                        .clicked()
-                    {
+                edit_mode => {
+                    let (save_label, cancel_label) = edit_mode
+                        .edit_labels()
+                        .expect("non-immediate operation mode has edit labels");
+                    let save_allowed = match edit_mode {
+                        OperationSurfaceMode::BatchDefaults { save_allowed } => save_allowed,
+                        _ => runnable,
+                    };
+                    if widgets::primary_button_enabled(ui, save_label, save_allowed).clicked() {
                         action.set(UpscaleSelectionAction::SaveQueueChanges);
                     }
-                    if widgets::secondary_button(ui, CANCEL_QUEUE_EDIT_LABEL).clicked() {
+                    if widgets::secondary_button(ui, cancel_label).clicked() {
                         action.set(UpscaleSelectionAction::CancelQueueEdit);
                     }
                 }
@@ -405,6 +410,26 @@ pub fn show(
     );
 
     action.get()
+}
+
+fn show_codec_selector(ui: &mut Ui, state: &mut UpscaleSelectionState) {
+    let mut requested = None;
+    select_codec(ui, state, &mut requested);
+    if let Some(codec) = requested {
+        state.set_codec(codec);
+    }
+}
+
+fn select_codec(ui: &mut Ui, state: &UpscaleSelectionState, requested: &mut Option<VideoCodec>) {
+    widgets::select_menu(ui, codec_label(state.codec()), &CODEC_OPTIONS, |ui| {
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            if widgets::select_menu_option(ui, codec_label(codec), state.codec() == codec).clicked()
+            {
+                *requested = Some(codec);
+                ui.close();
+            }
+        }
+    });
 }
 
 fn upscale_ready_feedback(error: &UpscaleValidationError) -> Option<Cow<'_, str>> {

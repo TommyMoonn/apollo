@@ -2,6 +2,7 @@ pub mod audio_extract;
 pub mod audio_extract_progress;
 pub mod audio_mix;
 pub mod audio_mix_progress;
+pub mod batch;
 pub mod file_intake;
 pub mod fonts;
 pub mod frame_capture;
@@ -26,11 +27,29 @@ use crate::queue::JobId;
 pub const ADD_TO_QUEUE_LABEL: &str = "Add to queue";
 pub const SAVE_QUEUE_CHANGES_LABEL: &str = "Save changes";
 pub const CANCEL_QUEUE_EDIT_LABEL: &str = "Cancel edit";
+pub const APPLY_BATCH_DEFAULTS_LABEL: &str = "Apply defaults";
+pub const SAVE_BATCH_OVERRIDE_LABEL: &str = "Save override";
+pub const CANCEL_BATCH_EDIT_LABEL: &str = "Cancel";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationSurfaceMode {
     Immediate { start_allowed: bool },
     QueueEdit,
+    BatchDefaults { save_allowed: bool },
+    BatchOverride,
+}
+
+impl OperationSurfaceMode {
+    pub const fn edit_labels(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Immediate { .. } => None,
+            Self::QueueEdit => Some((SAVE_QUEUE_CHANGES_LABEL, CANCEL_QUEUE_EDIT_LABEL)),
+            Self::BatchDefaults { .. } => {
+                Some((APPLY_BATCH_DEFAULTS_LABEL, CANCEL_BATCH_EDIT_LABEL))
+            }
+            Self::BatchOverride => Some((SAVE_BATCH_OVERRIDE_LABEL, CANCEL_BATCH_EDIT_LABEL)),
+        }
+    }
 }
 
 impl From<bool> for OperationSurfaceMode {
@@ -51,6 +70,7 @@ pub enum SourceAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QueueAction {
+    AddFiles,
     Start,
     CancelCurrent,
     StopAfterCurrent,

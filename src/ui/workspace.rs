@@ -8,12 +8,17 @@ use super::{SourceAction, fonts, layout, media_lifecycle, queue_count_label, the
 
 const CHANGE_FILE_LABEL: &str = "Change file";
 const CLOSE_SOURCE_LABEL: &str = "Close source";
-const QUEUE_EDIT_CONTEXT: &str = "Editing queued item";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceMode {
-    Source { queue_count: usize, enabled: bool },
-    QueueEdit { enabled: bool },
+    Source {
+        queue_count: usize,
+        enabled: bool,
+    },
+    FixedSourceEdit {
+        context: &'static str,
+        enabled: bool,
+        operation_switching: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +81,9 @@ pub fn show(
 ) -> WorkspaceAction {
     let action = Cell::new(WorkspaceAction::None);
     let enabled = match mode {
-        WorkspaceMode::Source { enabled, .. } | WorkspaceMode::QueueEdit { enabled } => enabled,
+        WorkspaceMode::Source { enabled, .. } | WorkspaceMode::FixedSourceEdit { enabled, .. } => {
+            enabled
+        }
     };
 
     ui.add_enabled_ui(enabled, |ui| {
@@ -84,20 +91,31 @@ pub fn show(
             WorkspaceMode::Source { queue_count, .. } => {
                 show_source_header(ui, presentation, queue_count, &action);
             }
-            WorkspaceMode::QueueEdit { .. } => show_queue_edit_header(ui, presentation),
+            WorkspaceMode::FixedSourceEdit { context, .. } => {
+                show_fixed_source_header(ui, presentation, context)
+            }
         }
         ui.add_space(theme::SPACING.related);
-        show_operation_switcher(ui, active_operation, &action);
+        let operation_switching = match mode {
+            WorkspaceMode::Source { .. } => true,
+            WorkspaceMode::FixedSourceEdit {
+                operation_switching,
+                ..
+            } => operation_switching,
+        };
+        ui.add_enabled_ui(operation_switching, |ui| {
+            show_operation_switcher(ui, active_operation, &action);
+        });
     });
 
     action.get()
 }
 
-fn show_queue_edit_header(ui: &mut Ui, presentation: &WorkspacePresentation) {
+fn show_fixed_source_header(ui: &mut Ui, presentation: &WorkspacePresentation, context: &str) {
     ui.spacing_mut().item_spacing.y = theme::SPACING.tight;
     ui.add(
         Label::new(
-            RichText::new(QUEUE_EDIT_CONTEXT)
+            RichText::new(context)
                 .text_style(fonts::technical_text_style())
                 .color(theme::SECONDARY_FAINT),
         )

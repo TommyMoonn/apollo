@@ -10,6 +10,7 @@ use crate::{
 use super::{QueueAction, fonts, layout, media_lifecycle, theme, widgets};
 
 const TITLE: &str = "Queue";
+const ADD_FILES_LABEL: &str = "Add files";
 const EMPTY_COPY: &str = "No jobs queued.";
 const START_LABEL: &str = "Start queue";
 const CANCEL_LABEL: &str = "Cancel current";
@@ -243,9 +244,14 @@ fn show_header(ui: &mut Ui, summary: &str, can_clear: bool, action: &Cell<QueueA
             media_lifecycle::technical_faint(ui, summary);
         },
         |ui| {
-            if can_clear && widgets::plain_button(ui, CLEAR_LABEL).clicked() {
-                action.set(QueueAction::ClearFinished);
-            }
+            ui.horizontal(|ui| {
+                if can_clear && widgets::plain_button(ui, CLEAR_LABEL).clicked() {
+                    action.set(QueueAction::ClearFinished);
+                }
+                if widgets::plain_button(ui, ADD_FILES_LABEL).clicked() {
+                    action.set(QueueAction::AddFiles);
+                }
+            });
         },
     );
 }

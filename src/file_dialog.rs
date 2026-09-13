@@ -17,6 +17,7 @@ const ALL_FILES_FILTER_PATTERN: &str = "*.*";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DialogTarget {
     MediaInput,
+    BatchInput,
     AudioMixOutput { session_id: u64 },
     UpscaleOutput { session_id: u64 },
     RemuxOutput { session_id: u64 },
@@ -104,6 +105,9 @@ pub(crate) enum FileDialogRequest {
     OpenSource {
         initial_directory: Option<PathBuf>,
     },
+    OpenSources {
+        initial_directory: Option<PathBuf>,
+    },
     SaveOutput {
         target: DialogTarget,
         options: SaveDialogOptions,
@@ -114,6 +118,7 @@ impl FileDialogRequest {
     pub(crate) fn target(&self) -> DialogTarget {
         match self {
             Self::OpenSource { .. } => DialogTarget::MediaInput,
+            Self::OpenSources { .. } => DialogTarget::BatchInput,
             Self::SaveOutput { target, .. } => *target,
         }
     }
@@ -122,6 +127,7 @@ impl FileDialogRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DialogOutcome {
     Selected(PathBuf),
+    SelectedMany(Vec<PathBuf>),
     Cancelled,
     Failed(String),
 }
@@ -279,10 +285,17 @@ fn run_dialog_service<F, R>(
         let outcome = match runner.as_mut() {
             Ok(runner) => {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    runner.run(&request)
+                    if matches!(request, FileDialogRequest::OpenSources { .. }) {
+                        runner.run_many(&request).map(|paths| {
+                            paths.map_or(DialogOutcome::Cancelled, DialogOutcome::SelectedMany)
+                        })
+                    } else {
+                        runner.run(&request).map(|path| {
+                            path.map_or(DialogOutcome::Cancelled, DialogOutcome::Selected)
+                        })
+                    }
                 })) {
-                    Ok(Ok(Some(path))) => DialogOutcome::Selected(path),
-                    Ok(Ok(None)) => DialogOutcome::Cancelled,
+                    Ok(Ok(outcome)) => outcome,
                     Ok(Err(error)) => DialogOutcome::Failed(error),
                     Err(_) => DialogOutcome::Failed(
                         "The native file dialog stopped unexpectedly.".to_owned(),
@@ -303,6 +316,10 @@ fn run_dialog_service<F, R>(
 
 pub(crate) trait DialogBackend {
     fn run(&mut self, request: &FileDialogRequest) -> Result<Option<PathBuf>, String>;
+
+    fn run_many(&mut self, request: &FileDialogRequest) -> Result<Option<Vec<PathBuf>>, String> {
+        self.run(request).map(|path| path.map(|path| vec![path]))
+    }
 }
 
 impl<F> DialogBackend for F
@@ -321,6 +338,10 @@ struct NativeDialogBackend(native_windows::DialogSession);
 impl DialogBackend for NativeDialogBackend {
     fn run(&mut self, request: &FileDialogRequest) -> Result<Option<PathBuf>, String> {
         self.0.run(request).map_err(|error| error.to_string())
+    }
+
+    fn run_many(&mut self, request: &FileDialogRequest) -> Result<Option<Vec<PathBuf>>, String> {
+        self.0.run_many(request).map_err(|error| error.to_string())
     }
 }
 
@@ -350,10 +371,10 @@ mod native_windows {
                 CoTaskMemFree, CoUninitialize,
             },
             UI::Shell::{
-                Common::COMDLG_FILTERSPEC, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
-                FOS_NOREADONLYRETURN, FOS_PATHMUSTEXIST, FOS_STRICTFILETYPES, FileOpenDialog,
-                FileSaveDialog, IFileDialog, IShellItem, SHCreateItemFromParsingName,
-                SIGDN_FILESYSPATH,
+                Common::COMDLG_FILTERSPEC, FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST,
+                FOS_FORCEFILESYSTEM, FOS_NOREADONLYRETURN, FOS_PATHMUSTEXIST, FOS_STRICTFILETYPES,
+                FileOpenDialog, FileSaveDialog, IFileDialog, IFileOpenDialog, IShellItem,
+                SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
             },
         },
         core::{HRESULT, HSTRING, PCWSTR, Result},
@@ -397,7 +418,23 @@ mod native_windows {
                 FileDialogRequest::OpenSource { initial_directory } => {
                     open_source(initial_directory.as_deref(), self.owner)
                 }
+                FileDialogRequest::OpenSources { initial_directory } => {
+                    open_sources(initial_directory.as_deref(), self.owner)
+                        .map(|paths| paths.and_then(|paths| paths.into_iter().next()))
+                }
                 FileDialogRequest::SaveOutput { options, .. } => save_output(options, self.owner),
+            }
+        }
+
+        pub(super) fn run_many(
+            &mut self,
+            request: &FileDialogRequest,
+        ) -> Result<Option<Vec<PathBuf>>> {
+            match request {
+                FileDialogRequest::OpenSources { initial_directory } => {
+                    open_sources(initial_directory.as_deref(), self.owner)
+                }
+                _ => self.run(request).map(|path| path.map(|path| vec![path])),
             }
         }
     }
@@ -421,6 +458,43 @@ mod native_windows {
             set_initial_folder_if_available(&dialog, initial_directory);
         }
         show(dialog, owner)
+    }
+
+    fn open_sources(
+        initial_directory: Option<&std::path::Path>,
+        owner: WindowOwner,
+    ) -> Result<Option<Vec<PathBuf>>> {
+        let dialog: IFileOpenDialog =
+            unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)? };
+        unsafe {
+            dialog.SetTitle(&HSTRING::from("Open media files"))?;
+            dialog.SetOptions(
+                FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_ALLOWMULTISELECT,
+            )?;
+            set_filters(
+                &dialog,
+                &[
+                    (MEDIA_FILTER_NAME, MEDIA_FILTER_PATTERN),
+                    (ALL_FILES_FILTER_NAME, ALL_FILES_FILTER_PATTERN),
+                ],
+            )?;
+            set_initial_folder_if_available(&dialog, initial_directory);
+        }
+        let shown = unsafe { dialog.Show(Some(HWND(owner.hwnd as *mut core::ffi::c_void))) };
+        if let Err(error) = shown {
+            if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+        let items = unsafe { dialog.GetResults()? };
+        let count = unsafe { items.GetCount()? };
+        let mut paths = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let item = unsafe { items.GetItemAt(index)? };
+            paths.push(item_path(&item)?);
+        }
+        Ok(Some(paths))
     }
 
     fn save_output(options: &SaveDialogOptions, owner: WindowOwner) -> Result<Option<PathBuf>> {
@@ -499,13 +573,17 @@ mod native_windows {
         }
 
         let item = unsafe { dialog.GetResult()? };
+        item_path(&item).map(Some)
+    }
+
+    fn item_path(item: &IShellItem) -> Result<PathBuf> {
         let display_name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH)? };
         let path = unsafe { display_name.to_string() };
         unsafe { CoTaskMemFree(Some(display_name.0.cast())) };
         let path = path.map_err(|_| {
             windows::core::Error::new(E_FAIL, "The selected path was not valid UTF-16.")
         })?;
-        Ok(Some(PathBuf::from(path)))
+        Ok(PathBuf::from(path))
     }
 }
 
@@ -524,9 +602,21 @@ mod tests {
     };
 
     use super::{
-        DialogOutcome, DialogTarget, FileDialogOwner, FileDialogRequest, FileDialogStartError,
-        OutputFormat, SaveDialogOptions,
+        DialogBackend, DialogOutcome, DialogTarget, FileDialogOwner, FileDialogRequest,
+        FileDialogStartError, OutputFormat, SaveDialogOptions,
     };
+
+    struct MultiSelectBackend(Vec<PathBuf>);
+
+    impl DialogBackend for MultiSelectBackend {
+        fn run(&mut self, _: &FileDialogRequest) -> Result<Option<PathBuf>, String> {
+            Ok(None)
+        }
+
+        fn run_many(&mut self, _: &FileDialogRequest) -> Result<Option<Vec<PathBuf>>, String> {
+            Ok(Some(self.0.clone()))
+        }
+    }
 
     fn open_request() -> FileDialogRequest {
         FileDialogRequest::OpenSource {
@@ -549,6 +639,27 @@ mod tests {
         let completion = wait_for_completion(&mut owner);
         assert_eq!(completion.target, DialogTarget::MediaInput);
         assert_eq!(completion.outcome, DialogOutcome::Selected(expected));
+    }
+
+    #[test]
+    fn multi_open_request_preserves_every_selected_path_in_native_order() {
+        let paths = vec![
+            PathBuf::from(r"C:\media\first.mp4"),
+            PathBuf::from(r"C:\media\second.mkv"),
+        ];
+        let expected = paths.clone();
+        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), move || {
+            Ok(MultiSelectBackend(paths))
+        });
+        owner
+            .request(FileDialogRequest::OpenSources {
+                initial_directory: Some(PathBuf::from(r"C:\media")),
+            })
+            .unwrap();
+
+        let completion = wait_for_completion(&mut owner);
+        assert_eq!(completion.target, DialogTarget::BatchInput);
+        assert_eq!(completion.outcome, DialogOutcome::SelectedMany(expected));
     }
 
     #[test]

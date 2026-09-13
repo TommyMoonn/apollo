@@ -1,5 +1,6 @@
 use std::{
     io,
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -25,14 +26,15 @@ use apollo::{
     },
     audio_mix::{
         execution::{AudioMixExecutionState, AudioMixExecutor, AudioMixStartError},
-        model::OutputContainer,
+        model::{LoudnessNormalization, OutputContainer},
     },
     frame_capture::{
         execution::{FrameCaptureExecutionState, FrameCaptureExecutor, FrameCaptureStartError},
-        model::FrameCaptureFormat,
+        model::{FrameCaptureFormat, FrameTimestamp},
         thumbnail::{FrameCaptureThumbnail, decode_frame_capture_thumbnail},
     },
     media::{
+        batch::BatchInspectionOwner,
         container::MediaContainer,
         error::{MediaError, MediaErrorKind},
         intake::{MediaIntake, MediaIntakeRequest, MediaLoadStart, MediaProbeDisposition},
@@ -57,6 +59,7 @@ use apollo::{
         audio_mix as audio_mix_ui,
         audio_mix::{AudioMixSelectionAction, AudioMixSelectionState},
         audio_mix_progress::{self, AudioMixLifecycleAction, AudioMixLifecycleUiState},
+        batch::{self as batch_ui, BatchAction, BatchItemView, BatchReadiness},
         file_intake::{self, FileIntakeAction},
         fonts, frame_capture as frame_capture_ui,
         frame_capture::{FrameCaptureSelectionAction, FrameCaptureSelectionState},
@@ -75,7 +78,10 @@ use apollo::{
         workspace::{self, Operation as Tool, WorkspaceAction, WorkspaceMode},
     },
     upscale::execution::{UpscaleExecutionState, UpscaleExecutor, UpscaleStartError},
-    upscale::{model::VideoCodec, validation::validate_upscale_request},
+    upscale::{
+        model::{UpscaleEncoderSettings, UpscaleTarget, VideoCodec},
+        validation::validate_upscale_request,
+    },
 };
 
 fn file_intake_enabled(
@@ -110,6 +116,8 @@ enum NavigationState {
     QueueEdit {
         origin: QueueOrigin,
     },
+    BatchSetup,
+    BatchEdit,
     SourceWorkspace {
         active_operation: Tool,
     },
@@ -118,6 +126,13 @@ enum NavigationState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueueOrigin {
     NoSource,
+    SourceWorkspace { active_operation: Tool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchOrigin {
+    NoSource,
+    Queue { origin: QueueOrigin },
     SourceWorkspace { active_operation: Tool },
 }
 
@@ -172,9 +187,8 @@ struct FrameCaptureToolState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct QueueEditState {
+struct OperationEditorState {
     session_id: u64,
-    job_id: JobId,
     media: MediaFile,
     presentation: Arc<SourcePresentation>,
     active_operation: Tool,
@@ -185,6 +199,64 @@ struct QueueEditState {
     frame_capture: FrameCaptureSelectionState,
     error: Option<MediaError>,
     error_details_open: bool,
+}
+
+impl OperationEditorState {
+    fn new(session_id: u64, media: MediaFile, active_operation: Tool) -> Self {
+        Self {
+            session_id,
+            presentation: Arc::new(SourcePresentation::new(&media)),
+            active_operation,
+            audio_mix: AudioMixSelectionState::new(&media),
+            upscale: UpscaleSelectionState::new(&media),
+            remux: RemuxSelectionState::new(&media),
+            audio_extract: AudioExtractSelectionState::new(&media),
+            frame_capture: FrameCaptureSelectionState::new(&media),
+            media,
+            error: None,
+            error_details_open: false,
+        }
+    }
+
+    fn hydrate(&mut self, operation: &QueuedOperation) {
+        match operation {
+            QueuedOperation::AudioMix(request) => {
+                self.audio_mix = AudioMixSelectionState::from_request(&self.media, request);
+            }
+            QueuedOperation::Upscale(request) => {
+                self.upscale = UpscaleSelectionState::from_request(&self.media, request);
+            }
+            QueuedOperation::Remux(request) => {
+                self.remux = RemuxSelectionState::from_request(&self.media, request);
+            }
+            QueuedOperation::AudioExtract(request) => {
+                self.audio_extract = AudioExtractSelectionState::from_request(&self.media, request);
+            }
+            QueuedOperation::FrameCapture(request) => {
+                self.frame_capture = FrameCaptureSelectionState::from_request(&self.media, request);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueueEditState {
+    job_id: JobId,
+    editor: OperationEditorState,
+}
+
+impl Deref for QueueEditState {
+    type Target = OperationEditorState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.editor
+    }
+}
+
+impl DerefMut for QueueEditState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.editor
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,40 +270,101 @@ enum QueueEditAction {
 impl QueueEditState {
     fn new(session_id: u64, job: &QueuedJob) -> Self {
         let media = job.media().clone();
-        let mut state = Self {
-            session_id,
+        let mut editor =
+            OperationEditorState::new(session_id, media, queued_operation_tool(job.operation()));
+        editor.hydrate(job.operation());
+        Self {
             job_id: job.id(),
-            presentation: Arc::new(SourcePresentation::new(&media)),
-            active_operation: queued_operation_tool(job.operation()),
-            audio_mix: AudioMixSelectionState::new(&media),
-            upscale: UpscaleSelectionState::new(&media),
-            remux: RemuxSelectionState::new(&media),
-            audio_extract: AudioExtractSelectionState::new(&media),
-            frame_capture: FrameCaptureSelectionState::new(&media),
-            media,
-            error: None,
-            error_details_open: false,
-        };
-        match job.operation() {
-            QueuedOperation::AudioMix(request) => {
-                state.audio_mix = AudioMixSelectionState::from_request(&state.media, request);
-            }
-            QueuedOperation::Upscale(request) => {
-                state.upscale = UpscaleSelectionState::from_request(&state.media, request);
-            }
-            QueuedOperation::Remux(request) => {
-                state.remux = RemuxSelectionState::from_request(&state.media, request);
-            }
-            QueuedOperation::AudioExtract(request) => {
-                state.audio_extract =
-                    AudioExtractSelectionState::from_request(&state.media, request);
-            }
-            QueuedOperation::FrameCapture(request) => {
-                state.frame_capture =
-                    FrameCaptureSelectionState::from_request(&state.media, request);
-            }
+            editor,
         }
-        state
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BatchSourceState {
+    Inspecting,
+    Failed,
+    Ready(MediaFile),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BatchDefaults {
+    AudioMix {
+        container: OutputContainer,
+        normalization: LoudnessNormalization,
+    },
+    Upscale {
+        target: UpscaleTarget,
+        codec: VideoCodec,
+        encoder_settings: UpscaleEncoderSettings,
+    },
+    Remux {
+        container: MediaContainer,
+    },
+    AudioExtract {
+        format: AudioExtractFormat,
+    },
+    FrameCapture {
+        timestamp: FrameTimestamp,
+        format: FrameCaptureFormat,
+    },
+}
+
+impl BatchDefaults {
+    const fn operation(&self) -> Tool {
+        match self {
+            Self::AudioMix { .. } => Tool::AudioMix,
+            Self::Upscale { .. } => Tool::VideoUpscale,
+            Self::Remux { .. } => Tool::Remux,
+            Self::AudioExtract { .. } => Tool::AudioExtract,
+            Self::FrameCapture { .. } => Tool::FrameCapture,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BatchItem {
+    path: PathBuf,
+    included: bool,
+    source: BatchSourceState,
+    operation: Option<QueuedOperation>,
+    readiness: BatchReadiness,
+    reason: Option<String>,
+    overridden: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BatchSetupState {
+    origin: BatchOrigin,
+    operation: Tool,
+    defaults: Option<BatchDefaults>,
+    items: Vec<BatchItem>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchEditTarget {
+    Defaults,
+    Item(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BatchEditState {
+    target: BatchEditTarget,
+    editor: OperationEditorState,
+}
+
+impl Deref for BatchEditState {
+    type Target = OperationEditorState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.editor
+    }
+}
+
+impl DerefMut for BatchEditState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.editor
     }
 }
 
@@ -395,7 +528,9 @@ impl AppState {
         match self.navigation {
             NavigationState::NoSource
             | NavigationState::Queue { .. }
-            | NavigationState::QueueEdit { .. } => None,
+            | NavigationState::QueueEdit { .. }
+            | NavigationState::BatchSetup
+            | NavigationState::BatchEdit => None,
             NavigationState::SourceWorkspace { active_operation } => Some(active_operation),
         }
     }
@@ -414,6 +549,7 @@ impl AppState {
             }
             NavigationState::Queue { origin } => origin,
             NavigationState::QueueEdit { origin } => origin,
+            NavigationState::BatchSetup | NavigationState::BatchEdit => QueueOrigin::NoSource,
         };
         self.navigation = NavigationState::Queue { origin };
         self.intake_error = None;
@@ -449,6 +585,9 @@ pub(crate) struct ApolloApp {
     frame_capture_executor: FrameCaptureExecutor,
     media_queue: MediaQueue,
     queue_edit: Option<QueueEditState>,
+    batch_setup: Option<BatchSetupState>,
+    batch_edit: Option<BatchEditState>,
+    batch_inspection: Option<BatchInspectionOwner>,
     queue_event_sender: mpsc::Sender<QueueExecutionEvent>,
     queue_event_receiver: Receiver<QueueExecutionEvent>,
     frame_capture_thumbnail_load: Option<FrameCaptureThumbnailLoad>,
@@ -483,6 +622,9 @@ impl ApolloApp {
             frame_capture_executor: FrameCaptureExecutor::new(),
             media_queue: MediaQueue::new(),
             queue_edit: None,
+            batch_setup: None,
+            batch_edit: None,
+            batch_inspection: None,
             queue_event_sender,
             queue_event_receiver,
             frame_capture_thumbnail_load: None,
@@ -565,6 +707,12 @@ impl ApolloApp {
 
     fn handle_queue_action(&mut self, action: QueueAction) -> bool {
         match action {
+            QueueAction::AddFiles => {
+                self.start_file_dialog(FileDialogRequest::OpenSources {
+                    initial_directory: None,
+                });
+                true
+            }
             QueueAction::Start => self.start_media_queue(),
             QueueAction::CancelCurrent => self.media_queue.cancel_current(),
             QueueAction::StopAfterCurrent => self.media_queue.stop_after_current(),
@@ -650,46 +798,14 @@ impl ApolloApp {
         let Some(edit) = self.queue_edit.as_mut() else {
             return false;
         };
-        let operation = match edit.active_operation {
-            Tool::AudioMix if edit.audio_mix.can_mix(&edit.media) => {
-                QueuedOperation::AudioMix(edit.audio_mix.request(&edit.media))
-            }
-            Tool::VideoUpscale => {
-                let Some(capabilities) = nvenc_capabilities else {
-                    return false;
-                };
-                let capability = match edit.upscale.codec() {
-                    VideoCodec::H264 => capabilities.h264_nvenc,
-                    VideoCodec::H265 => capabilities.h265_nvenc,
-                };
-                let request = edit
-                    .upscale
-                    .request_with_nvenc_capability(&edit.media, capability);
-                if validate_upscale_request(&request, &edit.media).is_err() {
-                    return false;
-                }
-                QueuedOperation::Upscale(request)
-            }
-            Tool::Remux if edit.remux.can_remux(&edit.media) => {
-                QueuedOperation::Remux(edit.remux.request(&edit.media))
-            }
-            Tool::AudioExtract if edit.audio_extract.can_extract(&edit.media) => {
-                let Some(request) = edit.audio_extract.request(&edit.media) else {
-                    return false;
-                };
-                QueuedOperation::AudioExtract(request)
-            }
-            Tool::FrameCapture if edit.frame_capture.can_capture(&edit.media) => {
-                let Some(request) = edit.frame_capture.request(&edit.media) else {
-                    return false;
-                };
-                QueuedOperation::FrameCapture(request)
-            }
-            _ => return false,
+        let job_id = edit.job_id;
+        let edit = &mut edit.editor;
+        let Some(operation) = operation_from_editor(edit, nvenc_capabilities.as_ref()) else {
+            return false;
         };
         match self
             .media_queue
-            .replace_waiting_operation(edit.job_id, operation)
+            .replace_waiting_operation(job_id, operation)
         {
             Ok(()) => self.finish_queue_edit(),
             Err(error) => {
@@ -1182,6 +1298,14 @@ impl ApolloApp {
     }
 
     fn show_navigation(&mut self, ui: &mut Ui) {
+        if matches!(self.state.navigation, NavigationState::BatchEdit) {
+            self.show_batch_edit(ui);
+            return;
+        }
+        if matches!(self.state.navigation, NavigationState::BatchSetup) {
+            self.show_batch_setup(ui);
+            return;
+        }
         if matches!(self.state.navigation, NavigationState::QueueEdit { .. }) {
             self.show_queue_edit(ui);
             return;
@@ -1292,7 +1416,9 @@ impl ApolloApp {
 
     fn handle_file_intake_action(&mut self, action: FileIntakeAction) {
         match action {
-            FileIntakeAction::OpenFile => self.handle_source_action(SourceAction::ChangeFile),
+            FileIntakeAction::OpenFile => self.start_file_dialog(FileDialogRequest::OpenSources {
+                initial_directory: None,
+            }),
             FileIntakeAction::OpenQueue => self.state.enter_queue(),
             FileIntakeAction::None => {}
         }
@@ -1311,6 +1437,160 @@ impl ApolloApp {
         self.handle_queue_action(action);
     }
 
+    fn show_batch_setup(&mut self, ui: &mut Ui) {
+        let Some(batch) = self.batch_setup.as_ref() else {
+            self.state.navigation = NavigationState::NoSource;
+            return;
+        };
+        let views = batch
+            .items
+            .iter()
+            .map(|item| BatchItemView {
+                source: &item.path,
+                output: item.operation.as_ref().map(QueuedOperation::output),
+                readiness: item.readiness,
+                reason: item.reason.as_deref(),
+                included: item.included,
+            })
+            .collect::<Vec<_>>();
+        let included = batch.items.iter().filter(|item| item.included).count();
+        let can_enqueue =
+            included > 0
+                && batch.items.iter().filter(|item| item.included).all(|item| {
+                    item.readiness == BatchReadiness::Ready && item.operation.is_some()
+                });
+        let action = batch_ui::show(
+            ui,
+            batch.operation,
+            &views,
+            batch
+                .items
+                .iter()
+                .any(|item| matches!(item.source, BatchSourceState::Ready(_))),
+            can_enqueue,
+            batch.error.as_deref(),
+        );
+        match action {
+            BatchAction::SelectOperation(operation) => {
+                let capabilities = self
+                    .ready_media_tools()
+                    .map(|tools| tools.video_encoders.clone());
+                if let Some(batch) = self.batch_setup.as_mut()
+                    && batch.operation != operation
+                {
+                    batch.operation = operation;
+                    batch.defaults = None;
+                    batch.error = None;
+                    for item in &mut batch.items {
+                        item.overridden = false;
+                    }
+                    if let Some(media) = batch.items.iter().find_map(|item| match &item.source {
+                        BatchSourceState::Ready(media) => Some(media.clone()),
+                        BatchSourceState::Inspecting | BatchSourceState::Failed => None,
+                    }) {
+                        let editor = OperationEditorState::new(0, media, operation);
+                        batch.defaults = batch_defaults_from_editor(&editor);
+                    }
+                    refresh_batch_items(batch, capabilities.as_ref());
+                }
+            }
+            BatchAction::ConfigureDefaults => {
+                self.begin_batch_edit(BatchEditTarget::Defaults);
+            }
+            BatchAction::EditItem(index) => {
+                self.begin_batch_edit(BatchEditTarget::Item(index));
+            }
+            BatchAction::ToggleIncluded(index) => {
+                if let Some(item) = self
+                    .batch_setup
+                    .as_mut()
+                    .and_then(|batch| batch.items.get_mut(index))
+                {
+                    item.included = !item.included;
+                }
+            }
+            BatchAction::Enqueue => {
+                self.enqueue_batch();
+            }
+            BatchAction::Back => {
+                self.finish_batch_setup();
+            }
+            BatchAction::None => {}
+        }
+    }
+
+    fn show_batch_edit(&mut self, ui: &mut Ui) {
+        let Some(edit) = self.batch_edit.as_ref() else {
+            self.state.navigation = NavigationState::BatchSetup;
+            return;
+        };
+        let target = edit.target;
+        let presentation = edit.presentation.clone();
+        let operation = edit.active_operation;
+        let enabled = !self.file_dialog.is_pending();
+        layout::workspace_chrome(ui, |ui| {
+            workspace::show(
+                ui,
+                &presentation.workspace,
+                operation,
+                WorkspaceMode::FixedSourceEdit {
+                    context: match target {
+                        BatchEditTarget::Defaults => "Configuring batch defaults",
+                        BatchEditTarget::Item(_) => "Overriding batch item",
+                    },
+                    enabled,
+                    operation_switching: false,
+                },
+            )
+        });
+        let capabilities = match &self.media_tools {
+            MediaToolsState::Ready(tools) if self.media_tools_discovery.is_none() => {
+                upscale_ui::UpscaleEncoderCapabilities::Ready(&tools.video_encoders)
+            }
+            _ => upscale_ui::UpscaleEncoderCapabilities::Checking,
+        };
+        let Some(edit) = self.batch_edit.as_mut() else {
+            return;
+        };
+        if let Some(error) = edit.error.clone() {
+            layout::content_gutter(ui, |ui| {
+                media_error::show_inline(ui, &error, &mut edit.error_details_open);
+                ui.add_space(theme::SPACING.section);
+            });
+        }
+        let defaults_save_allowed = batch_defaults_from_editor(&edit.editor).is_some();
+        let action = show_operation_editor(
+            ui,
+            &mut edit.editor,
+            capabilities,
+            match target {
+                BatchEditTarget::Defaults => OperationSurfaceMode::BatchDefaults {
+                    save_allowed: defaults_save_allowed,
+                },
+                BatchEditTarget::Item(_) => OperationSurfaceMode::BatchOverride,
+            },
+            enabled,
+            match target {
+                BatchEditTarget::Defaults => ("batch-defaults", 0),
+                BatchEditTarget::Item(index) => ("batch-item", index),
+            },
+        );
+        match action {
+            QueueEditAction::BrowseOutput => {
+                if let Some(edit) = self.batch_edit.as_ref() {
+                    self.start_file_dialog(editor_output_dialog_request(&edit.editor));
+                }
+            }
+            QueueEditAction::Save => {
+                self.save_batch_edit();
+            }
+            QueueEditAction::Cancel => {
+                self.finish_batch_edit();
+            }
+            QueueEditAction::None => {}
+        }
+    }
+
     fn show_queue_edit(&mut self, ui: &mut Ui) {
         let Some(edit) = self.queue_edit.as_ref() else {
             let _ = self.finish_queue_edit();
@@ -1324,7 +1604,11 @@ impl ApolloApp {
                 ui,
                 &presentation.workspace,
                 active_operation,
-                WorkspaceMode::QueueEdit { enabled },
+                WorkspaceMode::FixedSourceEdit {
+                    context: "Editing queued item",
+                    enabled,
+                    operation_switching: true,
+                },
             )
         })
         .inner;
@@ -1339,10 +1623,11 @@ impl ApolloApp {
         let Some(edit) = self.queue_edit.as_mut() else {
             return;
         };
-        let active_operation = edit.active_operation;
-        if let Some(error) = edit.error.as_ref() {
+        let job_id = edit.job_id;
+        let edit = &mut edit.editor;
+        if let Some(error) = edit.error.clone() {
             layout::content_gutter(ui, |ui| {
-                media_error::show_inline(ui, error, &mut edit.error_details_open);
+                media_error::show_inline(ui, &error, &mut edit.error_details_open);
                 ui.add_space(theme::SPACING.section);
             });
         }
@@ -1352,86 +1637,18 @@ impl ApolloApp {
             }
             _ => upscale_ui::UpscaleEncoderCapabilities::Checking,
         };
-        let action = layout::surface_fade(
+        let action = show_operation_editor(
             ui,
-            egui::Id::new(("queue-edit", edit.job_id.get(), active_operation.label())),
-            |ui| {
-                ui.push_id(("queue-editor", edit.job_id.get()), |ui| {
-                    ui.add_enabled_ui(enabled, |ui| match active_operation {
-                        Tool::AudioMix => match audio_mix_ui::show(
-                            ui,
-                            &edit.media,
-                            &edit.presentation.audio_mix,
-                            &mut edit.audio_mix,
-                            OperationSurfaceMode::QueueEdit,
-                        ) {
-                            AudioMixSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
-                            AudioMixSelectionAction::SaveQueueChanges => QueueEditAction::Save,
-                            AudioMixSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
-                            _ => QueueEditAction::None,
-                        },
-                        Tool::VideoUpscale => match upscale_ui::show(
-                            ui,
-                            &edit.media,
-                            &mut edit.upscale,
-                            capabilities,
-                            OperationSurfaceMode::QueueEdit,
-                        ) {
-                            UpscaleSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
-                            UpscaleSelectionAction::SaveQueueChanges => QueueEditAction::Save,
-                            UpscaleSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
-                            _ => QueueEditAction::None,
-                        },
-                        Tool::Remux => match remux_ui::show(
-                            ui,
-                            &edit.media,
-                            &edit.presentation.remux,
-                            &mut edit.remux,
-                            OperationSurfaceMode::QueueEdit,
-                        ) {
-                            RemuxSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
-                            RemuxSelectionAction::SaveQueueChanges => QueueEditAction::Save,
-                            RemuxSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
-                            _ => QueueEditAction::None,
-                        },
-                        Tool::AudioExtract => match audio_extract_ui::show(
-                            ui,
-                            &edit.media,
-                            &edit.presentation.audio_extract,
-                            &mut edit.audio_extract,
-                            OperationSurfaceMode::QueueEdit,
-                        ) {
-                            AudioExtractSelectionAction::BrowseOutput => {
-                                QueueEditAction::BrowseOutput
-                            }
-                            AudioExtractSelectionAction::SaveQueueChanges => QueueEditAction::Save,
-                            AudioExtractSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
-                            _ => QueueEditAction::None,
-                        },
-                        Tool::FrameCapture => match frame_capture_ui::show(
-                            ui,
-                            &edit.media,
-                            &edit.presentation.frame_capture,
-                            &mut edit.frame_capture,
-                            OperationSurfaceMode::QueueEdit,
-                        ) {
-                            FrameCaptureSelectionAction::BrowseOutput => {
-                                QueueEditAction::BrowseOutput
-                            }
-                            FrameCaptureSelectionAction::SaveQueueChanges => QueueEditAction::Save,
-                            FrameCaptureSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
-                            _ => QueueEditAction::None,
-                        },
-                    })
-                    .inner
-                })
-                .inner
-            },
+            edit,
+            capabilities,
+            OperationSurfaceMode::QueueEdit,
+            enabled,
+            ("queue-editor", job_id.get()),
         );
         match action {
             QueueEditAction::BrowseOutput => {
                 if let Some(edit) = self.queue_edit.as_ref() {
-                    self.start_file_dialog(queue_edit_output_dialog_request(edit));
+                    self.start_file_dialog(editor_output_dialog_request(&edit.editor));
                 }
             }
             QueueEditAction::Save => {
@@ -1461,6 +1678,272 @@ impl ApolloApp {
                 self.state.intake_error = Some(MediaError::probe_failure(format!(
                     "Media inspection worker could not start: {error}"
                 )));
+            }
+        }
+    }
+
+    fn start_batch_paths(&mut self, paths: Vec<PathBuf>) -> bool {
+        if paths.is_empty() || !self.file_intake_enabled() {
+            return false;
+        }
+        if paths.len() == 1 {
+            self.load_media_path(&paths[0]);
+            return true;
+        }
+        let Some(tools) = self.ready_media_tools().cloned() else {
+            return false;
+        };
+        let origin = match self.state.navigation {
+            NavigationState::NoSource => BatchOrigin::NoSource,
+            NavigationState::Queue { origin } => BatchOrigin::Queue { origin },
+            NavigationState::SourceWorkspace { active_operation } => {
+                BatchOrigin::SourceWorkspace { active_operation }
+            }
+            NavigationState::QueueEdit { origin } => BatchOrigin::Queue { origin },
+            NavigationState::BatchSetup | NavigationState::BatchEdit => return false,
+        };
+        let items = paths
+            .iter()
+            .map(|path| BatchItem {
+                path: path.clone(),
+                included: true,
+                source: BatchSourceState::Inspecting,
+                operation: None,
+                readiness: BatchReadiness::Inspecting,
+                reason: None,
+                overridden: false,
+            })
+            .collect();
+        let inspection = match BatchInspectionOwner::spawn(tools, paths, self.egui_context.clone())
+        {
+            Ok(inspection) => inspection,
+            Err(error) => {
+                self.state.intake_error = Some(MediaError::probe_failure(format!(
+                    "Batch inspection workers could not start: {error}"
+                )));
+                return false;
+            }
+        };
+        self.batch_edit = None;
+        self.batch_setup = Some(BatchSetupState {
+            origin,
+            operation: Tool::AudioMix,
+            defaults: None,
+            items,
+            error: None,
+        });
+        self.batch_inspection = Some(inspection);
+        self.state.navigation = NavigationState::BatchSetup;
+        true
+    }
+
+    fn poll_batch_inspection(&mut self) {
+        let Some(owner) = self.batch_inspection.as_mut() else {
+            return;
+        };
+        let results = owner.poll();
+        let complete = owner.is_complete();
+        let capabilities = self
+            .ready_media_tools()
+            .map(|tools| tools.video_encoders.clone());
+        let Some(batch) = self.batch_setup.as_mut() else {
+            self.batch_inspection = None;
+            return;
+        };
+        for result in results {
+            let Some(item) = batch.items.get_mut(result.index) else {
+                continue;
+            };
+            match result.result {
+                Ok(media) => item.source = BatchSourceState::Ready(media),
+                Err(reason) => {
+                    item.source = BatchSourceState::Failed;
+                    item.readiness = BatchReadiness::Incompatible;
+                    item.reason = Some(reason);
+                }
+            }
+        }
+        if batch.defaults.is_none()
+            && let Some(media) = batch.items.iter().find_map(|item| match &item.source {
+                BatchSourceState::Ready(media) => Some(media.clone()),
+                BatchSourceState::Inspecting | BatchSourceState::Failed => None,
+            })
+        {
+            let editor = OperationEditorState::new(0, media, batch.operation);
+            batch.defaults = batch_defaults_from_editor(&editor);
+        }
+        refresh_batch_items(batch, capabilities.as_ref());
+        if complete {
+            self.batch_inspection = None;
+        }
+    }
+
+    fn begin_batch_edit(&mut self, target: BatchEditTarget) -> bool {
+        let Some(batch) = self.batch_setup.as_ref() else {
+            return false;
+        };
+        let operation = batch.operation;
+        let defaults = batch.defaults.clone();
+        let (media, request) = match target {
+            BatchEditTarget::Defaults => {
+                let Some(media) = batch.items.iter().find_map(|item| match &item.source {
+                    BatchSourceState::Ready(media) => Some(media.clone()),
+                    BatchSourceState::Inspecting | BatchSourceState::Failed => None,
+                }) else {
+                    return false;
+                };
+                (media, None)
+            }
+            BatchEditTarget::Item(index) => {
+                let Some(item) = batch.items.get(index) else {
+                    return false;
+                };
+                let BatchSourceState::Ready(media) = &item.source else {
+                    return false;
+                };
+                (media.clone(), item.operation.clone())
+            }
+        };
+        let session_id = self.take_session_id();
+        let mut editor = OperationEditorState::new(session_id, media, operation);
+        if let Some(request) = request.as_ref() {
+            editor.hydrate(request);
+        } else if let Some(defaults) = defaults.as_ref() {
+            apply_batch_defaults(&mut editor, defaults);
+        }
+        self.batch_edit = Some(BatchEditState { target, editor });
+        self.state.navigation = NavigationState::BatchEdit;
+        true
+    }
+
+    fn finish_batch_edit(&mut self) -> bool {
+        if !matches!(self.state.navigation, NavigationState::BatchEdit) {
+            return false;
+        }
+        self.batch_edit = None;
+        self.state.navigation = NavigationState::BatchSetup;
+        true
+    }
+
+    fn save_batch_edit(&mut self) -> bool {
+        let capabilities = self
+            .ready_media_tools()
+            .map(|tools| tools.video_encoders.clone());
+        let Some(edit) = self.batch_edit.as_mut() else {
+            return false;
+        };
+        let target = edit.target;
+        let Some(batch) = self.batch_setup.as_mut() else {
+            return false;
+        };
+        match target {
+            BatchEditTarget::Defaults => {
+                let Some(defaults) = batch_defaults_from_editor(&edit.editor) else {
+                    return false;
+                };
+                batch.defaults = Some(defaults);
+                refresh_batch_items(batch, capabilities.as_ref());
+            }
+            BatchEditTarget::Item(index) => {
+                let Some(operation) =
+                    operation_from_editor(&mut edit.editor, capabilities.as_ref())
+                else {
+                    return false;
+                };
+                let Some(item) = batch.items.get_mut(index) else {
+                    return false;
+                };
+                item.operation = Some(operation);
+                item.readiness = BatchReadiness::Ready;
+                item.reason = None;
+                item.overridden = true;
+            }
+        }
+        self.finish_batch_edit()
+    }
+
+    fn finish_batch_setup(&mut self) -> bool {
+        let Some(batch) = self.batch_setup.take() else {
+            return false;
+        };
+        self.batch_inspection = None;
+        self.batch_edit = None;
+        self.state.navigation = match batch.origin {
+            BatchOrigin::NoSource => NavigationState::NoSource,
+            BatchOrigin::Queue { origin } => NavigationState::Queue { origin },
+            BatchOrigin::SourceWorkspace { active_operation } => {
+                NavigationState::SourceWorkspace { active_operation }
+            }
+        };
+        true
+    }
+
+    fn enqueue_batch(&mut self) -> bool {
+        let Some(batch) = self.batch_setup.as_mut() else {
+            return false;
+        };
+        batch.error = None;
+        let mut source_indexes = Vec::new();
+        let mut queued = Vec::new();
+        for (index, item) in batch.items.iter().enumerate() {
+            if !item.included {
+                continue;
+            }
+            let BatchSourceState::Ready(media) = &item.source else {
+                batch.error = Some("Every included file must finish inspection.".to_owned());
+                return false;
+            };
+            if item.readiness != BatchReadiness::Ready {
+                batch.error = Some("Resolve or exclude every included file.".to_owned());
+                return false;
+            }
+            let Some(operation) = item.operation.clone() else {
+                batch.error = Some("Every included file needs a valid operation.".to_owned());
+                return false;
+            };
+            source_indexes.push(index);
+            queued.push((media.clone(), operation));
+        }
+        if queued.is_empty() {
+            batch.error = Some("Include at least one ready file.".to_owned());
+            return false;
+        }
+        match self.media_queue.enqueue_batch(&queued) {
+            Ok(_) => {
+                let origin = batch.origin;
+                self.batch_setup = None;
+                self.batch_edit = None;
+                self.batch_inspection = None;
+                self.state.navigation = NavigationState::Queue {
+                    origin: match origin {
+                        BatchOrigin::NoSource => QueueOrigin::NoSource,
+                        BatchOrigin::Queue { origin } => origin,
+                        BatchOrigin::SourceWorkspace { active_operation } => {
+                            QueueOrigin::SourceWorkspace { active_operation }
+                        }
+                    },
+                };
+                true
+            }
+            Err(error) => {
+                let (batch_index, message) = match &error {
+                    apollo::queue::BatchEnqueueError::Item { index, error } => {
+                        (source_indexes.get(*index).copied(), error.to_string())
+                    }
+                    apollo::queue::BatchEnqueueError::DuplicateDestination { index, .. } => (
+                        source_indexes.get(*index).copied(),
+                        "Output duplicates another included file.".to_owned(),
+                    ),
+                    apollo::queue::BatchEnqueueError::JobIdExhausted => (None, error.to_string()),
+                };
+                if let Some(index) = batch_index
+                    && let Some(item) = batch.items.get_mut(index)
+                {
+                    item.readiness = BatchReadiness::NeedsAttention;
+                    item.reason = Some(message.clone());
+                }
+                batch.error = Some(format!("Batch was not queued: {message}"));
+                false
             }
         }
     }
@@ -1590,23 +2073,21 @@ impl ApolloApp {
         if !self.file_intake_enabled() {
             return;
         }
-        let dropped = context.input(|input| match input.raw.dropped_files.as_slice() {
-            [] => None,
-            [file] => Some(Ok(file.path().to_path_buf())),
-            _ => Some(Err(MediaError::multiple_files())),
+        let paths = context.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .map(|file| file.path().to_path_buf())
+                .collect::<Vec<_>>()
         });
-        match dropped {
-            Some(Ok(path)) => self.load_media_path(&path),
-            Some(Err(error)) => {
-                self.state.intake_error = Some(error);
-                self.state.intake_error_details_open = false;
-            }
-            None => {}
+        if !paths.is_empty() {
+            self.start_batch_paths(paths);
         }
     }
 
     fn drag_hovered(&self, context: &Context) -> bool {
-        self.file_intake_enabled() && context.input(|input| input.raw.hovered_files.len() == 1)
+        self.file_intake_enabled() && context.input(|input| !input.raw.hovered_files.is_empty())
     }
 
     fn show_audio_mix_tool(&mut self, ui: &mut Ui) {
@@ -2347,7 +2828,8 @@ impl ApolloApp {
 
     fn prepare_file_dialog_request(&self, mut request: FileDialogRequest) -> FileDialogRequest {
         match &mut request {
-            FileDialogRequest::OpenSource { initial_directory } => {
+            FileDialogRequest::OpenSource { initial_directory }
+            | FileDialogRequest::OpenSources { initial_directory } => {
                 *initial_directory = self.settings.source_directory();
             }
             FileDialogRequest::SaveOutput { options, .. } => {
@@ -2383,25 +2865,49 @@ impl ApolloApp {
     fn settle_file_dialog(&mut self, completion: FileDialogCompletion) {
         if let DialogOutcome::Selected(path) = &completion.outcome {
             match completion.target {
-                DialogTarget::MediaInput => self.settings.remember_source(path),
+                DialogTarget::MediaInput | DialogTarget::BatchInput => {
+                    self.settings.remember_source(path)
+                }
                 _ => self.settings.remember_output(path),
             }
+        } else if let DialogOutcome::SelectedMany(paths) = &completion.outcome
+            && let Some(path) = paths.first()
+        {
+            self.settings.remember_source(path);
         }
         match (completion.target, completion.outcome) {
             (_, DialogOutcome::Cancelled) => {}
             (DialogTarget::MediaInput, DialogOutcome::Selected(path)) => {
                 self.load_media_path(&path);
             }
-            (DialogTarget::MediaInput, DialogOutcome::Failed(diagnostic)) => {
+            (DialogTarget::BatchInput, DialogOutcome::Selected(path)) => {
+                self.start_batch_paths(vec![path]);
+            }
+            (DialogTarget::BatchInput, DialogOutcome::SelectedMany(paths)) => {
+                self.start_batch_paths(paths);
+            }
+            (
+                DialogTarget::MediaInput | DialogTarget::BatchInput,
+                DialogOutcome::Failed(diagnostic),
+            ) => {
                 self.state.intake_error = Some(MediaError::file_picker_unavailable(diagnostic));
                 self.state.intake_error_details_open = false;
             }
             (target, outcome) => {
-                settle_queue_edit_output_file_dialog(
-                    self.queue_edit.as_mut(),
-                    target,
-                    outcome.clone(),
-                );
+                if let Some(edit) = self.queue_edit.as_mut() {
+                    settle_editor_output_file_dialog(
+                        Some(&mut edit.editor),
+                        target,
+                        outcome.clone(),
+                    );
+                }
+                if let Some(edit) = self.batch_edit.as_mut() {
+                    settle_editor_output_file_dialog(
+                        Some(&mut edit.editor),
+                        target,
+                        outcome.clone(),
+                    );
+                }
                 settle_output_file_dialog(
                     &mut self.state,
                     ToolExecutionStates {
@@ -2419,8 +2925,8 @@ impl ApolloApp {
     }
 }
 
-fn settle_queue_edit_output_file_dialog(
-    edit: Option<&mut QueueEditState>,
+fn settle_editor_output_file_dialog(
+    edit: Option<&mut OperationEditorState>,
     target: DialogTarget,
     outcome: DialogOutcome,
 ) {
@@ -2428,7 +2934,7 @@ fn settle_queue_edit_output_file_dialog(
         return;
     };
     let target_session_id = match target {
-        DialogTarget::MediaInput => return,
+        DialogTarget::MediaInput | DialogTarget::BatchInput => return,
         DialogTarget::AudioMixOutput { session_id }
         | DialogTarget::UpscaleOutput { session_id }
         | DialogTarget::RemuxOutput { session_id }
@@ -2459,7 +2965,8 @@ fn settle_queue_edit_output_file_dialog(
             edit.error_details_open = false;
         }
         (_, DialogOutcome::Cancelled) => {}
-        (DialogTarget::MediaInput, DialogOutcome::Selected(_)) => {}
+        (DialogTarget::MediaInput | DialogTarget::BatchInput, _) => {}
+        (_, DialogOutcome::SelectedMany(_)) => {}
     }
 }
 
@@ -2632,7 +3139,7 @@ fn output_dialog_request(
     }
 }
 
-fn queue_edit_output_dialog_request(edit: &QueueEditState) -> FileDialogRequest {
+fn editor_output_dialog_request(edit: &OperationEditorState) -> FileDialogRequest {
     match edit.active_operation {
         Tool::AudioMix => {
             let format = match edit.audio_mix.container() {
@@ -2705,6 +3212,263 @@ fn queued_operation_tool(operation: &QueuedOperation) -> Tool {
         QueuedOperation::AudioExtract(_) => Tool::AudioExtract,
         QueuedOperation::FrameCapture(_) => Tool::FrameCapture,
     }
+}
+
+fn operation_from_editor(
+    edit: &mut OperationEditorState,
+    nvenc_capabilities: Option<&VideoEncoderCapabilities>,
+) -> Option<QueuedOperation> {
+    let media = edit.media.clone();
+    match edit.active_operation {
+        Tool::AudioMix if edit.audio_mix.can_mix(&media) => {
+            Some(QueuedOperation::AudioMix(edit.audio_mix.request(&media)))
+        }
+        Tool::VideoUpscale => {
+            let capabilities = nvenc_capabilities?;
+            let capability = match edit.upscale.codec() {
+                VideoCodec::H264 => capabilities.h264_nvenc.clone(),
+                VideoCodec::H265 => capabilities.h265_nvenc.clone(),
+            };
+            let request = edit
+                .upscale
+                .request_with_nvenc_capability(&media, capability);
+            validate_upscale_request(&request, &media).ok()?;
+            Some(QueuedOperation::Upscale(request))
+        }
+        Tool::Remux if edit.remux.can_remux(&media) => {
+            Some(QueuedOperation::Remux(edit.remux.request(&media)))
+        }
+        Tool::AudioExtract if edit.audio_extract.can_extract(&media) => edit
+            .audio_extract
+            .request(&media)
+            .map(QueuedOperation::AudioExtract),
+        Tool::FrameCapture if edit.frame_capture.can_capture(&media) => edit
+            .frame_capture
+            .request(&media)
+            .map(QueuedOperation::FrameCapture),
+        _ => None,
+    }
+}
+
+fn batch_defaults_from_editor(edit: &OperationEditorState) -> Option<BatchDefaults> {
+    match edit.active_operation {
+        Tool::AudioMix => Some(BatchDefaults::AudioMix {
+            container: edit.audio_mix.container(),
+            normalization: if edit.audio_mix.normalization_enabled() {
+                LoudnessNormalization::Enabled(edit.audio_mix.normalization_targets())
+            } else {
+                LoudnessNormalization::Off
+            },
+        }),
+        Tool::VideoUpscale => {
+            let target = edit.upscale.target();
+            let (max_width, max_height) = target.boundary();
+            if max_width == 0
+                || max_height == 0
+                || !max_width.is_multiple_of(2)
+                || !max_height.is_multiple_of(2)
+            {
+                return None;
+            }
+            Some(BatchDefaults::Upscale {
+                target,
+                codec: edit.upscale.codec(),
+                encoder_settings: edit.upscale.encoder_settings().clone(),
+            })
+        }
+        Tool::Remux => Some(BatchDefaults::Remux {
+            container: edit.remux.container(),
+        }),
+        Tool::AudioExtract => Some(BatchDefaults::AudioExtract {
+            format: edit.audio_extract.format(),
+        }),
+        Tool::FrameCapture => Some(BatchDefaults::FrameCapture {
+            timestamp: edit.frame_capture.timestamp_text().parse().ok()?,
+            format: edit.frame_capture.format(),
+        }),
+    }
+}
+
+fn apply_batch_defaults(edit: &mut OperationEditorState, defaults: &BatchDefaults) {
+    let media = edit.media.clone();
+    match defaults {
+        BatchDefaults::AudioMix {
+            container,
+            normalization,
+        } => {
+            edit.audio_mix.set_container(&media, *container);
+            match normalization {
+                LoudnessNormalization::Off => {
+                    edit.audio_mix.set_normalization_enabled(false);
+                }
+                LoudnessNormalization::Enabled(targets) => {
+                    edit.audio_mix.set_normalization_enabled(true);
+                    let _ = edit.audio_mix.set_normalization_targets(*targets);
+                }
+            }
+        }
+        BatchDefaults::Upscale {
+            target,
+            codec,
+            encoder_settings,
+        } => {
+            edit.upscale.set_target(&media, *target);
+            edit.upscale.set_codec(*codec);
+            edit.upscale
+                .set_encoder_selection(encoder_settings.selection());
+            for codec in [VideoCodec::H264, VideoCodec::H265] {
+                edit.upscale
+                    .set_cpu_quality(codec, encoder_settings.cpu_quality(codec));
+                edit.upscale
+                    .set_nvenc_quality(codec, encoder_settings.nvenc_quality(codec));
+            }
+        }
+        BatchDefaults::Remux { container } => {
+            edit.remux.set_container(*container);
+        }
+        BatchDefaults::AudioExtract { format } => {
+            edit.audio_extract.set_format(*format);
+        }
+        BatchDefaults::FrameCapture { timestamp, format } => {
+            edit.frame_capture
+                .set_timestamp_text(&media, timestamp.to_string());
+            edit.frame_capture.set_format(*format);
+        }
+    }
+}
+
+fn refresh_batch_items(
+    batch: &mut BatchSetupState,
+    capabilities: Option<&VideoEncoderCapabilities>,
+) {
+    let defaults = batch.defaults.clone();
+    for item in &mut batch.items {
+        if item.overridden {
+            continue;
+        }
+        let BatchSourceState::Ready(media) = &item.source else {
+            continue;
+        };
+        let media = media.clone();
+        item.operation = None;
+        item.reason = None;
+        let incompatible = match batch.operation {
+            Tool::AudioMix | Tool::AudioExtract => media.audio_streams.is_empty(),
+            Tool::VideoUpscale | Tool::FrameCapture => media.video_streams.is_empty(),
+            Tool::Remux => media.streams.is_empty(),
+        };
+        if incompatible {
+            item.readiness = BatchReadiness::Incompatible;
+            item.reason = Some(match batch.operation {
+                Tool::AudioMix | Tool::AudioExtract => "No audio tracks.".to_owned(),
+                Tool::VideoUpscale | Tool::FrameCapture => "No video track.".to_owned(),
+                Tool::Remux => "No media streams.".to_owned(),
+            });
+            continue;
+        }
+        if batch.operation == Tool::AudioExtract && media.audio_streams.len() > 1 {
+            item.readiness = BatchReadiness::NeedsAttention;
+            item.reason = Some("Select one audio track.".to_owned());
+            continue;
+        }
+        let mut editor = OperationEditorState::new(0, media, batch.operation);
+        if let Some(defaults) = defaults.as_ref()
+            && defaults.operation() == batch.operation
+        {
+            apply_batch_defaults(&mut editor, defaults);
+        }
+        match operation_from_editor(&mut editor, capabilities) {
+            Some(operation) => {
+                item.operation = Some(operation);
+                item.readiness = BatchReadiness::Ready;
+            }
+            None => {
+                item.readiness = BatchReadiness::NeedsAttention;
+                item.reason = Some(
+                    match batch.operation {
+                        Tool::VideoUpscale => "Shared target is not valid for this source.",
+                        Tool::FrameCapture => "Timestamp is outside this source's duration.",
+                        Tool::Remux => "Container is not compatible with this source.",
+                        Tool::AudioMix => "Audio mix settings are not valid for this source.",
+                        Tool::AudioExtract => "Audio extraction settings need review.",
+                    }
+                    .to_owned(),
+                );
+            }
+        }
+    }
+}
+
+fn show_operation_editor(
+    ui: &mut Ui,
+    edit: &mut OperationEditorState,
+    capabilities: upscale_ui::UpscaleEncoderCapabilities<'_>,
+    mode: OperationSurfaceMode,
+    enabled: bool,
+    id: impl std::hash::Hash + std::fmt::Debug,
+) -> QueueEditAction {
+    let active_operation = edit.active_operation;
+    layout::surface_fade(ui, egui::Id::new((id, active_operation.label())), |ui| {
+        ui.add_enabled_ui(enabled, |ui| match active_operation {
+            Tool::AudioMix => match audio_mix_ui::show(
+                ui,
+                &edit.media,
+                &edit.presentation.audio_mix,
+                &mut edit.audio_mix,
+                mode,
+            ) {
+                AudioMixSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
+                AudioMixSelectionAction::SaveQueueChanges => QueueEditAction::Save,
+                AudioMixSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
+                _ => QueueEditAction::None,
+            },
+            Tool::VideoUpscale => {
+                match upscale_ui::show(ui, &edit.media, &mut edit.upscale, capabilities, mode) {
+                    UpscaleSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
+                    UpscaleSelectionAction::SaveQueueChanges => QueueEditAction::Save,
+                    UpscaleSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
+                    _ => QueueEditAction::None,
+                }
+            }
+            Tool::Remux => match remux_ui::show(
+                ui,
+                &edit.media,
+                &edit.presentation.remux,
+                &mut edit.remux,
+                mode,
+            ) {
+                RemuxSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
+                RemuxSelectionAction::SaveQueueChanges => QueueEditAction::Save,
+                RemuxSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
+                _ => QueueEditAction::None,
+            },
+            Tool::AudioExtract => match audio_extract_ui::show(
+                ui,
+                &edit.media,
+                &edit.presentation.audio_extract,
+                &mut edit.audio_extract,
+                mode,
+            ) {
+                AudioExtractSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
+                AudioExtractSelectionAction::SaveQueueChanges => QueueEditAction::Save,
+                AudioExtractSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
+                _ => QueueEditAction::None,
+            },
+            Tool::FrameCapture => match frame_capture_ui::show(
+                ui,
+                &edit.media,
+                &edit.presentation.frame_capture,
+                &mut edit.frame_capture,
+                mode,
+            ) {
+                FrameCaptureSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
+                FrameCaptureSelectionAction::SaveQueueChanges => QueueEditAction::Save,
+                FrameCaptureSelectionAction::CancelQueueEdit => QueueEditAction::Cancel,
+                _ => QueueEditAction::None,
+            },
+        })
+        .inner
+    })
 }
 
 fn audio_mix_output_dialog_request(session: &AudioMixToolState) -> FileDialogRequest {
@@ -2866,6 +3630,7 @@ impl eframe::App for ApolloApp {
 
                 self.poll_file_dialog();
                 self.poll_media_inspection();
+                self.poll_batch_inspection();
                 self.poll_frame_capture_thumbnail();
 
                 self.handle_window_file_drop(ui.ctx());
@@ -2896,14 +3661,15 @@ mod tests {
     };
 
     use super::{
-        ApolloApp, AppSettings, AppState, FrameCaptureThumbnailLoad, MediaInspection,
+        ApolloApp, AppSettings, AppState, BatchDefaults, BatchEditTarget, BatchItem, BatchOrigin,
+        BatchSetupState, BatchSourceState, FrameCaptureThumbnailLoad, MediaInspection,
         MediaToolsState, NavigationState, QueueExecutionEvent, QueueOrigin, Tool,
         ToolExecutionStates, audio_extract_output_dialog_request, audio_mix_output_dialog_request,
         completed_output_folder, file_intake_enabled, frame_capture_output_dialog_request,
         operation_workspace_visible, queue_event_matches_active, queue_execution_wake,
-        remux_output_dialog_request, settle_output_file_dialog, shows_audio_extract_lifecycle,
-        shows_audio_mix_lifecycle, shows_frame_capture_lifecycle, shows_remux_lifecycle,
-        shows_upscale_lifecycle,
+        refresh_batch_items, remux_output_dialog_request, settle_output_file_dialog,
+        shows_audio_extract_lifecycle, shows_audio_mix_lifecycle, shows_frame_capture_lifecycle,
+        shows_remux_lifecycle, shows_upscale_lifecycle,
     };
     use crate::file_dialog::{
         DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
@@ -2917,7 +3683,8 @@ mod tests {
             model::{LoudnessNormalization, LoudnessTargets, OutputContainer, TrackGain},
         },
         frame_capture::{
-            execution::FrameCaptureExecutionState, model::FrameCaptureFormat,
+            execution::FrameCaptureExecutionState,
+            model::{FrameCaptureFormat, FrameTimestamp},
             thumbnail::FrameCaptureThumbnail,
         },
         media::{
@@ -2935,7 +3702,8 @@ mod tests {
         ui::{
             ProcessExecutionArbitration, QueueAction, SourceAction,
             audio_extract::AudioExtractSelectionAction, audio_mix::AudioMixSelectionAction,
-            file_intake::FileIntakeAction, fonts, frame_capture::FrameCaptureSelectionAction,
+            batch::BatchReadiness, file_intake::FileIntakeAction, fonts,
+            frame_capture::FrameCaptureSelectionAction,
             frame_capture_progress::FrameCaptureThumbnailState, layout,
             remux::RemuxSelectionAction, theme, upscale::UpscaleSelectionAction,
         },
@@ -3219,6 +3987,9 @@ mod tests {
             frame_capture_executor: apollo::frame_capture::execution::FrameCaptureExecutor::new(),
             media_queue: MediaQueue::new(),
             queue_edit: None,
+            batch_setup: None,
+            batch_edit: None,
+            batch_inspection: None,
             queue_event_sender,
             queue_event_receiver,
             frame_capture_thumbnail_load: None,
@@ -3233,6 +4004,15 @@ mod tests {
             next_session_id: 1,
             tools_error_details_open: false,
         }
+    }
+
+    fn assert_no_batch_execution(app: &ApolloApp) {
+        assert!(app.media_queue.jobs().is_empty());
+        assert!(!app.audio_mix_executor.is_running());
+        assert!(!app.upscale_executor.is_running());
+        assert!(!app.remux_executor.is_running());
+        assert!(!app.audio_extract_executor.is_running());
+        assert!(!app.frame_capture_executor.is_running());
     }
 
     fn assert_no_source(state: &AppState) {
@@ -4114,7 +4894,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_file_drop_is_rejected_before_any_probe_starts() {
+    fn multiple_file_drop_enters_batch_setup_in_source_order() {
         let (first_directory, first) = temp_file("multi-drop-first");
         let (second_directory, second) = temp_file("multi-drop-second");
         let mut app = app();
@@ -4123,16 +4903,286 @@ mod tests {
 
         assert!(app.media_inspection.is_none());
         assert!(app.state.media_intake.current().is_none());
+        assert_eq!(app.state.navigation, NavigationState::BatchSetup);
+        let batch = app.batch_setup.as_ref().unwrap();
         assert_eq!(
-            app.state.intake_error.as_ref().map(MediaError::kind),
-            Some(MediaErrorKind::MultipleFiles)
-        );
-        assert_eq!(
-            app.state.intake_error.as_ref().map(MediaError::message),
-            Some("Drop one file at a time.")
+            batch
+                .items
+                .iter()
+                .map(|item| &item.path)
+                .collect::<Vec<_>>(),
+            vec![&first, &second]
         );
         fs::remove_dir_all(first_directory).unwrap();
         fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn audio_extract_batch_requires_explicit_selection_for_multi_track_sources() {
+        let (first_directory, first_path) = temp_file("batch-audio-first");
+        let (second_directory, second_path) = temp_file("batch-audio-second");
+        let first_media = media(&first_path);
+        let mut second_media = media(&second_path);
+        second_media.streams.push(MediaStream {
+            stream_index: 2,
+            kind: StreamKind::Audio,
+            codec: Some("aac".to_owned()),
+        });
+        second_media.audio_streams.push(AudioStream {
+            stream_index: 2,
+            codec: Some("aac".to_owned()),
+            channels: Some(2),
+            channel_layout: Some("stereo".to_owned()),
+            title: Some("Commentary".to_owned()),
+            language: Some("eng".to_owned()),
+        });
+        let mut batch = BatchSetupState {
+            origin: BatchOrigin::NoSource,
+            operation: Tool::AudioExtract,
+            defaults: Some(BatchDefaults::AudioExtract {
+                format: AudioExtractFormat::Original,
+            }),
+            items: vec![
+                BatchItem {
+                    path: first_path,
+                    included: true,
+                    source: BatchSourceState::Ready(first_media),
+                    operation: None,
+                    readiness: BatchReadiness::Inspecting,
+                    reason: None,
+                    overridden: false,
+                },
+                BatchItem {
+                    path: second_path,
+                    included: true,
+                    source: BatchSourceState::Ready(second_media),
+                    operation: None,
+                    readiness: BatchReadiness::Inspecting,
+                    reason: None,
+                    overridden: false,
+                },
+            ],
+            error: None,
+        };
+
+        refresh_batch_items(&mut batch, None);
+
+        assert_eq!(batch.items[0].readiness, BatchReadiness::Ready);
+        assert_eq!(batch.items[1].readiness, BatchReadiness::NeedsAttention);
+        assert_eq!(
+            batch.items[1].reason.as_deref(),
+            Some("Select one audio track.")
+        );
+        assert_ne!(
+            batch.items[0]
+                .operation
+                .as_ref()
+                .map(QueuedOperation::output),
+            batch.items[1]
+                .operation
+                .as_ref()
+                .map(QueuedOperation::output)
+        );
+        fs::remove_dir_all(first_directory).unwrap();
+        fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn excluded_video_only_first_source_does_not_block_audio_extract_defaults() {
+        let (first_directory, first_path) = temp_file("batch-video-only-first");
+        let (second_directory, second_path) = temp_file("batch-audio-valid-second");
+        let mut first_media = media(&first_path);
+        first_media
+            .streams
+            .retain(|stream| stream.kind != StreamKind::Audio);
+        first_media.audio_streams.clear();
+        let second_media = media(&second_path);
+        let mut app = app();
+        app.batch_setup = Some(BatchSetupState {
+            origin: BatchOrigin::NoSource,
+            operation: Tool::AudioExtract,
+            defaults: Some(BatchDefaults::AudioExtract {
+                format: AudioExtractFormat::Original,
+            }),
+            items: vec![
+                BatchItem {
+                    path: first_path,
+                    included: false,
+                    source: BatchSourceState::Ready(first_media),
+                    operation: None,
+                    readiness: BatchReadiness::Inspecting,
+                    reason: None,
+                    overridden: false,
+                },
+                BatchItem {
+                    path: second_path.clone(),
+                    included: true,
+                    source: BatchSourceState::Ready(second_media),
+                    operation: None,
+                    readiness: BatchReadiness::Inspecting,
+                    reason: None,
+                    overridden: false,
+                },
+            ],
+            error: None,
+        });
+        app.state.navigation = NavigationState::BatchSetup;
+        refresh_batch_items(app.batch_setup.as_mut().unwrap(), None);
+
+        assert!(app.begin_batch_edit(BatchEditTarget::Defaults));
+        app.batch_edit
+            .as_mut()
+            .unwrap()
+            .audio_extract
+            .set_format(AudioExtractFormat::Flac);
+        assert!(app.save_batch_edit());
+
+        let batch = app.batch_setup.as_ref().unwrap();
+        assert_eq!(batch.items[0].readiness, BatchReadiness::Incompatible);
+        assert_eq!(batch.items[0].reason.as_deref(), Some("No audio tracks."));
+        assert_eq!(batch.items[1].readiness, BatchReadiness::Ready);
+        assert!(matches!(
+            batch.items[1].operation.as_ref(),
+            Some(QueuedOperation::AudioExtract(request))
+                if request.input == second_path && request.format == AudioExtractFormat::Flac
+        ));
+        assert_no_batch_execution(&app);
+        fs::remove_dir_all(first_directory).unwrap();
+        fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn frame_capture_defaults_apply_before_per_source_timestamp_validation() {
+        let (first_directory, first_path) = temp_file("batch-short-video-first");
+        let (second_directory, second_path) = temp_file("batch-long-video-second");
+        let mut first_media = media(&first_path);
+        first_media.duration = Some(Duration::from_secs(5));
+        let mut second_media = media(&second_path);
+        second_media.duration = Some(Duration::from_secs(20));
+        let mut app = app();
+        app.batch_setup = Some(BatchSetupState {
+            origin: BatchOrigin::NoSource,
+            operation: Tool::FrameCapture,
+            defaults: Some(BatchDefaults::FrameCapture {
+                timestamp: FrameTimestamp::ZERO,
+                format: FrameCaptureFormat::Png,
+            }),
+            items: vec![
+                BatchItem {
+                    path: first_path,
+                    included: true,
+                    source: BatchSourceState::Ready(first_media),
+                    operation: None,
+                    readiness: BatchReadiness::Inspecting,
+                    reason: None,
+                    overridden: false,
+                },
+                BatchItem {
+                    path: second_path,
+                    included: true,
+                    source: BatchSourceState::Ready(second_media),
+                    operation: None,
+                    readiness: BatchReadiness::Inspecting,
+                    reason: None,
+                    overridden: false,
+                },
+            ],
+            error: None,
+        });
+        app.state.navigation = NavigationState::BatchSetup;
+
+        assert!(app.begin_batch_edit(BatchEditTarget::Defaults));
+        let edit = app.batch_edit.as_mut().unwrap();
+        let representative = edit.media.clone();
+        edit.frame_capture
+            .set_timestamp_text(&representative, "00:00:10.000".to_owned());
+        edit.frame_capture.set_format(FrameCaptureFormat::Jpeg);
+        assert!(app.save_batch_edit());
+
+        let batch = app.batch_setup.as_ref().unwrap();
+        assert_eq!(batch.items[0].readiness, BatchReadiness::NeedsAttention);
+        assert_eq!(
+            batch.items[0].reason.as_deref(),
+            Some("Timestamp is outside this source's duration.")
+        );
+        assert_eq!(batch.items[1].readiness, BatchReadiness::Ready);
+        assert!(matches!(
+            batch.items[1].operation.as_ref(),
+            Some(QueuedOperation::FrameCapture(request))
+                if request.timestamp.to_string() == "00:00:10.000"
+                    && request.format == FrameCaptureFormat::Jpeg
+        ));
+        assert_no_batch_execution(&app);
+        fs::remove_dir_all(first_directory).unwrap();
+        fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn batch_override_cancel_is_non_mutating_and_save_updates_only_the_item() {
+        let (directory, path) = temp_file("batch-override");
+        let source = media(&path);
+        let mut app = app();
+        let selection = apollo::ui::remux::RemuxSelectionState::new(&source);
+        let original = QueuedOperation::Remux(selection.request(&source));
+        app.batch_setup = Some(BatchSetupState {
+            origin: BatchOrigin::NoSource,
+            operation: Tool::Remux,
+            defaults: Some(BatchDefaults::Remux {
+                container: MediaContainer::Matroska,
+            }),
+            items: vec![BatchItem {
+                path: path.clone(),
+                included: true,
+                source: BatchSourceState::Ready(source),
+                operation: Some(original.clone()),
+                readiness: BatchReadiness::Ready,
+                reason: None,
+                overridden: false,
+            }],
+            error: None,
+        });
+        app.state.navigation = NavigationState::BatchSetup;
+
+        assert!(app.begin_batch_edit(BatchEditTarget::Item(0)));
+        app.batch_edit
+            .as_mut()
+            .unwrap()
+            .remux
+            .set_custom_output_path(directory.join("cancelled.mkv"));
+        assert!(app.finish_batch_edit());
+        assert_eq!(
+            app.batch_setup.as_ref().unwrap().items[0].operation,
+            Some(original.clone())
+        );
+
+        assert!(app.begin_batch_edit(BatchEditTarget::Item(0)));
+        let saved_output = directory.join("saved.mkv");
+        app.batch_edit
+            .as_mut()
+            .unwrap()
+            .remux
+            .set_custom_output_path(saved_output.clone());
+        assert!(app.save_batch_edit());
+        assert_eq!(
+            app.batch_setup.as_ref().unwrap().items[0]
+                .operation
+                .as_ref()
+                .map(QueuedOperation::output),
+            Some(saved_output.as_path())
+        );
+        let saved_operation = app.batch_setup.as_ref().unwrap().items[0].operation.clone();
+        assert!(app.begin_batch_edit(BatchEditTarget::Defaults));
+        app.batch_edit
+            .as_mut()
+            .unwrap()
+            .remux
+            .set_container(MediaContainer::Mp4);
+        assert!(app.save_batch_edit());
+        let item = &app.batch_setup.as_ref().unwrap().items[0];
+        assert!(item.overridden);
+        assert_eq!(item.operation, saved_operation);
+        assert_no_batch_execution(&app);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -6427,13 +7477,13 @@ mod tests {
     }
 
     #[test]
-    fn drag_hover_marks_only_one_available_file_as_a_valid_target() {
+    fn drag_hover_accepts_single_and_multiple_files_when_intake_is_available() {
         let (first_directory, first) = temp_file("hover-first");
         let (second_directory, second) = temp_file("hover-second");
         let mut app = app();
 
         assert!(drag_hovered(&app, &[&first]));
-        assert!(!drag_hovered(&app, &[&first, &second]));
+        assert!(drag_hovered(&app, &[&first, &second]));
 
         let _sender = begin_pending_inspection(&mut app, &first);
         assert!(!drag_hovered(&app, &[&second]));

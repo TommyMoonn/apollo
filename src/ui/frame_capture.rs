@@ -21,12 +21,13 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, CANCEL_QUEUE_EDIT_LABEL, OperationSurfaceMode, SAVE_QUEUE_CHANGES_LABEL,
-    fonts, layout, output_name::OutputNameState, theme, widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, output_name::OutputNameState, theme,
+    widgets,
 };
 
 const TIMESTAMP_LABEL: &str = "Timestamp";
 const OUTPUT_LABEL: &str = "Output";
+const FORMAT_LABEL: &str = "Format";
 const BROWSE_LABEL: &str = "Browse";
 const CAPTURE_LABEL: &str = "Capture frame";
 const FORMAT_OPTIONS: [&str; 2] = ["PNG", "JPEG"];
@@ -171,6 +172,7 @@ pub fn show(
     mode: impl Into<OperationSurfaceMode>,
 ) -> FrameCaptureSelectionAction {
     let mode = mode.into();
+    let shared_defaults = matches!(mode, OperationSurfaceMode::BatchDefaults { .. });
     let action = Cell::new(FrameCaptureSelectionAction::None);
     let validation = state.validation(media);
     let feedback = validation.as_ref().err().and_then(ready_feedback);
@@ -201,23 +203,34 @@ pub fn show(
             }
 
             ui.add_space(theme::SPACING.section);
-            let _ = widgets::section_label(ui, OUTPUT_LABEL);
-            ui.add_space(theme::SPACING.compact);
-            let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
-            let selector_width = widgets::select_menu_intrinsic_width(ui, &FORMAT_OPTIONS);
-            let row = widgets::operation_output_row(
+            let _ = widgets::section_label(
                 ui,
-                &mut output_stem,
-                state.format().extension(),
-                BROWSE_LABEL,
-                selector_width,
-                |ui| show_format_selector(ui, state),
+                if shared_defaults {
+                    FORMAT_LABEL
+                } else {
+                    OUTPUT_LABEL
+                },
             );
-            if row.filename.changed() {
-                state.set_output_filename_stem(OsString::from(output_stem));
-            }
-            if row.browse.clicked() {
-                action.set(FrameCaptureSelectionAction::BrowseOutput);
+            ui.add_space(theme::SPACING.compact);
+            if shared_defaults {
+                show_format_selector(ui, state);
+            } else {
+                let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
+                let selector_width = widgets::select_menu_intrinsic_width(ui, &FORMAT_OPTIONS);
+                let row = widgets::operation_output_row(
+                    ui,
+                    &mut output_stem,
+                    state.format().extension(),
+                    BROWSE_LABEL,
+                    selector_width,
+                    |ui| show_format_selector(ui, state),
+                );
+                if row.filename.changed() {
+                    state.set_output_filename_stem(OsString::from(output_stem));
+                }
+                if row.browse.clicked() {
+                    action.set(FrameCaptureSelectionAction::BrowseOutput);
+                }
             }
             ui.add_space(theme::SPACING.tight);
             technical_context(ui, format_detail(state.format()));
@@ -248,13 +261,18 @@ pub fn show(
                     action.set(FrameCaptureSelectionAction::QueueRequested);
                 }
             }
-            OperationSurfaceMode::QueueEdit => {
-                if widgets::primary_button_enabled(ui, SAVE_QUEUE_CHANGES_LABEL, validation.is_ok())
-                    .clicked()
-                {
+            edit_mode => {
+                let (save_label, cancel_label) = edit_mode
+                    .edit_labels()
+                    .expect("non-immediate operation mode has edit labels");
+                let save_allowed = match edit_mode {
+                    OperationSurfaceMode::BatchDefaults { save_allowed } => save_allowed,
+                    _ => validation.is_ok(),
+                };
+                if widgets::primary_button_enabled(ui, save_label, save_allowed).clicked() {
                     action.set(FrameCaptureSelectionAction::SaveQueueChanges);
                 }
-                if widgets::secondary_button(ui, CANCEL_QUEUE_EDIT_LABEL).clicked() {
+                if widgets::secondary_button(ui, cancel_label).clicked() {
                     action.set(FrameCaptureSelectionAction::CancelQueueEdit);
                 }
             }

@@ -175,6 +175,34 @@ pub enum QueueEnqueueError {
     DuplicateDestination { existing_job: JobId },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchEnqueueError {
+    JobIdExhausted,
+    Item {
+        index: usize,
+        error: QueueEnqueueError,
+    },
+    DuplicateDestination {
+        index: usize,
+        first_index: usize,
+    },
+}
+
+impl fmt::Display for BatchEnqueueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::JobIdExhausted => formatter.write_str("queue job identifiers are exhausted"),
+            Self::Item { index, error } => write!(formatter, "batch item {index}: {error}"),
+            Self::DuplicateDestination { index, first_index } => write!(
+                formatter,
+                "batch item {index} duplicates the destination of item {first_index}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BatchEnqueueError {}
+
 impl fmt::Display for QueueEnqueueError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

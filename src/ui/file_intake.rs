@@ -8,7 +8,7 @@ use super::{fonts, layout, media_error, theme, widgets};
 
 const WORDMARK: &str = "apollo";
 const OPEN_LABEL: &str = "Open files";
-const DROP_HINT: &str = "or drop a video anywhere";
+const DROP_HINT: &str = "or drop videos anywhere";
 const INSPECTING_LABEL: &str = "Inspecting media…";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FileIntakeAction {
@@ -179,7 +179,7 @@ mod tests {
     fn intake_copy_matches_quiet_focus_surface() {
         assert_eq!(WORDMARK, "apollo");
         assert_eq!(OPEN_LABEL, "Open files");
-        assert_eq!(DROP_HINT, "or drop a video anywhere");
+        assert_eq!(DROP_HINT, "or drop videos anywhere");
         assert_eq!(INSPECTING_LABEL, "Inspecting media…");
         assert_eq!(queue_label(0), "Queue (0)");
         assert_eq!(queue_label(12), "Queue (12)");

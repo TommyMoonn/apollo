@@ -19,11 +19,11 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, CANCEL_QUEUE_EDIT_LABEL, OperationSurfaceMode, SAVE_QUEUE_CHANGES_LABEL,
-    layout, output_name::OutputNameState, theme, widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, layout, output_name::OutputNameState, theme, widgets,
 };
 
 const OUTPUT_LABEL: &str = "Output";
+const CONTAINER_LABEL: &str = "Container";
 const BROWSE_LABEL: &str = "Browse";
 const REMUX_LABEL: &str = "Remux";
 const CONTAINER_OPTIONS: [&str; 2] = ["MP4", "MKV"];
@@ -165,6 +165,7 @@ pub fn show(
     mode: impl Into<OperationSurfaceMode>,
 ) -> RemuxSelectionAction {
     let mode = mode.into();
+    let shared_defaults = matches!(mode, OperationSurfaceMode::BatchDefaults { .. });
     let action = Cell::new(RemuxSelectionAction::None);
     let validation = state.validation(media);
     let feedback = validation
@@ -176,23 +177,34 @@ pub fn show(
         |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
 
-            let _ = widgets::section_label(ui, OUTPUT_LABEL);
-            ui.add_space(theme::SPACING.compact);
-            let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
-            let selector_width = widgets::select_menu_intrinsic_width(ui, &CONTAINER_OPTIONS);
-            let row = widgets::operation_output_row(
+            let _ = widgets::section_label(
                 ui,
-                &mut output_stem,
-                state.container().extension(),
-                BROWSE_LABEL,
-                selector_width,
-                |ui| show_container_selector(ui, state),
+                if shared_defaults {
+                    CONTAINER_LABEL
+                } else {
+                    OUTPUT_LABEL
+                },
             );
-            if row.filename.changed() {
-                state.set_output_filename_stem(OsString::from(output_stem));
-            }
-            if row.browse.clicked() {
-                action.set(RemuxSelectionAction::BrowseOutput);
+            ui.add_space(theme::SPACING.compact);
+            if shared_defaults {
+                show_container_selector(ui, state);
+            } else {
+                let mut output_stem = state.output_filename_stem().to_string_lossy().into_owned();
+                let selector_width = widgets::select_menu_intrinsic_width(ui, &CONTAINER_OPTIONS);
+                let row = widgets::operation_output_row(
+                    ui,
+                    &mut output_stem,
+                    state.container().extension(),
+                    BROWSE_LABEL,
+                    selector_width,
+                    |ui| show_container_selector(ui, state),
+                );
+                if row.filename.changed() {
+                    state.set_output_filename_stem(OsString::from(output_stem));
+                }
+                if row.browse.clicked() {
+                    action.set(RemuxSelectionAction::BrowseOutput);
+                }
             }
 
             if let Some(feedback) = feedback.as_deref() {
@@ -221,13 +233,18 @@ pub fn show(
                     action.set(RemuxSelectionAction::QueueRequested);
                 }
             }
-            OperationSurfaceMode::QueueEdit => {
-                if widgets::primary_button_enabled(ui, SAVE_QUEUE_CHANGES_LABEL, validation.is_ok())
-                    .clicked()
-                {
+            edit_mode => {
+                let (save_label, cancel_label) = edit_mode
+                    .edit_labels()
+                    .expect("non-immediate operation mode has edit labels");
+                let save_allowed = match edit_mode {
+                    OperationSurfaceMode::BatchDefaults { save_allowed } => save_allowed,
+                    _ => validation.is_ok(),
+                };
+                if widgets::primary_button_enabled(ui, save_label, save_allowed).clicked() {
                     action.set(RemuxSelectionAction::SaveQueueChanges);
                 }
-                if widgets::secondary_button(ui, CANCEL_QUEUE_EDIT_LABEL).clicked() {
+                if widgets::secondary_button(ui, cancel_label).clicked() {
                     action.set(RemuxSelectionAction::CancelQueueEdit);
                 }
             }
