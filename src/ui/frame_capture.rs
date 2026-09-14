@@ -94,11 +94,16 @@ impl FrameCaptureSelectionState {
         &self.timestamp_text
     }
 
+    pub fn valid_timestamp(&self, media: &MediaFile) -> Option<FrameTimestamp> {
+        let timestamp = FrameTimestamp::from_str(&self.timestamp_text).ok()?;
+        validate_frame_timestamp(timestamp, media.duration)
+            .is_ok()
+            .then_some(timestamp)
+    }
+
     pub fn set_timestamp_text(&mut self, media: &MediaFile, timestamp: String) {
         self.timestamp_text = timestamp;
-        if let Ok(timestamp) = FrameTimestamp::from_str(&self.timestamp_text)
-            && validate_frame_timestamp(timestamp, media.duration).is_ok()
-        {
+        if let Some(timestamp) = self.valid_timestamp(media) {
             self.output_name
                 .set_generated_stem(default_output_stem(&media.path, timestamp));
         }
@@ -432,10 +437,12 @@ mod tests {
         let media = media(Some(Duration::from_secs(10)));
         let mut state = FrameCaptureSelectionState::new(&media);
         state.set_timestamp_text(&media, "00:00:01.250".into());
+        let preview_timestamp = state.valid_timestamp(&media).unwrap();
         assert_eq!(
             state.request(&media).unwrap().timestamp.milliseconds(),
             1_250
         );
+        assert_eq!(state.request(&media).unwrap().timestamp, preview_timestamp);
         assert!(state.can_capture(&media));
         assert_eq!(
             state.output_path(),
@@ -443,6 +450,7 @@ mod tests {
         );
 
         state.set_timestamp_text(&media, "one second".into());
+        assert!(state.valid_timestamp(&media).is_none());
         assert!(state.request(&media).is_none());
         assert!(!state.can_capture(&media));
         assert_eq!(

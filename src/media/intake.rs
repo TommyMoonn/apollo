@@ -54,7 +54,7 @@ impl fmt::Display for MediaIntakeError {
 impl std::error::Error for MediaIntakeError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SourceIdentity {
+pub struct SourceIdentity {
     canonical_path: PathBuf,
     len: u64,
     modified: Option<SystemTime>,
@@ -118,6 +118,12 @@ impl MediaIntake {
 
     pub fn current(&self) -> Option<&MediaFile> {
         self.current.as_ref().map(|cached| &cached.media)
+    }
+
+    pub fn current_with_identity(&self) -> Option<(&SourceIdentity, &MediaFile)> {
+        self.current
+            .as_ref()
+            .map(|cached| (&cached.identity, &cached.media))
     }
 
     /// Return the cached probe only while the underlying file still matches the identity that was
@@ -400,6 +406,7 @@ mod tests {
         fs::write(&path, b"a").unwrap();
         let mut intake = MediaIntake::default();
         inspect_successfully(&mut intake, &path);
+        let first_identity = intake.current_with_identity().unwrap().0.clone();
         fs::write(&path, b"changed-size").unwrap();
 
         let request = match intake.begin_load(&path).unwrap() {
@@ -410,6 +417,8 @@ mod tests {
             intake.complete_probe(request, Ok(media(&path))),
             Ok(MediaProbeDisposition::Published)
         );
+        let replacement_identity = intake.current_with_identity().unwrap().0;
+        assert_ne!(replacement_identity, &first_identity);
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -8,6 +8,7 @@ use std::{
         mpsc::{self, Receiver, TryRecvError},
     },
     thread,
+    time::Instant,
 };
 
 use egui::{CentralPanel, Context, Ui};
@@ -31,12 +32,14 @@ use apollo::{
     frame_capture::{
         execution::{FrameCaptureExecutionState, FrameCaptureExecutor, FrameCaptureStartError},
         model::{FrameCaptureFormat, FrameTimestamp},
+        preview::{FramePreview, PREVIEW_DEBOUNCE},
         thumbnail::{FrameCaptureThumbnail, decode_frame_capture_thumbnail},
     },
     media::{
         batch::BatchInspectionOwner,
         container::MediaContainer,
         error::{MediaError, MediaErrorKind},
+        intake::SourceIdentity,
         intake::{MediaIntake, MediaIntakeRequest, MediaLoadStart, MediaProbeDisposition},
         model::MediaFile,
         probe::{MediaProbeError, probe_media},
@@ -187,8 +190,10 @@ struct AudioExtractToolState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FrameCaptureToolState {
     session_id: u64,
+    source_identity: SourceIdentity,
     media: MediaFile,
     selection: FrameCaptureSelectionState,
+    preview: FramePreview<()>,
     lifecycle_ui: FrameCaptureLifecycleUiState,
     start_error: Option<MediaError>,
     start_error_details_open: bool,
@@ -902,6 +907,8 @@ impl ApolloApp {
                 if let Some(session) = self.state.frame_capture.as_mut() {
                     session.selection =
                         FrameCaptureSelectionState::from_request(&session.media, request);
+                    let timestamp = session.selection.valid_timestamp(&session.media);
+                    self.update_frame_capture_preview(timestamp);
                 }
             }
         }
@@ -1063,9 +1070,15 @@ impl ApolloApp {
         {
             return;
         }
-        if self.state.active_operation() != Some(tool) {
+        let previous_tool = self.state.active_operation();
+        if previous_tool != Some(tool) {
             self.state.queue_confirmation = None;
             self.state.operation_action_error = None;
+            if previous_tool == Some(Tool::FrameCapture)
+                && let Some(session) = self.state.frame_capture.as_mut()
+            {
+                session.preview.invalidate();
+            }
         }
         if self.activate_cached_source(tool) {
             self.state.navigation = NavigationState::SourceWorkspace {
@@ -1075,7 +1088,12 @@ impl ApolloApp {
     }
 
     fn activate_cached_source(&mut self, tool: Tool) -> bool {
-        let Some(media) = self.state.media_intake.current().cloned() else {
+        let Some((source_identity, media)) = self
+            .state
+            .media_intake
+            .current_with_identity()
+            .map(|(identity, media)| (identity.clone(), media.clone()))
+        else {
             self.state.navigation = NavigationState::NoSource;
             self.state.retire_tool_sessions();
             return false;
@@ -1162,21 +1180,59 @@ impl ApolloApp {
                     .state
                     .frame_capture
                     .as_ref()
-                    .is_some_and(|session| session.media == media)
+                    .is_some_and(|session| session.source_identity == source_identity)
                 {
                     let session_id = self.take_session_id();
+                    let selection = FrameCaptureSelectionState::new(&media);
                     self.state.frame_capture = Some(FrameCaptureToolState {
                         session_id,
-                        selection: FrameCaptureSelectionState::new(&media),
+                        source_identity,
+                        selection,
+                        preview: FramePreview::default(),
                         lifecycle_ui: FrameCaptureLifecycleUiState::default(),
                         start_error: None,
                         start_error_details_open: false,
                         media,
                     });
                 }
+                let timestamp = self
+                    .state
+                    .frame_capture
+                    .as_ref()
+                    .and_then(|session| session.selection.valid_timestamp(&session.media));
+                if self.state.frame_capture.as_ref().is_some_and(|session| {
+                    matches!(
+                        session.preview.state(),
+                        apollo::frame_capture::preview::PreviewState::Idle
+                    )
+                }) {
+                    self.update_frame_capture_preview(timestamp);
+                }
             }
         }
         true
+    }
+
+    fn update_frame_capture_preview(&mut self, timestamp: Option<FrameTimestamp>) {
+        let Some(session) = self.state.frame_capture.as_mut() else {
+            return;
+        };
+        let Some(timestamp) = timestamp else {
+            session.preview.invalidate();
+            return;
+        };
+        if session
+            .preview
+            .schedule(
+                &session.source_identity,
+                &session.media,
+                timestamp,
+                Instant::now(),
+            )
+            .is_some()
+        {
+            self.egui_context.request_repaint_after(PREVIEW_DEBOUNCE);
+        }
     }
 
     fn take_session_id(&mut self) -> u64 {
@@ -2979,14 +3035,15 @@ impl ApolloApp {
             .as_ref()
             .filter(|(tool, _)| *tool == Tool::FrameCapture)
             .map(|(_, error)| error.clone());
-        let action = ui
+        let (action, timestamp_edit) = ui
             .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let session = self
                     .state
                     .frame_capture
                     .as_mut()
                     .expect("frame capture source exists while ready surface is shown");
-                frame_capture_ui::show(
+                let timestamp_before = session.selection.timestamp_text().to_owned();
+                let action = frame_capture_ui::show(
                     ui,
                     &session.media,
                     &presentation.frame_capture,
@@ -2996,9 +3053,15 @@ impl ApolloApp {
                         queue_confirmation,
                         action_error: action_error.as_ref(),
                     },
-                )
+                );
+                let timestamp_edit = (session.selection.timestamp_text() != timestamp_before)
+                    .then(|| session.selection.valid_timestamp(&session.media));
+                (action, timestamp_edit)
             })
             .inner;
+        if let Some(timestamp) = timestamp_edit {
+            self.update_frame_capture_preview(timestamp);
+        }
         if let Err(error) = self.handle_frame_capture_action(action)
             && let Some(session) = self.state.frame_capture.as_mut()
         {
@@ -4984,6 +5047,100 @@ mod tests {
 
         fs::remove_dir_all(first_directory).unwrap();
         fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn frame_preview_ownership_follows_source_and_operation_sessions() {
+        use apollo::frame_capture::preview::PreviewState;
+
+        let (first_directory, first_path) = temp_file("preview-first-source");
+        let (second_directory, second_path) = temp_file("preview-second-source");
+        let mut app = app();
+        app.load_media_path_with_probe(&first_path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+
+        let first_generation = match app
+            .state
+            .frame_capture
+            .as_ref()
+            .map(|session| session.preview.state())
+        {
+            Some(PreviewState::Debouncing { request, .. }) => {
+                assert_eq!(request.input, first_path);
+                assert_eq!(
+                    &request.source_identity,
+                    &app.state.frame_capture.as_ref().unwrap().source_identity
+                );
+                request.generation
+            }
+            state => panic!("expected a debounced preview for the first source, got {state:?}"),
+        };
+
+        app.select_tool(Tool::Remux);
+        assert!(matches!(
+            app.state
+                .frame_capture
+                .as_ref()
+                .map(|session| session.preview.state()),
+            Some(PreviewState::Idle)
+        ));
+
+        app.select_tool(Tool::FrameCapture);
+        assert!(matches!(
+            app.state
+                .frame_capture
+                .as_ref()
+                .map(|session| session.preview.state()),
+            Some(PreviewState::Debouncing { request, .. })
+                if request.generation.get() > first_generation.get()
+                    && request.input == first_path
+        ));
+
+        let old_session_id = app.state.frame_capture.as_ref().unwrap().session_id;
+        app.load_media_path_with_probe(&second_path, |path| Ok(media(path)));
+        assert!(matches!(
+            app.state.frame_capture.as_ref(),
+            Some(session)
+                if session.session_id != old_session_id
+                    && matches!(
+                        session.preview.state(),
+                        PreviewState::Debouncing { request, .. }
+                            if request.input == second_path
+                    )
+        ));
+
+        fs::remove_dir_all(first_directory).unwrap();
+        fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn missing_video_preview_request_schedules_no_delayed_repaint() {
+        let (directory, path) = temp_file("preview-missing-video-repaint");
+        let mut app = app();
+        let (delayed_sender, delayed_receiver) = mpsc::channel();
+        app.egui_context.set_request_repaint_callback(move |info| {
+            if info.delay > Duration::ZERO {
+                let _ = delayed_sender.send(info.delay);
+            }
+        });
+        let mut source = media(&path);
+        source.video_streams.clear();
+        app.load_media_path_with_probe(&path, |_| Ok(source));
+
+        app.select_tool(Tool::FrameCapture);
+
+        assert!(matches!(
+            app.state
+                .frame_capture
+                .as_ref()
+                .map(|session| session.preview.state()),
+            Some(apollo::frame_capture::preview::PreviewState::Idle)
+        ));
+        assert!(matches!(
+            delayed_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
