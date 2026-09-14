@@ -24,8 +24,8 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, output_name::OutputNameState,
-    show_queue_confirmation, theme, widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error,
+    output_name::OutputNameState, show_queue_confirmation, theme, widgets,
 };
 
 const PRESET_TARGETS: [UpscaleTarget; 3] = [
@@ -293,12 +293,12 @@ impl UpscaleSelectionState {
 ///
 /// The caller owns source acquisition and execution orchestration. This surface only mutates
 /// target, codec, and output-path state and emits user intent for those responsibilities.
-pub fn show(
+pub fn show<'a>(
     ui: &mut Ui,
     media: &MediaFile,
     state: &mut UpscaleSelectionState,
     capabilities: UpscaleEncoderCapabilities<'_>,
-    mode: impl Into<OperationSurfaceMode>,
+    mode: impl Into<OperationSurfaceMode<'a>>,
 ) -> UpscaleSelectionAction {
     let mode = mode.into();
     let shared_defaults = matches!(mode, OperationSurfaceMode::BatchDefaults { .. });
@@ -370,6 +370,10 @@ pub fn show(
                 ui.add_space(theme::SPACING.tight);
                 let _ = widgets::inline_status(ui, &feedback, widgets::InlineStatusKind::Error);
             }
+            if let Some(error) = mode.inline_action_error() {
+                ui.add_space(theme::SPACING.related);
+                media_error::show_operation_action(ui, error);
+            }
         },
         |ui| {
             let runnable = matches!(validation, Some(Ok(())));
@@ -377,6 +381,7 @@ pub fn show(
                 OperationSurfaceMode::Immediate {
                     start_allowed,
                     queue_confirmation,
+                    ..
                 } => {
                     if widgets::primary_button_enabled(ui, UPSCALE_LABEL, runnable && start_allowed)
                         .clicked()

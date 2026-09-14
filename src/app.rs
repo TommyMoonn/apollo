@@ -59,7 +59,9 @@ use apollo::{
         audio_mix as audio_mix_ui,
         audio_mix::{AudioMixSelectionAction, AudioMixSelectionState},
         audio_mix_progress::{self, AudioMixLifecycleAction, AudioMixLifecycleUiState},
-        batch::{self as batch_ui, BatchAction, BatchItemView, BatchReadiness},
+        batch::{
+            self as batch_ui, BatchAction, BatchItemEditAction, BatchItemView, BatchReadiness,
+        },
         file_intake::{self, FileIntakeAction},
         fonts, frame_capture as frame_capture_ui,
         frame_capture::{FrameCaptureSelectionAction, FrameCaptureSelectionState},
@@ -346,6 +348,13 @@ struct BatchSetupState {
     defaults: Option<BatchDefaults>,
     items: Vec<BatchItem>,
     error: Option<String>,
+    append_error: Option<MediaError>,
+    append_error_details_open: bool,
+}
+
+struct BatchInspectionSession {
+    owner: BatchInspectionOwner,
+    item_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,6 +396,7 @@ struct AppState {
     audio_extract: Option<AudioExtractToolState>,
     frame_capture: Option<FrameCaptureToolState>,
     queue_confirmation: Option<Tool>,
+    operation_action_error: Option<(Tool, MediaError)>,
 }
 
 impl Default for AppState {
@@ -403,6 +413,7 @@ impl Default for AppState {
             audio_extract: None,
             frame_capture: None,
             queue_confirmation: None,
+            operation_action_error: None,
         }
     }
 }
@@ -568,6 +579,7 @@ impl AppState {
         self.intake_error = None;
         self.intake_error_details_open = false;
         self.queue_confirmation = None;
+        self.operation_action_error = None;
     }
 
     fn close_source(&mut self) {
@@ -578,6 +590,7 @@ impl AppState {
         self.intake_error = None;
         self.intake_error_details_open = false;
         self.queue_confirmation = None;
+        self.operation_action_error = None;
     }
 
     fn retire_tool_sessions(&mut self) {
@@ -602,7 +615,7 @@ pub(crate) struct ApolloApp {
     queue_edit: Option<QueueEditState>,
     batch_setup: Option<BatchSetupState>,
     batch_edit: Option<BatchEditState>,
-    batch_inspection: Option<BatchInspectionOwner>,
+    batch_inspection: Option<BatchInspectionSession>,
     queue_event_sender: mpsc::Sender<QueueExecutionEvent>,
     queue_event_receiver: Receiver<QueueExecutionEvent>,
     frame_capture_thumbnail_load: Option<FrameCaptureThumbnailLoad>,
@@ -726,6 +739,7 @@ impl ApolloApp {
                 self.media_queue.clear_disposable_history();
                 self.start_file_dialog(FileDialogRequest::OpenSources {
                     initial_directory: None,
+                    target: DialogTarget::BatchInput,
                 });
                 true
             }
@@ -813,6 +827,7 @@ impl ApolloApp {
         self.queue_edit = Some(QueueEditState::new(session_id, &job));
         self.state.navigation = NavigationState::QueueEdit { origin };
         self.state.queue_confirmation = None;
+        self.state.operation_action_error = None;
         true
     }
 
@@ -854,6 +869,7 @@ impl ApolloApp {
         self.hydrate_cached_source_operation(job.operation());
         self.state.enter_workspace(operation);
         self.state.queue_confirmation = None;
+        self.state.operation_action_error = None;
         true
     }
 
@@ -992,14 +1008,13 @@ impl ApolloApp {
 
     fn enqueue_from_ready_surface(&mut self, operation: Tool) {
         self.state.queue_confirmation = None;
+        self.state.operation_action_error = None;
         match self.enqueue_current_operation(operation) {
             Ok(Some(_)) => self.state.queue_confirmation = Some(operation),
             Ok(None) => {}
             Err(error) => {
-                self.state.intake_error = Some(MediaError::invalid_request(format!(
-                    "Could not add to queue: {error}"
-                )));
-                self.state.intake_error_details_open = false;
+                self.state.operation_action_error =
+                    Some((operation, media_error_from_queue_enqueue(&error)));
             }
         }
     }
@@ -1025,6 +1040,7 @@ impl ApolloApp {
             return;
         }
         self.state.queue_confirmation = None;
+        self.state.operation_action_error = None;
         match action {
             SourceAction::ChangeFile => self.start_file_dialog(FileDialogRequest::OpenSource {
                 initial_directory: None,
@@ -1049,6 +1065,7 @@ impl ApolloApp {
         }
         if self.state.active_operation() != Some(tool) {
             self.state.queue_confirmation = None;
+            self.state.operation_action_error = None;
         }
         if self.activate_cached_source(tool) {
             self.state.navigation = NavigationState::SourceWorkspace {
@@ -1183,7 +1200,7 @@ impl ApolloApp {
             ui.heading("Media tools unavailable");
             ui.add_space(theme::SPACING.compact);
             media_error::show_inline(ui, &error, &mut self.tools_error_details_open);
-            ui.add_space(theme::SPACING.section);
+            ui.add_space(theme::SPACING.related);
             if widgets::secondary_button(ui, "Retry").clicked() {
                 self.retry_media_tools();
             }
@@ -1493,7 +1510,7 @@ impl ApolloApp {
         if ready_surface && let Some(error) = self.state.intake_error.as_ref() {
             layout::content_gutter(ui, |ui| {
                 media_error::show_inline(ui, error, &mut self.state.intake_error_details_open);
-                ui.add_space(theme::SPACING.section);
+                ui.add_space(theme::SPACING.related);
             });
         }
         let show_operation = |app: &mut Self, ui: &mut Ui| match active_operation {
@@ -1540,6 +1557,7 @@ impl ApolloApp {
         match action {
             FileIntakeAction::OpenFile => self.start_file_dialog(FileDialogRequest::OpenSources {
                 initial_directory: None,
+                target: DialogTarget::BatchInput,
             }),
             FileIntakeAction::OpenQueue => self.state.enter_queue(),
             FileIntakeAction::None => {}
@@ -1560,7 +1578,7 @@ impl ApolloApp {
     }
 
     fn show_batch_setup(&mut self, ui: &mut Ui) {
-        let Some(batch) = self.batch_setup.as_ref() else {
+        let Some(batch) = self.batch_setup.as_mut() else {
             self.state.navigation = NavigationState::NoSource;
             return;
         };
@@ -1573,6 +1591,16 @@ impl ApolloApp {
                 readiness: item.readiness,
                 reason: item.reason.as_deref(),
                 included: item.included,
+                edit_action: match (&item.source, item.readiness) {
+                    (BatchSourceState::Ready(_), BatchReadiness::Ready) => {
+                        Some(BatchItemEditAction::Override)
+                    }
+                    (BatchSourceState::Ready(_), BatchReadiness::NeedsAttention) => {
+                        Some(BatchItemEditAction::Review)
+                    }
+                    _ => None,
+                },
+                can_toggle_included: matches!(item.source, BatchSourceState::Ready(_)),
             })
             .collect::<Vec<_>>();
         let included = batch.items.iter().filter(|item| item.included).count();
@@ -1590,7 +1618,12 @@ impl ApolloApp {
                 .iter()
                 .any(|item| matches!(item.source, BatchSourceState::Ready(_))),
             can_enqueue,
-            batch.error.as_deref(),
+            self.batch_inspection.is_none(),
+            batch_ui::BatchFeedback {
+                status: batch.error.as_deref(),
+                append_error: batch.append_error.as_ref(),
+                append_error_details_open: &mut batch.append_error_details_open,
+            },
         );
         match action {
             BatchAction::SelectOperation(operation) => {
@@ -1618,6 +1651,12 @@ impl ApolloApp {
             }
             BatchAction::ConfigureDefaults => {
                 self.begin_batch_edit(BatchEditTarget::Defaults);
+            }
+            BatchAction::AddFiles => {
+                self.start_file_dialog(FileDialogRequest::OpenSources {
+                    initial_directory: None,
+                    target: DialogTarget::BatchAppend,
+                });
             }
             BatchAction::EditItem(index) => {
                 self.begin_batch_edit(BatchEditTarget::Item(index));
@@ -1677,7 +1716,7 @@ impl ApolloApp {
         if let Some(error) = edit.error.clone() {
             layout::content_gutter(ui, |ui| {
                 media_error::show_inline(ui, &error, &mut edit.error_details_open);
-                ui.add_space(theme::SPACING.section);
+                ui.add_space(theme::SPACING.related);
             });
         }
         let defaults_save_allowed = batch_defaults_from_editor(&edit.editor).is_some();
@@ -1750,7 +1789,7 @@ impl ApolloApp {
         if let Some(error) = edit.error.clone() {
             layout::content_gutter(ui, |ui| {
                 media_error::show_inline(ui, &error, &mut edit.error_details_open);
-                ui.add_space(theme::SPACING.section);
+                ui.add_space(theme::SPACING.related);
             });
         }
         let capabilities = match &self.media_tools {
@@ -1858,8 +1897,13 @@ impl ApolloApp {
             defaults: None,
             items,
             error: None,
+            append_error: None,
+            append_error_details_open: false,
         });
-        self.batch_inspection = Some(inspection);
+        self.batch_inspection = Some(BatchInspectionSession {
+            owner: inspection,
+            item_offset: 0,
+        });
         self.state.navigation = NavigationState::BatchSetup;
         true
     }
@@ -1868,8 +1912,9 @@ impl ApolloApp {
         let Some(owner) = self.batch_inspection.as_mut() else {
             return;
         };
-        let results = owner.poll();
-        let complete = owner.is_complete();
+        let results = owner.owner.poll();
+        let complete = owner.owner.is_complete();
+        let item_offset = owner.item_offset;
         let capabilities = self
             .ready_media_tools()
             .map(|tools| tools.video_encoders.clone());
@@ -1878,13 +1923,14 @@ impl ApolloApp {
             return;
         };
         for result in results {
-            let Some(item) = batch.items.get_mut(result.index) else {
+            let Some(item) = batch.items.get_mut(item_offset + result.index) else {
                 continue;
             };
             match result.result {
                 Ok(media) => item.source = BatchSourceState::Ready(media),
                 Err(reason) => {
                     item.source = BatchSourceState::Failed;
+                    item.included = false;
                     item.readiness = BatchReadiness::Incompatible;
                     item.reason = Some(reason);
                 }
@@ -1903,6 +1949,72 @@ impl ApolloApp {
         if complete {
             self.batch_inspection = None;
         }
+    }
+
+    fn append_batch_paths(&mut self, paths: Vec<PathBuf>) -> bool {
+        if paths.is_empty() || self.batch_inspection.is_some() {
+            return false;
+        }
+        let Some(tools) = self.ready_media_tools().cloned() else {
+            return false;
+        };
+        let Some(batch) = self.batch_setup.as_ref() else {
+            return false;
+        };
+        let mut unique: Vec<PathBuf> = Vec::new();
+        let mut duplicate_count = 0;
+        for path in paths {
+            if batch
+                .items
+                .iter()
+                .any(|item| normalized_source_paths_equal(&item.path, &path))
+                || unique
+                    .iter()
+                    .any(|existing| normalized_source_paths_equal(existing, &path))
+            {
+                duplicate_count += 1;
+            } else {
+                unique.push(path);
+            }
+        }
+        if unique.is_empty() {
+            if let Some(batch) = self.batch_setup.as_mut() {
+                batch.append_error = None;
+                batch.append_error_details_open = false;
+                batch.error = Some(duplicate_source_message(duplicate_count));
+            }
+            return false;
+        }
+        let offset = batch.items.len();
+        let owner =
+            match BatchInspectionOwner::spawn(tools, unique.clone(), self.egui_context.clone()) {
+                Ok(owner) => owner,
+                Err(error) => {
+                    if let Some(batch) = self.batch_setup.as_mut() {
+                        batch.error =
+                            Some(format!("Additional files could not be inspected: {error}"));
+                    }
+                    return false;
+                }
+            };
+        let batch = self.batch_setup.as_mut().expect("batch remains active");
+        batch.append_error = None;
+        batch.append_error_details_open = false;
+        batch.items.extend(unique.into_iter().map(|path| BatchItem {
+            path,
+            included: true,
+            source: BatchSourceState::Inspecting,
+            operation: None,
+            readiness: BatchReadiness::Inspecting,
+            reason: None,
+            overridden: false,
+        }));
+        batch.error = (duplicate_count > 0).then(|| duplicate_source_message(duplicate_count));
+        self.batch_inspection = Some(BatchInspectionSession {
+            owner,
+            item_offset: offset,
+        });
+        true
     }
 
     fn begin_batch_edit(&mut self, target: BatchEditTarget) -> bool {
@@ -2081,6 +2193,7 @@ impl ApolloApp {
         }
 
         self.state.queue_confirmation = None;
+        self.state.operation_action_error = None;
         self.state.intake_error = None;
         self.state.intake_error_details_open = false;
         match self.state.media_intake.begin_load(path) {
@@ -2251,6 +2364,12 @@ impl ApolloApp {
             .clone();
         let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
         let queue_confirmation = self.state.queue_confirmation == Some(Tool::AudioMix);
+        let action_error = self
+            .state
+            .operation_action_error
+            .as_ref()
+            .filter(|(tool, _)| *tool == Tool::AudioMix)
+            .map(|(_, error)| error.clone());
         let action = ui
             .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let session = self
@@ -2266,6 +2385,7 @@ impl ApolloApp {
                     OperationSurfaceMode::Immediate {
                         start_allowed: immediate_start_allowed,
                         queue_confirmation,
+                        action_error: action_error.as_ref(),
                     },
                 )
             })
@@ -2316,6 +2436,7 @@ impl ApolloApp {
         }
         if action != AudioMixSelectionAction::None {
             self.state.queue_confirmation = None;
+            self.state.operation_action_error = None;
         }
         match action {
             AudioMixSelectionAction::BrowseOutput => {
@@ -2386,6 +2507,12 @@ impl ApolloApp {
         let enabled = self.workspace_interaction_enabled();
         let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
         let queue_confirmation = self.state.queue_confirmation == Some(Tool::VideoUpscale);
+        let action_error = self
+            .state
+            .operation_action_error
+            .as_ref()
+            .filter(|(tool, _)| *tool == Tool::VideoUpscale)
+            .map(|(_, error)| error.clone());
         let capabilities = match &self.media_tools {
             MediaToolsState::Ready(tools) if self.media_tools_discovery.is_none() => {
                 upscale_ui::UpscaleEncoderCapabilities::Ready(&tools.video_encoders)
@@ -2407,6 +2534,7 @@ impl ApolloApp {
                     OperationSurfaceMode::Immediate {
                         start_allowed: immediate_start_allowed,
                         queue_confirmation,
+                        action_error: action_error.as_ref(),
                     },
                 )
             })
@@ -2457,6 +2585,7 @@ impl ApolloApp {
         }
         if action != UpscaleSelectionAction::None {
             self.state.queue_confirmation = None;
+            self.state.operation_action_error = None;
         }
         match action {
             UpscaleSelectionAction::BrowseOutput => {
@@ -2543,6 +2672,12 @@ impl ApolloApp {
             .clone();
         let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
         let queue_confirmation = self.state.queue_confirmation == Some(Tool::Remux);
+        let action_error = self
+            .state
+            .operation_action_error
+            .as_ref()
+            .filter(|(tool, _)| *tool == Tool::Remux)
+            .map(|(_, error)| error.clone());
         let action = ui
             .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let remux = self
@@ -2558,6 +2693,7 @@ impl ApolloApp {
                     OperationSurfaceMode::Immediate {
                         start_allowed: immediate_start_allowed,
                         queue_confirmation,
+                        action_error: action_error.as_ref(),
                     },
                 )
             })
@@ -2605,6 +2741,7 @@ impl ApolloApp {
         }
         if action != RemuxSelectionAction::None {
             self.state.queue_confirmation = None;
+            self.state.operation_action_error = None;
         }
         match action {
             RemuxSelectionAction::BrowseOutput => {
@@ -2681,6 +2818,12 @@ impl ApolloApp {
             .clone();
         let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
         let queue_confirmation = self.state.queue_confirmation == Some(Tool::AudioExtract);
+        let action_error = self
+            .state
+            .operation_action_error
+            .as_ref()
+            .filter(|(tool, _)| *tool == Tool::AudioExtract)
+            .map(|(_, error)| error.clone());
         let action = ui
             .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let session = self
@@ -2696,6 +2839,7 @@ impl ApolloApp {
                     OperationSurfaceMode::Immediate {
                         start_allowed: immediate_start_allowed,
                         queue_confirmation,
+                        action_error: action_error.as_ref(),
                     },
                 )
             })
@@ -2746,6 +2890,7 @@ impl ApolloApp {
         }
         if action != AudioExtractSelectionAction::None {
             self.state.queue_confirmation = None;
+            self.state.operation_action_error = None;
         }
         match action {
             AudioExtractSelectionAction::BrowseOutput => {
@@ -2828,6 +2973,12 @@ impl ApolloApp {
             .clone();
         let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
         let queue_confirmation = self.state.queue_confirmation == Some(Tool::FrameCapture);
+        let action_error = self
+            .state
+            .operation_action_error
+            .as_ref()
+            .filter(|(tool, _)| *tool == Tool::FrameCapture)
+            .map(|(_, error)| error.clone());
         let action = ui
             .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let session = self
@@ -2843,6 +2994,7 @@ impl ApolloApp {
                     OperationSurfaceMode::Immediate {
                         start_allowed: immediate_start_allowed,
                         queue_confirmation,
+                        action_error: action_error.as_ref(),
                     },
                 )
             })
@@ -2893,6 +3045,7 @@ impl ApolloApp {
         }
         if action != FrameCaptureSelectionAction::None {
             self.state.queue_confirmation = None;
+            self.state.operation_action_error = None;
         }
         match action {
             FrameCaptureSelectionAction::BrowseOutput => {
@@ -2982,7 +3135,9 @@ impl ApolloApp {
     fn prepare_file_dialog_request(&self, mut request: FileDialogRequest) -> FileDialogRequest {
         match &mut request {
             FileDialogRequest::OpenSource { initial_directory }
-            | FileDialogRequest::OpenSources { initial_directory } => {
+            | FileDialogRequest::OpenSources {
+                initial_directory, ..
+            } => {
                 *initial_directory = self.settings.source_directory();
             }
             FileDialogRequest::SaveOutput { options, .. } => {
@@ -3018,7 +3173,7 @@ impl ApolloApp {
     fn settle_file_dialog(&mut self, completion: FileDialogCompletion) {
         if let DialogOutcome::Selected(path) = &completion.outcome {
             match completion.target {
-                DialogTarget::MediaInput | DialogTarget::BatchInput => {
+                DialogTarget::MediaInput | DialogTarget::BatchInput | DialogTarget::BatchAppend => {
                     self.settings.remember_source(path)
                 }
                 _ => self.settings.remember_output(path),
@@ -3038,6 +3193,19 @@ impl ApolloApp {
             }
             (DialogTarget::BatchInput, DialogOutcome::SelectedMany(paths)) => {
                 self.start_batch_paths(paths);
+            }
+            (DialogTarget::BatchAppend, DialogOutcome::Selected(path)) => {
+                self.append_batch_paths(vec![path]);
+            }
+            (DialogTarget::BatchAppend, DialogOutcome::SelectedMany(paths)) => {
+                self.append_batch_paths(paths);
+            }
+            (DialogTarget::BatchAppend, DialogOutcome::Failed(diagnostic)) => {
+                if let Some(batch) = self.batch_setup.as_mut() {
+                    batch.error = None;
+                    batch.append_error = Some(MediaError::file_picker_unavailable(diagnostic));
+                    batch.append_error_details_open = false;
+                }
             }
             (
                 DialogTarget::MediaInput | DialogTarget::BatchInput,
@@ -3087,7 +3255,7 @@ fn settle_editor_output_file_dialog(
         return;
     };
     let target_session_id = match target {
-        DialogTarget::MediaInput | DialogTarget::BatchInput => return,
+        DialogTarget::MediaInput | DialogTarget::BatchInput | DialogTarget::BatchAppend => return,
         DialogTarget::AudioMixOutput { session_id }
         | DialogTarget::UpscaleOutput { session_id }
         | DialogTarget::RemuxOutput { session_id }
@@ -3118,7 +3286,7 @@ fn settle_editor_output_file_dialog(
             edit.error_details_open = false;
         }
         (_, DialogOutcome::Cancelled) => {}
-        (DialogTarget::MediaInput | DialogTarget::BatchInput, _) => {}
+        (DialogTarget::MediaInput | DialogTarget::BatchInput | DialogTarget::BatchAppend, _) => {}
         (_, DialogOutcome::SelectedMany(_)) => {}
     }
 }
@@ -3729,6 +3897,42 @@ fn queue_event_matches_active(active_job: Option<JobId>, event: QueueExecutionEv
     active_job == Some(event.job_id)
 }
 
+fn normalized_source_paths_equal(left: &Path, right: &Path) -> bool {
+    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn media_error_from_queue_enqueue(error: &QueueEnqueueError) -> MediaError {
+    match error {
+        QueueEnqueueError::Source(error) => MediaError::from_intake_error(error),
+        QueueEnqueueError::SourceDoesNotMatchMedia => {
+            MediaError::source_unavailable(error.to_string())
+        }
+        QueueEnqueueError::Output(error) => MediaError::from_output_error(error),
+        QueueEnqueueError::DuplicateDestination { .. } => {
+            MediaError::queue_destination_reserved(error.to_string())
+        }
+        QueueEnqueueError::JobIdExhausted => MediaError::invalid_request(error.to_string()),
+    }
+}
+
+fn duplicate_source_message(count: usize) -> String {
+    if count == 1 {
+        "Ignored 1 file that is already in this batch.".to_owned()
+    } else {
+        format!("Ignored {count} files that are already in this batch.")
+    }
+}
+
 fn open_folder(path: &Path) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     let mut command = Command::new("explorer");
@@ -3857,7 +4061,7 @@ mod tests {
             audio_extract::AudioExtractSelectionAction, audio_mix::AudioMixSelectionAction,
             batch::BatchReadiness, file_intake::FileIntakeAction, fonts,
             frame_capture::FrameCaptureSelectionAction,
-            frame_capture_progress::FrameCaptureThumbnailState, layout,
+            frame_capture_progress::FrameCaptureThumbnailState, layout, media_error,
             remux::RemuxSelectionAction, theme, upscale::UpscaleSelectionAction,
         },
         upscale::{
@@ -5145,6 +5349,8 @@ mod tests {
                 },
             ],
             error: None,
+            append_error: None,
+            append_error_details_open: false,
         };
 
         refresh_batch_items(&mut batch, None);
@@ -5207,6 +5413,8 @@ mod tests {
                 },
             ],
             error: None,
+            append_error: None,
+            append_error_details_open: false,
         });
         app.state.navigation = NavigationState::BatchSetup;
         refresh_batch_items(app.batch_setup.as_mut().unwrap(), None);
@@ -5270,6 +5478,8 @@ mod tests {
                 },
             ],
             error: None,
+            append_error: None,
+            append_error_details_open: false,
         });
         app.state.navigation = NavigationState::BatchSetup;
 
@@ -5322,6 +5532,8 @@ mod tests {
                 overridden: false,
             }],
             error: None,
+            append_error: None,
+            append_error_details_open: false,
         });
         app.state.navigation = NavigationState::BatchSetup;
 
@@ -6672,7 +6884,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_enqueue_sets_inline_confirmation_and_a_failed_attempt_clears_it() {
+    fn duplicate_queued_destination_is_truthful_operation_local_feedback() {
         let (directory, path) = temp_file("queue-confirmation");
         let mut app = app();
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
@@ -6681,6 +6893,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(app.media_queue.pending_count(), 1);
+        let output_path = app.media_queue.jobs()[0].operation().output().to_path_buf();
+        assert!(!output_path.exists());
         assert_eq!(app.state.queue_confirmation, Some(Tool::AudioMix));
         let context = egui::Context::default();
         fonts::install(&context);
@@ -6692,8 +6906,211 @@ mod tests {
         app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested)
             .unwrap();
         assert_eq!(app.media_queue.pending_count(), 1);
+        assert!(!output_path.exists());
         assert_eq!(app.state.queue_confirmation, None);
+        assert!(app.state.intake_error.is_none());
+        assert!(matches!(
+            app.state.operation_action_error,
+            Some((Tool::AudioMix, ref error))
+                if error.kind() == MediaErrorKind::QueueDestinationReserved
+                    && error.diagnostic().is_some_and(|diagnostic| diagnostic.contains("queue job 1"))
+        ));
 
+        let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
+        assert!(output_contains_text(
+            &output,
+            "Another queued job already targets this output."
+        ));
+        output.textures_delta.clear();
+
+        let error = app
+            .state
+            .operation_action_error
+            .as_ref()
+            .map(|(_, error)| error.clone())
+            .unwrap();
+        let mut details_open = true;
+        let mut output = context.run_ui(Default::default(), |ui| {
+            media_error::show_inline(ui, &error, &mut details_open)
+        });
+        assert!(output_contains_text(&output, "queue job 1"));
+        output.textures_delta.clear();
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn genuine_existing_output_keeps_filesystem_output_exists_feedback() {
+        let (directory, path) = temp_file("queue-existing-output");
+        let existing_output = directory.join("already-there.mp4");
+        fs::write(&existing_output, b"existing output").unwrap();
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.state
+            .audio_mix
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_custom_output_path(existing_output);
+
+        app.enqueue_from_ready_surface(Tool::AudioMix);
+
+        assert!(app.media_queue.jobs().is_empty());
+        assert!(app.state.intake_error.is_none());
+        assert!(matches!(
+            app.state.operation_action_error,
+            Some((Tool::AudioMix, ref error))
+                if error.kind() == MediaErrorKind::OutputExists
+                    && error.guidance() == Some("Choose another output path or move the existing file.")
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn batch_append_ignores_duplicates_without_mutating_existing_configuration() {
+        let (directory, path) = temp_file("batch-append-duplicate");
+        let source = media(&path);
+        let operation = QueuedOperation::Remux(
+            apollo::ui::remux::RemuxSelectionState::new(&source).request(&source),
+        );
+        let mut app = app();
+        app.batch_setup = Some(BatchSetupState {
+            origin: BatchOrigin::NoSource,
+            operation: Tool::Remux,
+            defaults: Some(BatchDefaults::Remux {
+                container: MediaContainer::Matroska,
+            }),
+            items: vec![BatchItem {
+                path: path.clone(),
+                included: true,
+                source: BatchSourceState::Ready(source),
+                operation: Some(operation.clone()),
+                readiness: BatchReadiness::Ready,
+                reason: None,
+                overridden: true,
+            }],
+            error: None,
+            append_error: None,
+            append_error_details_open: false,
+        });
+
+        assert!(!app.append_batch_paths(vec![path.clone(), path.clone()]));
+        let batch = app.batch_setup.as_ref().unwrap();
+        assert_eq!(batch.items.len(), 1);
+        assert_eq!(batch.items[0].operation, Some(operation));
+        assert!(batch.items[0].overridden);
+        assert_eq!(
+            batch.error.as_deref(),
+            Some("Ignored 2 files that are already in this batch.")
+        );
+        assert!(app.batch_inspection.is_none());
+        assert!(app.media_queue.jobs().is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn batch_append_picker_failure_is_visible_and_never_leaks_to_intake() {
+        let (directory, path) = temp_file("batch-append-picker-failure");
+        let source = media(&path);
+        let operation = QueuedOperation::Remux(
+            apollo::ui::remux::RemuxSelectionState::new(&source).request(&source),
+        );
+        let mut app = app();
+        app.batch_setup = Some(BatchSetupState {
+            origin: BatchOrigin::NoSource,
+            operation: Tool::Remux,
+            defaults: Some(BatchDefaults::Remux {
+                container: MediaContainer::Matroska,
+            }),
+            items: vec![BatchItem {
+                path,
+                included: true,
+                source: BatchSourceState::Ready(source),
+                operation: Some(operation),
+                readiness: BatchReadiness::Ready,
+                reason: None,
+                overridden: true,
+            }],
+            error: None,
+            append_error: None,
+            append_error_details_open: false,
+        });
+        app.state.navigation = NavigationState::BatchSetup;
+
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::BatchAppend,
+            outcome: DialogOutcome::Failed("native picker diagnostic".to_owned()),
+        });
+
+        assert!(app.state.intake_error.is_none());
+        let batch = app.batch_setup.as_ref().unwrap();
+        assert!(matches!(
+            batch.append_error,
+            Some(ref error)
+                if error.kind() == MediaErrorKind::FilePickerUnavailable
+                    && error.diagnostic() == Some("native picker diagnostic")
+        ));
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
+        assert!(output_contains_text(
+            &output,
+            "The file picker could not be opened."
+        ));
+        output.textures_delta.clear();
+
+        assert!(app.finish_batch_setup());
+        assert!(app.state.intake_error.is_none());
+        let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
+        assert!(!output_contains_text(
+            &output,
+            "The file picker could not be opened."
+        ));
+        output.textures_delta.clear();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn batch_append_picker_cancellation_preserves_the_complete_batch_state() {
+        let (directory, path) = temp_file("batch-append-picker-cancel");
+        let source = media(&path);
+        let operation = QueuedOperation::Remux(
+            apollo::ui::remux::RemuxSelectionState::new(&source).request(&source),
+        );
+        let mut app = app();
+        app.batch_setup = Some(BatchSetupState {
+            origin: BatchOrigin::NoSource,
+            operation: Tool::Remux,
+            defaults: Some(BatchDefaults::Remux {
+                container: MediaContainer::Matroska,
+            }),
+            items: vec![BatchItem {
+                path,
+                included: false,
+                source: BatchSourceState::Ready(source),
+                operation: Some(operation),
+                readiness: BatchReadiness::Ready,
+                reason: None,
+                overridden: true,
+            }],
+            error: Some("Existing batch feedback".to_owned()),
+            append_error: Some(MediaError::file_picker_unavailable(
+                "existing append diagnostic",
+            )),
+            append_error_details_open: true,
+        });
+        app.state.navigation = NavigationState::BatchSetup;
+        let before = app.batch_setup.clone();
+
+        app.settle_file_dialog(FileDialogCompletion {
+            target: DialogTarget::BatchAppend,
+            outcome: DialogOutcome::Cancelled,
+        });
+
+        assert_eq!(app.batch_setup, before);
+        assert!(app.state.intake_error.is_none());
+        assert!(app.media_queue.jobs().is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 

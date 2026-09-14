@@ -62,6 +62,11 @@ pub const QUEUE_STATE_WIDTH: f32 = 78.0;
 /// Shared wide-row height vertically centers bounded cells while identity uses two lines.
 pub const QUEUE_ROW_HEIGHT: f32 = 44.0;
 
+/// Batch rows share Queue's two-line identity rhythm while reserving stable status and actions.
+pub const BATCH_IDENTITY_MIN_WIDTH: f32 = 180.0;
+pub const BATCH_STATE_WIDTH: f32 = 150.0;
+pub const BATCH_ROW_HEIGHT: f32 = 44.0;
+
 /// Useful source identity width retained beside workspace source actions before compact metadata
 /// is omitted at narrow widths.
 pub const WORKSPACE_METADATA_MIN_WIDTH: f32 = 220.0;
@@ -109,6 +114,46 @@ pub enum TrackRowLayout {
 pub enum QueueRowLayout {
     Inline,
     Stacked,
+}
+
+pub type BatchRowLayout = QueueRowLayout;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BatchRowPlan {
+    pub layout: BatchRowLayout,
+    pub row_height: f32,
+    pub identity_width: f32,
+    pub state_width: f32,
+    pub action_width: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BatchRowColumns {
+    pub identity: Rect,
+    pub state: Rect,
+    pub actions: Rect,
+}
+
+impl BatchRowPlan {
+    pub fn columns(self, row: Rect) -> BatchRowColumns {
+        debug_assert_eq!(self.layout, BatchRowLayout::Inline);
+        let gap = theme::SPACING.related;
+        let identity = Rect::from_min_size(row.min, vec2(self.identity_width, row.height()));
+        let state = Rect::from_min_size(
+            identity.right_top() + vec2(gap, 0.0),
+            vec2(self.state_width, row.height()),
+        );
+        let actions = Rect::from_min_size(
+            state.right_top() + vec2(gap, 0.0),
+            vec2(self.action_width, row.height()),
+        );
+        debug_assert!((actions.right() - row.right()).abs() <= 0.5);
+        BatchRowColumns {
+            identity,
+            state,
+            actions,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -758,6 +803,25 @@ pub fn queue_row_plan(available_width: f32, action_width: f32) -> QueueRowPlan {
     }
 }
 
+pub fn batch_row_plan(available_width: f32, action_width: f32) -> BatchRowPlan {
+    let available_width = safe_dimension(available_width);
+    let action_width = safe_dimension(action_width);
+    let fixed_width = BATCH_STATE_WIDTH + action_width + 2.0 * theme::SPACING.related;
+    let identity_width = (available_width - fixed_width).max(0.0);
+    let layout = if identity_width >= BATCH_IDENTITY_MIN_WIDTH {
+        BatchRowLayout::Inline
+    } else {
+        BatchRowLayout::Stacked
+    };
+    BatchRowPlan {
+        layout,
+        row_height: BATCH_ROW_HEIGHT,
+        identity_width,
+        state_width: BATCH_STATE_WIDTH,
+        action_width,
+    }
+}
+
 /// Intrinsic bounds of an action group for the selected responsive arrangement.
 ///
 /// The group size is derived only from intrinsic action sizes and the supplied shared gap. It does
@@ -906,7 +970,8 @@ mod tests {
     use egui::{Rect, Vec2, pos2};
 
     use super::{
-        ACTION_BAR_VERTICAL_PADDING, ActionLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT,
+        ACTION_BAR_VERTICAL_PADDING, ActionLayout, BATCH_IDENTITY_MIN_WIDTH, BATCH_ROW_HEIGHT,
+        BATCH_STATE_WIDTH, BatchRowLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT,
         ENCODER_QUALITY_CONTROL_WIDTH, ENCODER_QUALITY_STEP, FIELD_PAIR_MIN_COLUMN_WIDTH,
         FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, FieldPairLayout, IntakeLayout,
         MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, OUTPUT_FILENAME_MIN_INLINE_WIDTH, OutputRowLayout,
@@ -914,10 +979,11 @@ mod tests {
         PROGRESS_TRACK_HEIGHT, QUEUE_IDENTITY_MIN_WIDTH, QUEUE_OPERATION_WIDTH, QUEUE_ROW_HEIGHT,
         QUEUE_STATE_WIDTH, QueueRowLayout, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
         TRACK_TEXT_MIN_INLINE_WIDTH, TextOverflowPolicy, TrackRowLayout, WINDOW_CHROME_HEIGHT,
-        WORKSPACE_METADATA_MIN_WIDTH, action_group_size, action_layout, bounded_content_width,
-        centered_action_group, field_pair_layout, focus_content, intake_content,
-        intake_layout_plan, operation_surface, output_row_plan, queue_row_plan, surface_fade,
-        track_row_plan, workspace_header_shows_metadata, workspace_switcher_fits_one_line,
+        WORKSPACE_METADATA_MIN_WIDTH, action_group_size, action_layout, batch_row_plan,
+        bounded_content_width, centered_action_group, field_pair_layout, focus_content,
+        intake_content, intake_layout_plan, operation_surface, output_row_plan, queue_row_plan,
+        surface_fade, track_row_plan, workspace_header_shows_metadata,
+        workspace_switcher_fits_one_line,
     };
     use crate::ui::theme;
 
@@ -938,6 +1004,9 @@ mod tests {
         assert_eq!(QUEUE_OPERATION_WIDTH, 104.0);
         assert_eq!(QUEUE_STATE_WIDTH, 78.0);
         assert_eq!(QUEUE_ROW_HEIGHT, 44.0);
+        assert_eq!(BATCH_IDENTITY_MIN_WIDTH, 180.0);
+        assert_eq!(BATCH_STATE_WIDTH, 150.0);
+        assert_eq!(BATCH_ROW_HEIGHT, 44.0);
         assert_eq!(ENCODER_QUALITY_STEP, 1.0);
         assert_eq!(OUTPUT_FILENAME_MIN_INLINE_WIDTH, 180.0);
         assert_eq!(WORKSPACE_METADATA_MIN_WIDTH, 220.0);
@@ -972,6 +1041,26 @@ mod tests {
         assert_eq!(
             queue_row_plan(f32::NAN, action_width).layout,
             QueueRowLayout::Stacked
+        );
+    }
+
+    #[test]
+    fn batch_rows_keep_shared_bounded_cells_and_stack_at_narrow_width() {
+        let action_width = 128.0;
+        let wide = batch_row_plan(620.0, action_width);
+        assert_eq!(wide.layout, BatchRowLayout::Inline);
+        assert_eq!(wide.state_width, BATCH_STATE_WIDTH);
+        assert_eq!(wide.action_width, action_width);
+        assert!(wide.identity_width >= BATCH_IDENTITY_MIN_WIDTH);
+
+        let row = Rect::from_min_size(pos2(8.0, 12.0), Vec2::new(620.0, BATCH_ROW_HEIGHT));
+        let columns = wide.columns(row);
+        assert_eq!(columns.identity.left(), row.left());
+        assert!((columns.actions.right() - row.right()).abs() <= 0.5);
+
+        assert_eq!(
+            batch_row_plan(420.0, action_width).layout,
+            BatchRowLayout::Stacked
         );
     }
 

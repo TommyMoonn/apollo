@@ -18,6 +18,7 @@ const ALL_FILES_FILTER_PATTERN: &str = "*.*";
 pub(crate) enum DialogTarget {
     MediaInput,
     BatchInput,
+    BatchAppend,
     AudioMixOutput { session_id: u64 },
     UpscaleOutput { session_id: u64 },
     RemuxOutput { session_id: u64 },
@@ -107,6 +108,7 @@ pub(crate) enum FileDialogRequest {
     },
     OpenSources {
         initial_directory: Option<PathBuf>,
+        target: DialogTarget,
     },
     SaveOutput {
         target: DialogTarget,
@@ -118,7 +120,7 @@ impl FileDialogRequest {
     pub(crate) fn target(&self) -> DialogTarget {
         match self {
             Self::OpenSource { .. } => DialogTarget::MediaInput,
-            Self::OpenSources { .. } => DialogTarget::BatchInput,
+            Self::OpenSources { target, .. } => *target,
             Self::SaveOutput { target, .. } => *target,
         }
     }
@@ -418,10 +420,10 @@ mod native_windows {
                 FileDialogRequest::OpenSource { initial_directory } => {
                     open_source(initial_directory.as_deref(), self.owner)
                 }
-                FileDialogRequest::OpenSources { initial_directory } => {
-                    open_sources(initial_directory.as_deref(), self.owner)
-                        .map(|paths| paths.and_then(|paths| paths.into_iter().next()))
-                }
+                FileDialogRequest::OpenSources {
+                    initial_directory, ..
+                } => open_sources(initial_directory.as_deref(), self.owner)
+                    .map(|paths| paths.and_then(|paths| paths.into_iter().next())),
                 FileDialogRequest::SaveOutput { options, .. } => save_output(options, self.owner),
             }
         }
@@ -431,9 +433,9 @@ mod native_windows {
             request: &FileDialogRequest,
         ) -> Result<Option<Vec<PathBuf>>> {
             match request {
-                FileDialogRequest::OpenSources { initial_directory } => {
-                    open_sources(initial_directory.as_deref(), self.owner)
-                }
+                FileDialogRequest::OpenSources {
+                    initial_directory, ..
+                } => open_sources(initial_directory.as_deref(), self.owner),
                 _ => self.run(request).map(|path| path.map(|path| vec![path])),
             }
         }
@@ -654,6 +656,7 @@ mod tests {
         owner
             .request(FileDialogRequest::OpenSources {
                 initial_directory: Some(PathBuf::from(r"C:\media")),
+                target: DialogTarget::BatchInput,
             })
             .unwrap();
 

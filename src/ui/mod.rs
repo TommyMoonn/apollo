@@ -22,6 +22,7 @@ pub mod upscale_progress;
 pub mod widgets;
 pub mod workspace;
 
+use crate::media::error::MediaError;
 use crate::queue::JobId;
 
 pub const ADD_TO_QUEUE_LABEL: &str = "Add to queue";
@@ -33,10 +34,11 @@ pub const SAVE_BATCH_OVERRIDE_LABEL: &str = "Save override";
 pub const CANCEL_BATCH_EDIT_LABEL: &str = "Cancel";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperationSurfaceMode {
+pub enum OperationSurfaceMode<'a> {
     Immediate {
         start_allowed: bool,
         queue_confirmation: bool,
+        action_error: Option<&'a MediaError>,
     },
     QueueEdit,
     BatchDefaults {
@@ -45,7 +47,7 @@ pub enum OperationSurfaceMode {
     BatchOverride,
 }
 
-impl OperationSurfaceMode {
+impl OperationSurfaceMode<'_> {
     pub const fn edit_labels(self) -> Option<(&'static str, &'static str)> {
         match self {
             Self::Immediate { .. } => None,
@@ -58,11 +60,21 @@ impl OperationSurfaceMode {
     }
 }
 
-impl From<bool> for OperationSurfaceMode {
+impl<'a> OperationSurfaceMode<'a> {
+    pub const fn inline_action_error(self) -> Option<&'a MediaError> {
+        match self {
+            Self::Immediate { action_error, .. } => action_error,
+            _ => None,
+        }
+    }
+}
+
+impl From<bool> for OperationSurfaceMode<'_> {
     fn from(start_allowed: bool) -> Self {
         Self::Immediate {
             start_allowed,
             queue_confirmation: false,
+            action_error: None,
         }
     }
 }

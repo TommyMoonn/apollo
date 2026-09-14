@@ -74,9 +74,22 @@ pub(super) fn technical_faint(ui: &mut Ui, text: &str) {
 pub(super) fn diagnostic_viewport(ui: &mut Ui, text: &str) {
     ScrollArea::vertical()
         .max_height(layout::DIAGNOSTIC_MAX_HEIGHT)
-        .min_scrolled_height(layout::DIAGNOSTIC_MAX_HEIGHT)
-        .auto_shrink([false, false])
+        .min_scrolled_height(0.0)
+        .auto_shrink([false, true])
         .show(ui, |ui| diagnostic_text(ui, text));
+}
+
+pub(super) fn diagnostic_height(ui: &Ui, text: &str, wrap_width: f32) -> f32 {
+    ui.painter()
+        .layout(
+            text.to_owned(),
+            fonts::technical_text_style().resolve(ui.style()),
+            theme::SECONDARY_FAINT,
+            wrap_width.max(0.0),
+        )
+        .size()
+        .y
+        .min(layout::DIAGNOSTIC_MAX_HEIGHT)
 }
 
 pub(super) fn file_name(ui: &mut Ui, output: &std::path::Path) {

@@ -11,14 +11,14 @@ use super::{
 
 const NO_DIAGNOSTIC: &str = "No diagnostic details were reported.";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MediaOutputContainer {
     Mp4,
     Mkv,
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MediaErrorKind {
     MediaToolsCheckFailed,
     FfmpegUnavailable,
@@ -33,6 +33,7 @@ pub enum MediaErrorKind {
     Mp4Incompatibility,
     EncoderUnavailable,
     OutputExists,
+    QueueDestinationReserved,
     OutputNotWritable,
     FilePickerUnavailable,
     OutputPickerUnavailable,
@@ -69,6 +70,9 @@ impl MediaError {
             MediaErrorKind::Mp4Incompatibility => "A source stream cannot be written into MP4.",
             MediaErrorKind::EncoderUnavailable => "The required encoder is unavailable.",
             MediaErrorKind::OutputExists => "The output file already exists.",
+            MediaErrorKind::QueueDestinationReserved => {
+                "Another queued job already targets this output."
+            }
             MediaErrorKind::OutputNotWritable => "The output location is not writable.",
             MediaErrorKind::FilePickerUnavailable => "The file picker could not be opened.",
             MediaErrorKind::OutputPickerUnavailable => "The output picker could not be opened.",
@@ -119,6 +123,9 @@ impl MediaError {
             MediaErrorKind::OutputExists => {
                 Some("Choose another output path or move the existing file.")
             }
+            MediaErrorKind::QueueDestinationReserved => {
+                Some("Choose another output, or edit or remove the queued job.")
+            }
             MediaErrorKind::OutputNotWritable => {
                 Some("Choose a writable output folder and try again.")
             }
@@ -159,6 +166,18 @@ impl MediaError {
 
     pub fn probe_failure(diagnostic: impl Into<String>) -> Self {
         Self::with_diagnostic(MediaErrorKind::ProbeFailure, diagnostic)
+    }
+
+    pub fn source_unavailable(diagnostic: impl Into<String>) -> Self {
+        Self::with_diagnostic(MediaErrorKind::SourceUnavailable, diagnostic)
+    }
+
+    pub fn output_exists(diagnostic: impl Into<String>) -> Self {
+        Self::with_diagnostic(MediaErrorKind::OutputExists, diagnostic)
+    }
+
+    pub fn queue_destination_reserved(diagnostic: impl Into<String>) -> Self {
+        Self::with_diagnostic(MediaErrorKind::QueueDestinationReserved, diagnostic)
     }
 
     pub fn output_not_writable(diagnostic: impl Into<String>) -> Self {
@@ -481,6 +500,31 @@ mod tests {
             .kind(),
             MediaErrorKind::OutputNotWritable
         );
+    }
+
+    #[test]
+    fn queued_destination_reservation_has_truthful_copy_distinct_from_an_existing_file() {
+        let error =
+            MediaError::queue_destination_reserved("queue job 7 already targets this output");
+        assert_eq!(error.kind(), MediaErrorKind::QueueDestinationReserved);
+        assert_eq!(
+            error.message(),
+            "Another queued job already targets this output."
+        );
+        assert_eq!(
+            error.guidance(),
+            Some("Choose another output, or edit or remove the queued job.")
+        );
+        assert_eq!(
+            error.diagnostic(),
+            Some("queue job 7 already targets this output")
+        );
+
+        let existing = MediaError::from_output_error(&MediaOutputError::OutputAlreadyExists(
+            PathBuf::from("output.mp4"),
+        ));
+        assert_eq!(existing.kind(), MediaErrorKind::OutputExists);
+        assert_eq!(existing.message(), "The output file already exists.");
     }
 
     #[test]

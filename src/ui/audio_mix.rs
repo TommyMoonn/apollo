@@ -22,8 +22,8 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, output_name::OutputNameState,
-    show_queue_confirmation, theme, widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error,
+    output_name::OutputNameState, show_queue_confirmation, theme, widgets,
 };
 
 const UNTITLED_AUDIO: &str = "Untitled audio";
@@ -381,12 +381,12 @@ impl AudioMixSelectionState {
 ///
 /// The caller owns source acquisition and execution orchestration. This surface only mutates
 /// selection, container, and output-path state and emits user intent for those responsibilities.
-pub fn show(
+pub fn show<'a>(
     ui: &mut Ui,
     media: &MediaFile,
     presentation: &AudioMixPresentation,
     state: &mut AudioMixSelectionState,
-    mode: impl Into<OperationSurfaceMode>,
+    mode: impl Into<OperationSurfaceMode<'a>>,
 ) -> AudioMixSelectionAction {
     let mode = mode.into();
     let shared_defaults = matches!(mode, OperationSurfaceMode::BatchDefaults { .. });
@@ -445,11 +445,16 @@ pub fn show(
                 ui.add_space(theme::SPACING.tight);
                 let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
             }
+            if let Some(error) = mode.inline_action_error() {
+                ui.add_space(theme::SPACING.related);
+                media_error::show_operation_action(ui, error);
+            }
         },
         |ui| match mode {
             OperationSurfaceMode::Immediate {
                 start_allowed,
                 queue_confirmation,
+                ..
             } => {
                 if widgets::primary_button_enabled(ui, MIX_LABEL, can_mix && start_allowed)
                     .clicked()

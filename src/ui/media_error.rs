@@ -3,9 +3,9 @@ use egui::{Response, Ui};
 use crate::media::error::MediaError;
 
 use super::{
-    layout,
     media_lifecycle::{
-        diagnostic_viewport, heading, right_aligned_actions, secondary_copy, secondary_copy_height,
+        diagnostic_height, diagnostic_viewport, heading, right_aligned_actions, secondary_copy,
+        secondary_copy_height,
     },
     theme, widgets,
 };
@@ -17,6 +17,13 @@ pub fn show_inline(ui: &mut Ui, error: &MediaError, details_open: &mut bool) {
     ui.spacing_mut().item_spacing.y = 0.0;
     show_copy(ui, error);
     show_details(ui, error, details_open);
+}
+
+pub fn show_operation_action(ui: &mut Ui, error: &MediaError) {
+    let id = ui.make_persistent_id(("operation-action-error", error.kind(), error.diagnostic()));
+    let mut details_open = ui.data_mut(|data| data.get_temp::<bool>(id).unwrap_or(false));
+    show_inline(ui, error, &mut details_open);
+    ui.data_mut(|data| data.insert_temp(id, details_open));
 }
 
 pub(super) fn inline_height(
@@ -37,7 +44,7 @@ pub(super) fn inline_height(
             height += theme::DETAILS_TOP_GAP
                 + theme::SEPARATOR_WIDTH
                 + theme::DETAILS_SEPARATOR_GAP
-                + layout::DIAGNOSTIC_MAX_HEIGHT;
+                + diagnostic_height(ui, error.diagnostic().unwrap_or_default(), wrap_width);
         }
     }
 
@@ -102,7 +109,7 @@ mod tests {
             process::MediaProcessFailure,
             tools::MediaToolsError,
         },
-        ui::{fonts, theme},
+        ui::{fonts, media_lifecycle, theme},
     };
 
     use super::{inline_height, show_inline};
@@ -177,6 +184,22 @@ mod tests {
         });
 
         assert!(narrow > wide);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn short_diagnostic_uses_content_height_before_the_scroll_cap() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let mut short = 0.0;
+        let mut long = 0.0;
+        let output = context.run_ui(Default::default(), |ui| {
+            short = media_lifecycle::diagnostic_height(ui, "one diagnostic line", 400.0);
+            long = media_lifecycle::diagnostic_height(ui, &"diagnostic line ".repeat(200), 200.0);
+        });
+        assert!(short > 0.0 && short < crate::ui::layout::DIAGNOSTIC_MAX_HEIGHT);
+        assert_eq!(long, crate::ui::layout::DIAGNOSTIC_MAX_HEIGHT);
         output.drop_without_applying_deltas();
     }
 }

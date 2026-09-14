@@ -47,12 +47,18 @@ struct QueueSummary {
 }
 
 struct QueueRowContext<'a> {
-    jobs: &'a [QueuedJob],
+    move_capabilities: &'a [WaitingMoveCapability],
     active_job: Option<JobId>,
     active_progress: Option<&'a MediaProgress>,
     plan: layout::QueueRowPlan,
     run_state: QueueRunState,
     action: &'a Cell<QueueAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct WaitingMoveCapability {
+    earlier: bool,
+    later: bool,
 }
 
 impl QueueSummary {
@@ -133,8 +139,9 @@ pub fn show(
             } else {
                 let action_width = action_width.expect("non-empty queue has an action width");
                 let row_plan = layout::queue_row_plan(ui.available_width(), action_width);
+                let move_capabilities = waiting_move_capabilities(jobs);
                 let row_context = QueueRowContext {
-                    jobs,
+                    move_capabilities: &move_capabilities,
                     active_job,
                     active_progress,
                     plan: row_plan,
@@ -327,8 +334,7 @@ fn show_job_row(ui: &mut Ui, job_index: usize, job: &QueuedJob, context: &QueueR
     match plan.layout {
         layout::QueueRowLayout::Inline => show_inline_job_row(
             ui,
-            context.jobs,
-            job_index,
+            context.move_capabilities[job_index],
             job,
             plan,
             context.run_state,
@@ -336,8 +342,7 @@ fn show_job_row(ui: &mut Ui, job_index: usize, job: &QueuedJob, context: &QueueR
         ),
         layout::QueueRowLayout::Stacked => show_stacked_job_row(
             ui,
-            context.jobs,
-            job_index,
+            context.move_capabilities[job_index],
             job,
             context.run_state,
             context.action,
@@ -365,8 +370,7 @@ fn show_job_row(ui: &mut Ui, job_index: usize, job: &QueuedJob, context: &QueueR
 
 fn show_inline_job_row(
     ui: &mut Ui,
-    jobs: &[QueuedJob],
-    job_index: usize,
+    move_capability: WaitingMoveCapability,
     job: &QueuedJob,
     plan: layout::QueueRowPlan,
     run_state: QueueRunState,
@@ -393,15 +397,14 @@ fn show_inline_job_row(
     );
     if let Some(actions) = cells.actions {
         exact_cell(ui, actions, Layout::right_to_left(Align::Center), |ui| {
-            show_row_actions(ui, jobs, job_index, job, run_state, action)
+            show_row_actions(ui, move_capability, job, run_state, action)
         });
     }
 }
 
 fn show_stacked_job_row(
     ui: &mut Ui,
-    jobs: &[QueuedJob],
-    job_index: usize,
+    move_capability: WaitingMoveCapability,
     job: &QueuedJob,
     run_state: QueueRunState,
     action: &Cell<QueueAction>,
@@ -425,7 +428,7 @@ fn show_stacked_job_row(
             Sense::hover(),
         );
         exact_cell(ui, actions, Layout::right_to_left(Align::Center), |ui| {
-            show_row_actions(ui, jobs, job_index, job, run_state, action)
+            show_row_actions(ui, move_capability, job, run_state, action)
         });
     }
 }
@@ -455,8 +458,7 @@ fn show_identity(ui: &mut Ui, job: &QueuedJob) {
 
 fn show_row_actions(
     ui: &mut Ui,
-    jobs: &[QueuedJob],
-    job_index: usize,
+    move_capability: WaitingMoveCapability,
     job: &QueuedJob,
     run_state: QueueRunState,
     action: &Cell<QueueAction>,
@@ -468,20 +470,23 @@ fn show_row_actions(
                 action.set(QueueAction::Remove(job.id()));
             }
             if matches!(run_state, QueueRunState::Stopped) {
-                let (can_move_earlier, can_move_later) = waiting_move_capabilities(jobs, job_index);
                 if widgets::plain_button(ui, EDIT_LABEL).clicked() {
                     action.set(QueueAction::Edit(job.id()));
                 }
-                if widgets::compact_secondary_button_enabled(ui, MOVE_LATER_LABEL, can_move_later)
-                    .on_hover_text(MOVE_LATER_HELP)
-                    .clicked()
+                if widgets::compact_secondary_button_enabled(
+                    ui,
+                    MOVE_LATER_LABEL,
+                    move_capability.later,
+                )
+                .on_hover_text(MOVE_LATER_HELP)
+                .clicked()
                 {
                     action.set(QueueAction::MoveLater(job.id()));
                 }
                 if widgets::compact_secondary_button_enabled(
                     ui,
                     MOVE_EARLIER_LABEL,
-                    can_move_earlier,
+                    move_capability.earlier,
                 )
                 .on_hover_text(MOVE_EARLIER_HELP)
                 .clicked()
@@ -528,16 +533,25 @@ fn row_action_width(ui: &Ui, jobs: &[QueuedJob], run_state: QueueRunState) -> f3
     }
 }
 
-fn waiting_move_capabilities(jobs: &[QueuedJob], job_index: usize) -> (bool, bool) {
-    let waiting_indices = jobs
+fn waiting_move_capabilities(jobs: &[QueuedJob]) -> Vec<WaitingMoveCapability> {
+    let waiting_count = jobs
         .iter()
-        .enumerate()
-        .filter_map(|(index, job)| matches!(job.state(), QueueJobState::Waiting).then_some(index))
-        .collect::<Vec<_>>();
-    let Some(position) = waiting_indices.iter().position(|index| *index == job_index) else {
-        return (false, false);
-    };
-    (position > 0, position + 1 < waiting_indices.len())
+        .filter(|job| matches!(job.state(), QueueJobState::Waiting))
+        .count();
+    let mut seen_waiting = 0;
+    jobs.iter()
+        .map(|job| {
+            if !matches!(job.state(), QueueJobState::Waiting) {
+                return WaitingMoveCapability::default();
+            }
+            let capability = WaitingMoveCapability {
+                earlier: seen_waiting > 0,
+                later: seen_waiting + 1 < waiting_count,
+            };
+            seen_waiting += 1;
+            capability
+        })
+        .collect()
 }
 
 fn secondary_text(ui: &mut Ui, text: &str) {
@@ -613,7 +627,7 @@ mod tests {
         ADD_FILES_LABEL, BACK_LABEL, CANCEL_LABEL, CANCEL_QUEUE_LABEL, MOVE_EARLIER_HELP,
         MOVE_EARLIER_LABEL, MOVE_LATER_HELP, MOVE_LATER_LABEL, QueueSummary, REMOVE_LABEL,
         STOP_AFTER_CURRENT_LABEL, STOPPING_LABEL, bound_active_progress, failure_details,
-        file_name, has_row_actions, show, state_label,
+        file_name, has_row_actions, show, state_label, waiting_move_capabilities,
     };
 
     static NEXT_QUEUE_UI_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
@@ -891,6 +905,25 @@ mod tests {
             QueueJobFailure::SourceChanged
         )));
         assert!(!has_row_actions(&QueueJobState::Cancelled));
+    }
+
+    #[test]
+    fn waiting_move_capabilities_are_prepared_once_in_job_order() {
+        let (directory, mut jobs) = waiting_jobs(5);
+        let completed_output = jobs[1].operation().output().to_path_buf();
+        jobs[1].set_state(QueueJobState::Completed {
+            output: completed_output,
+        });
+        jobs[3].set_state(QueueJobState::Cancelled);
+
+        let capabilities = waiting_move_capabilities(&jobs);
+        assert_eq!(capabilities.len(), jobs.len());
+        assert!(!capabilities[0].earlier && capabilities[0].later);
+        assert_eq!(capabilities[1], Default::default());
+        assert!(capabilities[2].earlier && capabilities[2].later);
+        assert_eq!(capabilities[3], Default::default());
+        assert!(capabilities[4].earlier && !capabilities[4].later);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
