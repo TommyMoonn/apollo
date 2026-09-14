@@ -109,6 +109,34 @@ cargo test --all-targets
 
 Report checks truthfully. If a required tool or dependency is unavailable, record the check as not run rather than inferring success.
 
+## Queue and Batch Architecture
+
+`MediaQueue` owns immutable queued jobs, monotonic `JobId` values, destination reservations, source revalidation, sequential advancement, cancellation, terminal history, and atomic batch insertion. `MediaExecution` remains the only process-lifecycle and staged-output publication owner. Queue progress and completion are routed by the active `JobId`; repainting a Queue or Batch surface must not inspect media or touch the filesystem.
+
+Only Waiting jobs are editable or reorderable, and editing is disabled while automatic advancement is Running or Stopping after current. Queue-row Edit and the loaded-source queued-item selector enter the same queue editor and hydrate the retained `MediaFile` and immutable request without another FFprobe invocation. The source is fixed, while the operation and settings may change. Saving replaces the Waiting request atomically without changing its `JobId` or queue position. Entry origin owns the return route.
+
+`Add to queue` from a normal source workspace keeps the source and operation active, increments the pending count, and shows operation-local success or failure feedback. Pending counts include Waiting and Running jobs only. A destination reserved by another non-terminal job is distinct from a file that already exists on disk.
+
+Batch setup is temporary pre-queue state. It applies one shared operation and source-independent defaults, then projects and validates a request independently for each inspected source. Per-file overrides survive later shared-default changes. `BatchInspectionOwner` is the single inspection owner and permits at most two concurrent FFprobe processes. Appending sources reuses that owner and preserves the current operation, defaults, inclusion choices, and overrides. No queued job exists until `MediaQueue` accepts the complete included batch atomically.
+
+Queue control semantics are intentionally distinct:
+
+- `Cancel current` cancels the active job and continues normal advancement.
+- `Stop after current` lets the active job finish, stops advancement, and preserves Waiting jobs.
+- `Cancel queue` cancels the active job and marks all Waiting jobs Cancelled.
+- `Clear finished` removes every terminal job, including failures.
+- Leaving Queue through Back or starting Add files removes only disposable Completed and Cancelled history. Failed jobs remain available with diagnostic Details.
+
+### Queue release smoke
+
+Before releasing a Queue change, exercise the native application at wide, default, and narrow widths with empty, Waiting, Running, Completed, Cancelled, Failed, mixed-state, and long-path queues. Check the aligned Queue header and columns, stacked narrow rows, disabled reorder-arrow legibility, active-`JobId` progress, and separation of Back from process controls.
+
+Also verify both queue-edit entry points with same-source duplicate jobs and different sources; Save and Cancel return to the correct origin; changing operation preserves the queued source; retained queued media opens without FFprobe; and successful single-item enqueue keeps its source workspace with `Added to queue` feedback and an updated pending count.
+
+For Batch setup, cover native multi-select, multi-file drop, Add files, normalized duplicate sources, shared defaults, Ready Override, Needs attention Review, inspection failure, Include/Exclude, and atomic enqueue. Confirm that appending preserves existing state, inspection never exceeds two concurrent probes, and failed or incompatible sources expose no inert actions.
+
+Finally, exercise duplicate queued destinations, genuine existing output files, invalid requests, changed or missing sources, and short and long diagnostics. Concise corrective guidance must remain visible without opening Details, while expanded diagnostics use only the required height up to the shared maximum.
+
 ## Typography
 
 Apollo does not depend on machine-installed fonts for application typography. The repository font assets live under:

@@ -224,7 +224,7 @@ fn show_queue_footer(
     queue_start_allowed: bool,
     action: &Cell<QueueAction>,
 ) {
-    Sides::new().show(
+    Sides::new().shrink_left().show(
         ui,
         |ui| {
             if widgets::secondary_button(ui, BACK_LABEL).clicked() {
@@ -1085,6 +1085,45 @@ mod tests {
         assert!(back.left() < cancel_current.left());
         assert!(cancel_current.left() < stop.left());
         assert!(stop.left() < cancel_queue.left());
+    }
+
+    #[test]
+    fn populated_running_queue_retains_back_beside_process_controls() {
+        let (directory, mut jobs) = waiting_jobs(6);
+        jobs[0].set_state(QueueJobState::Running);
+        let completed_output = jobs[3].operation().output().to_path_buf();
+        jobs[3].set_state(QueueJobState::Completed {
+            output: completed_output,
+        });
+        jobs[4].set_state(QueueJobState::Cancelled);
+        jobs[5].set_state(QueueJobState::Failed(QueueJobFailure::SourceChanged));
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let mut output = context.run_ui(Default::default(), |ui| {
+            ui.set_width(760.0);
+            ui.set_height(600.0);
+            let _ = show(
+                ui,
+                &jobs,
+                Some(JobId::new(1)),
+                None,
+                QueueRunState::Running,
+                true,
+            );
+        });
+
+        let back = output_text_rect(&output, BACK_LABEL).unwrap();
+        let cancel_current = output_text_rect(&output, CANCEL_LABEL).unwrap();
+        let stop = output_text_rect(&output, STOP_AFTER_CURRENT_LABEL).unwrap();
+        let cancel_queue = output_text_rect(&output, CANCEL_QUEUE_LABEL).unwrap();
+        output.textures_delta.clear();
+
+        assert_eq!(back.top(), cancel_current.top());
+        assert_eq!(cancel_current.top(), stop.top());
+        assert_eq!(stop.top(), cancel_queue.top());
+        assert!(back.right() < cancel_current.left());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

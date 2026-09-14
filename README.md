@@ -33,7 +33,7 @@ Apollo is a small native desktop media utility for audio mixing, video upscaling
 
 The installer registers Apollo for the current Windows user, creates a Start Menu shortcut, and provides normal Windows uninstall behavior. The portable ZIP does not register or install Apollo.
 
-Apollo v0.5.0 includes FFmpeg and FFprobe in both Windows packages, so no separate media-tool installation is needed. Keep the portable folder intact, including `licenses/`. Older releases, including v0.4.0, still require the tools on PATH; check the downloaded release version.
+Apollo Windows packages from v0.5.0 onward include FFmpeg and FFprobe, so no separate media-tool installation is needed. Keep the portable folder intact, including `licenses/`. Older releases, including v0.4.0, still require the tools on PATH; check the downloaded release version.
 
 See the [latest release notes](https://github.com/TommyMoonn/apollo/releases/latest) or browse [all releases](https://github.com/TommyMoonn/apollo/releases).
 
@@ -44,6 +44,8 @@ See the [latest release notes](https://github.com/TommyMoonn/apollo/releases/lat
 - **Remux** - copy all compatible streams into MKV or MP4 without re-encoding, with incompatibilities reported before processing.
 - **Audio Extract** - save one selected audio track as an original MKA copy, 256 kbps AAC, or lossless FLAC.
 - **Frame Capture** - save one timestamped frame as lossless PNG or high-quality JPEG, then confirm the result with a bounded image preview.
+- **Sequential media queue** - prepare multiple operations, reorder or edit Waiting jobs, and process one FFmpeg job at a time with progress and retained results.
+- **Multi-file batches** - choose one shared operation and defaults for several files, append more sources, review per-file readiness, and apply individual overrides before one atomic enqueue.
 - **Source workspace** - keep one source loaded while switching between media tools, or explicitly change or close it.
 - **Output control** - edit the output filename, choose the destination, and return to the last-used source and output directories in native file dialogs.
 - **Safe publication** - work is written to an owned temporary location and published only after successful completion; failed or cancelled work does not leave a misleading final file.
@@ -73,6 +75,14 @@ Scaling remains Lanczos on the CPU. NVIDIA selection changes video encoding, not
 ## Native and focused
 
 Apollo keeps the interface native and the workflow direct. The application owns media selection, validation, progress, cancellation, and safe output publication, while FFmpeg and FFprobe perform media inspection and processing.
+
+## Queue and batch workflow
+
+`Add to queue` keeps the current source and operation open, updates the pending Queue count, and confirms the enqueue inline. Waiting jobs can be edited from either their Queue row or the loaded-source queued-item selector. The source remains fixed during an edit, while the operation and its settings may change. Waiting jobs can also be reordered before the queue starts.
+
+The queue runs one media process at a time. `Cancel current` advances to the next Waiting job, `Stop after current` preserves Waiting work after the active job finishes, and `Cancel queue` cancels both active and Waiting work. Completed and Cancelled history stays visible until leaving Queue or starting Add files; Failed jobs remain for review until `Clear finished` is used. Failure details retain the underlying diagnostic.
+
+Selecting or dropping multiple files opens Batch setup. Choose shared defaults, append more files, exclude incompatible items, and use Review or Override where per-file settings are required. Apollo inspects at most two batch sources concurrently and adds the batch only when every included item can be enqueued together.
 
 ## Project documentation
 

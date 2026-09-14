@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-14
+
+Apollo 0.6.0 adds a sequential in-application queue and a hybrid multi-file Batch workflow while preserving Apollo's source-first editing model and safe output publication.
+
+### Added
+
+- A sequential media queue that runs one FFmpeg operation at a time, retains progress and terminal results, and advances after success, failure, or `Cancel current`.
+- Waiting-job reordering and fixed-source editing from both Queue-row `Edit` and the loaded-source queued-item selector. Each queued job remains independently addressable by its queue identity, including multiple operations or outputs for one source.
+- Explicit `Stop after current` and `Cancel queue` controls alongside `Cancel current`, with Waiting work preserved or cancelled according to the selected intent.
+- Hybrid multi-file Batch setup with shared operation defaults, bounded concurrent inspection, per-file readiness, Include/Exclude, individual Review or Override, source appending, and atomic enqueue.
+
+### Changed
+
+- Successful `Add to queue` keeps the current source and operation open, updates the pending Queue count, and shows inline confirmation.
+- Completed and Cancelled jobs remain visible for immediate review, then are removed when leaving Queue or starting Add files. Failed jobs are retained until explicitly cleared.
+- Queue and Batch layouts now use aligned wide columns and predictable narrow stacking, with compact headers, legible reorder controls, bounded diagnostics, and active progress tied to the running job.
+
+### Fixed
+
+- Queue enqueue failures remain local to the operation that requested them and distinguish a destination reserved by another queued job from an output file that already exists.
+- Batch append-picker failures remain visible within Batch setup, and inspection failures no longer expose actions that cannot succeed.
+- The populated Running Queue footer retains left-owned Back navigation alongside its right-owned process controls.
+
 ## [0.5.0] - 2026-09-11
 
 Apollo 0.5.0 includes the media tools needed to use the Windows installer and portable package without a separate FFmpeg installation.
@@ -154,7 +177,8 @@ Apollo 0.1.0 is the first public Windows release, bringing focused Audio Mix and
 - Missing optional FFprobe metadata falls back to usable media and track labels instead of preventing intake or selection.
 - Upscale sizing preserves the source aspect ratio within the selected target boundary without default cropping, stretching, or black padding.
 
-[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/TommyMoonn/apollo/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/TommyMoonn/apollo/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/TommyMoonn/apollo/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/TommyMoonn/apollo/compare/v0.3.1...v0.3.2
