@@ -374,6 +374,40 @@ pub fn select_menu<R>(
     InnerResponse { inner, response }
 }
 
+/// Selector popup constrained to the current content width. Long option labels truncate inside
+/// the popup instead of expanding it beyond the owning surface.
+pub fn bounded_select_menu<R>(
+    ui: &mut Ui,
+    selected_text: &str,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> InnerResponse<Option<R>> {
+    let maximum_outer_width = ui.available_width();
+    let response = select_button(ui, selected_text);
+    let frame = Frame::popup(ui.style());
+    let popup_width = response.rect.width().max(maximum_outer_width);
+    let content_width = (popup_width - frame.total_margin().sum().x).max(0.0);
+    let inner = Popup::menu(&response)
+        .width(popup_width)
+        .frame(frame)
+        .show(|ui| {
+            ui.set_width(content_width);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add_contents(ui)
+        })
+        .map(|inner_response| inner_response.inner);
+
+    InnerResponse { inner, response }
+}
+
+/// One exact-width, single-line option for [`bounded_select_menu`].
+#[must_use]
+pub fn bounded_select_menu_option(ui: &mut Ui, label: &str) -> Response {
+    ui.add_sized(
+        [ui.available_width(), theme::COMPACT_CONTROL_HEIGHT],
+        egui::Button::new(label).frame(false).truncate(),
+    )
+}
+
 fn show_selector_popup<R>(
     ui: &mut Ui,
     response: &Response,

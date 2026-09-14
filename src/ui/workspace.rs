@@ -2,23 +2,54 @@ use std::{cell::Cell, path::Path};
 
 use egui::{Label, RichText, Sides, TextStyle, Ui};
 
-use crate::media::model::MediaFile;
+use crate::{media::model::MediaFile, queue::JobId};
 
 use super::{SourceAction, fonts, layout, media_lifecycle, queue_count_label, theme, widgets};
 
 const CHANGE_FILE_LABEL: &str = "Change file";
 const CLOSE_SOURCE_LABEL: &str = "Close source";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceMode {
+pub enum WorkspaceMode<'a> {
     Source {
         pending_queue_count: usize,
         enabled: bool,
+        editable_jobs: &'a [EditableQueuedJob<'a>],
+        queue_editing_allowed: bool,
     },
     FixedSourceEdit {
         context: &'static str,
         enabled: bool,
         operation_switching: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditableQueuedJob<'a> {
+    pub id: JobId,
+    pub source: &'a Path,
+    pub operation: &'static str,
+    pub output: &'a Path,
+}
+
+impl EditableQueuedJob<'_> {
+    fn label(self) -> String {
+        format!(
+            "{} · {} · {}",
+            source_file_name(self.source),
+            self.operation,
+            source_file_name(self.output)
+        )
+    }
+
+    fn hover_text(self) -> String {
+        format!(
+            "Job {}\nSource: {}\nOperation: {}\nOutput: {}",
+            self.id,
+            self.source.display(),
+            self.operation,
+            self.output.display()
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +86,7 @@ pub enum WorkspaceAction {
     None,
     Source(SourceAction),
     SelectOperation(Operation),
+    EditQueuedJob(JobId),
     OpenQueue,
 }
 
@@ -77,7 +109,7 @@ pub fn show(
     ui: &mut Ui,
     presentation: &WorkspacePresentation,
     active_operation: Operation,
-    mode: WorkspaceMode,
+    mode: WorkspaceMode<'_>,
 ) -> WorkspaceAction {
     let action = Cell::new(WorkspaceAction::None);
     let enabled = match mode {
@@ -90,9 +122,17 @@ pub fn show(
         match mode {
             WorkspaceMode::Source {
                 pending_queue_count,
+                editable_jobs,
+                queue_editing_allowed,
                 ..
             } => {
                 show_source_header(ui, presentation, pending_queue_count, &action);
+                if !editable_jobs.is_empty() {
+                    ui.add_space(theme::SPACING.related);
+                    ui.add_enabled_ui(queue_editing_allowed, |ui| {
+                        show_queued_job_selector(ui, editable_jobs, &action);
+                    });
+                }
             }
             WorkspaceMode::FixedSourceEdit { context, .. } => {
                 show_fixed_source_header(ui, presentation, context)
@@ -112,6 +152,25 @@ pub fn show(
     });
 
     action.get()
+}
+
+fn show_queued_job_selector(
+    ui: &mut Ui,
+    jobs: &[EditableQueuedJob<'_>],
+    action: &Cell<WorkspaceAction>,
+) {
+    let trigger = format!("Edit queued item ({})", jobs.len());
+    let _ = widgets::bounded_select_menu(ui, &trigger, |ui| {
+        for &job in jobs {
+            let label = job.label();
+            let response =
+                widgets::bounded_select_menu_option(ui, &label).on_hover_text(job.hover_text());
+            if response.clicked() {
+                action.set(WorkspaceAction::EditQueuedJob(job.id));
+                egui::Popup::close_all(ui.ctx());
+            }
+        }
+    });
 }
 
 fn show_fixed_source_header(ui: &mut Ui, presentation: &WorkspacePresentation, context: &str) {
@@ -292,11 +351,12 @@ mod tests {
 
     use crate::{
         media::model::{AudioStream, MediaFile, MediaStream, StreamKind, VideoStream},
-        ui::{fonts, theme},
+        ui::{fonts, theme, widgets},
     };
 
     use super::{
-        Operation, WorkspaceAction, WorkspaceMode, WorkspacePresentation, show, source_metadata,
+        EditableQueuedJob, Operation, WorkspaceAction, WorkspaceMode, WorkspacePresentation, show,
+        source_metadata,
     };
 
     fn shape_text_rect(shape: &egui::Shape, text: &str) -> Option<egui::Rect> {
@@ -346,6 +406,8 @@ mod tests {
                 WorkspaceMode::Source {
                     pending_queue_count: 3,
                     enabled: false,
+                    editable_jobs: &[],
+                    queue_editing_allowed: true,
                 },
             );
         });
@@ -361,6 +423,8 @@ mod tests {
                 WorkspaceMode::Source {
                     pending_queue_count: 3,
                     enabled: false,
+                    editable_jobs: &[],
+                    queue_editing_allowed: true,
                 },
             );
         });
@@ -376,6 +440,8 @@ mod tests {
                 WorkspaceMode::Source {
                     pending_queue_count: 3,
                     enabled: false,
+                    editable_jobs: &[],
+                    queue_editing_allowed: true,
                 },
             );
         });
@@ -423,6 +489,64 @@ mod tests {
     }
 
     #[test]
+    fn queued_item_identity_keeps_duplicate_source_operations_separately_addressable() {
+        let source = PathBuf::from(r"C:\media\recording.mkv");
+        let first_output = PathBuf::from(r"C:\exports\recording-4k.mp4");
+        let second_output = PathBuf::from(r"C:\exports\recording-8k.mp4");
+        let first = EditableQueuedJob {
+            id: crate::queue::JobId::new(41),
+            source: &source,
+            operation: "Upscale",
+            output: &first_output,
+        };
+        let second = EditableQueuedJob {
+            id: crate::queue::JobId::new(42),
+            source: &source,
+            operation: "Upscale",
+            output: &second_output,
+        };
+
+        assert_eq!(first.label(), "recording.mkv · Upscale · recording-4k.mp4");
+        assert_eq!(second.label(), "recording.mkv · Upscale · recording-8k.mp4");
+        assert_ne!(first.id, second.id);
+        assert!(
+            first
+                .hover_text()
+                .contains(source.to_string_lossy().as_ref())
+        );
+        assert!(
+            first
+                .hover_text()
+                .contains(first_output.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn queued_item_option_truncates_inside_its_bounded_popup_width() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let label = "an exceptionally long source filename that must not expand the workspace · Frame Capture · another exceptionally long output filename.png";
+        let width = 260.0;
+        let mut output = context.run_ui(Default::default(), |ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 80.0), egui::Sense::hover());
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
+            );
+            let response = widgets::bounded_select_menu_option(&mut child, label);
+            assert!(response.rect.right() <= rect.right() + 0.5);
+        });
+        let text_rect = output_text_rect(&output, label);
+        output.textures_delta.clear();
+        assert!(
+            text_rect.right() <= width + 0.5,
+            "overflowed: {text_rect:?}"
+        );
+    }
+
+    #[test]
     fn shared_metadata_uses_source_dimensions_and_duration() {
         assert_eq!(
             source_metadata(&media()).as_deref(),
@@ -444,6 +568,8 @@ mod tests {
                     WorkspaceMode::Source {
                         pending_queue_count: 3,
                         enabled: true,
+                        editable_jobs: &[],
+                        queue_editing_allowed: true,
                     },
                 ),
                 WorkspaceAction::None
@@ -499,6 +625,8 @@ mod tests {
                 WorkspaceMode::Source {
                     pending_queue_count: 3,
                     enabled: true,
+                    editable_jobs: &[],
+                    queue_editing_allowed: true,
                 },
             );
         });
@@ -541,6 +669,8 @@ mod tests {
                 WorkspaceMode::Source {
                     pending_queue_count: 3,
                     enabled: true,
+                    editable_jobs: &[],
+                    queue_editing_allowed: true,
                 },
             );
         });

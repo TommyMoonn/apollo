@@ -15,7 +15,7 @@ use crate::{
     },
     media::{
         execution::MediaExecutionFailure,
-        intake::{MediaIntakeError, SourceIdentity},
+        intake::{MediaIntake, MediaIntakeError, SourceIdentity},
         model::MediaFile,
         operation::PreparedMediaOperation,
         output::MediaOutputError,
@@ -61,6 +61,16 @@ pub enum QueuedOperation {
 }
 
 impl QueuedOperation {
+    pub const fn display_name(&self) -> &'static str {
+        match self {
+            Self::AudioMix(_) => "Audio Mix",
+            Self::Upscale(_) => "Upscale",
+            Self::Remux(_) => "Remux",
+            Self::AudioExtract(_) => "Audio Extract",
+            Self::FrameCapture(_) => "Frame Capture",
+        }
+    }
+
     pub fn input(&self) -> &Path {
         match self {
             Self::AudioMix(request) => &request.input,
@@ -325,6 +335,12 @@ impl QueuedJob {
 
     pub fn state(&self) -> &QueueJobState {
         &self.state
+    }
+
+    /// Rebuild the normal source workspace from the immutable media and identity snapshots
+    /// captured when this job was queued. This does not inspect the source again.
+    pub fn retained_intake(&self) -> MediaIntake {
+        MediaIntake::from_retained(self.source_identity.clone(), self.media.clone())
     }
 
     pub(crate) fn source_identity(&self) -> &SourceIdentity {

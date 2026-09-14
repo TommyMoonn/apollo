@@ -108,6 +108,14 @@ pub struct MediaIntake {
 }
 
 impl MediaIntake {
+    pub(crate) fn from_retained(identity: SourceIdentity, media: MediaFile) -> Self {
+        Self {
+            current: Some(CachedMedia { identity, media }),
+            pending_probe: None,
+            next_request_id: 0,
+        }
+    }
+
     pub fn current(&self) -> Option<&MediaFile> {
         self.current.as_ref().map(|cached| &cached.media)
     }

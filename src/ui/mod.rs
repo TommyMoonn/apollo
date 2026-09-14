@@ -25,6 +25,7 @@ pub mod workspace;
 use crate::queue::JobId;
 
 pub const ADD_TO_QUEUE_LABEL: &str = "Add to queue";
+pub const ADDED_TO_QUEUE_LABEL: &str = "Added to queue";
 pub const SAVE_QUEUE_CHANGES_LABEL: &str = "Save changes";
 pub const CANCEL_QUEUE_EDIT_LABEL: &str = "Cancel edit";
 pub const APPLY_BATCH_DEFAULTS_LABEL: &str = "Apply defaults";
@@ -33,9 +34,14 @@ pub const CANCEL_BATCH_EDIT_LABEL: &str = "Cancel";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationSurfaceMode {
-    Immediate { start_allowed: bool },
+    Immediate {
+        start_allowed: bool,
+        queue_confirmation: bool,
+    },
     QueueEdit,
-    BatchDefaults { save_allowed: bool },
+    BatchDefaults {
+        save_allowed: bool,
+    },
     BatchOverride,
 }
 
@@ -54,7 +60,16 @@ impl OperationSurfaceMode {
 
 impl From<bool> for OperationSurfaceMode {
     fn from(start_allowed: bool) -> Self {
-        Self::Immediate { start_allowed }
+        Self::Immediate {
+            start_allowed,
+            queue_confirmation: false,
+        }
+    }
+}
+
+pub(crate) fn show_queue_confirmation(ui: &mut egui::Ui, visible: bool) {
+    if visible {
+        let _ = widgets::inline_status(ui, ADDED_TO_QUEUE_LABEL, widgets::InlineStatusKind::Status);
     }
 }
 

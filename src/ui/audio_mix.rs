@@ -22,8 +22,8 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, output_name::OutputNameState, theme,
-    widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, output_name::OutputNameState,
+    show_queue_confirmation, theme, widgets,
 };
 
 const UNTITLED_AUDIO: &str = "Untitled audio";
@@ -447,7 +447,10 @@ pub fn show(
             }
         },
         |ui| match mode {
-            OperationSurfaceMode::Immediate { start_allowed } => {
+            OperationSurfaceMode::Immediate {
+                start_allowed,
+                queue_confirmation,
+            } => {
                 if widgets::primary_button_enabled(ui, MIX_LABEL, can_mix && start_allowed)
                     .clicked()
                 {
@@ -462,6 +465,7 @@ pub fn show(
                 {
                     action.set(AudioMixSelectionAction::QueueRequested);
                 }
+                show_queue_confirmation(ui, queue_confirmation);
             }
             edit_mode => {
                 let (save_label, cancel_label) = edit_mode

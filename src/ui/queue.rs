@@ -7,7 +7,7 @@ use egui::{
 
 use crate::{
     media::progress::MediaProgress,
-    queue::{JobId, QueueJobState, QueueRunState, QueuedJob, QueuedOperation},
+    queue::{JobId, QueueJobState, QueueRunState, QueuedJob},
 };
 
 use super::{QueueAction, fonts, layout, media_lifecycle, theme, widgets};
@@ -383,7 +383,7 @@ fn show_inline_job_row(
         ui,
         cells.operation,
         Layout::left_to_right(Align::Center),
-        |ui| secondary_text(ui, operation_label(job.operation())),
+        |ui| secondary_text(ui, job.operation().display_name()),
     );
     exact_cell(
         ui,
@@ -414,7 +414,7 @@ fn show_stacked_job_row(
     exact_cell(ui, metadata, Layout::left_to_right(Align::Center), |ui| {
         Sides::new().truncate().show(
             ui,
-            |ui| secondary_text(ui, operation_label(job.operation())),
+            |ui| secondary_text(ui, job.operation().display_name()),
             |ui| state_text(ui, job.state()),
         );
     });
@@ -568,16 +568,6 @@ fn file_name(path: &Path) -> String {
         .unwrap_or(path.as_os_str())
         .to_string_lossy()
         .into_owned()
-}
-
-fn operation_label(operation: &QueuedOperation) -> &'static str {
-    match operation {
-        QueuedOperation::AudioMix(_) => "Audio Mix",
-        QueuedOperation::Upscale(_) => "Upscale",
-        QueuedOperation::Remux(_) => "Remux",
-        QueuedOperation::AudioExtract(_) => "Audio Extract",
-        QueuedOperation::FrameCapture(_) => "Frame Capture",
-    }
 }
 
 fn state_label(state: &QueueJobState) -> &'static str {

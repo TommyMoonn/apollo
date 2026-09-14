@@ -19,7 +19,8 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, layout, output_name::OutputNameState, theme, widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, layout, output_name::OutputNameState,
+    show_queue_confirmation, theme, widgets,
 };
 
 const OUTPUT_LABEL: &str = "Output";
@@ -213,7 +214,10 @@ pub fn show(
             }
         },
         |ui| match mode {
-            OperationSurfaceMode::Immediate { start_allowed } => {
+            OperationSurfaceMode::Immediate {
+                start_allowed,
+                queue_confirmation,
+            } => {
                 if widgets::primary_button_enabled(
                     ui,
                     REMUX_LABEL,
@@ -232,6 +236,7 @@ pub fn show(
                 {
                     action.set(RemuxSelectionAction::QueueRequested);
                 }
+                show_queue_confirmation(ui, queue_confirmation);
             }
             edit_mode => {
                 let (save_label, cancel_label) = edit_mode

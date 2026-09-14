@@ -48,6 +48,12 @@ impl MediaQueue {
         &self.jobs
     }
 
+    pub fn waiting_jobs(&self) -> impl Iterator<Item = &QueuedJob> {
+        self.jobs
+            .iter()
+            .filter(|job| matches!(job.state(), QueueJobState::Waiting))
+    }
+
     pub fn pending_count(&self) -> usize {
         self.jobs
             .iter()
@@ -684,6 +690,33 @@ mod tests {
             queue.jobs()[0].operation(),
             QueuedOperation::AudioExtract(request) if request.output == replacement_output
         ));
+    }
+
+    #[test]
+    fn waiting_job_view_keeps_distinct_jobs_in_insertion_order_and_retained_media() {
+        let directory = TestDirectory::new("waiting-view");
+        let media = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let terminal = queue
+            .enqueue(&media, remux(&media, directory.path().join("terminal.mkv")))
+            .unwrap();
+        assert!(queue.cancel_queue());
+        let first = queue
+            .enqueue(&media, remux(&media, directory.path().join("first.mkv")))
+            .unwrap();
+        let second = queue
+            .enqueue(&media, remux(&media, directory.path().join("second.mkv")))
+            .unwrap();
+
+        let waiting = queue.waiting_jobs().collect::<Vec<_>>();
+        assert_eq!(
+            waiting.iter().map(|job| job.id()).collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        assert_ne!(first, second);
+        assert_eq!(waiting[0].retained_intake().current(), Some(&media));
+        assert_eq!(queue.jobs()[0].id(), terminal);
+        assert!(matches!(queue.jobs()[0].state(), QueueJobState::Cancelled));
     }
 
     #[test]
