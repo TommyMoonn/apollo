@@ -6,16 +6,19 @@ use std::{
     time::Duration,
 };
 
-use egui::{Align, Label, Layout, RichText, TextEdit, TextureId, Ui};
+use egui::{Align, Label, Layout, RichText, TextEdit, TextureId, Ui, WidgetInfo, WidgetType};
 
 use crate::{
     frame_capture::{
+        frame_index::{FrameDirection, FrameStep},
         model::{
-            FrameCaptureFormat, FrameCaptureRequest, FrameTimestamp, FrameTimestampParseError,
+            FrameCaptureFormat, FrameCaptureRequest, FramePosition, FrameTimestamp,
+            FrameTimestampParseError,
         },
         preview::{PreviewImage, PreviewState},
         validation::{
-            FrameCaptureValidationError, validate_frame_capture_request, validate_frame_timestamp,
+            FrameCaptureValidationError, validate_frame_capture_request, validate_frame_position,
+            validate_frame_timestamp,
         },
     },
     media::{model::MediaFile, output::MediaOutputError},
@@ -35,7 +38,10 @@ const FORMAT_OPTIONS: [&str; 2] = ["PNG", "JPEG"];
 const PREVIEW_ALT_TEXT: &str = "Frame preview at the selected timestamp";
 const PREVIEW_UPDATING_TEXT: &str = "Updating preview…";
 const PREVIEW_FAILED_TEXT: &str = "Preview unavailable";
+const FRAME_INDEX_LOADING_TEXT: &str = "Finding nearby frames…";
+const FRAME_INDEX_FAILED_TEXT: &str = "Frame navigation unavailable";
 const PREVIEW_FALLBACK_SIZE: [usize; 2] = [640, 360];
+const STEP_OPTIONS: [&str; 4] = ["1 frame", "2 frames", "5 frames", "10 frames"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LivePreviewStatus {
@@ -48,13 +54,13 @@ enum LivePreviewStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameCaptureLivePreview {
     status: LivePreviewStatus,
-    texture: Option<(TextureId, [usize; 2])>,
+    texture: Option<(TextureId, [usize; 2], FramePosition)>,
 }
 
 impl FrameCaptureLivePreview {
     pub fn from_preview(
         state: &PreviewState<PreviewImage>,
-        retained_texture: Option<(TextureId, [usize; 2])>,
+        retained_texture: Option<(TextureId, [usize; 2], FramePosition)>,
     ) -> Self {
         let status = match state {
             PreviewState::Idle => LivePreviewStatus::Idle,
@@ -77,23 +83,37 @@ impl FrameCaptureLivePreview {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameCaptureSelectionState {
     timestamp_text: String,
+    position: FramePosition,
+    step: FrameStep,
     format: FrameCaptureFormat,
     output_name: OutputNameState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameCapturePresentation {
-    duration_context: Option<String>,
+    duration: Option<String>,
 }
 
 impl FrameCapturePresentation {
     pub fn new(media: &MediaFile) -> Self {
         Self {
-            duration_context: media
-                .duration
-                .map(|duration| format!("Duration {}", format_duration(duration))),
+            duration: media.duration.map(format_duration),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameNavigationAvailability {
+    pub previous: bool,
+    pub next: bool,
+    pub loading: bool,
+    pub failed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionSettle {
+    Debounced,
+    Immediate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -103,6 +123,8 @@ pub enum FrameCaptureSelectionAction {
     BrowseOutput,
     QueueRequested,
     CaptureRequested,
+    PositionEdited(PositionSettle),
+    StepRequested(FrameDirection),
     SaveQueueChanges,
     CancelQueueEdit,
 }
@@ -111,6 +133,8 @@ impl FrameCaptureSelectionState {
     pub fn new(media: &MediaFile) -> Self {
         Self {
             timestamp_text: FrameTimestamp::ZERO.to_string(),
+            position: FrameTimestamp::ZERO.into(),
+            step: FrameStep::One,
             format: FrameCaptureFormat::Png,
             output_name: OutputNameState::new(
                 &media.path,
@@ -122,6 +146,8 @@ impl FrameCaptureSelectionState {
     pub fn from_request(media: &MediaFile, request: &FrameCaptureRequest) -> Self {
         let mut state = Self {
             timestamp_text: request.position.to_string(),
+            position: request.position,
+            step: FrameStep::One,
             format: request.format,
             output_name: OutputNameState::new(
                 &media.path,
@@ -143,12 +169,37 @@ impl FrameCaptureSelectionState {
             .then_some(timestamp)
     }
 
+    pub fn valid_position(&self, media: &MediaFile) -> Option<FramePosition> {
+        let timestamp = FrameTimestamp::from_str(&self.timestamp_text).ok()?;
+        validate_frame_timestamp(timestamp, media.duration).ok()?;
+        validate_frame_position(self.position, media.duration)
+            .is_ok()
+            .then_some(self.position)
+    }
+
     pub fn set_timestamp_text(&mut self, media: &MediaFile, timestamp: String) {
         self.timestamp_text = timestamp;
         if let Some(timestamp) = self.valid_timestamp(media) {
+            self.position = timestamp.into();
             self.output_name
                 .set_generated_stem(default_output_stem(&media.path, timestamp));
         }
+    }
+
+    pub fn set_position(&mut self, media: &MediaFile, position: FramePosition) {
+        self.position = position;
+        let timestamp = position.display_timestamp();
+        self.timestamp_text = timestamp.to_string();
+        self.output_name
+            .set_generated_stem(default_output_stem(&media.path, timestamp));
+    }
+
+    pub const fn step(&self) -> FrameStep {
+        self.step
+    }
+
+    pub fn set_step(&mut self, step: FrameStep) {
+        self.step = step;
     }
 
     pub fn format(&self) -> FrameCaptureFormat {
@@ -180,10 +231,11 @@ impl FrameCaptureSelectionState {
     }
 
     pub fn request(&self, media: &MediaFile) -> Option<FrameCaptureRequest> {
+        let position = self.valid_position(media)?;
         Some(FrameCaptureRequest {
             input: media.path.clone(),
             output: self.output_path(),
-            position: FrameTimestamp::from_str(&self.timestamp_text).ok()?.into(),
+            position,
             format: self.format,
         })
     }
@@ -195,10 +247,12 @@ impl FrameCaptureSelectionState {
     fn validation(&self, media: &MediaFile) -> Result<(), FrameCaptureReadyError> {
         let timestamp = FrameTimestamp::from_str(&self.timestamp_text)
             .map_err(FrameCaptureReadyError::Timestamp)?;
+        validate_frame_timestamp(timestamp, media.duration)
+            .map_err(FrameCaptureReadyError::Request)?;
         let request = FrameCaptureRequest {
             input: media.path.clone(),
             output: self.output_path(),
-            position: timestamp.into(),
+            position: self.position,
             format: self.format,
         };
         validate_frame_capture_request(&request, media).map_err(FrameCaptureReadyError::Request)
@@ -217,6 +271,7 @@ pub fn show<'a>(
     presentation: &FrameCapturePresentation,
     state: &mut FrameCaptureSelectionState,
     live_preview: Option<FrameCaptureLivePreview>,
+    navigation: Option<FrameNavigationAvailability>,
     mode: impl Into<OperationSurfaceMode<'a>>,
 ) -> FrameCaptureSelectionAction {
     let mode = mode.into();
@@ -230,29 +285,19 @@ pub fn show<'a>(
         |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
 
-            let _ = widgets::section_label(ui, TIMESTAMP_LABEL);
-            ui.add_space(theme::SPACING.compact);
-            let mut timestamp_text = state.timestamp_text().to_owned();
-            let timestamp = ui.add_sized(
-                [ui.available_width(), theme::COMPACT_CONTROL_HEIGHT],
-                TextEdit::singleline(&mut timestamp_text)
-                    .hint_text("HH:MM:SS.mmm")
-                    .vertical_align(Align::Center),
-            );
-            if timestamp.changed() {
-                state.set_timestamp_text(media, timestamp_text);
-            }
-            if timestamp.lost_focus() {
-                ui.ctx().request_repaint();
-            }
-            if let Some(duration_context) = presentation.duration_context.as_deref() {
-                ui.add_space(theme::SPACING.tight);
-                technical_context(ui, duration_context);
-            }
-
             if let Some(live_preview) = live_preview {
+                show_live_preview(ui, media, live_preview, state.valid_position(media));
                 ui.add_space(theme::SPACING.related);
-                show_live_preview(ui, media, live_preview);
+                show_precision_position(
+                    ui,
+                    media,
+                    presentation,
+                    state,
+                    navigation.expect("live preview owns precision navigation presentation"),
+                    &action,
+                );
+            } else {
+                show_legacy_timestamp(ui, media, presentation, state);
             }
 
             ui.add_space(theme::SPACING.section);
@@ -344,7 +389,12 @@ pub fn show<'a>(
     action.get()
 }
 
-fn show_live_preview(ui: &mut Ui, media: &MediaFile, preview: FrameCaptureLivePreview) {
+fn show_live_preview(
+    ui: &mut Ui,
+    media: &MediaFile,
+    preview: FrameCaptureLivePreview,
+    current: Option<FramePosition>,
+) {
     let source_size = media
         .video_streams
         .first()
@@ -352,22 +402,229 @@ fn show_live_preview(ui: &mut Ui, media: &MediaFile, preview: FrameCaptureLivePr
         .unwrap_or(PREVIEW_FALLBACK_SIZE);
     let image_size = preview
         .texture
-        .map_or(source_size, |(_, texture_size)| texture_size);
+        .map_or(source_size, |(_, texture_size, _)| texture_size);
     let display_size = layout::live_preview_size(ui.available_width(), image_size);
+    let retained_position = preview.texture.map(|(_, _, position)| position);
+    let retained_is_current = retained_position.is_some_and(|position| Some(position) == current);
 
     match preview.status {
         LivePreviewStatus::Updating => technical_context(ui, PREVIEW_UPDATING_TEXT),
         LivePreviewStatus::Failed => technical_context(ui, PREVIEW_FAILED_TEXT),
+        LivePreviewStatus::Idle if retained_position.is_some() && !retained_is_current => {
+            technical_context(
+                ui,
+                &format!(
+                    "Last preview: {}",
+                    retained_position.expect("retained preview position checked above")
+                ),
+            );
+        }
         LivePreviewStatus::Idle | LivePreviewStatus::Ready => {
             ui.add_space(ui.text_style_height(&fonts::technical_text_style()));
         }
     }
+    if matches!(preview.status, LivePreviewStatus::Updating)
+        && !retained_is_current
+        && let Some(retained_position) = retained_position
+    {
+        ui.add_space(theme::SPACING.tight);
+        technical_context(ui, &format!("Last preview: {retained_position}"));
+    }
     ui.add_space(theme::SPACING.tight);
 
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
-        let texture = preview.texture.map(|(texture, _)| texture);
+        let texture = preview.texture.map(|(texture, _, _)| texture);
         let _ = widgets::framed_preview(ui, texture, display_size, PREVIEW_ALT_TEXT);
     });
+}
+
+fn show_precision_position(
+    ui: &mut Ui,
+    media: &MediaFile,
+    presentation: &FrameCapturePresentation,
+    state: &mut FrameCaptureSelectionState,
+    navigation: FrameNavigationAvailability,
+    action: &Cell<FrameCaptureSelectionAction>,
+) {
+    let mut timestamp_text = state.timestamp_text().to_owned();
+    let (timestamp, _) = layout::frame_position_row(
+        ui,
+        |ui| {
+            let response = ui.add_sized(
+                [
+                    layout::FRAME_POSITION_EDITOR_WIDTH.min(ui.available_width()),
+                    theme::COMPACT_CONTROL_HEIGHT,
+                ],
+                TextEdit::singleline(&mut timestamp_text)
+                    .font(fonts::technical_text_style())
+                    .hint_text("HH:MM:SS.mmm")
+                    .vertical_align(Align::Center),
+            );
+            response.widget_info(|| {
+                WidgetInfo::labeled(
+                    WidgetType::TextEdit,
+                    response.enabled(),
+                    "Current timestamp",
+                )
+            });
+            response
+        },
+        |ui| {
+            if let Some(duration) = presentation.duration.as_deref() {
+                technical_context(ui, duration);
+            }
+        },
+    );
+    if timestamp.changed() {
+        state.set_timestamp_text(media, timestamp_text);
+        action.set(FrameCaptureSelectionAction::PositionEdited(
+            PositionSettle::Debounced,
+        ));
+    }
+
+    if let Some(maximum) = media.duration.and_then(scrubber_maximum) {
+        ui.add_space(theme::SPACING.compact);
+        let mut milliseconds = state
+            .valid_position(media)
+            .map_or(0, |position| position.display_timestamp().milliseconds())
+            .clamp(0, maximum);
+        let scrubber = widgets::frame_position_scrubber(ui, &mut milliseconds, maximum);
+        if scrubber.changed() {
+            state.set_position(
+                media,
+                FrameTimestamp::from_milliseconds(milliseconds).into(),
+            );
+        }
+        if let Some(settle) = scrubber_settle(
+            scrubber.changed(),
+            scrubber.dragged(),
+            scrubber.drag_stopped(),
+        ) {
+            action.set(FrameCaptureSelectionAction::PositionEdited(settle));
+        }
+    }
+
+    ui.add_space(theme::SPACING.related);
+    let action_sizes = [
+        widgets::compact_secondary_button_intrinsic_size(ui, "−"),
+        egui::vec2(
+            widgets::select_menu_intrinsic_width(ui, &STEP_OPTIONS),
+            theme::COMPACT_CONTROL_HEIGHT,
+        ),
+        widgets::compact_secondary_button_intrinsic_size(ui, "+"),
+    ];
+    layout::centered_action_group(
+        ui,
+        &action_sizes,
+        layout::ActionLayout::Horizontal,
+        theme::SPACING.compact,
+        |ui| {
+            let previous = widgets::compact_secondary_button_enabled(
+                ui,
+                "−",
+                navigation.previous && !navigation.loading,
+            );
+            show_step_selector(ui, state);
+            let next = widgets::compact_secondary_button_enabled(
+                ui,
+                "+",
+                navigation.next && !navigation.loading,
+            );
+            if previous.clicked() {
+                action.set(FrameCaptureSelectionAction::StepRequested(
+                    FrameDirection::Previous,
+                ));
+            }
+            if next.clicked() {
+                action.set(FrameCaptureSelectionAction::StepRequested(
+                    FrameDirection::Next,
+                ));
+            }
+        },
+    );
+    if navigation.loading || navigation.failed {
+        ui.add_space(theme::SPACING.tight);
+        technical_context(
+            ui,
+            if navigation.loading {
+                FRAME_INDEX_LOADING_TEXT
+            } else {
+                FRAME_INDEX_FAILED_TEXT
+            },
+        );
+    }
+}
+
+fn show_legacy_timestamp(
+    ui: &mut Ui,
+    media: &MediaFile,
+    presentation: &FrameCapturePresentation,
+    state: &mut FrameCaptureSelectionState,
+) {
+    let _ = widgets::section_label(ui, TIMESTAMP_LABEL);
+    ui.add_space(theme::SPACING.compact);
+    let mut timestamp_text = state.timestamp_text().to_owned();
+    let timestamp = ui.add_sized(
+        [ui.available_width(), theme::COMPACT_CONTROL_HEIGHT],
+        TextEdit::singleline(&mut timestamp_text)
+            .hint_text("HH:MM:SS.mmm")
+            .vertical_align(Align::Center),
+    );
+    if timestamp.changed() {
+        state.set_timestamp_text(media, timestamp_text);
+    }
+    if let Some(duration) = presentation.duration.as_deref() {
+        ui.add_space(theme::SPACING.tight);
+        technical_context(ui, &format!("Duration {duration}"));
+    }
+}
+
+fn show_step_selector(ui: &mut Ui, state: &mut FrameCaptureSelectionState) {
+    let mut requested = None;
+    widgets::select_menu(ui, step_label(state.step()), &STEP_OPTIONS, |ui| {
+        for step in [
+            FrameStep::One,
+            FrameStep::Two,
+            FrameStep::Five,
+            FrameStep::Ten,
+        ] {
+            if widgets::select_menu_option(ui, step_label(step), state.step() == step).clicked() {
+                requested = Some(step);
+                ui.close();
+            }
+        }
+    });
+    if let Some(step) = requested {
+        state.set_step(step);
+    }
+}
+
+fn step_label(step: FrameStep) -> &'static str {
+    match step {
+        FrameStep::One => "1 frame",
+        FrameStep::Two => "2 frames",
+        FrameStep::Five => "5 frames",
+        FrameStep::Ten => "10 frames",
+    }
+}
+
+fn scrubber_maximum(duration: Duration) -> Option<i64> {
+    let last_nanosecond = duration.as_nanos().checked_sub(1)?;
+    i64::try_from(last_nanosecond / 1_000_000).ok()
+}
+
+fn scrubber_settle(
+    changed: bool,
+    pointer_held: bool,
+    pointer_released: bool,
+) -> Option<PositionSettle> {
+    if pointer_released || (changed && !pointer_held) {
+        Some(PositionSettle::Immediate)
+    } else if changed {
+        Some(PositionSettle::Debounced)
+    } else {
+        None
+    }
 }
 
 fn show_format_selector(ui: &mut Ui, state: &mut FrameCaptureSelectionState) {
@@ -461,14 +718,18 @@ mod tests {
     use std::{ffi::OsString, path::PathBuf, time::Duration};
 
     use crate::{
-        frame_capture::model::FrameCaptureFormat,
+        frame_capture::{
+            frame_index::FrameStep,
+            model::{FrameCaptureFormat, FrameTimeBase, FrameTimestamp, ResolvedFramePosition},
+        },
         media::model::{MediaFile, MediaStream, StreamKind, VideoStream},
         ui::{fonts, theme},
     };
 
     use super::{
         FrameCaptureLivePreview, FrameCapturePresentation, FrameCaptureSelectionState,
-        LivePreviewStatus, format_detail, format_duration, ready_feedback,
+        FrameNavigationAvailability, LivePreviewStatus, PositionSettle, format_detail,
+        format_duration, ready_feedback, scrubber_maximum, scrubber_settle,
     };
 
     fn media(duration: Option<Duration>) -> MediaFile {
@@ -554,6 +815,55 @@ mod tests {
     }
 
     #[test]
+    fn resolved_frame_identity_survives_presentation_and_capture_request() {
+        let media = media(Some(Duration::from_secs(10)));
+        let position = ResolvedFramePosition::new(
+            1_001,
+            FrameTimeBase::new(1, 30_000).expect("valid time base"),
+        )
+        .expect("displayable frame position");
+        let request = crate::frame_capture::model::FrameCaptureRequest {
+            input: media.path.clone(),
+            output: PathBuf::from("captures/frame.png"),
+            position: position.into(),
+            format: FrameCaptureFormat::Png,
+        };
+
+        let state = FrameCaptureSelectionState::from_request(&media, &request);
+
+        assert_eq!(state.timestamp_text(), "00:00:00.033");
+        assert_eq!(state.request(&media).unwrap().position, position.into());
+        assert_eq!(state.step(), FrameStep::One);
+    }
+
+    #[test]
+    fn scrubber_range_uses_the_last_valid_millisecond_before_duration() {
+        assert_eq!(scrubber_maximum(Duration::from_secs(10)), Some(9_999));
+        assert_eq!(
+            scrubber_maximum(Duration::from_nanos(10_000_500_000)),
+            Some(10_000)
+        );
+        assert_eq!(scrubber_maximum(Duration::ZERO), None);
+    }
+
+    #[test]
+    fn scrubber_movement_debounces_but_click_and_release_settle_immediately() {
+        assert_eq!(
+            scrubber_settle(true, true, false),
+            Some(PositionSettle::Debounced)
+        );
+        assert_eq!(
+            scrubber_settle(true, false, false),
+            Some(PositionSettle::Immediate)
+        );
+        assert_eq!(
+            scrubber_settle(false, false, true),
+            Some(PositionSettle::Immediate)
+        );
+        assert_eq!(scrubber_settle(false, true, false), None);
+    }
+
+    #[test]
     fn invalid_timestamp_feedback_is_rendered_inline() {
         let context = egui::Context::default();
         fonts::install(&context);
@@ -564,7 +874,7 @@ mod tests {
         let presentation = FrameCapturePresentation::new(&media);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &presentation, &mut state, None, true);
+            let _ = super::show(ui, &media, &presentation, &mut state, None, None, true);
         });
         assert!(output.shapes.iter().any(|shape| {
             shape_contains(&shape.shape, "Enter a timestamp using HH:MM:SS.mmm.")
@@ -614,7 +924,7 @@ mod tests {
         let mut state = FrameCaptureSelectionState::new(&media);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &presentation, &mut state, None, true);
+            let _ = super::show(ui, &media, &presentation, &mut state, None, None, true);
         });
 
         assert!(
@@ -646,7 +956,20 @@ mod tests {
         };
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &presentation, &mut state, Some(preview), true);
+            let _ = super::show(
+                ui,
+                &media,
+                &presentation,
+                &mut state,
+                Some(preview),
+                Some(FrameNavigationAvailability {
+                    previous: false,
+                    next: false,
+                    loading: true,
+                    failed: false,
+                }),
+                true,
+            );
         });
 
         assert!(
@@ -659,8 +982,102 @@ mod tests {
     }
 
     #[test]
+    fn precision_surface_uses_one_current_position_and_one_duration_value() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let media = media(Some(Duration::from_millis(10_250)));
+        let presentation = FrameCapturePresentation::new(&media);
+        let mut state = FrameCaptureSelectionState::new(&media);
+        let preview = FrameCaptureLivePreview {
+            status: LivePreviewStatus::Idle,
+            texture: None,
+        };
+
+        let output = context.run_ui(Default::default(), |ui| {
+            let _ = super::show(
+                ui,
+                &media,
+                &presentation,
+                &mut state,
+                Some(preview),
+                Some(FrameNavigationAvailability {
+                    previous: false,
+                    next: true,
+                    loading: false,
+                    failed: false,
+                }),
+                true,
+            );
+        });
+
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|shape| { shape_contains(&shape.shape, "00:00:10.250") })
+        );
+        assert!(
+            !output
+                .shapes
+                .iter()
+                .any(|shape| { shape_contains(&shape.shape, "Duration 00:00:10.250") })
+        );
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn invalid_current_text_labels_a_retained_image_as_the_last_preview() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let media = media(Some(Duration::from_secs(10)));
+        let presentation = FrameCapturePresentation::new(&media);
+        let mut state = FrameCaptureSelectionState::new(&media);
+        state.set_timestamp_text(&media, "invalid".to_owned());
+        let retained = (
+            egui::TextureId::Managed(9),
+            [640, 360],
+            FrameTimestamp::from_milliseconds(1_250).into(),
+        );
+        let preview = FrameCaptureLivePreview::from_preview(
+            &crate::frame_capture::preview::PreviewState::Idle,
+            Some(retained),
+        );
+
+        let output = context.run_ui(Default::default(), |ui| {
+            let _ = super::show(
+                ui,
+                &media,
+                &presentation,
+                &mut state,
+                Some(preview),
+                Some(FrameNavigationAvailability {
+                    previous: false,
+                    next: false,
+                    loading: false,
+                    failed: false,
+                }),
+                true,
+            );
+        });
+
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|shape| { shape_contains(&shape.shape, "Last preview: 00:00:01.250") })
+        );
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
     fn idle_validation_state_keeps_the_last_valid_preview_texture() {
-        let retained = (egui::TextureId::Managed(7), [640, 360]);
+        let retained = (
+            egui::TextureId::Managed(7),
+            [640, 360],
+            FrameTimestamp::from_milliseconds(250).into(),
+        );
         let preview = FrameCaptureLivePreview::from_preview(
             &crate::frame_capture::preview::PreviewState::Idle,
             Some(retained),
@@ -686,7 +1103,20 @@ mod tests {
         };
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &presentation, &mut state, Some(preview), true);
+            let _ = super::show(
+                ui,
+                &media,
+                &presentation,
+                &mut state,
+                Some(preview),
+                Some(FrameNavigationAvailability {
+                    previous: true,
+                    next: true,
+                    loading: false,
+                    failed: false,
+                }),
+                true,
+            );
         });
 
         assert!(

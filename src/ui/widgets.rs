@@ -1,6 +1,6 @@
 use egui::{
     Align, Align2, Color32, CornerRadius, DragValue, Frame, Image, InnerResponse, Label, Layout,
-    Popup, Rect, Response, RichText, Sense, Sides, Stroke, StrokeKind, TextEdit, TextStyle,
+    Popup, Rect, Response, RichText, Sense, Sides, Slider, Stroke, StrokeKind, TextEdit, TextStyle,
     TextureId, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 use std::{ops::RangeInclusive, path::Path};
@@ -207,6 +207,31 @@ pub fn compact_secondary_button_enabled(ui: &mut Ui, label: &str, enabled: bool)
             compact: true,
         },
     )
+}
+
+/// Full-width millisecond scrubber for bounded Frame Capture navigation.
+#[must_use]
+pub fn frame_position_scrubber(ui: &mut Ui, value: &mut i64, maximum: i64) -> Response {
+    let available_width = ui.available_width();
+    let response = ui
+        .scope(|ui| {
+            ui.spacing_mut().slider_width = available_width;
+            ui.spacing_mut().interact_size.y = theme::SCRUBBER_HEIGHT;
+            ui.visuals_mut().widgets.inactive.bg_fill = theme::SEPARATOR;
+            ui.visuals_mut().widgets.hovered.bg_fill = theme::BORDER_STRONG;
+            ui.visuals_mut().widgets.active.bg_fill = theme::BORDER_STRONG;
+            ui.visuals_mut().selection.bg_fill = theme::SECONDARY;
+            ui.add(
+                Slider::new(value, 0..=maximum.max(0))
+                    .show_value(false)
+                    .trailing_fill(true)
+                    .step_by(1.0),
+            )
+        })
+        .inner;
+    response
+        .widget_info(|| WidgetInfo::slider(response.enabled(), *value as f64, "Frame position"));
+    response
 }
 
 fn compact_secondary_button_intrinsic_width(ui: &Ui, label: &str) -> f32 {

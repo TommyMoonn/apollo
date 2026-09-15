@@ -84,6 +84,9 @@ pub const DIAGNOSTIC_MAX_HEIGHT: f32 = 80.0;
 pub const LIVE_PREVIEW_MAX_WIDTH: f32 = 720.0;
 pub const LIVE_PREVIEW_MAX_HEIGHT: f32 = 360.0;
 
+/// Stable width for the editable current position beside right-aligned source duration.
+pub const FRAME_POSITION_EDITOR_WIDTH: f32 = 150.0;
+
 /// Progress tracks are deliberately thin and rectangular.
 pub const PROGRESS_TRACK_HEIGHT: f32 = 4.0;
 
@@ -111,6 +114,20 @@ pub fn live_preview_size(available_width: f32, image_size: [usize; 2]) -> Vec2 {
         .min(LIVE_PREVIEW_MAX_HEIGHT / image_height)
         .min(1.0);
     vec2(image_width * scale, image_height * scale)
+}
+
+/// Keep the editable current position and duration on one restrained metadata row.
+pub fn frame_position_row<L, R>(
+    ui: &mut Ui,
+    add_position: impl FnOnce(&mut Ui) -> L,
+    add_duration: impl FnOnce(&mut Ui) -> R,
+) -> (L, R) {
+    Sides::new()
+        .height(theme::COMPACT_CONTROL_HEIGHT)
+        .spacing(theme::SPACING.related)
+        .shrink_left()
+        .truncate()
+        .show(ui, add_position, add_duration)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

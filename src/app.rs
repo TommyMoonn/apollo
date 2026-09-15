@@ -31,7 +31,11 @@ use apollo::{
     },
     frame_capture::{
         execution::{FrameCaptureExecutionState, FrameCaptureExecutor, FrameCaptureStartError},
-        model::{FrameCaptureFormat, FrameTimestamp},
+        frame_index::{
+            FrameDirection, FrameIndexError, FrameIndexQueryOwner, FrameIndexRequest,
+            FrameIndexState, FrameNavigation, FrameNavigator, FrameStep,
+        },
+        model::{FrameCaptureFormat, FramePosition, FrameTimestamp},
         preview::{
             FramePreview, PREVIEW_DEBOUNCE, PreviewExtractionError, PreviewExtractionOwner,
             PreviewGeneration, PreviewImage, PreviewRequest, PreviewState, decode_preview_png,
@@ -70,7 +74,10 @@ use apollo::{
         },
         file_intake::{self, FileIntakeAction},
         fonts, frame_capture as frame_capture_ui,
-        frame_capture::{FrameCaptureSelectionAction, FrameCaptureSelectionState},
+        frame_capture::{
+            FrameCaptureSelectionAction, FrameCaptureSelectionState, FrameNavigationAvailability,
+            PositionSettle,
+        },
         frame_capture_progress::{
             self, FrameCaptureLifecycleAction, FrameCaptureLifecycleUiState,
             FrameCaptureThumbnailRequest,
@@ -198,6 +205,9 @@ struct FrameCaptureToolState {
     selection: FrameCaptureSelectionState,
     preview: FramePreview<PreviewImage>,
     preview_texture: Option<FramePreviewTexture>,
+    frame_navigator: FrameNavigator,
+    frame_index_due: Option<(FramePosition, Instant)>,
+    pending_step: Option<PendingFrameStep>,
     lifecycle_ui: FrameCaptureLifecycleUiState,
     start_error: Option<MediaError>,
     start_error_details_open: bool,
@@ -207,7 +217,54 @@ struct FrameCaptureToolState {
 struct FramePreviewTexture {
     generation: PreviewGeneration,
     size: [usize; 2],
+    position: FramePosition,
     handle: TextureHandle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingFrameStep {
+    origin: FramePosition,
+    direction: FrameDirection,
+    step: FrameStep,
+}
+
+fn frame_navigation_availability(session: &FrameCaptureToolState) -> FrameNavigationAvailability {
+    let Some(position) = session.selection.valid_position(&session.media) else {
+        return FrameNavigationAvailability {
+            previous: false,
+            next: false,
+            loading: false,
+            failed: false,
+        };
+    };
+    let loading = session.frame_index_due.is_some()
+        || matches!(
+            session.frame_navigator.state(),
+            FrameIndexState::Loading { .. }
+        );
+    let failed = matches!(
+        session.frame_navigator.state(),
+        FrameIndexState::Failed { .. }
+    );
+    let step = session.selection.step();
+    let previous = !matches!(
+        session
+            .frame_navigator
+            .navigate(position, FrameDirection::Previous, step),
+        FrameNavigation::Boundary
+    );
+    let next = !matches!(
+        session
+            .frame_navigator
+            .navigate(position, FrameDirection::Next, step),
+        FrameNavigation::Boundary
+    );
+    FrameNavigationAvailability {
+        previous,
+        next,
+        loading,
+        failed,
+    }
 }
 
 impl std::fmt::Debug for FramePreviewTexture {
@@ -216,6 +273,7 @@ impl std::fmt::Debug for FramePreviewTexture {
             .debug_struct("FramePreviewTexture")
             .field("generation", &self.generation)
             .field("size", &self.size)
+            .field("position", &self.position)
             .field("texture_id", &self.handle.id())
             .finish()
     }
@@ -679,6 +737,7 @@ pub(crate) struct ApolloApp {
     frame_capture_thumbnail_load: Option<FrameCaptureThumbnailLoad>,
     frame_preview_extraction: PreviewExtractionOwner,
     frame_preview_decode: Option<FramePreviewDecode>,
+    frame_index_query: FrameIndexQueryOwner,
     progress_repaint: MediaProgressRepaintOwner,
     media_inspection: Option<MediaInspection>,
     file_dialog: FileDialogOwner,
@@ -718,6 +777,7 @@ impl ApolloApp {
             frame_capture_thumbnail_load: None,
             frame_preview_extraction: PreviewExtractionOwner::default(),
             frame_preview_decode: None,
+            frame_index_query: FrameIndexQueryOwner::default(),
             progress_repaint: MediaProgressRepaintOwner::new(egui_context.clone()),
             media_inspection: None,
             file_dialog: FileDialogOwner::new(egui_context.clone(), native_window_owner),
@@ -924,7 +984,7 @@ impl ApolloApp {
         self.state.media_intake = job.retained_intake();
         self.state.source_presentation = Some(Arc::new(SourcePresentation::new(job.media())));
         self.frame_capture_thumbnail_load = None;
-        self.cancel_frame_preview_work();
+        self.cancel_frame_capture_support();
         self.state.retire_tool_sessions();
         if !self.activate_cached_source(operation) {
             return false;
@@ -965,8 +1025,8 @@ impl ApolloApp {
                 if let Some(session) = self.state.frame_capture.as_mut() {
                     session.selection =
                         FrameCaptureSelectionState::from_request(&session.media, request);
-                    let timestamp = session.selection.valid_timestamp(&session.media);
-                    self.update_frame_capture_preview(timestamp);
+                    let position = session.selection.valid_position(&session.media);
+                    self.update_frame_capture_position(position, PositionSettle::Debounced);
                 }
             }
         }
@@ -1116,7 +1176,7 @@ impl ApolloApp {
 
     fn close_source(&mut self) {
         self.frame_capture_thumbnail_load = None;
-        self.cancel_frame_preview_work();
+        self.cancel_frame_capture_support();
         self.state.close_source();
     }
 
@@ -1140,7 +1200,7 @@ impl ApolloApp {
                 session.preview_texture = None;
             }
             if previous_tool == Some(Tool::FrameCapture) {
-                self.cancel_frame_preview_work();
+                self.cancel_frame_capture_support();
             }
         }
         if self.activate_cached_source(tool) {
@@ -1158,7 +1218,7 @@ impl ApolloApp {
             .map(|(identity, media)| (identity.clone(), media.clone()))
         else {
             self.state.navigation = NavigationState::NoSource;
-            self.cancel_frame_preview_work();
+            self.cancel_frame_capture_support();
             self.state.retire_tool_sessions();
             return false;
         };
@@ -1254,51 +1314,91 @@ impl ApolloApp {
                         selection,
                         preview: FramePreview::default(),
                         preview_texture: None,
+                        frame_navigator: FrameNavigator::default(),
+                        frame_index_due: None,
+                        pending_step: None,
                         lifecycle_ui: FrameCaptureLifecycleUiState::default(),
                         start_error: None,
                         start_error_details_open: false,
                         media,
                     });
                 }
-                let timestamp = self
+                let position = self
                     .state
                     .frame_capture
                     .as_ref()
-                    .and_then(|session| session.selection.valid_timestamp(&session.media));
+                    .and_then(|session| session.selection.valid_position(&session.media));
                 if self.state.frame_capture.as_ref().is_some_and(|session| {
                     matches!(
                         session.preview.state(),
                         apollo::frame_capture::preview::PreviewState::Idle
                     )
                 }) {
-                    self.update_frame_capture_preview(timestamp);
+                    self.update_frame_capture_position(position, PositionSettle::Debounced);
                 }
             }
         }
         true
     }
 
-    fn update_frame_capture_preview(&mut self, timestamp: Option<FrameTimestamp>) {
+    fn update_frame_capture_position(
+        &mut self,
+        position: Option<FramePosition>,
+        settle: PositionSettle,
+    ) {
+        self.frame_index_query.cancel();
         let Some(session) = self.state.frame_capture.as_mut() else {
             return;
         };
-        let Some(timestamp) = timestamp else {
+        session.pending_step = None;
+        session.frame_navigator.invalidate();
+        session.frame_index_due = None;
+        let ready_at = self.schedule_frame_capture_preview(position, settle);
+        if let (Some(position), Some(ready_at), Some(session)) =
+            (position, ready_at, self.state.frame_capture.as_mut())
+        {
+            session.frame_index_due = Some((position, ready_at));
+        }
+    }
+
+    fn schedule_frame_capture_preview(
+        &mut self,
+        position: Option<FramePosition>,
+        settle: PositionSettle,
+    ) -> Option<Instant> {
+        self.cancel_frame_preview_work();
+        let session = self.state.frame_capture.as_mut()?;
+        let Some(position) = position else {
             session.preview.invalidate();
-            self.cancel_frame_preview_work();
-            return;
+            return None;
         };
-        if session
-            .preview
-            .schedule(
+        let now = Instant::now();
+        let delay = match settle {
+            PositionSettle::Debounced => PREVIEW_DEBOUNCE,
+            PositionSettle::Immediate => std::time::Duration::ZERO,
+        };
+        let scheduled = match settle {
+            PositionSettle::Debounced => session.preview.schedule_position(
                 &session.source_identity,
                 &session.media,
-                timestamp,
-                Instant::now(),
-            )
-            .is_some()
-        {
-            self.egui_context.request_repaint_after(PREVIEW_DEBOUNCE);
+                position,
+                now,
+            ),
+            PositionSettle::Immediate => session.preview.schedule_position_immediately(
+                &session.source_identity,
+                &session.media,
+                position,
+                now,
+            ),
+        };
+        if scheduled.is_some() {
+            if delay.is_zero() {
+                self.egui_context.request_repaint();
+            } else {
+                self.egui_context.request_repaint_after(delay);
+            }
         }
+        scheduled.map(|_| now + delay)
     }
 
     fn poll_frame_capture_preview(&mut self) {
@@ -1321,6 +1421,142 @@ impl ApolloApp {
         self.poll_frame_preview_extraction();
         self.poll_frame_preview_decode();
         self.sync_frame_preview_texture();
+    }
+
+    fn poll_frame_capture_index(&mut self) {
+        let now = Instant::now();
+        let due = self.state.frame_capture.as_mut().and_then(|session| {
+            session
+                .frame_index_due
+                .filter(|(_, ready_at)| now >= *ready_at)?;
+            session.frame_index_due.take().map(|(position, _)| position)
+        });
+        if let Some(position) = due {
+            self.start_frame_index_query(position);
+        }
+
+        let Some(completion) = self.frame_index_query.poll() else {
+            return;
+        };
+        self.settle_frame_index_request(completion.request, completion.result);
+    }
+
+    fn start_frame_index_query(&mut self, position: FramePosition) {
+        let Some(tools) = self.ready_media_tools().cloned() else {
+            return;
+        };
+        let request = {
+            let Some(session) = self.state.frame_capture.as_mut() else {
+                return;
+            };
+            match session.frame_navigator.schedule(
+                &session.source_identity,
+                &session.media,
+                position,
+            ) {
+                Ok(Some(request)) => request,
+                Ok(None) => {
+                    self.resolve_pending_frame_step();
+                    return;
+                }
+                Err(_) => return,
+            }
+        };
+        let context = self.egui_context.clone();
+        let wake = MediaProcessWake::new(move |_| context.request_repaint());
+        if let Err(error) = self.frame_index_query.start(&tools, request.clone(), wake) {
+            self.settle_frame_index_request(request, Err(error));
+        }
+    }
+
+    fn settle_frame_index_request(
+        &mut self,
+        request: FrameIndexRequest,
+        result: Result<Vec<u8>, FrameIndexError>,
+    ) {
+        let ready = self.state.frame_capture.as_mut().is_some_and(|session| {
+            if !session.frame_navigator.settle(request, result) {
+                return false;
+            }
+            if matches!(
+                session.frame_navigator.state(),
+                FrameIndexState::Ready { .. }
+            ) {
+                true
+            } else {
+                session.pending_step = None;
+                false
+            }
+        });
+        if ready {
+            self.resolve_pending_frame_step();
+        }
+    }
+
+    fn request_frame_step(&mut self, direction: FrameDirection) {
+        let outcome = {
+            let Some(session) = self.state.frame_capture.as_mut() else {
+                return;
+            };
+            let Some(origin) = session.selection.valid_position(&session.media) else {
+                return;
+            };
+            let pending = PendingFrameStep {
+                origin,
+                direction,
+                step: session.selection.step(),
+            };
+            session.pending_step = Some(pending);
+            (
+                pending,
+                session
+                    .frame_navigator
+                    .navigate(origin, direction, pending.step),
+            )
+        };
+        self.apply_frame_step_outcome(outcome.0, outcome.1);
+    }
+
+    fn resolve_pending_frame_step(&mut self) {
+        let outcome = self.state.frame_capture.as_ref().and_then(|session| {
+            let pending = session.pending_step?;
+            Some((
+                pending,
+                session
+                    .frame_navigator
+                    .navigate(pending.origin, pending.direction, pending.step),
+            ))
+        });
+        if let Some((pending, outcome)) = outcome {
+            self.apply_frame_step_outcome(pending, outcome);
+        }
+    }
+
+    fn apply_frame_step_outcome(&mut self, pending: PendingFrameStep, outcome: FrameNavigation) {
+        match outcome {
+            FrameNavigation::Resolved(position) => {
+                if let Some(session) = self.state.frame_capture.as_mut() {
+                    session.pending_step = None;
+                    session
+                        .selection
+                        .set_position(&session.media, position.into());
+                }
+                self.schedule_frame_capture_preview(
+                    Some(position.into()),
+                    PositionSettle::Immediate,
+                );
+            }
+            FrameNavigation::NeedsNeighborhood(anchor) => {
+                self.start_frame_index_query(anchor);
+            }
+            FrameNavigation::Boundary => {
+                if let Some(session) = self.state.frame_capture.as_mut()
+                    && session.pending_step == Some(pending)
+                {
+                    session.pending_step = None;
+                }
+            }
+        }
     }
 
     fn start_frame_preview_extraction(&mut self, request: PreviewRequest) {
@@ -1431,6 +1667,7 @@ impl ApolloApp {
         session.preview_texture = Some(FramePreviewTexture {
             generation: request.generation,
             size,
+            position: request.position,
             handle,
         });
     }
@@ -1438,6 +1675,16 @@ impl ApolloApp {
     fn cancel_frame_preview_work(&mut self) {
         self.frame_preview_extraction.cancel();
         self.frame_preview_decode = None;
+    }
+
+    fn cancel_frame_capture_support(&mut self) {
+        self.cancel_frame_preview_work();
+        self.frame_index_query.cancel();
+        if let Some(session) = self.state.frame_capture.as_mut() {
+            session.frame_index_due = None;
+            session.pending_step = None;
+            session.frame_navigator.invalidate();
+        }
     }
 
     fn take_session_id(&mut self) -> u64 {
@@ -2546,7 +2793,7 @@ impl ApolloApp {
                     .current()
                     .map(|media| Arc::new(SourcePresentation::new(media)));
                 self.frame_capture_thumbnail_load = None;
-                self.cancel_frame_preview_work();
+                self.cancel_frame_capture_support();
                 self.state.retire_tool_sessions();
                 if self.activate_cached_source(operation) {
                     self.state.enter_workspace(operation);
@@ -3241,7 +3488,7 @@ impl ApolloApp {
             .as_ref()
             .filter(|(tool, _)| *tool == Tool::FrameCapture)
             .map(|(_, error)| error.clone());
-        let (action, timestamp_edit) = ui
+        let action = ui
             .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
                 let session = self
                     .state
@@ -3253,28 +3500,37 @@ impl ApolloApp {
                     session
                         .preview_texture
                         .as_ref()
-                        .map(|texture| (texture.handle.id(), texture.size)),
+                        .map(|texture| (texture.handle.id(), texture.size, texture.position)),
                 );
-                let timestamp_before = session.selection.timestamp_text().to_owned();
-                let action = frame_capture_ui::show(
+                let navigation = frame_navigation_availability(session);
+                frame_capture_ui::show(
                     ui,
                     &session.media,
                     &presentation.frame_capture,
                     &mut session.selection,
                     Some(live_preview),
+                    Some(navigation),
                     OperationSurfaceMode::Immediate {
                         start_allowed: immediate_start_allowed,
                         queue_confirmation,
                         action_error: action_error.as_ref(),
                     },
-                );
-                let timestamp_edit = (session.selection.timestamp_text() != timestamp_before)
-                    .then(|| session.selection.valid_timestamp(&session.media));
-                (action, timestamp_edit)
+                )
             })
             .inner;
-        if let Some(timestamp) = timestamp_edit {
-            self.update_frame_capture_preview(timestamp);
+        match action {
+            FrameCaptureSelectionAction::PositionEdited(settle) => {
+                let position = self
+                    .state
+                    .frame_capture
+                    .as_ref()
+                    .and_then(|session| session.selection.valid_position(&session.media));
+                self.update_frame_capture_position(position, settle);
+            }
+            FrameCaptureSelectionAction::StepRequested(direction) => {
+                self.request_frame_step(direction);
+            }
+            _ => {}
         }
         if let Err(error) = self.handle_frame_capture_action(action)
             && let Some(session) = self.state.frame_capture.as_mut()
@@ -3358,6 +3614,8 @@ impl ApolloApp {
             }
             FrameCaptureSelectionAction::SaveQueueChanges
             | FrameCaptureSelectionAction::CancelQueueEdit
+            | FrameCaptureSelectionAction::PositionEdited(_)
+            | FrameCaptureSelectionAction::StepRequested(_)
             | FrameCaptureSelectionAction::None => {}
         }
         Ok(())
@@ -4058,6 +4316,7 @@ fn show_operation_editor(
                 &edit.presentation.frame_capture,
                 &mut edit.frame_capture,
                 None,
+                None,
                 mode,
             ) {
                 FrameCaptureSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
@@ -4267,6 +4526,7 @@ impl eframe::App for ApolloApp {
                 self.poll_media_inspection();
                 self.poll_batch_inspection();
                 self.poll_frame_capture_preview();
+                self.poll_frame_capture_index();
                 self.poll_frame_capture_thumbnail();
 
                 self.handle_window_file_drop(ui.ctx());
@@ -4298,15 +4558,16 @@ mod tests {
 
     use super::{
         ApolloApp, AppSettings, AppState, BatchDefaults, BatchEditTarget, BatchItem, BatchOrigin,
-        BatchSetupState, BatchSourceState, FrameCaptureThumbnailLoad, FramePreviewDecode,
-        MediaInspection, MediaToolsState, NavigationState, PreviewExtractionOwner, QueueEditOrigin,
-        QueueExecutionEvent, QueueOrigin, Tool, ToolExecutionStates,
+        BatchSetupState, BatchSourceState, FrameCaptureThumbnailLoad, FrameDirection,
+        FrameIndexError, FrameIndexQueryOwner, FrameIndexState, FramePreviewDecode, FrameStep,
+        MediaInspection, MediaToolsState, NavigationState, PositionSettle, PreviewExtractionOwner,
+        QueueEditOrigin, QueueExecutionEvent, QueueOrigin, Tool, ToolExecutionStates,
         audio_extract_output_dialog_request, audio_mix_output_dialog_request,
         completed_output_folder, file_intake_enabled, frame_capture_output_dialog_request,
-        operation_workspace_visible, queue_event_matches_active, queue_execution_wake,
-        refresh_batch_items, remux_output_dialog_request, settle_output_file_dialog,
-        shows_audio_extract_lifecycle, shows_audio_mix_lifecycle, shows_frame_capture_lifecycle,
-        shows_remux_lifecycle, shows_upscale_lifecycle,
+        frame_navigation_availability, operation_workspace_visible, queue_event_matches_active,
+        queue_execution_wake, refresh_batch_items, remux_output_dialog_request,
+        settle_output_file_dialog, shows_audio_extract_lifecycle, shows_audio_mix_lifecycle,
+        shows_frame_capture_lifecycle, shows_remux_lifecycle, shows_upscale_lifecycle,
     };
     use crate::file_dialog::{
         DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
@@ -4321,7 +4582,10 @@ mod tests {
         },
         frame_capture::{
             execution::FrameCaptureExecutionState,
-            model::{FrameCaptureFormat, FrameTimestamp},
+            model::{
+                FrameCaptureFormat, FramePosition, FrameTimeBase, FrameTimestamp,
+                ResolvedFramePosition,
+            },
             preview::{PREVIEW_DEBOUNCE, PreviewImage, PreviewState},
             thumbnail::FrameCaptureThumbnail,
         },
@@ -4633,6 +4897,7 @@ mod tests {
             frame_capture_thumbnail_load: None,
             frame_preview_extraction: PreviewExtractionOwner::default(),
             frame_preview_decode: None,
+            frame_index_query: FrameIndexQueryOwner::default(),
             progress_repaint: MediaProgressRepaintOwner::new(egui_context.clone()),
             media_inspection: None,
             file_dialog: FileDialogOwner::new_for_test(egui_context.clone(), || {
@@ -4644,6 +4909,22 @@ mod tests {
             next_session_id: 1,
             tools_error_details_open: false,
         }
+    }
+
+    fn seed_frame_neighborhood(app: &mut ApolloApp, center: FramePosition, payload: &[u8]) {
+        let session = app.state.frame_capture.as_mut().unwrap();
+        session.frame_index_due = None;
+        session.selection.set_position(&session.media, center);
+        let request = session
+            .frame_navigator
+            .schedule(&session.source_identity, &session.media, center)
+            .unwrap()
+            .unwrap();
+        assert!(
+            session
+                .frame_navigator
+                .settle(request, Ok(payload.to_vec()))
+        );
     }
 
     fn assert_no_batch_execution(app: &ApolloApp) {
@@ -5284,11 +5565,220 @@ mod tests {
         ));
         app.sync_frame_preview_texture();
 
-        app.update_frame_capture_preview(None);
+        app.update_frame_capture_position(None, PositionSettle::Debounced);
 
         let session = app.state.frame_capture.as_ref().unwrap();
         assert!(matches!(session.preview.state(), PreviewState::Idle));
         assert!(session.preview_texture.is_some());
+        assert!(session.frame_index_due.is_none());
+        assert!(matches!(
+            session.frame_navigator.state(),
+            FrameIndexState::Idle
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn navigation_enablement_uses_exact_sub_millisecond_frame_identity() {
+        let (directory, path) = temp_file("sub-millisecond-navigation-boundaries");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let half_millisecond = ResolvedFramePosition::new(
+            1,
+            FrameTimeBase::new(1, 2_000).expect("valid test time base"),
+        )
+        .expect("displayable test frame");
+        {
+            let session = app.state.frame_capture.as_mut().unwrap();
+            session.frame_index_due = None;
+            session
+                .selection
+                .set_position(&session.media, FramePosition::from(half_millisecond));
+            let request = session
+                .frame_navigator
+                .schedule(
+                    &session.source_identity,
+                    &session.media,
+                    FramePosition::from(half_millisecond),
+                )
+                .unwrap()
+                .unwrap();
+            assert!(session.frame_navigator.settle(
+                request,
+                Ok(br#"{"frames":[{"best_effort_timestamp":0},{"best_effort_timestamp":1}],"streams":[{"time_base":"1/2000"}]}"#.to_vec())
+            ));
+        }
+
+        let availability = frame_navigation_availability(app.state.frame_capture.as_ref().unwrap());
+        assert!(availability.previous);
+        assert!(!availability.next);
+        assert!(!availability.loading);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn position_intent_uses_debounce_while_release_is_immediately_due() {
+        let (directory, path) = temp_file("position-settle-policy");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let position = FrameTimestamp::from_milliseconds(250).into();
+        seed_frame_neighborhood(
+            &mut app,
+            FrameTimestamp::ZERO.into(),
+            br#"{"frames":[{"best_effort_timestamp":0},{"best_effort_timestamp":100}],"streams":[{"time_base":"1/1000"}]}"#,
+        );
+
+        app.update_frame_capture_position(Some(position), PositionSettle::Debounced);
+        let session = app.state.frame_capture.as_ref().unwrap();
+        let debounced_ready_at = match session.preview.state() {
+            PreviewState::Debouncing { ready_at, .. } => *ready_at,
+            state => panic!("expected debouncing preview, got {state:?}"),
+        };
+        assert!(debounced_ready_at > Instant::now());
+        assert!(matches!(
+            session.frame_navigator.state(),
+            FrameIndexState::Idle
+        ));
+
+        app.update_frame_capture_position(Some(position), PositionSettle::Immediate);
+        let session = app.state.frame_capture.as_ref().unwrap();
+        let immediate_ready_at = match session.preview.state() {
+            PreviewState::Debouncing { ready_at, .. } => *ready_at,
+            state => panic!("expected immediately due preview, got {state:?}"),
+        };
+        assert!(immediate_ready_at <= Instant::now());
+        assert!(
+            session
+                .frame_index_due
+                .is_some_and(|(_, ready_at)| ready_at <= Instant::now())
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cached_vfr_steps_reuse_navigation_coverage_and_schedule_only_preview() {
+        let (directory, path) = temp_file("vfr-frame-step");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let time_base = FrameTimeBase::new(1, 1_000).expect("valid test time base");
+        seed_frame_neighborhood(
+            &mut app,
+            FrameTimestamp::from_milliseconds(100).into(),
+            br#"{"frames":[{"best_effort_timestamp":40},{"best_effort_timestamp":100},{"best_effort_timestamp":170},{"best_effort_timestamp":240},{"best_effort_timestamp":310},{"best_effort_timestamp":380}],"streams":[{"time_base":"1/1000"}]}"#,
+        );
+
+        app.request_frame_step(FrameDirection::Next);
+        assert_cached_step(&mut app, 170, time_base);
+
+        app.request_frame_step(FrameDirection::Next);
+        assert_cached_step(&mut app, 240, time_base);
+
+        app.state
+            .frame_capture
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_step(FrameStep::Two);
+        app.request_frame_step(FrameDirection::Next);
+        assert_cached_step(&mut app, 380, time_base);
+
+        app.request_frame_step(FrameDirection::Previous);
+        assert_cached_step(&mut app, 240, time_base);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn assert_cached_step(app: &mut ApolloApp, timestamp: i64, time_base: FrameTimeBase) {
+        let expected = ResolvedFramePosition::new(timestamp, time_base)
+            .expect("stepped test frame remains displayable");
+        let session = app.state.frame_capture.as_ref().unwrap();
+        assert_eq!(
+            session.selection.request(&session.media).unwrap().position,
+            expected.into()
+        );
+        assert_eq!(
+            session.selection.timestamp_text(),
+            expected.display_timestamp().to_string()
+        );
+        assert!(session.frame_index_due.is_none());
+        assert!(matches!(
+            session.frame_navigator.state(),
+            FrameIndexState::Ready { .. }
+        ));
+        assert!(matches!(
+            session.preview.state(),
+            PreviewState::Debouncing { request, ready_at }
+                if request.position == expected.into() && *ready_at <= Instant::now()
+        ));
+        assert!(!app.frame_index_query.cancel());
+    }
+
+    #[test]
+    fn leaving_cached_frame_coverage_starts_one_new_neighborhood_query() {
+        let (directory, path) = temp_file("frame-step-needs-neighborhood");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        seed_frame_neighborhood(
+            &mut app,
+            FrameTimestamp::from_milliseconds(100).into(),
+            br#"{"frames":[{"best_effort_timestamp":40},{"best_effort_timestamp":100},{"best_effort_timestamp":170},{"best_effort_timestamp":240}],"streams":[{"time_base":"1/1000"}]}"#,
+        );
+        {
+            let session = app.state.frame_capture.as_mut().unwrap();
+            session.selection.set_step(FrameStep::Two);
+        }
+        app.request_frame_step(FrameDirection::Next);
+        assert_cached_step(
+            &mut app,
+            240,
+            FrameTimeBase::new(1, 1_000).expect("valid test time base"),
+        );
+        app.state
+            .frame_capture
+            .as_mut()
+            .unwrap()
+            .selection
+            .set_step(FrameStep::One);
+        app.media_tools = MediaToolsState::Ready(MediaTools::new(
+            "missing-ffmpeg",
+            std::env::current_exe().expect("current test executable is available"),
+        ));
+
+        app.request_frame_step(FrameDirection::Next);
+
+        let edge = ResolvedFramePosition::new(
+            240,
+            FrameTimeBase::new(1, 1_000).expect("valid test time base"),
+        )
+        .expect("edge frame remains displayable");
+        let request = {
+            let session = app.state.frame_capture.as_ref().unwrap();
+            assert!(session.frame_index_due.is_none());
+            assert!(session.pending_step.is_some());
+            match session.frame_navigator.state() {
+                FrameIndexState::Loading { request } => {
+                    assert_eq!(request.center, edge.into());
+                    request.clone()
+                }
+                state => panic!("expected one loading edge query, got {state:?}"),
+            }
+        };
+        app.frame_index_query.cancel();
+        app.settle_frame_index_request(request, Err(FrameIndexError::Cancelled));
+
+        let session = app.state.frame_capture.as_ref().unwrap();
+        assert!(session.pending_step.is_none());
+        assert!(matches!(
+            session.frame_navigator.state(),
+            FrameIndexState::Failed {
+                request,
+                error: FrameIndexError::Cancelled,
+            } if request.center == edge.into()
+        ));
+        assert!(!app.frame_index_query.cancel());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -6282,8 +6772,8 @@ mod tests {
         for text in [
             "recording.mkv",
             "1920×1080",
-            "Timestamp",
             "00:00:00.000",
+            "1 frame",
             "PNG",
             "lossless",
             "Output",
@@ -6293,6 +6783,8 @@ mod tests {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
         assert!(!output_contains_text(&output, "Format"));
+        assert!(!output_contains_text(&output, "Timestamp"));
+        assert!(!output_contains_text(&output, "Duration"));
         fs::remove_dir_all(directory).unwrap();
     }
 

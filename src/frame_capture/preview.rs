@@ -346,6 +346,27 @@ impl<Image: Clone> FramePreview<Image> {
         position: FramePosition,
         now: Instant,
     ) -> Option<PreviewGeneration> {
+        self.schedule_position_after(source_identity, media, position, now, PREVIEW_DEBOUNCE)
+    }
+
+    pub fn schedule_position_immediately(
+        &mut self,
+        source_identity: &SourceIdentity,
+        media: &MediaFile,
+        position: FramePosition,
+        now: Instant,
+    ) -> Option<PreviewGeneration> {
+        self.schedule_position_after(source_identity, media, position, now, Duration::ZERO)
+    }
+
+    fn schedule_position_after(
+        &mut self,
+        source_identity: &SourceIdentity,
+        media: &MediaFile,
+        position: FramePosition,
+        now: Instant,
+        delay: Duration,
+    ) -> Option<PreviewGeneration> {
         if self.source_identity.as_ref() != Some(source_identity) {
             self.source_identity = Some(source_identity.clone());
             self.cache.clear();
@@ -368,7 +389,7 @@ impl<Image: Clone> FramePreview<Image> {
                 video_stream_index: video_stream.stream_index,
                 position,
             },
-            ready_at: now + PREVIEW_DEBOUNCE,
+            ready_at: now + delay,
         };
         Some(generation)
     }
