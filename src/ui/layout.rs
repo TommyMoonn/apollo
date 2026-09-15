@@ -80,11 +80,38 @@ pub const FOCUS_CONTENT_MIN_HEIGHT: f32 = 230.0;
 /// Failure diagnostics remain subordinate and bounded inside terminal surfaces.
 pub const DIAGNOSTIC_MAX_HEIGHT: f32 = 80.0;
 
+/// Live Frame Capture previews stay subordinate to the operation form at every window size.
+pub const LIVE_PREVIEW_MAX_WIDTH: f32 = 720.0;
+pub const LIVE_PREVIEW_MAX_HEIGHT: f32 = 360.0;
+
 /// Progress tracks are deliberately thin and rectangular.
 pub const PROGRESS_TRACK_HEIGHT: f32 = 4.0;
 
 /// Paths and filenames stay on one line and truncate rather than forcing actions off-screen.
 pub const PATH_TEXT_OVERFLOW: TextOverflowPolicy = TextOverflowPolicy::Ellipsis;
+
+/// Fit a preview inside the operation column while preserving its source aspect ratio.
+///
+/// Preview images are never enlarged beyond their decoded dimensions. The explicit caps keep
+/// landscape, portrait, and ultrawide sources from dominating the source-first operation surface.
+pub fn live_preview_size(available_width: f32, image_size: [usize; 2]) -> Vec2 {
+    let available_width = safe_dimension(available_width).min(LIVE_PREVIEW_MAX_WIDTH);
+    let image_width = image_size[0] as f32;
+    let image_height = image_size[1] as f32;
+    if available_width <= 0.0
+        || !image_width.is_finite()
+        || !image_height.is_finite()
+        || image_width <= 0.0
+        || image_height <= 0.0
+    {
+        return Vec2::ZERO;
+    }
+
+    let scale = (available_width / image_width)
+        .min(LIVE_PREVIEW_MAX_HEIGHT / image_height)
+        .min(1.0);
+    vec2(image_width * scale, image_height * scale)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionLayout {
@@ -974,14 +1001,15 @@ mod tests {
         BATCH_STATE_WIDTH, BatchRowLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT,
         ENCODER_QUALITY_CONTROL_WIDTH, ENCODER_QUALITY_STEP, FIELD_PAIR_MIN_COLUMN_WIDTH,
         FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, FieldPairLayout, IntakeLayout,
-        MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, OUTPUT_FILENAME_MIN_INLINE_WIDTH, OutputRowLayout,
-        PATH_TEXT_OVERFLOW, PIXEL_DIMENSION_CONTROL_WIDTH, PIXEL_DIMENSION_STEP,
-        PROGRESS_TRACK_HEIGHT, QUEUE_IDENTITY_MIN_WIDTH, QUEUE_OPERATION_WIDTH, QUEUE_ROW_HEIGHT,
-        QUEUE_STATE_WIDTH, QueueRowLayout, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE,
-        TRACK_TEXT_MIN_INLINE_WIDTH, TextOverflowPolicy, TrackRowLayout, WINDOW_CHROME_HEIGHT,
-        WORKSPACE_METADATA_MIN_WIDTH, action_group_size, action_layout, batch_row_plan,
-        bounded_content_width, centered_action_group, field_pair_layout, focus_content,
-        intake_content, intake_layout_plan, operation_surface, output_row_plan, queue_row_plan,
+        LIVE_PREVIEW_MAX_HEIGHT, LIVE_PREVIEW_MAX_WIDTH, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE,
+        OUTPUT_FILENAME_MIN_INLINE_WIDTH, OutputRowLayout, PATH_TEXT_OVERFLOW,
+        PIXEL_DIMENSION_CONTROL_WIDTH, PIXEL_DIMENSION_STEP, PROGRESS_TRACK_HEIGHT,
+        QUEUE_IDENTITY_MIN_WIDTH, QUEUE_OPERATION_WIDTH, QUEUE_ROW_HEIGHT, QUEUE_STATE_WIDTH,
+        QueueRowLayout, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE, TRACK_TEXT_MIN_INLINE_WIDTH,
+        TextOverflowPolicy, TrackRowLayout, WINDOW_CHROME_HEIGHT, WORKSPACE_METADATA_MIN_WIDTH,
+        action_group_size, action_layout, batch_row_plan, bounded_content_width,
+        centered_action_group, field_pair_layout, focus_content, intake_content,
+        intake_layout_plan, live_preview_size, operation_surface, output_row_plan, queue_row_plan,
         surface_fade, track_row_plan, workspace_header_shows_metadata,
         workspace_switcher_fits_one_line,
     };
@@ -1011,6 +1039,8 @@ mod tests {
         assert_eq!(OUTPUT_FILENAME_MIN_INLINE_WIDTH, 180.0);
         assert_eq!(WORKSPACE_METADATA_MIN_WIDTH, 220.0);
         assert_eq!(FOCUS_CONTENT_MAX_WIDTH, 470.0);
+        assert_eq!(LIVE_PREVIEW_MAX_WIDTH, 720.0);
+        assert_eq!(LIVE_PREVIEW_MAX_HEIGHT, 360.0);
         assert_eq!(FOCUS_CONTENT_MIN_HEIGHT, 230.0);
         assert_eq!(DIAGNOSTIC_MAX_HEIGHT, 80.0);
         assert_eq!(theme::PRIMARY_CONTROL_HEIGHT, 31.0);
@@ -1023,6 +1053,37 @@ mod tests {
         assert_eq!(theme::SOURCE_HEADER_GAP, 14.0);
         assert_eq!(theme::INLINE_ACTION_GAP, 10.0);
         assert_eq!(PROGRESS_TRACK_HEIGHT, 4.0);
+    }
+
+    #[test]
+    fn live_preview_preserves_aspect_and_respects_narrow_and_wide_bounds() {
+        let narrow = live_preview_size(344.0, [1920, 1080]);
+        assert_eq!(narrow, Vec2::new(344.0, 193.5));
+
+        let wide = live_preview_size(1200.0, [1920, 1080]);
+        assert_eq!(wide, Vec2::new(640.0, 360.0));
+        assert!(wide.x <= LIVE_PREVIEW_MAX_WIDTH);
+        assert!(wide.y <= LIVE_PREVIEW_MAX_HEIGHT);
+        assert!((wide.x / wide.y - 16.0 / 9.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn live_preview_bounds_portrait_and_ultrawide_sources_without_upscaling() {
+        assert_eq!(
+            live_preview_size(674.0, [1080, 1920]),
+            Vec2::new(202.5, 360.0)
+        );
+
+        let ultrawide = live_preview_size(674.0, [3440, 1440]);
+        assert_eq!(ultrawide.x, 674.0);
+        assert!((ultrawide.x / ultrawide.y - 3440.0 / 1440.0).abs() < 0.001);
+
+        assert_eq!(
+            live_preview_size(674.0, [320, 180]),
+            Vec2::new(320.0, 180.0)
+        );
+        assert_eq!(live_preview_size(f32::NAN, [320, 180]), Vec2::ZERO);
+        assert_eq!(live_preview_size(674.0, [0, 180]), Vec2::ZERO);
     }
 
     #[test]

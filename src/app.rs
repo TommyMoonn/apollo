@@ -1284,7 +1284,6 @@ impl ApolloApp {
         };
         let Some(timestamp) = timestamp else {
             session.preview.invalidate();
-            session.preview_texture = None;
             self.cancel_frame_preview_work();
             return;
         };
@@ -3249,12 +3248,20 @@ impl ApolloApp {
                     .frame_capture
                     .as_mut()
                     .expect("frame capture source exists while ready surface is shown");
+                let live_preview = frame_capture_ui::FrameCaptureLivePreview::from_preview(
+                    session.preview.state(),
+                    session
+                        .preview_texture
+                        .as_ref()
+                        .map(|texture| (texture.handle.id(), texture.size)),
+                );
                 let timestamp_before = session.selection.timestamp_text().to_owned();
                 let action = frame_capture_ui::show(
                     ui,
                     &session.media,
                     &presentation.frame_capture,
                     &mut session.selection,
+                    Some(live_preview),
                     OperationSurfaceMode::Immediate {
                         start_allowed: immediate_start_allowed,
                         queue_confirmation,
@@ -4050,6 +4057,7 @@ fn show_operation_editor(
                 &edit.media,
                 &edit.presentation.frame_capture,
                 &mut edit.frame_capture,
+                None,
                 mode,
             ) {
                 FrameCaptureSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
@@ -5256,6 +5264,31 @@ mod tests {
             .id();
 
         assert_eq!(first_texture, second_texture);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn invalid_timestamp_retires_work_but_keeps_the_last_valid_preview_visible() {
+        let (directory, path) = temp_file("preview-invalid-input-retains-texture");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let session = app.state.frame_capture.as_mut().unwrap();
+        let request = session
+            .preview
+            .take_due_request(Instant::now() + PREVIEW_DEBOUNCE)
+            .unwrap();
+        assert!(session.preview.settle(
+            request,
+            Ok(PreviewImage::from_rgba([2, 1], vec![255; 8]).unwrap())
+        ));
+        app.sync_frame_preview_texture();
+
+        app.update_frame_capture_preview(None);
+
+        let session = app.state.frame_capture.as_ref().unwrap();
+        assert!(matches!(session.preview.state(), PreviewState::Idle));
+        assert!(session.preview_texture.is_some());
         fs::remove_dir_all(directory).unwrap();
     }
 

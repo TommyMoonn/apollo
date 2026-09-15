@@ -1,7 +1,7 @@
 use egui::{
-    Align, Align2, Color32, CornerRadius, DragValue, Frame, InnerResponse, Label, Layout, Popup,
-    Rect, Response, RichText, Sense, Sides, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder,
-    Vec2, WidgetInfo, WidgetType, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, DragValue, Frame, Image, InnerResponse, Label, Layout,
+    Popup, Rect, Response, RichText, Sense, Sides, Stroke, StrokeKind, TextEdit, TextStyle,
+    TextureId, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 use std::{ops::RangeInclusive, path::Path};
 
@@ -843,6 +843,38 @@ pub fn separator(ui: &mut Ui) {
     );
 }
 
+/// Render a passive image surface with the shared monochrome container treatment.
+#[must_use]
+pub fn framed_preview(
+    ui: &mut Ui,
+    texture: Option<TextureId>,
+    desired_size: Vec2,
+    alt_text: &str,
+) -> Response {
+    let desired_size = vec2(
+        finite_nonnegative(desired_size.x),
+        finite_nonnegative(desired_size.y),
+    );
+    let (rect, response) = ui.allocate_exact_size(desired_size, Sense::hover());
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(theme::CONTAINER_RADIUS),
+        theme::BACKGROUND,
+    );
+    if let Some(texture) = texture {
+        let _ = ui.put(rect, Image::new((texture, rect.size())).alt_text(alt_text));
+    } else {
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Image, true, alt_text));
+    }
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(theme::CONTAINER_RADIUS),
+        Stroke::new(theme::SEPARATOR_WIDTH, theme::SEPARATOR),
+        StrokeKind::Inside,
+    );
+    response
+}
+
 fn button(ui: &mut Ui, label: &str, enabled: bool, kind: ButtonKind) -> Response {
     button_with_horizontal_padding(ui, label, enabled, kind, BUTTON_HORIZONTAL_PADDING)
 }
@@ -1119,8 +1151,8 @@ mod tests {
     use super::{
         BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
         button_text_style, compact_secondary_button_enabled, conditional_fade,
-        displayed_progress_fraction, encoder_quality_control, filename_field, inline_status,
-        inline_status_color, inline_status_height, labeled_control, mode_button,
+        displayed_progress_fraction, encoder_quality_control, filename_field, framed_preview,
+        inline_status, inline_status_color, inline_status_height, labeled_control, mode_button,
         mode_button_intrinsic_size, operation_output_row, parse_pixel_dimension,
         pixel_dimension_control, plain_button_text_style, primary_button_enabled, progress_bar,
         progress_rail_color, secondary_button, select_button, select_menu_intrinsic_width,
@@ -1155,6 +1187,28 @@ mod tests {
                 .find_map(|shape| shape_rect_stroke(shape, rect)),
             _ => None,
         }
+    }
+
+    #[test]
+    fn framed_preview_uses_exact_passive_geometry_and_container_border() {
+        egui::__run_test_ui(|ui| {
+            let response = framed_preview(
+                ui,
+                None,
+                egui::vec2(320.0, 180.0),
+                "Frame preview at the selected timestamp",
+            );
+
+            assert_eq!(response.rect.size(), egui::vec2(320.0, 180.0));
+            assert!(!response.clicked());
+            let has_border = std::cell::Cell::new(false);
+            ui.painter().for_each_shape(|shape| {
+                if shape_rect_stroke(&shape.shape, response.rect) == Some(theme::SEPARATOR) {
+                    has_border.set(true);
+                }
+            });
+            assert!(has_border.get());
+        });
     }
 
     fn shape_text_color(shape: &egui::Shape, text: &str) -> Option<egui::Color32> {

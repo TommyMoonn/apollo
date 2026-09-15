@@ -6,13 +6,14 @@ use std::{
     time::Duration,
 };
 
-use egui::{Align, Label, RichText, TextEdit, Ui};
+use egui::{Align, Label, Layout, RichText, TextEdit, TextureId, Ui};
 
 use crate::{
     frame_capture::{
         model::{
             FrameCaptureFormat, FrameCaptureRequest, FrameTimestamp, FrameTimestampParseError,
         },
+        preview::{PreviewImage, PreviewState},
         validation::{
             FrameCaptureValidationError, validate_frame_capture_request, validate_frame_timestamp,
         },
@@ -31,6 +32,47 @@ const FORMAT_LABEL: &str = "Format";
 const BROWSE_LABEL: &str = "Browse";
 const CAPTURE_LABEL: &str = "Capture frame";
 const FORMAT_OPTIONS: [&str; 2] = ["PNG", "JPEG"];
+const PREVIEW_ALT_TEXT: &str = "Frame preview at the selected timestamp";
+const PREVIEW_UPDATING_TEXT: &str = "Updating preview…";
+const PREVIEW_FAILED_TEXT: &str = "Preview unavailable";
+const PREVIEW_FALLBACK_SIZE: [usize; 2] = [640, 360];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LivePreviewStatus {
+    Idle,
+    Updating,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameCaptureLivePreview {
+    status: LivePreviewStatus,
+    texture: Option<(TextureId, [usize; 2])>,
+}
+
+impl FrameCaptureLivePreview {
+    pub fn from_preview(
+        state: &PreviewState<PreviewImage>,
+        retained_texture: Option<(TextureId, [usize; 2])>,
+    ) -> Self {
+        let status = match state {
+            PreviewState::Idle => LivePreviewStatus::Idle,
+            PreviewState::Debouncing { .. } | PreviewState::Loading { .. } => {
+                LivePreviewStatus::Updating
+            }
+            PreviewState::Ready { .. } => LivePreviewStatus::Ready,
+            PreviewState::Failed { .. } => LivePreviewStatus::Failed,
+        };
+        let texture = matches!(
+            status,
+            LivePreviewStatus::Idle | LivePreviewStatus::Updating | LivePreviewStatus::Ready
+        )
+        .then_some(retained_texture)
+        .flatten();
+        Self { status, texture }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameCaptureSelectionState {
@@ -174,6 +216,7 @@ pub fn show<'a>(
     media: &MediaFile,
     presentation: &FrameCapturePresentation,
     state: &mut FrameCaptureSelectionState,
+    live_preview: Option<FrameCaptureLivePreview>,
     mode: impl Into<OperationSurfaceMode<'a>>,
 ) -> FrameCaptureSelectionAction {
     let mode = mode.into();
@@ -205,6 +248,11 @@ pub fn show<'a>(
             if let Some(duration_context) = presentation.duration_context.as_deref() {
                 ui.add_space(theme::SPACING.tight);
                 technical_context(ui, duration_context);
+            }
+
+            if let Some(live_preview) = live_preview {
+                ui.add_space(theme::SPACING.related);
+                show_live_preview(ui, media, live_preview);
             }
 
             ui.add_space(theme::SPACING.section);
@@ -294,6 +342,32 @@ pub fn show<'a>(
     );
 
     action.get()
+}
+
+fn show_live_preview(ui: &mut Ui, media: &MediaFile, preview: FrameCaptureLivePreview) {
+    let source_size = media
+        .video_streams
+        .first()
+        .and_then(|video| Some([video.width? as usize, video.height? as usize]))
+        .unwrap_or(PREVIEW_FALLBACK_SIZE);
+    let image_size = preview
+        .texture
+        .map_or(source_size, |(_, texture_size)| texture_size);
+    let display_size = layout::live_preview_size(ui.available_width(), image_size);
+
+    match preview.status {
+        LivePreviewStatus::Updating => technical_context(ui, PREVIEW_UPDATING_TEXT),
+        LivePreviewStatus::Failed => technical_context(ui, PREVIEW_FAILED_TEXT),
+        LivePreviewStatus::Idle | LivePreviewStatus::Ready => {
+            ui.add_space(ui.text_style_height(&fonts::technical_text_style()));
+        }
+    }
+    ui.add_space(theme::SPACING.tight);
+
+    ui.with_layout(Layout::top_down(Align::Center), |ui| {
+        let texture = preview.texture.map(|(texture, _)| texture);
+        let _ = widgets::framed_preview(ui, texture, display_size, PREVIEW_ALT_TEXT);
+    });
 }
 
 fn show_format_selector(ui: &mut Ui, state: &mut FrameCaptureSelectionState) {
@@ -393,8 +467,8 @@ mod tests {
     };
 
     use super::{
-        FrameCapturePresentation, FrameCaptureSelectionState, format_detail, format_duration,
-        ready_feedback,
+        FrameCaptureLivePreview, FrameCapturePresentation, FrameCaptureSelectionState,
+        LivePreviewStatus, format_detail, format_duration, ready_feedback,
     };
 
     fn media(duration: Option<Duration>) -> MediaFile {
@@ -474,7 +548,7 @@ mod tests {
         let presentation = FrameCapturePresentation::new(&media);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &presentation, &mut state, true);
+            let _ = super::show(ui, &media, &presentation, &mut state, None, true);
         });
         assert!(output.shapes.iter().any(|shape| {
             shape_contains(&shape.shape, "Enter a timestamp using HH:MM:SS.mmm.")
@@ -524,7 +598,7 @@ mod tests {
         let mut state = FrameCaptureSelectionState::new(&media);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &presentation, &mut state, true);
+            let _ = super::show(ui, &media, &presentation, &mut state, None, true);
         });
 
         assert!(
@@ -539,6 +613,74 @@ mod tests {
                 .iter()
                 .any(|shape| shape_contains(&shape.shape, "lossless"))
         );
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn updating_preview_uses_restrained_status() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let media = media(Some(Duration::from_secs(10)));
+        let presentation = FrameCapturePresentation::new(&media);
+        let mut state = FrameCaptureSelectionState::new(&media);
+        let preview = FrameCaptureLivePreview {
+            status: LivePreviewStatus::Updating,
+            texture: None,
+        };
+
+        let output = context.run_ui(Default::default(), |ui| {
+            let _ = super::show(ui, &media, &presentation, &mut state, Some(preview), true);
+        });
+
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|shape| { shape_contains(&shape.shape, super::PREVIEW_UPDATING_TEXT) })
+        );
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn idle_validation_state_keeps_the_last_valid_preview_texture() {
+        let retained = (egui::TextureId::Managed(7), [640, 360]);
+        let preview = FrameCaptureLivePreview::from_preview(
+            &crate::frame_capture::preview::PreviewState::Idle,
+            Some(retained),
+        );
+
+        assert_eq!(preview.status, LivePreviewStatus::Idle);
+        assert_eq!(preview.texture, Some(retained));
+    }
+
+    #[test]
+    fn preview_failure_is_feedback_only_and_does_not_change_capture_request() {
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let media = media(Some(Duration::from_secs(10)));
+        let presentation = FrameCapturePresentation::new(&media);
+        let mut state = FrameCaptureSelectionState::new(&media);
+        state.set_timestamp_text(&media, "00:00:01.250".into());
+        let request_before = state.request(&media).unwrap();
+        let preview = FrameCaptureLivePreview {
+            status: LivePreviewStatus::Failed,
+            texture: None,
+        };
+
+        let output = context.run_ui(Default::default(), |ui| {
+            let _ = super::show(ui, &media, &presentation, &mut state, Some(preview), true);
+        });
+
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|shape| { shape_contains(&shape.shape, super::PREVIEW_FAILED_TEXT) })
+        );
+        assert!(state.can_capture(&media));
+        assert_eq!(state.request(&media).unwrap(), request_before);
         output.drop_without_applying_deltas();
     }
 
