@@ -1,6 +1,9 @@
 use std::{
+    collections::VecDeque,
     fmt,
+    io::Cursor,
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -22,6 +25,7 @@ use super::{
 pub const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(200);
 pub const PREVIEW_MAXIMUM_EDGE: u32 = 720;
 const PREVIEW_STDOUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+const PREVIEW_CACHE_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PreviewGeneration(u64);
@@ -42,18 +46,72 @@ pub struct PreviewRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewImage {
+    size: [usize; 2],
+    rgba: Arc<[u8]>,
+}
+
+impl PreviewImage {
+    pub fn from_rgba(size: [usize; 2], rgba: Vec<u8>) -> Option<Self> {
+        let expected_length = size[0].checked_mul(size[1])?.checked_mul(4)?;
+        (size[0] > 0
+            && size[1] > 0
+            && size[0] <= PREVIEW_MAXIMUM_EDGE as usize
+            && size[1] <= PREVIEW_MAXIMUM_EDGE as usize
+            && rgba.len() == expected_length)
+            .then(|| Self {
+                size,
+                rgba: Arc::from(rgba),
+            })
+    }
+
+    pub fn size(&self) -> [usize; 2] {
+        self.size
+    }
+
+    pub fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
+}
+
+pub fn decode_preview_png(bytes: &[u8]) -> Result<PreviewImage, PreviewExtractionError> {
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(PREVIEW_MAXIMUM_EDGE);
+    limits.max_image_height = Some(PREVIEW_MAXIMUM_EDGE);
+    reader.limits(limits);
+    let rgba = reader
+        .decode()
+        .map_err(|error| PreviewExtractionError::Decode(error.to_string()))?
+        .to_rgba8();
+    PreviewImage::from_rgba(
+        [rgba.width() as usize, rgba.height() as usize],
+        rgba.into_raw(),
+    )
+    .ok_or_else(|| {
+        PreviewExtractionError::Decode("preview image dimensions are invalid".to_owned())
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewExtractionError {
+    Start(MediaProcessStartError),
     Process {
         reason: MediaProcessFailure,
         diagnostic: String,
     },
+    Decode(String),
     Cancelled,
 }
 
 impl fmt::Display for PreviewExtractionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Start(error) => write!(formatter, "preview process could not start: {error}"),
             Self::Process { reason, .. } => write!(formatter, "preview process failed: {reason:?}"),
+            Self::Decode(reason) => {
+                write!(formatter, "preview image could not be decoded: {reason}")
+            }
             Self::Cancelled => formatter.write_str("preview extraction was cancelled"),
         }
     }
@@ -70,6 +128,48 @@ pub struct PreviewCompletion {
 pub struct PreviewExtraction {
     request: PreviewRequest,
     process: Option<Box<dyn PreviewProcessControl>>,
+}
+
+#[derive(Debug, Default)]
+pub struct PreviewExtractionOwner {
+    active: Option<PreviewExtraction>,
+}
+
+impl PreviewExtractionOwner {
+    pub fn start(
+        &mut self,
+        tools: &MediaTools,
+        request: PreviewRequest,
+        wake: MediaProcessWake,
+    ) -> Result<(), MediaProcessStartError> {
+        self.cancel();
+        self.active = Some(PreviewExtraction::start_with_wake(tools, request, wake)?);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn request(&self) -> Option<&PreviewRequest> {
+        self.active.as_ref().map(PreviewExtraction::request)
+    }
+
+    pub fn poll(&mut self) -> Option<PreviewCompletion> {
+        let completion = self.active.as_mut()?.poll()?;
+        self.active = None;
+        Some(completion)
+    }
+
+    pub fn cancel(&mut self) -> bool {
+        let Some(active) = self.active.take() else {
+            return false;
+        };
+        active.cancel()
+    }
+
+    #[cfg(test)]
+    fn replace(&mut self, extraction: PreviewExtraction) {
+        self.cancel();
+        self.active = Some(extraction);
+    }
 }
 
 trait PreviewProcessControl: ProcessControl {
@@ -182,14 +282,33 @@ pub enum PreviewState<Image> {
     },
     Failed {
         request: PreviewRequest,
-        error: String,
+        error: PreviewExtractionError,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewCacheKey {
+    source_identity: SourceIdentity,
+    timestamp: FrameTimestamp,
+    maximum_edge: u32,
+}
+
+impl From<&PreviewRequest> for PreviewCacheKey {
+    fn from(request: &PreviewRequest) -> Self {
+        Self {
+            source_identity: request.source_identity.clone(),
+            timestamp: request.timestamp,
+            maximum_edge: PREVIEW_MAXIMUM_EDGE,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FramePreview<Image> {
     generation: PreviewGeneration,
     state: PreviewState<Image>,
+    source_identity: Option<SourceIdentity>,
+    cache: VecDeque<(PreviewCacheKey, Image)>,
 }
 
 impl<Image> Default for FramePreview<Image> {
@@ -197,11 +316,13 @@ impl<Image> Default for FramePreview<Image> {
         Self {
             generation: PreviewGeneration(0),
             state: PreviewState::Idle,
+            source_identity: None,
+            cache: VecDeque::new(),
         }
     }
 }
 
-impl<Image> FramePreview<Image> {
+impl<Image: Clone> FramePreview<Image> {
     pub fn state(&self) -> &PreviewState<Image> {
         &self.state
     }
@@ -213,6 +334,10 @@ impl<Image> FramePreview<Image> {
         timestamp: FrameTimestamp,
         now: Instant,
     ) -> Option<PreviewGeneration> {
+        if self.source_identity.as_ref() != Some(source_identity) {
+            self.source_identity = Some(source_identity.clone());
+            self.cache.clear();
+        }
         let Some(video_stream) = media.video_streams.first() else {
             self.invalidate();
             return None;
@@ -245,10 +370,36 @@ impl<Image> FramePreview<Image> {
         }
 
         let request = request.clone();
+        if let Some(image) = self.cached(&request) {
+            self.state = PreviewState::Ready { request, image };
+            return None;
+        }
         self.state = PreviewState::Loading {
             request: request.clone(),
         };
         Some(request)
+    }
+
+    pub fn is_loading(&self, request: &PreviewRequest) -> bool {
+        matches!(&self.state, PreviewState::Loading { request: current } if current == request)
+    }
+
+    pub fn settle(
+        &mut self,
+        request: PreviewRequest,
+        result: Result<Image, PreviewExtractionError>,
+    ) -> bool {
+        if !self.is_loading(&request) {
+            return false;
+        }
+        self.state = match result {
+            Ok(image) => {
+                self.cache_insert(&request, image.clone());
+                PreviewState::Ready { request, image }
+            }
+            Err(error) => PreviewState::Failed { request, error },
+        };
+        true
     }
 
     pub fn invalidate(&mut self) {
@@ -264,12 +415,48 @@ impl<Image> FramePreview<Image> {
             .expect("Frame Capture preview generation space is exhausted");
         self.generation
     }
+
+    fn cached(&mut self, request: &PreviewRequest) -> Option<Image> {
+        let key = PreviewCacheKey::from(request);
+        let index = self
+            .cache
+            .iter()
+            .position(|(candidate, _)| *candidate == key)?;
+        let entry = self
+            .cache
+            .remove(index)
+            .expect("located preview cache entry remains present");
+        let image = entry.1.clone();
+        self.cache.push_back(entry);
+        Some(image)
+    }
+
+    fn cache_insert(&mut self, request: &PreviewRequest, image: Image) {
+        let key = PreviewCacheKey::from(request);
+        if let Some(index) = self
+            .cache
+            .iter()
+            .position(|(candidate, _)| *candidate == key)
+        {
+            self.cache.remove(index);
+        }
+        self.cache.push_back((key, image));
+        if self.cache.len() > PREVIEW_CACHE_CAPACITY {
+            self.cache.pop_front();
+        }
+    }
+
+    #[cfg(test)]
+    fn cache_len(&self) -> usize {
+        self.cache.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
         fs,
+        io::Cursor,
         path::{Path, PathBuf},
         sync::{
             Arc, Mutex,
@@ -277,6 +464,8 @@ mod tests {
         },
         time::{Duration, Instant},
     };
+
+    use image::{DynamicImage, ImageFormat};
 
     use crate::media::{
         execution::ProcessControl,
@@ -287,8 +476,9 @@ mod tests {
     };
 
     use super::{
-        FramePreview, PREVIEW_DEBOUNCE, PREVIEW_MAXIMUM_EDGE, PREVIEW_STDOUT_LIMIT_BYTES,
-        PreviewExtraction, PreviewExtractionError, PreviewState,
+        FramePreview, PREVIEW_CACHE_CAPACITY, PREVIEW_DEBOUNCE, PREVIEW_MAXIMUM_EDGE,
+        PREVIEW_STDOUT_LIMIT_BYTES, PreviewExtraction, PreviewExtractionError,
+        PreviewExtractionOwner, PreviewImage, PreviewState, decode_preview_png,
     };
     use crate::frame_capture::model::FrameTimestamp;
 
@@ -594,13 +784,162 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    fn extraction_owner_replaces_and_cancels_the_only_active_process() {
+        let (directory, path, identity) = temp_source("owner", b"source");
+        let media = media(&path, None);
+        let first_request =
+            preview_request_at(&identity, &media, FrameTimestamp::from_milliseconds(100));
+        let second_request =
+            preview_request_at(&identity, &media, FrameTimestamp::from_milliseconds(200));
+        let first_process = FakeProcess::running(Vec::new());
+        let first_handle = first_process.clone();
+        let first = PreviewExtraction::start_with_launcher(
+            &MediaTools::new("ffmpeg", "ffprobe"),
+            first_request,
+            |_| Ok(first_process),
+        )
+        .unwrap();
+        let second_process = FakeProcess::running(Vec::new());
+        let second_handle = second_process.clone();
+        let second = PreviewExtraction::start_with_launcher(
+            &MediaTools::new("ffmpeg", "ffprobe"),
+            second_request.clone(),
+            |_| Ok(second_process),
+        )
+        .unwrap();
+        let mut owner = PreviewExtractionOwner::default();
+
+        owner.replace(first);
+        owner.replace(second);
+
+        assert_eq!(first_handle.state(), MediaProcessState::Cancelled);
+        assert_eq!(owner.request(), Some(&second_request));
+        assert!(owner.cancel());
+        assert_eq!(second_handle.state(), MediaProcessState::Cancelled);
+        assert!(owner.request().is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_completion_cannot_replace_a_newer_generation() {
+        let (directory, path, identity) = temp_source("stale", b"source");
+        let media = media(&path, None);
+        let now = Instant::now();
+        let mut preview = FramePreview::<usize>::default();
+        preview
+            .schedule(
+                &identity,
+                &media,
+                FrameTimestamp::from_milliseconds(100),
+                now,
+            )
+            .unwrap();
+        let stale = preview.take_due_request(now + PREVIEW_DEBOUNCE).unwrap();
+        let current_generation = preview
+            .schedule(
+                &identity,
+                &media,
+                FrameTimestamp::from_milliseconds(200),
+                now + PREVIEW_DEBOUNCE,
+            )
+            .unwrap();
+
+        assert!(!preview.settle(stale, Ok(1)));
+        assert!(matches!(
+            preview.state(),
+            PreviewState::Debouncing { request, .. }
+                if request.generation == current_generation
+                    && request.timestamp == FrameTimestamp::from_milliseconds(200)
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cache_hit_avoids_a_request_and_lru_eviction_is_bounded() {
+        let (directory, path, identity) = temp_source("cache", b"source");
+        let media = media(&path, None);
+        let now = Instant::now();
+        let mut preview = FramePreview::<usize>::default();
+        for index in 0..=PREVIEW_CACHE_CAPACITY {
+            let timestamp = FrameTimestamp::from_milliseconds(index as i64);
+            preview.schedule(&identity, &media, timestamp, now).unwrap();
+            let request = preview.take_due_request(now + PREVIEW_DEBOUNCE).unwrap();
+            assert!(preview.settle(request, Ok(index)));
+        }
+
+        assert_eq!(preview.cache_len(), PREVIEW_CACHE_CAPACITY);
+        preview
+            .schedule(&identity, &media, FrameTimestamp::ZERO, now)
+            .unwrap();
+        assert!(preview.take_due_request(now + PREVIEW_DEBOUNCE).is_some());
+        preview
+            .schedule(&identity, &media, FrameTimestamp::from_milliseconds(1), now)
+            .unwrap();
+        assert!(preview.take_due_request(now + PREVIEW_DEBOUNCE).is_none());
+        assert!(matches!(
+            preview.state(),
+            PreviewState::Ready { image: 1, .. }
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn changed_source_identity_clears_source_specific_cache() {
+        let (directory, path, first_identity) = temp_source("cache-source", b"source");
+        let media = media(&path, None);
+        let now = Instant::now();
+        let mut preview = FramePreview::<usize>::default();
+        preview
+            .schedule(&first_identity, &media, FrameTimestamp::ZERO, now)
+            .unwrap();
+        let request = preview.take_due_request(now + PREVIEW_DEBOUNCE).unwrap();
+        assert!(preview.settle(request, Ok(1)));
+
+        fs::write(&path, b"replacement source identity").unwrap();
+        let replacement_identity = SourceIdentity::read(&path).unwrap();
+        preview
+            .schedule(&replacement_identity, &media, FrameTimestamp::ZERO, now)
+            .unwrap();
+
+        assert_eq!(preview.cache_len(), 0);
+        assert!(preview.take_due_request(now + PREVIEW_DEBOUNCE).is_some());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn png_decode_returns_bounded_rgba_and_rejects_oversized_images() {
+        let image = decode_preview_png(&png_bytes(720, 405)).unwrap();
+        assert_eq!(image.size(), [720, 405]);
+        assert_eq!(image.rgba().len(), 720 * 405 * 4);
+        assert!(matches!(
+            decode_preview_png(&png_bytes(PREVIEW_MAXIMUM_EDGE + 1, 1)),
+            Err(PreviewExtractionError::Decode(_))
+        ));
+        assert!(PreviewImage::from_rgba([2, 1], vec![0; 7]).is_none());
+    }
+
     fn preview_request(identity: &SourceIdentity, media: &MediaFile) -> super::PreviewRequest {
+        preview_request_at(identity, media, FrameTimestamp::ZERO)
+    }
+
+    fn preview_request_at(
+        identity: &SourceIdentity,
+        media: &MediaFile,
+        timestamp: FrameTimestamp,
+    ) -> super::PreviewRequest {
         let now = Instant::now();
         let mut preview = FramePreview::<()>::default();
-        preview
-            .schedule(identity, media, FrameTimestamp::ZERO, now)
-            .unwrap();
+        preview.schedule(identity, media, timestamp, now).unwrap();
         preview.take_due_request(now + PREVIEW_DEBOUNCE).unwrap()
+    }
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::new_rgba8(width, height)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        bytes.into_inner()
     }
 
     fn has_pair(args: &[std::ffi::OsString], option: &str, value: &str) -> bool {

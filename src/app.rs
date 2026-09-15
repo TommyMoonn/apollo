@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-use egui::{CentralPanel, Context, Ui};
+use egui::{CentralPanel, ColorImage, Context, TextureHandle, TextureOptions, Ui};
 
 use crate::file_dialog::{
     DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
@@ -32,7 +32,10 @@ use apollo::{
     frame_capture::{
         execution::{FrameCaptureExecutionState, FrameCaptureExecutor, FrameCaptureStartError},
         model::{FrameCaptureFormat, FrameTimestamp},
-        preview::{FramePreview, PREVIEW_DEBOUNCE},
+        preview::{
+            FramePreview, PREVIEW_DEBOUNCE, PreviewExtractionError, PreviewExtractionOwner,
+            PreviewGeneration, PreviewImage, PreviewRequest, PreviewState, decode_preview_png,
+        },
         thumbnail::{FrameCaptureThumbnail, decode_frame_capture_thumbnail},
     },
     media::{
@@ -193,10 +196,29 @@ struct FrameCaptureToolState {
     source_identity: SourceIdentity,
     media: MediaFile,
     selection: FrameCaptureSelectionState,
-    preview: FramePreview<()>,
+    preview: FramePreview<PreviewImage>,
+    preview_texture: Option<FramePreviewTexture>,
     lifecycle_ui: FrameCaptureLifecycleUiState,
     start_error: Option<MediaError>,
     start_error_details_open: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct FramePreviewTexture {
+    generation: PreviewGeneration,
+    size: [usize; 2],
+    handle: TextureHandle,
+}
+
+impl std::fmt::Debug for FramePreviewTexture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FramePreviewTexture")
+            .field("generation", &self.generation)
+            .field("size", &self.size)
+            .field("texture_id", &self.handle.id())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,6 +456,11 @@ struct FrameCaptureThumbnailLoad {
     receiver: Receiver<Result<FrameCaptureThumbnail, String>>,
 }
 
+struct FramePreviewDecode {
+    request: PreviewRequest,
+    receiver: Receiver<Result<PreviewImage, PreviewExtractionError>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QueueExecutionEvent {
     job_id: JobId,
@@ -477,6 +504,32 @@ impl FrameCaptureThumbnailLoad {
             request_id,
             receiver,
         })
+    }
+}
+
+impl FramePreviewDecode {
+    fn spawn(request: PreviewRequest, bytes: Vec<u8>, context: Context) -> io::Result<Self> {
+        Self::spawn_with(request, context, move || decode_preview_png(&bytes))
+    }
+
+    fn spawn_with<F>(request: PreviewRequest, context: Context, decode: F) -> io::Result<Self>
+    where
+        F: FnOnce() -> Result<PreviewImage, PreviewExtractionError> + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("apollo-frame-preview-decode".to_owned())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode))
+                    .unwrap_or_else(|_| {
+                        Err(PreviewExtractionError::Decode(
+                            "preview decode worker stopped unexpectedly".to_owned(),
+                        ))
+                    });
+                let _ = sender.send(result);
+                context.request_repaint();
+            })?;
+        Ok(Self { request, receiver })
     }
 }
 
@@ -624,6 +677,8 @@ pub(crate) struct ApolloApp {
     queue_event_sender: mpsc::Sender<QueueExecutionEvent>,
     queue_event_receiver: Receiver<QueueExecutionEvent>,
     frame_capture_thumbnail_load: Option<FrameCaptureThumbnailLoad>,
+    frame_preview_extraction: PreviewExtractionOwner,
+    frame_preview_decode: Option<FramePreviewDecode>,
     progress_repaint: MediaProgressRepaintOwner,
     media_inspection: Option<MediaInspection>,
     file_dialog: FileDialogOwner,
@@ -661,6 +716,8 @@ impl ApolloApp {
             queue_event_sender,
             queue_event_receiver,
             frame_capture_thumbnail_load: None,
+            frame_preview_extraction: PreviewExtractionOwner::default(),
+            frame_preview_decode: None,
             progress_repaint: MediaProgressRepaintOwner::new(egui_context.clone()),
             media_inspection: None,
             file_dialog: FileDialogOwner::new(egui_context.clone(), native_window_owner),
@@ -867,6 +924,7 @@ impl ApolloApp {
         self.state.media_intake = job.retained_intake();
         self.state.source_presentation = Some(Arc::new(SourcePresentation::new(job.media())));
         self.frame_capture_thumbnail_load = None;
+        self.cancel_frame_preview_work();
         self.state.retire_tool_sessions();
         if !self.activate_cached_source(operation) {
             return false;
@@ -1058,6 +1116,7 @@ impl ApolloApp {
 
     fn close_source(&mut self) {
         self.frame_capture_thumbnail_load = None;
+        self.cancel_frame_preview_work();
         self.state.close_source();
     }
 
@@ -1078,6 +1137,10 @@ impl ApolloApp {
                 && let Some(session) = self.state.frame_capture.as_mut()
             {
                 session.preview.invalidate();
+                session.preview_texture = None;
+            }
+            if previous_tool == Some(Tool::FrameCapture) {
+                self.cancel_frame_preview_work();
             }
         }
         if self.activate_cached_source(tool) {
@@ -1095,6 +1158,7 @@ impl ApolloApp {
             .map(|(identity, media)| (identity.clone(), media.clone()))
         else {
             self.state.navigation = NavigationState::NoSource;
+            self.cancel_frame_preview_work();
             self.state.retire_tool_sessions();
             return false;
         };
@@ -1189,6 +1253,7 @@ impl ApolloApp {
                         source_identity,
                         selection,
                         preview: FramePreview::default(),
+                        preview_texture: None,
                         lifecycle_ui: FrameCaptureLifecycleUiState::default(),
                         start_error: None,
                         start_error_details_open: false,
@@ -1219,6 +1284,8 @@ impl ApolloApp {
         };
         let Some(timestamp) = timestamp else {
             session.preview.invalidate();
+            session.preview_texture = None;
+            self.cancel_frame_preview_work();
             return;
         };
         if session
@@ -1233,6 +1300,145 @@ impl ApolloApp {
         {
             self.egui_context.request_repaint_after(PREVIEW_DEBOUNCE);
         }
+    }
+
+    fn poll_frame_capture_preview(&mut self) {
+        let due_request = self
+            .state
+            .frame_capture
+            .as_mut()
+            .and_then(|session| session.preview.take_due_request(Instant::now()));
+        if let Some(request) = due_request {
+            self.start_frame_preview_extraction(request);
+        } else if self
+            .state
+            .frame_capture
+            .as_ref()
+            .is_some_and(|session| matches!(session.preview.state(), PreviewState::Ready { .. }))
+        {
+            self.cancel_frame_preview_work();
+        }
+
+        self.poll_frame_preview_extraction();
+        self.poll_frame_preview_decode();
+        self.sync_frame_preview_texture();
+    }
+
+    fn start_frame_preview_extraction(&mut self, request: PreviewRequest) {
+        self.frame_preview_decode = None;
+        let tools = self
+            .ready_media_tools()
+            .cloned()
+            .expect("preview extraction starts only while media tools are ready");
+        let context = self.egui_context.clone();
+        let wake = MediaProcessWake::new(move |_| context.request_repaint());
+        if let Err(error) = self
+            .frame_preview_extraction
+            .start(&tools, request.clone(), wake)
+        {
+            self.settle_frame_preview(request, Err(PreviewExtractionError::Start(error)));
+        }
+    }
+
+    fn poll_frame_preview_extraction(&mut self) {
+        let Some(completion) = self.frame_preview_extraction.poll() else {
+            return;
+        };
+        let authoritative = self
+            .state
+            .frame_capture
+            .as_ref()
+            .is_some_and(|session| session.preview.is_loading(&completion.request));
+        if !authoritative {
+            return;
+        }
+
+        match completion.result {
+            Ok(bytes) => {
+                let request = completion.request;
+                match FramePreviewDecode::spawn(request.clone(), bytes, self.egui_context.clone()) {
+                    Ok(decode) => self.frame_preview_decode = Some(decode),
+                    Err(error) => {
+                        self.settle_frame_preview(
+                            request,
+                            Err(PreviewExtractionError::Decode(format!(
+                                "preview decode worker could not start: {error}"
+                            ))),
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                self.settle_frame_preview(completion.request, Err(error));
+            }
+        }
+    }
+
+    fn poll_frame_preview_decode(&mut self) {
+        let result = match self.frame_preview_decode.as_ref() {
+            Some(decode) => decode.receiver.try_recv(),
+            None => return,
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(PreviewExtractionError::Decode(
+                "preview decode worker stopped before returning a result".to_owned(),
+            )),
+        };
+        let decode = self
+            .frame_preview_decode
+            .take()
+            .expect("preview decode exists while its result is settled");
+        self.settle_frame_preview(decode.request, result);
+    }
+
+    fn settle_frame_preview(
+        &mut self,
+        request: PreviewRequest,
+        result: Result<PreviewImage, PreviewExtractionError>,
+    ) -> bool {
+        self.state
+            .frame_capture
+            .as_mut()
+            .is_some_and(|session| session.preview.settle(request, result))
+    }
+
+    fn sync_frame_preview_texture(&mut self) {
+        let Some(session) = self.state.frame_capture.as_mut() else {
+            return;
+        };
+        let PreviewState::Ready { request, image } = session.preview.state() else {
+            return;
+        };
+        if session
+            .preview_texture
+            .as_ref()
+            .is_some_and(|texture| texture.generation == request.generation)
+        {
+            return;
+        }
+        let size = image.size();
+        let color = ColorImage::from_rgba_unmultiplied(size, image.rgba());
+        let handle = self.egui_context.load_texture(
+            format!(
+                "frame-capture-preview-{}-{}",
+                session.session_id,
+                request.generation.get()
+            ),
+            color,
+            TextureOptions::LINEAR,
+        );
+        session.preview_texture = Some(FramePreviewTexture {
+            generation: request.generation,
+            size,
+            handle,
+        });
+    }
+
+    fn cancel_frame_preview_work(&mut self) {
+        self.frame_preview_extraction.cancel();
+        self.frame_preview_decode = None;
     }
 
     fn take_session_id(&mut self) -> u64 {
@@ -2341,6 +2547,7 @@ impl ApolloApp {
                     .current()
                     .map(|media| Arc::new(SourcePresentation::new(media)));
                 self.frame_capture_thumbnail_load = None;
+                self.cancel_frame_preview_work();
                 self.state.retire_tool_sessions();
                 if self.activate_cached_source(operation) {
                     self.state.enter_workspace(operation);
@@ -4051,6 +4258,7 @@ impl eframe::App for ApolloApp {
                 self.poll_file_dialog();
                 self.poll_media_inspection();
                 self.poll_batch_inspection();
+                self.poll_frame_capture_preview();
                 self.poll_frame_capture_thumbnail();
 
                 self.handle_window_file_drop(ui.ctx());
@@ -4077,14 +4285,15 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
             mpsc,
         },
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use super::{
         ApolloApp, AppSettings, AppState, BatchDefaults, BatchEditTarget, BatchItem, BatchOrigin,
-        BatchSetupState, BatchSourceState, FrameCaptureThumbnailLoad, MediaInspection,
-        MediaToolsState, NavigationState, QueueEditOrigin, QueueExecutionEvent, QueueOrigin, Tool,
-        ToolExecutionStates, audio_extract_output_dialog_request, audio_mix_output_dialog_request,
+        BatchSetupState, BatchSourceState, FrameCaptureThumbnailLoad, FramePreviewDecode,
+        MediaInspection, MediaToolsState, NavigationState, PreviewExtractionOwner, QueueEditOrigin,
+        QueueExecutionEvent, QueueOrigin, Tool, ToolExecutionStates,
+        audio_extract_output_dialog_request, audio_mix_output_dialog_request,
         completed_output_folder, file_intake_enabled, frame_capture_output_dialog_request,
         operation_workspace_visible, queue_event_matches_active, queue_execution_wake,
         refresh_batch_items, remux_output_dialog_request, settle_output_file_dialog,
@@ -4105,6 +4314,7 @@ mod tests {
         frame_capture::{
             execution::FrameCaptureExecutionState,
             model::{FrameCaptureFormat, FrameTimestamp},
+            preview::{PREVIEW_DEBOUNCE, PreviewImage, PreviewState},
             thumbnail::FrameCaptureThumbnail,
         },
         media::{
@@ -4413,6 +4623,8 @@ mod tests {
             queue_event_sender,
             queue_event_receiver,
             frame_capture_thumbnail_load: None,
+            frame_preview_extraction: PreviewExtractionOwner::default(),
+            frame_preview_decode: None,
             progress_repaint: MediaProgressRepaintOwner::new(egui_context.clone()),
             media_inspection: None,
             file_dialog: FileDialogOwner::new_for_test(egui_context.clone(), || {
@@ -4966,6 +5178,162 @@ mod tests {
                 .unwrap()
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn live_preview_decode_runs_on_the_dedicated_worker() {
+        let (directory, path) = temp_file("preview-decode-worker");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let request = match app.state.frame_capture.as_ref().unwrap().preview.state() {
+            PreviewState::Debouncing { request, .. } => request.clone(),
+            state => panic!("expected debouncing preview, got {state:?}"),
+        };
+        let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
+        let decode = FramePreviewDecode::spawn_with(request, egui::Context::default(), move || {
+            thread_sender
+                .send(std::thread::current().name().map(str::to_owned))
+                .unwrap();
+            Ok(PreviewImage::from_rgba([2, 1], vec![255; 8]).unwrap())
+        })
+        .expect("preview decode worker should start");
+
+        assert_eq!(
+            thread_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            Some("apollo-frame-preview-decode".to_owned())
+        );
+        assert!(
+            decode
+                .receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_ok()
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn authoritative_preview_texture_is_stable_across_unrelated_repaints() {
+        let (directory, path) = temp_file("preview-texture-stability");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let session = app.state.frame_capture.as_mut().unwrap();
+        let request = session
+            .preview
+            .take_due_request(Instant::now() + PREVIEW_DEBOUNCE)
+            .unwrap();
+        assert!(session.preview.settle(
+            request,
+            Ok(PreviewImage::from_rgba([2, 1], vec![255; 8]).unwrap())
+        ));
+
+        app.sync_frame_preview_texture();
+        let first_texture = app
+            .state
+            .frame_capture
+            .as_ref()
+            .unwrap()
+            .preview_texture
+            .as_ref()
+            .unwrap()
+            .handle
+            .id();
+        app.egui_context.request_repaint();
+        app.sync_frame_preview_texture();
+        let second_texture = app
+            .state
+            .frame_capture
+            .as_ref()
+            .unwrap()
+            .preview_texture
+            .as_ref()
+            .unwrap()
+            .handle
+            .id();
+
+        assert_eq!(first_texture, second_texture);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cached_timestamp_becomes_ready_without_launching_ffmpeg() {
+        let (directory, path) = temp_file("preview-cache-hit");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let session = app.state.frame_capture.as_mut().unwrap();
+        let first = session
+            .preview
+            .take_due_request(Instant::now() + PREVIEW_DEBOUNCE)
+            .unwrap();
+        assert!(session.preview.settle(
+            first,
+            Ok(PreviewImage::from_rgba([2, 1], vec![255; 8]).unwrap())
+        ));
+        let cached_generation = session
+            .preview
+            .schedule(
+                &session.source_identity,
+                &session.media,
+                FrameTimestamp::ZERO,
+                Instant::now() - PREVIEW_DEBOUNCE,
+            )
+            .unwrap();
+
+        app.poll_frame_capture_preview();
+
+        assert!(matches!(
+            app.state.frame_capture.as_ref().unwrap().preview.state(),
+            PreviewState::Ready { request, image }
+                if request.generation == cached_generation && image.size() == [2, 1]
+        ));
+        assert!(app.frame_preview_extraction.poll().is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_decode_completion_is_rejected_after_a_newer_edit() {
+        let (directory, path) = temp_file("preview-stale-decode");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let session = app.state.frame_capture.as_mut().unwrap();
+        let stale_request = session
+            .preview
+            .take_due_request(Instant::now() + PREVIEW_DEBOUNCE)
+            .unwrap();
+        let current_generation = session
+            .preview
+            .schedule(
+                &session.source_identity,
+                &session.media,
+                FrameTimestamp::from_milliseconds(500),
+                Instant::now(),
+            )
+            .unwrap();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.frame_preview_decode = Some(FramePreviewDecode {
+            request: stale_request,
+            receiver,
+        });
+        sender
+            .send(Ok(PreviewImage::from_rgba([2, 1], vec![255; 8]).unwrap()))
+            .unwrap();
+
+        app.poll_frame_preview_decode();
+
+        assert!(app.frame_preview_decode.is_none());
+        assert!(matches!(
+            app.state.frame_capture.as_ref().unwrap().preview.state(),
+            PreviewState::Debouncing { request, .. }
+                if request.generation == current_generation
+                    && request.timestamp == FrameTimestamp::from_milliseconds(500)
+        ));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
