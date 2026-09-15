@@ -12,14 +12,20 @@ use std::{
 
 use egui::Context;
 
-use super::{model::MediaFile, tools::MediaTools};
+use super::{intake::SourceIdentity, model::MediaFile, tools::MediaTools};
 
 pub const MAX_BATCH_INSPECTIONS: usize = 2;
 
 #[derive(Debug)]
 pub struct BatchInspectionResult {
     pub index: usize,
-    pub result: Result<MediaFile, String>,
+    pub result: Result<BatchInspectedMedia, String>,
+}
+
+#[derive(Debug)]
+pub struct BatchInspectedMedia {
+    pub source_identity: SourceIdentity,
+    pub media: MediaFile,
 }
 
 pub struct BatchInspectionOwner {
@@ -31,13 +37,19 @@ pub struct BatchInspectionOwner {
 impl BatchInspectionOwner {
     pub fn spawn(tools: MediaTools, paths: Vec<PathBuf>, context: Context) -> io::Result<Self> {
         Self::spawn_with(paths, context, move |path| {
-            super::probe::probe_media(&tools, path).map_err(|error| error.to_string())
+            let source_identity = SourceIdentity::read(path).map_err(|error| error.to_string())?;
+            let media =
+                super::probe::probe_media(&tools, path).map_err(|error| error.to_string())?;
+            Ok(BatchInspectedMedia {
+                source_identity,
+                media,
+            })
         })
     }
 
     fn spawn_with<F>(paths: Vec<PathBuf>, context: Context, inspect: F) -> io::Result<Self>
     where
-        F: Fn(&std::path::Path) -> Result<MediaFile, String> + Send + Sync + 'static,
+        F: Fn(&std::path::Path) -> Result<BatchInspectedMedia, String> + Send + Sync + 'static,
     {
         let remaining = paths.len();
         let work = Arc::new(Mutex::new(
@@ -124,8 +136,8 @@ mod tests {
         time::Duration,
     };
 
-    use super::{BatchInspectionOwner, MAX_BATCH_INSPECTIONS};
-    use crate::media::model::MediaFile;
+    use super::{BatchInspectedMedia, BatchInspectionOwner, MAX_BATCH_INSPECTIONS};
+    use crate::media::{intake::SourceIdentity, model::MediaFile};
 
     #[test]
     fn inspection_concurrency_is_bounded_and_results_keep_source_order_identity() {
@@ -133,7 +145,22 @@ mod tests {
         let peak = Arc::new(AtomicUsize::new(0));
         let active_for_worker = Arc::clone(&active);
         let peak_for_worker = Arc::clone(&peak);
-        let paths = (0..8).map(|index| format!("{index}.mkv").into()).collect();
+        let directory = std::env::temp_dir().join(format!(
+            "apollo-batch-inspection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let paths = (0..8)
+            .map(|index| {
+                let path = directory.join(format!("{index}.mkv"));
+                std::fs::write(&path, [index as u8]).unwrap();
+                path
+            })
+            .collect();
         let mut owner = BatchInspectionOwner::spawn_with(
             paths,
             egui::Context::default(),
@@ -142,23 +169,34 @@ mod tests {
                 peak_for_worker.fetch_max(current, Ordering::AcqRel);
                 thread::sleep(Duration::from_millis(2));
                 active_for_worker.fetch_sub(1, Ordering::AcqRel);
-                Ok(MediaFile {
-                    path: path.to_path_buf(),
-                    duration: None,
-                    streams: Vec::new(),
-                    video_streams: Vec::new(),
-                    audio_streams: Vec::new(),
+                Ok(BatchInspectedMedia {
+                    source_identity: SourceIdentity::read(path).unwrap(),
+                    media: MediaFile {
+                        path: path.to_path_buf(),
+                        duration: None,
+                        streams: Vec::new(),
+                        video_streams: Vec::new(),
+                        audio_streams: Vec::new(),
+                    },
                 })
             },
         )
         .unwrap();
         let mut indexes = Vec::new();
         while !owner.is_complete() {
-            indexes.extend(owner.poll().into_iter().map(|result| result.index));
+            for result in owner.poll() {
+                let inspected = result.result.unwrap();
+                assert_eq!(
+                    inspected.source_identity,
+                    SourceIdentity::read(&inspected.media.path).unwrap()
+                );
+                indexes.push(result.index);
+            }
             thread::yield_now();
         }
         indexes.sort_unstable();
         assert_eq!(indexes, (0..8).collect::<Vec<_>>());
         assert!(peak.load(Ordering::Acquire) <= MAX_BATCH_INSPECTIONS);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

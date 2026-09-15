@@ -111,6 +111,15 @@ pub struct FrameNavigationAvailability {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameCapturePositionSurface {
+    Simple,
+    Precision {
+        preview: FrameCaptureLivePreview,
+        navigation: FrameNavigationAvailability,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositionSettle {
     Debounced,
     Immediate,
@@ -270,8 +279,7 @@ pub fn show<'a>(
     media: &MediaFile,
     presentation: &FrameCapturePresentation,
     state: &mut FrameCaptureSelectionState,
-    live_preview: Option<FrameCaptureLivePreview>,
-    navigation: Option<FrameNavigationAvailability>,
+    position_surface: FrameCapturePositionSurface,
     mode: impl Into<OperationSurfaceMode<'a>>,
 ) -> FrameCaptureSelectionAction {
     let mode = mode.into();
@@ -285,19 +293,18 @@ pub fn show<'a>(
         |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
 
-            if let Some(live_preview) = live_preview {
-                show_live_preview(ui, media, live_preview, state.valid_position(media));
-                ui.add_space(theme::SPACING.related);
-                show_precision_position(
-                    ui,
-                    media,
-                    presentation,
-                    state,
-                    navigation.expect("live preview owns precision navigation presentation"),
-                    &action,
-                );
-            } else {
-                show_legacy_timestamp(ui, media, presentation, state);
+            match position_surface {
+                FrameCapturePositionSurface::Simple => {
+                    show_legacy_timestamp(ui, media, presentation, state);
+                }
+                FrameCapturePositionSurface::Precision {
+                    preview,
+                    navigation,
+                } => {
+                    show_live_preview(ui, media, preview, state.valid_position(media));
+                    ui.add_space(theme::SPACING.related);
+                    show_precision_position(ui, media, presentation, state, navigation, &action);
+                }
             }
 
             ui.add_space(theme::SPACING.section);
@@ -727,9 +734,9 @@ mod tests {
     };
 
     use super::{
-        FrameCaptureLivePreview, FrameCapturePresentation, FrameCaptureSelectionState,
-        FrameNavigationAvailability, LivePreviewStatus, PositionSettle, format_detail,
-        format_duration, ready_feedback, scrubber_maximum, scrubber_settle,
+        FrameCaptureLivePreview, FrameCapturePositionSurface, FrameCapturePresentation,
+        FrameCaptureSelectionState, FrameNavigationAvailability, LivePreviewStatus, PositionSettle,
+        format_detail, format_duration, ready_feedback, scrubber_maximum, scrubber_settle,
     };
 
     fn media(duration: Option<Duration>) -> MediaFile {
@@ -874,7 +881,14 @@ mod tests {
         let presentation = FrameCapturePresentation::new(&media);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &presentation, &mut state, None, None, true);
+            let _ = super::show(
+                ui,
+                &media,
+                &presentation,
+                &mut state,
+                FrameCapturePositionSurface::Simple,
+                true,
+            );
         });
         assert!(output.shapes.iter().any(|shape| {
             shape_contains(&shape.shape, "Enter a timestamp using HH:MM:SS.mmm.")
@@ -924,7 +938,14 @@ mod tests {
         let mut state = FrameCaptureSelectionState::new(&media);
 
         let output = context.run_ui(Default::default(), |ui| {
-            let _ = super::show(ui, &media, &presentation, &mut state, None, None, true);
+            let _ = super::show(
+                ui,
+                &media,
+                &presentation,
+                &mut state,
+                FrameCapturePositionSurface::Simple,
+                true,
+            );
         });
 
         assert!(
@@ -961,13 +982,15 @@ mod tests {
                 &media,
                 &presentation,
                 &mut state,
-                Some(preview),
-                Some(FrameNavigationAvailability {
-                    previous: false,
-                    next: false,
-                    loading: true,
-                    failed: false,
-                }),
+                FrameCapturePositionSurface::Precision {
+                    preview,
+                    navigation: FrameNavigationAvailability {
+                        previous: false,
+                        next: false,
+                        loading: true,
+                        failed: false,
+                    },
+                },
                 true,
             );
         });
@@ -1000,13 +1023,15 @@ mod tests {
                 &media,
                 &presentation,
                 &mut state,
-                Some(preview),
-                Some(FrameNavigationAvailability {
-                    previous: false,
-                    next: true,
-                    loading: false,
-                    failed: false,
-                }),
+                FrameCapturePositionSurface::Precision {
+                    preview,
+                    navigation: FrameNavigationAvailability {
+                        previous: false,
+                        next: true,
+                        loading: false,
+                        failed: false,
+                    },
+                },
                 true,
             );
         });
@@ -1051,13 +1076,15 @@ mod tests {
                 &media,
                 &presentation,
                 &mut state,
-                Some(preview),
-                Some(FrameNavigationAvailability {
-                    previous: false,
-                    next: false,
-                    loading: false,
-                    failed: false,
-                }),
+                FrameCapturePositionSurface::Precision {
+                    preview,
+                    navigation: FrameNavigationAvailability {
+                        previous: false,
+                        next: false,
+                        loading: false,
+                        failed: false,
+                    },
+                },
                 true,
             );
         });
@@ -1108,13 +1135,15 @@ mod tests {
                 &media,
                 &presentation,
                 &mut state,
-                Some(preview),
-                Some(FrameNavigationAvailability {
-                    previous: true,
-                    next: true,
-                    loading: false,
-                    failed: false,
-                }),
+                FrameCapturePositionSurface::Precision {
+                    preview,
+                    navigation: FrameNavigationAvailability {
+                        previous: true,
+                        next: true,
+                        loading: false,
+                        failed: false,
+                    },
+                },
                 true,
             );
         });
