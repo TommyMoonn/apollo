@@ -1,6 +1,9 @@
-use std::ffi::OsString;
+use std::{ffi::OsString, path::Path};
 
-use super::model::{FrameCaptureFormat, FrameCaptureRequest};
+use super::{
+    model::{FrameCaptureFormat, FrameCaptureRequest, FrameTimestamp},
+    preview::{PREVIEW_MAXIMUM_EDGE, PreviewRequest},
+};
 
 const JPEG_QUALITY: &str = "2";
 
@@ -14,24 +17,18 @@ pub fn build_frame_capture_invocation(
     request: &FrameCaptureRequest,
     primary_video_stream_index: u32,
 ) -> FfmpegInvocation {
-    let mut args = vec![
-        OsString::from("-ss"),
-        OsString::from(request.timestamp.to_string()),
-        OsString::from("-i"),
-        request.input.as_os_str().to_os_string(),
-        OsString::from("-map"),
-        OsString::from(format!("0:{primary_video_stream_index}")),
-        OsString::from("-frames:v"),
-        OsString::from("1"),
-        OsString::from("-abort_on"),
-        OsString::from("empty_output"),
-        OsString::from("-an"),
+    let mut args = frame_selection_args(
+        &request.input,
+        primary_video_stream_index,
+        request.timestamp,
+    );
+    args.extend([
         OsString::from("-c:v"),
         OsString::from(match request.format {
             FrameCaptureFormat::Png => "png",
             FrameCaptureFormat::Jpeg => "mjpeg",
         }),
-    ];
+    ]);
 
     if request.format == FrameCaptureFormat::Jpeg {
         args.extend([OsString::from("-q:v"), OsString::from(JPEG_QUALITY)]);
@@ -46,4 +43,47 @@ pub fn build_frame_capture_invocation(
         request.output.as_os_str().to_os_string(),
     ]);
     FfmpegInvocation { args }
+}
+
+pub fn build_preview_invocation(request: &PreviewRequest) -> FfmpegInvocation {
+    let mut args = frame_selection_args(
+        &request.input,
+        request.video_stream_index,
+        request.timestamp,
+    );
+    args.extend([
+        OsString::from("-vf"),
+        OsString::from(format!(
+            "scale=w='min({PREVIEW_MAXIMUM_EDGE},iw)':h='min({PREVIEW_MAXIMUM_EDGE},ih)':force_original_aspect_ratio=decrease"
+        )),
+        OsString::from("-pix_fmt"),
+        OsString::from("rgba"),
+        OsString::from("-c:v"),
+        OsString::from("png"),
+        OsString::from("-nostats"),
+        OsString::from("-f"),
+        OsString::from("image2pipe"),
+        OsString::from("pipe:1"),
+    ]);
+    FfmpegInvocation { args }
+}
+
+fn frame_selection_args(
+    input: &Path,
+    primary_video_stream_index: u32,
+    timestamp: FrameTimestamp,
+) -> Vec<OsString> {
+    vec![
+        OsString::from("-ss"),
+        OsString::from(timestamp.to_string()),
+        OsString::from("-i"),
+        input.as_os_str().to_os_string(),
+        OsString::from("-map"),
+        OsString::from(format!("0:{primary_video_stream_index}")),
+        OsString::from("-frames:v"),
+        OsString::from("1"),
+        OsString::from("-abort_on"),
+        OsString::from("empty_output"),
+        OsString::from("-an"),
+    ]
 }

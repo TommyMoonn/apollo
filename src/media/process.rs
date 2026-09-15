@@ -124,6 +124,11 @@ impl MediaProcessCommand {
     pub fn arguments(&self) -> &[OsString] {
         &self.args
     }
+
+    #[cfg(test)]
+    pub(crate) fn captured_stdout_limit_bytes(&self) -> usize {
+        self.captured_stdout_limit
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +276,10 @@ impl MediaProcess {
 
     pub fn captured_stdout(&self) -> String {
         lock_unpoisoned(&self.captured_stdout).as_lossy_string()
+    }
+
+    pub fn captured_stdout_bytes(&self) -> Vec<u8> {
+        lock_unpoisoned(&self.captured_stdout).bytes.clone()
     }
 }
 
@@ -763,6 +772,10 @@ mod tests {
 
         assert_eq!(wait_for_process(&process), MediaProcessState::Completed);
         assert_eq!(process.captured_stdout().trim(), "stdout-line");
+        assert!(matches!(
+            process.captured_stdout_bytes().as_slice(),
+            b"stdout-line\n" | b"stdout-line\r\n"
+        ));
     }
 
     #[test]
