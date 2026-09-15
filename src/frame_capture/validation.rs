@@ -5,7 +5,7 @@ use crate::media::{
     output::{MediaOutputError, validate_output_path},
 };
 
-use super::model::FrameCaptureRequest;
+use super::model::{FrameCaptureRequest, FramePosition};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameCaptureValidationError {
@@ -62,7 +62,7 @@ pub fn validate_frame_capture_request(
     if media.video_streams.is_empty() {
         return Err(FrameCaptureValidationError::MissingVideoStream);
     }
-    validate_frame_timestamp(request.timestamp, media.duration)?;
+    validate_frame_position(request.position, media.duration)?;
 
     validate_output_extension(request)?;
     validate_output_path(&request.output).map_err(FrameCaptureValidationError::Output)
@@ -72,17 +72,23 @@ pub fn validate_frame_timestamp(
     timestamp: super::model::FrameTimestamp,
     duration: Option<Duration>,
 ) -> Result<(), FrameCaptureValidationError> {
-    if timestamp.milliseconds() < 0 {
+    validate_frame_position(timestamp.into(), duration)
+}
+
+pub fn validate_frame_position(
+    position: FramePosition,
+    duration: Option<Duration>,
+) -> Result<(), FrameCaptureValidationError> {
+    if position.is_negative() {
         return Err(FrameCaptureValidationError::NegativeTimestamp);
     }
-    if let Some(duration) = duration {
-        let duration_milliseconds = duration.as_millis();
-        if Duration::from_millis(timestamp.milliseconds() as u64) >= duration {
-            return Err(FrameCaptureValidationError::TimestampAtOrBeyondDuration {
-                timestamp_milliseconds: timestamp.milliseconds(),
-                duration_milliseconds,
-            });
-        }
+    if let Some(duration) = duration
+        && position.is_at_or_beyond(duration)
+    {
+        return Err(FrameCaptureValidationError::TimestampAtOrBeyondDuration {
+            timestamp_milliseconds: position.display_timestamp().milliseconds(),
+            duration_milliseconds: duration.as_millis(),
+        });
     }
     Ok(())
 }

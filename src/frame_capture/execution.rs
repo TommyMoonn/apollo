@@ -290,7 +290,7 @@ mod tests {
             if existing_output {
                 fs::write(&request.output, b"occupied").unwrap();
             } else {
-                request.timestamp = FrameTimestamp::from_milliseconds(-1);
+                request.position = FrameTimestamp::from_milliseconds(-1).into();
             }
             let tools = fake_tools(&directory);
             let launches = Arc::new(AtomicUsize::new(0));
@@ -318,7 +318,7 @@ mod tests {
     fn exact_duration_timestamp_is_rejected_before_launch() {
         let directory = TestDirectory::new("duration-boundary-no-launch");
         let (mut request, media) = valid_request_and_media(&directory);
-        request.timestamp = FrameTimestamp::from_milliseconds(10_000);
+        request.position = FrameTimestamp::from_milliseconds(10_000).into();
         let tools = fake_tools(&directory);
         let launches = Arc::new(AtomicUsize::new(0));
         let launch_count = Arc::clone(&launches);
@@ -421,7 +421,7 @@ mod tests {
             FrameCaptureRequest {
                 input: input.clone(),
                 output: directory.path().join("frame.png"),
-                timestamp: FrameTimestamp::from_milliseconds(1_250),
+                position: FrameTimestamp::from_milliseconds(1_250).into(),
                 format: FrameCaptureFormat::Png,
             },
             MediaFile {

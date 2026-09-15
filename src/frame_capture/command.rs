@@ -1,7 +1,7 @@
 use std::{ffi::OsString, path::Path};
 
 use super::{
-    model::{FrameCaptureFormat, FrameCaptureRequest, FrameTimestamp},
+    model::{FrameCaptureFormat, FrameCaptureRequest, FramePosition},
     preview::{PREVIEW_MAXIMUM_EDGE, PreviewRequest},
 };
 
@@ -17,11 +17,8 @@ pub fn build_frame_capture_invocation(
     request: &FrameCaptureRequest,
     primary_video_stream_index: u32,
 ) -> FfmpegInvocation {
-    let mut args = frame_selection_args(
-        &request.input,
-        primary_video_stream_index,
-        request.timestamp,
-    );
+    let mut args =
+        frame_selection_args(&request.input, primary_video_stream_index, request.position);
     args.extend([
         OsString::from("-c:v"),
         OsString::from(match request.format {
@@ -46,11 +43,8 @@ pub fn build_frame_capture_invocation(
 }
 
 pub fn build_preview_invocation(request: &PreviewRequest) -> FfmpegInvocation {
-    let mut args = frame_selection_args(
-        &request.input,
-        request.video_stream_index,
-        request.timestamp,
-    );
+    let mut args =
+        frame_selection_args(&request.input, request.video_stream_index, request.position);
     args.extend([
         OsString::from("-vf"),
         OsString::from(format!(
@@ -71,11 +65,11 @@ pub fn build_preview_invocation(request: &PreviewRequest) -> FfmpegInvocation {
 fn frame_selection_args(
     input: &Path,
     primary_video_stream_index: u32,
-    timestamp: FrameTimestamp,
+    position: FramePosition,
 ) -> Vec<OsString> {
     vec![
         OsString::from("-ss"),
-        OsString::from(timestamp.to_string()),
+        OsString::from(position.ffmpeg_timestamp()),
         OsString::from("-i"),
         input.as_os_str().to_os_string(),
         OsString::from("-map"),

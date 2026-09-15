@@ -121,11 +121,11 @@ impl FrameCaptureSelectionState {
 
     pub fn from_request(media: &MediaFile, request: &FrameCaptureRequest) -> Self {
         let mut state = Self {
-            timestamp_text: request.timestamp.to_string(),
+            timestamp_text: request.position.to_string(),
             format: request.format,
             output_name: OutputNameState::new(
                 &media.path,
-                default_output_stem(&media.path, request.timestamp),
+                default_output_stem(&media.path, request.position.display_timestamp()),
             ),
         };
         state.output_name.set_custom_path(request.output.clone());
@@ -183,7 +183,7 @@ impl FrameCaptureSelectionState {
         Some(FrameCaptureRequest {
             input: media.path.clone(),
             output: self.output_path(),
-            timestamp: FrameTimestamp::from_str(&self.timestamp_text).ok()?,
+            position: FrameTimestamp::from_str(&self.timestamp_text).ok()?.into(),
             format: self.format,
         })
     }
@@ -198,7 +198,7 @@ impl FrameCaptureSelectionState {
         let request = FrameCaptureRequest {
             input: media.path.clone(),
             output: self.output_path(),
-            timestamp,
+            position: timestamp.into(),
             format: self.format,
         };
         validate_frame_capture_request(&request, media).map_err(FrameCaptureReadyError::Request)
@@ -503,7 +503,15 @@ mod tests {
             PathBuf::from("captures/recording-frame-00-00-00-000.png")
         );
         assert!(state.can_capture(&media));
-        assert_eq!(state.request(&media).unwrap().timestamp.milliseconds(), 0);
+        assert_eq!(
+            state
+                .request(&media)
+                .unwrap()
+                .position
+                .display_timestamp()
+                .milliseconds(),
+            0
+        );
     }
 
     #[test]
@@ -513,10 +521,18 @@ mod tests {
         state.set_timestamp_text(&media, "00:00:01.250".into());
         let preview_timestamp = state.valid_timestamp(&media).unwrap();
         assert_eq!(
-            state.request(&media).unwrap().timestamp.milliseconds(),
+            state
+                .request(&media)
+                .unwrap()
+                .position
+                .display_timestamp()
+                .milliseconds(),
             1_250
         );
-        assert_eq!(state.request(&media).unwrap().timestamp, preview_timestamp);
+        assert_eq!(
+            state.request(&media).unwrap().position.display_timestamp(),
+            preview_timestamp
+        );
         assert!(state.can_capture(&media));
         assert_eq!(
             state.output_path(),

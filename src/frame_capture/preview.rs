@@ -19,7 +19,9 @@ use crate::media::{
 };
 
 use super::{
-    command::build_preview_invocation, model::FrameTimestamp, validation::validate_frame_timestamp,
+    command::build_preview_invocation,
+    model::{FramePosition, FrameTimestamp},
+    validation::validate_frame_position,
 };
 
 pub const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -42,7 +44,7 @@ pub struct PreviewRequest {
     pub source_identity: SourceIdentity,
     pub input: PathBuf,
     pub video_stream_index: u32,
-    pub timestamp: FrameTimestamp,
+    pub position: FramePosition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,7 +291,7 @@ pub enum PreviewState<Image> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PreviewCacheKey {
     source_identity: SourceIdentity,
-    timestamp: FrameTimestamp,
+    position: FramePosition,
     maximum_edge: u32,
 }
 
@@ -297,7 +299,7 @@ impl From<&PreviewRequest> for PreviewCacheKey {
     fn from(request: &PreviewRequest) -> Self {
         Self {
             source_identity: request.source_identity.clone(),
-            timestamp: request.timestamp,
+            position: request.position,
             maximum_edge: PREVIEW_MAXIMUM_EDGE,
         }
     }
@@ -334,6 +336,16 @@ impl<Image: Clone> FramePreview<Image> {
         timestamp: FrameTimestamp,
         now: Instant,
     ) -> Option<PreviewGeneration> {
+        self.schedule_position(source_identity, media, timestamp.into(), now)
+    }
+
+    pub fn schedule_position(
+        &mut self,
+        source_identity: &SourceIdentity,
+        media: &MediaFile,
+        position: FramePosition,
+        now: Instant,
+    ) -> Option<PreviewGeneration> {
         if self.source_identity.as_ref() != Some(source_identity) {
             self.source_identity = Some(source_identity.clone());
             self.cache.clear();
@@ -342,7 +354,7 @@ impl<Image: Clone> FramePreview<Image> {
             self.invalidate();
             return None;
         };
-        if validate_frame_timestamp(timestamp, media.duration).is_err() {
+        if validate_frame_position(position, media.duration).is_err() {
             self.invalidate();
             return None;
         }
@@ -354,7 +366,7 @@ impl<Image: Clone> FramePreview<Image> {
                 source_identity: source_identity.clone(),
                 input: media.path.clone(),
                 video_stream_index: video_stream.stream_index,
-                timestamp,
+                position,
             },
             ready_at: now + PREVIEW_DEBOUNCE,
         };
@@ -480,7 +492,13 @@ mod tests {
         PREVIEW_STDOUT_LIMIT_BYTES, PreviewExtraction, PreviewExtractionError,
         PreviewExtractionOwner, PreviewImage, PreviewState, decode_preview_png,
     };
-    use crate::frame_capture::model::FrameTimestamp;
+    use crate::frame_capture::{
+        command::{build_frame_capture_invocation, build_preview_invocation},
+        model::{
+            FrameCaptureFormat, FrameCaptureRequest, FrameTimeBase, FrameTimestamp,
+            ResolvedFramePosition,
+        },
+    };
 
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
 
@@ -531,7 +549,7 @@ mod tests {
                     && request.source_identity == identity
                     && request.input == media.path
                     && request.video_stream_index == 7
-                    && request.timestamp == timestamp
+                    && request.position == timestamp.into()
                     && *ready_at == now + PREVIEW_DEBOUNCE
         ));
         assert!(
@@ -543,8 +561,8 @@ mod tests {
             preview
                 .take_due_request(now + PREVIEW_DEBOUNCE)
                 .unwrap()
-                .timestamp,
-            timestamp
+                .position,
+            timestamp.into()
         );
         assert!(matches!(preview.state(), PreviewState::Loading { .. }));
         fs::remove_dir_all(directory).unwrap();
@@ -610,7 +628,7 @@ mod tests {
             .take_due_request(now + PREVIEW_DEBOUNCE + Duration::from_millis(50))
             .unwrap();
         assert_eq!(request.generation, second);
-        assert_eq!(request.timestamp, second_timestamp);
+        assert_eq!(request.position, second_timestamp.into());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -698,7 +716,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(extraction.request().timestamp, timestamp);
+        assert_eq!(extraction.request().position, timestamp.into());
         let observed = observed.lock().unwrap();
         let command = observed.as_ref().unwrap();
         assert_eq!(command.program(), Path::new("resolved-ffmpeg"));
@@ -721,6 +739,32 @@ mod tests {
             command.captured_stdout_limit_bytes(),
             PREVIEW_STDOUT_LIMIT_BYTES
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn resolved_frame_uses_the_same_precise_seek_for_preview_and_capture() {
+        let (directory, path, identity) = temp_source("resolved-command", b"source");
+        let media = media(&path, None);
+        let position =
+            ResolvedFramePosition::new(1_001, FrameTimeBase::new(1, 30_000).unwrap()).unwrap();
+        let now = Instant::now();
+        let mut preview = FramePreview::<()>::default();
+        preview
+            .schedule_position(&identity, &media, position.into(), now)
+            .unwrap();
+        let preview_request = preview.take_due_request(now + PREVIEW_DEBOUNCE).unwrap();
+        let capture_request = FrameCaptureRequest {
+            input: path,
+            output: directory.join("frame.png"),
+            position: position.into(),
+            format: FrameCaptureFormat::Png,
+        };
+
+        let preview_args = build_preview_invocation(&preview_request).args;
+        let capture_args = build_frame_capture_invocation(&capture_request, 7).args;
+        assert!(has_pair(&preview_args, "-ss", "0.033366666"));
+        assert!(has_pair(&capture_args, "-ss", "0.033366666"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -850,7 +894,7 @@ mod tests {
             preview.state(),
             PreviewState::Debouncing { request, .. }
                 if request.generation == current_generation
-                    && request.timestamp == FrameTimestamp::from_milliseconds(200)
+                    && request.position == FrameTimestamp::from_milliseconds(200).into()
         ));
         fs::remove_dir_all(directory).unwrap();
     }

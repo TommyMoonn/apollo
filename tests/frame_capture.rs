@@ -41,7 +41,7 @@ fn request(format: FrameCaptureFormat, timestamp: FrameTimestamp) -> FrameCaptur
     FrameCaptureRequest {
         input: PathBuf::from("source/input.mkv"),
         output: PathBuf::from(format!("output/frame.{}", format.extension())),
-        timestamp,
+        position: timestamp.into(),
         format,
     }
 }

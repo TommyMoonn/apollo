@@ -5364,7 +5364,8 @@ mod tests {
             app.state.frame_capture.as_ref().unwrap().preview.state(),
             PreviewState::Debouncing { request, .. }
                 if request.generation == current_generation
-                    && request.timestamp == FrameTimestamp::from_milliseconds(500)
+                    && request.position.display_timestamp()
+                        == FrameTimestamp::from_milliseconds(500)
         ));
         fs::remove_dir_all(directory).unwrap();
     }
@@ -6059,7 +6060,7 @@ mod tests {
         assert!(matches!(
             batch.items[1].operation.as_ref(),
             Some(QueuedOperation::FrameCapture(request))
-                if request.timestamp.to_string() == "00:00:10.000"
+                if request.position.to_string() == "00:00:10.000"
                     && request.format == FrameCaptureFormat::Jpeg
         ));
         assert_no_batch_execution(&app);

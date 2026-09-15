@@ -289,7 +289,7 @@ fn frame_capture(tools: &MediaTools, media: &MediaFile, directory: &Path) {
         let request = FrameCaptureRequest {
             input: media.path.clone(),
             output: directory.join(format!("frame.{}", format.extension())),
-            timestamp: FrameTimestamp::from_milliseconds(500),
+            position: FrameTimestamp::from_milliseconds(500).into(),
             format,
         };
         let mut executor = FrameCaptureExecutor::new();

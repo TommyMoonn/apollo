@@ -245,7 +245,7 @@ fn show_completed(
         ui.add_space(theme::SPACING.tight);
         technical_faint(ui, format_label(request.format));
         ui.add_space(theme::SPACING.tight);
-        technical_faint(ui, &request.timestamp.to_string());
+        technical_faint(ui, &request.position.to_string());
         ui.add_space(theme::RESULT_FOOTER_GAP);
         let (done, open_folder) = right_aligned_actions(ui, |ui| {
             ui.spacing_mut().item_spacing.x = theme::FOOTER_ACTION_GAP;
@@ -527,7 +527,7 @@ mod tests {
         FrameCaptureRequest {
             input: PathBuf::from("C:/media/recording.mkv"),
             output: PathBuf::from("C:/media/recording-frame.png"),
-            timestamp: FrameTimestamp::from_milliseconds(1_250),
+            position: FrameTimestamp::from_milliseconds(1_250).into(),
             format: FrameCaptureFormat::Png,
         }
     }
