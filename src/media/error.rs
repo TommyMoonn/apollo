@@ -37,6 +37,8 @@ pub enum MediaErrorKind {
     OutputNotWritable,
     FilePickerUnavailable,
     OutputPickerUnavailable,
+    ClipboardUnavailable,
+    FrameTooLargeToCopy,
     MultipleFiles,
     InvalidRequest,
     ChildProcessFailed,
@@ -76,6 +78,8 @@ impl MediaError {
             MediaErrorKind::OutputNotWritable => "The output location is not writable.",
             MediaErrorKind::FilePickerUnavailable => "The file picker could not be opened.",
             MediaErrorKind::OutputPickerUnavailable => "The output picker could not be opened.",
+            MediaErrorKind::ClipboardUnavailable => "The frame could not be copied.",
+            MediaErrorKind::FrameTooLargeToCopy => "This frame is too large to copy safely.",
             MediaErrorKind::MultipleFiles => "Drop one file at a time.",
             MediaErrorKind::InvalidRequest => "The requested media operation is not valid.",
             MediaErrorKind::ChildProcessFailed => "FFmpeg could not complete the media process.",
@@ -131,6 +135,12 @@ impl MediaError {
             }
             MediaErrorKind::FilePickerUnavailable => Some("Try Open files again."),
             MediaErrorKind::OutputPickerUnavailable => Some("Try Browse again."),
+            MediaErrorKind::ClipboardUnavailable => {
+                Some("Show details for the diagnostic, then try Copy frame again.")
+            }
+            MediaErrorKind::FrameTooLargeToCopy => {
+                Some("Capture the frame to an image file instead.")
+            }
             MediaErrorKind::MultipleFiles => None,
             MediaErrorKind::InvalidRequest => Some("Review the current settings and try again."),
             MediaErrorKind::ChildProcessFailed | MediaErrorKind::UnknownFfmpegFailure => {
@@ -186,6 +196,14 @@ impl MediaError {
 
     pub fn output_picker_unavailable(diagnostic: impl Into<String>) -> Self {
         Self::with_diagnostic(MediaErrorKind::OutputPickerUnavailable, diagnostic)
+    }
+
+    pub fn clipboard_unavailable(diagnostic: impl Into<String>) -> Self {
+        Self::with_diagnostic(MediaErrorKind::ClipboardUnavailable, diagnostic)
+    }
+
+    pub fn frame_too_large(diagnostic: impl Into<String>) -> Self {
+        Self::with_diagnostic(MediaErrorKind::FrameTooLargeToCopy, diagnostic)
     }
 
     pub fn file_picker_unavailable(diagnostic: impl Into<String>) -> Self {
@@ -599,6 +617,23 @@ mod tests {
         assert_eq!(error.message(), "The file picker could not be opened.");
         assert_eq!(error.guidance(), Some("Try Open files again."));
         assert_eq!(error.diagnostic(), Some("native dialog diagnostic"));
+    }
+
+    #[test]
+    fn clipboard_failures_and_oversized_frames_have_actionable_distinct_copy() {
+        let clipboard = MediaError::clipboard_unavailable("OpenClipboard failed");
+        assert_eq!(clipboard.kind(), MediaErrorKind::ClipboardUnavailable);
+        assert_eq!(clipboard.message(), "The frame could not be copied.");
+        assert!(clipboard.guidance().unwrap().contains("Copy frame"));
+        assert_eq!(clipboard.diagnostic(), Some("OpenClipboard failed"));
+
+        let oversized = MediaError::frame_too_large("16384 x 16384 exceeds 256 MiB");
+        assert_eq!(oversized.kind(), MediaErrorKind::FrameTooLargeToCopy);
+        assert_eq!(
+            oversized.message(),
+            "This frame is too large to copy safely."
+        );
+        assert!(oversized.guidance().unwrap().contains("image file"));
     }
 
     #[test]

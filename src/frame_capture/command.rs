@@ -1,6 +1,7 @@
 use std::{ffi::OsString, path::Path};
 
 use super::{
+    clipboard::CopyFrameRequest,
     model::{FrameCaptureFormat, FrameCaptureRequest, FramePosition},
     preview::{PREVIEW_MAXIMUM_EDGE, PreviewRequest},
 };
@@ -52,6 +53,20 @@ pub fn build_preview_invocation(request: &PreviewRequest) -> FfmpegInvocation {
         )),
         OsString::from("-pix_fmt"),
         OsString::from("rgba"),
+        OsString::from("-c:v"),
+        OsString::from("png"),
+        OsString::from("-nostats"),
+        OsString::from("-f"),
+        OsString::from("image2pipe"),
+        OsString::from("pipe:1"),
+    ]);
+    FfmpegInvocation { args }
+}
+
+pub fn build_copy_frame_invocation(request: &CopyFrameRequest) -> FfmpegInvocation {
+    let mut args =
+        frame_selection_args(&request.input, request.video_stream_index, request.position);
+    args.extend([
         OsString::from("-c:v"),
         OsString::from("png"),
         OsString::from("-nostats"),

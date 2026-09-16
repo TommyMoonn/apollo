@@ -96,10 +96,15 @@ pub fn primary_button_enabled(ui: &mut Ui, label: &str, enabled: bool) -> Respon
 
 #[must_use]
 pub fn secondary_button(ui: &mut Ui, label: &str) -> Response {
+    secondary_button_enabled(ui, label, true)
+}
+
+#[must_use]
+pub fn secondary_button_enabled(ui: &mut Ui, label: &str, enabled: bool) -> Response {
     button(
         ui,
         label,
-        true,
+        enabled,
         ButtonKind {
             tone: theme::ControlTone::Standard,
             selected: false,

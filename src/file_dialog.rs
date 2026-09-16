@@ -43,6 +43,11 @@ impl WindowOwner {
             _ => Err("Apollo's native window handle is unavailable on this platform.".to_owned()),
         }
     }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) const fn native_handle(self) -> isize {
+        self.hwnd
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

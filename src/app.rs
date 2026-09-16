@@ -30,6 +30,10 @@ use apollo::{
         model::{LoudnessNormalization, OutputContainer},
     },
     frame_capture::{
+        clipboard::{
+            CopyFrameError, CopyFrameExtractionOwner, CopyFrameRequest, CopyFrameWorker,
+            copy_frame_action_eligible,
+        },
         execution::{FrameCaptureExecutionState, FrameCaptureExecutor, FrameCaptureStartError},
         frame_index::{
             FrameDirection, FrameIndexError, FrameIndexQueryOwner, FrameIndexRequest,
@@ -76,7 +80,7 @@ use apollo::{
         fonts, frame_capture as frame_capture_ui,
         frame_capture::{
             FrameCapturePositionSurface, FrameCaptureSelectionAction, FrameCaptureSelectionState,
-            FrameNavigationAvailability, PositionSettle,
+            FrameCopyActionState, FrameCopyStatus, FrameNavigationAvailability, PositionSettle,
         },
         frame_capture_progress::{
             self, FrameCaptureLifecycleAction, FrameCaptureLifecycleUiState,
@@ -205,6 +209,7 @@ struct FrameCaptureToolState {
     lifecycle_ui: FrameCaptureLifecycleUiState,
     start_error: Option<MediaError>,
     start_error_details_open: bool,
+    copy_status: FrameCopyStatus,
 }
 
 impl Deref for FrameCaptureToolState {
@@ -826,9 +831,13 @@ pub(crate) struct ApolloApp {
     frame_preview_extraction: PreviewExtractionOwner,
     frame_preview_decode: Option<FramePreviewDecode>,
     frame_index_query: FrameIndexQueryOwner,
+    copy_frame_extraction: CopyFrameExtractionOwner,
+    copy_frame_worker: Option<CopyFrameWorker>,
+    copy_frame_session_id: Option<u64>,
     progress_repaint: MediaProgressRepaintOwner,
     media_inspection: Option<MediaInspection>,
     file_dialog: FileDialogOwner,
+    clipboard_owner: Option<isize>,
     settings: AppSettings,
     egui_context: Context,
     next_media_tools_attempt_id: u64,
@@ -843,6 +852,14 @@ impl ApolloApp {
 
         let egui_context = creation_context.egui_ctx.clone();
         let native_window_owner = WindowOwner::from_window(creation_context);
+        #[cfg(target_os = "windows")]
+        let clipboard_owner = native_window_owner
+            .as_ref()
+            .ok()
+            .copied()
+            .map(WindowOwner::native_handle);
+        #[cfg(not(target_os = "windows"))]
+        let clipboard_owner = None;
         let (queue_event_sender, queue_event_receiver) = mpsc::channel();
         let mut app = Self {
             state: AppState::default(),
@@ -866,9 +883,13 @@ impl ApolloApp {
             frame_preview_extraction: PreviewExtractionOwner::default(),
             frame_preview_decode: None,
             frame_index_query: FrameIndexQueryOwner::default(),
+            copy_frame_extraction: CopyFrameExtractionOwner::default(),
+            copy_frame_worker: None,
+            copy_frame_session_id: None,
             progress_repaint: MediaProgressRepaintOwner::new(egui_context.clone()),
             media_inspection: None,
             file_dialog: FileDialogOwner::new(egui_context.clone(), native_window_owner),
+            clipboard_owner,
             settings: AppSettings::load(creation_context.storage),
             egui_context: egui_context.clone(),
             next_media_tools_attempt_id: 0,
@@ -891,11 +912,19 @@ impl ApolloApp {
     }
 
     fn immediate_operation_running(&self) -> bool {
+        self.media_operation_running() || self.copy_frame_active()
+    }
+
+    fn media_operation_running(&self) -> bool {
         self.audio_mix_executor.is_running()
             || self.upscale_executor.is_running()
             || self.remux_executor.is_running()
             || self.audio_extract_executor.is_running()
             || self.frame_capture_executor.is_running()
+    }
+
+    fn copy_frame_active(&self) -> bool {
+        self.copy_frame_extraction.is_active() || self.copy_frame_worker.is_some()
     }
 
     fn execution_arbitration(&self) -> ProcessExecutionArbitration {
@@ -1272,10 +1301,11 @@ impl ApolloApp {
                 self.audio_extract_executor.state(),
                 self.frame_capture_executor.state(),
             )
+            && !self.copy_frame_active()
     }
 
     fn workspace_interaction_enabled(&self) -> bool {
-        self.media_inspection.is_none()
+        self.media_inspection.is_none() && !self.copy_frame_active()
     }
 
     fn handle_source_action(&mut self, action: SourceAction) {
@@ -1316,6 +1346,7 @@ impl ApolloApp {
             {
                 session.preview.invalidate();
                 session.preview_texture = None;
+                session.copy_status = FrameCopyStatus::Idle;
             }
             if previous_tool == Some(Tool::FrameCapture) {
                 self.cancel_frame_capture_support();
@@ -1435,6 +1466,7 @@ impl ApolloApp {
                         lifecycle_ui: FrameCaptureLifecycleUiState::default(),
                         start_error: None,
                         start_error_details_open: false,
+                        copy_status: FrameCopyStatus::Idle,
                         media,
                     });
                 }
@@ -1887,6 +1919,147 @@ impl ApolloApp {
             editor.frame_index_due = None;
             editor.pending_step = None;
             editor.frame_navigator.invalidate();
+        }
+    }
+
+    fn start_copy_frame(&mut self) {
+        if self.copy_frame_active()
+            || self.media_operation_running()
+            || !self.execution_arbitration().immediate_start_allowed()
+        {
+            return;
+        }
+        let request = self.state.frame_capture.as_ref().and_then(|session| {
+            let source_identity = session.source_identity.as_ref()?;
+            let position = session.selection.valid_position(&session.media)?;
+            Some((
+                session.session_id,
+                CopyFrameRequest::new(source_identity, &session.media, position),
+            ))
+        });
+        let Some((session_id, request)) = request else {
+            return;
+        };
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => {
+                self.settle_copy_frame(session_id, None, Err(error));
+                return;
+            }
+        };
+        let Some(tools) = self.ready_media_tools().cloned() else {
+            return;
+        };
+        if let Some(session) = self.state.frame_capture.as_mut() {
+            session.copy_status = FrameCopyStatus::Copying;
+        }
+        self.copy_frame_session_id = Some(session_id);
+        let context = self.egui_context.clone();
+        let wake = MediaProcessWake::new(move |_| context.request_repaint());
+        if let Err(error) = self
+            .copy_frame_extraction
+            .start(&tools, request.clone(), wake)
+        {
+            self.copy_frame_session_id = None;
+            self.settle_copy_frame(session_id, Some(&request), Err(error));
+        }
+    }
+
+    fn poll_copy_frame(&mut self) {
+        if let Some(result) = self
+            .copy_frame_worker
+            .as_ref()
+            .and_then(CopyFrameWorker::poll)
+        {
+            let worker = self
+                .copy_frame_worker
+                .take()
+                .expect("copy-frame worker exists while its result is settled");
+            let session_id = self.copy_frame_session_id.take().unwrap_or_default();
+            self.settle_copy_frame(session_id, Some(&worker.request), result);
+        }
+
+        let Some(completion) = self.copy_frame_extraction.poll() else {
+            return;
+        };
+        let session_id = self.copy_frame_session_id.take().unwrap_or_default();
+        if !self.copy_frame_request_is_current(session_id, &completion.request) {
+            return;
+        }
+        match completion.result {
+            Ok(bytes) => {
+                let context = self.egui_context.clone();
+                match CopyFrameWorker::spawn(
+                    completion.request.clone(),
+                    bytes,
+                    self.clipboard_owner,
+                    move || {
+                        context.request_repaint();
+                    },
+                ) {
+                    Ok(worker) => {
+                        self.copy_frame_worker = Some(worker);
+                        self.copy_frame_session_id = Some(session_id);
+                    }
+                    Err(error) => {
+                        self.settle_copy_frame(session_id, Some(&completion.request), Err(error))
+                    }
+                }
+            }
+            Err(error) => {
+                self.settle_copy_frame(session_id, Some(&completion.request), Err(error));
+            }
+        }
+    }
+
+    fn copy_frame_request_is_current(&self, session_id: u64, request: &CopyFrameRequest) -> bool {
+        self.state.frame_capture.as_ref().is_some_and(|session| {
+            session.session_id == session_id
+                && session.source_identity.as_ref() == Some(&request.source_identity)
+        })
+    }
+
+    fn settle_copy_frame(
+        &mut self,
+        session_id: u64,
+        request: Option<&CopyFrameRequest>,
+        result: Result<(), CopyFrameError>,
+    ) {
+        let current = self.state.frame_capture.as_ref().is_some_and(|session| {
+            session.session_id == session_id
+                && request.is_none_or(|request| {
+                    session.source_identity.as_ref() == Some(&request.source_identity)
+                })
+        });
+        if !current {
+            return;
+        }
+        let session = self
+            .state
+            .frame_capture
+            .as_mut()
+            .expect("current copy-frame session remains available");
+        match result {
+            Ok(()) => {
+                session.copy_status = FrameCopyStatus::Copied;
+                self.state.operation_action_error = None;
+            }
+            Err(CopyFrameError::Cancelled) => {
+                session.copy_status = FrameCopyStatus::Idle;
+            }
+            Err(error) => {
+                session.copy_status = FrameCopyStatus::Idle;
+                self.state.operation_action_error = Some((Tool::FrameCapture, error.user_error()));
+            }
+        }
+    }
+
+    fn cancel_copy_frame_work(&mut self) {
+        self.copy_frame_extraction.cancel();
+        self.copy_frame_worker = None;
+        self.copy_frame_session_id = None;
+        if let Some(session) = self.state.frame_capture.as_mut() {
+            session.copy_status = FrameCopyStatus::Idle;
         }
     }
 
@@ -3714,7 +3887,8 @@ impl ApolloApp {
             .as_ref()
             .expect("source presentation exists while workspace is shown")
             .clone();
-        let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
+        let immediate_start_allowed =
+            self.execution_arbitration().immediate_start_allowed() && !self.copy_frame_active();
         let queue_confirmation = self.state.queue_confirmation == Some(Tool::FrameCapture);
         let action_error = self
             .state
@@ -3737,6 +3911,15 @@ impl ApolloApp {
                         .map(|texture| (texture.handle.id(), texture.size, texture.position)),
                 );
                 let navigation = frame_navigation_availability(&session.media, &session.editor);
+                let copy = FrameCopyActionState {
+                    enabled: session
+                        .selection
+                        .valid_position(&session.media)
+                        .is_some_and(|position| {
+                            copy_frame_action_eligible(&session.media, position)
+                        }),
+                    status: session.copy_status,
+                };
                 let FrameCaptureToolState { media, editor, .. } = session;
                 frame_capture_ui::show(
                     ui,
@@ -3747,6 +3930,7 @@ impl ApolloApp {
                         preview: live_preview,
                         navigation,
                     },
+                    Some(copy),
                     OperationSurfaceMode::Immediate {
                         start_allowed: immediate_start_allowed,
                         queue_confirmation,
@@ -3849,11 +4033,18 @@ impl ApolloApp {
                 )?;
                 self.frame_capture_thumbnail_load = None;
             }
+            FrameCaptureSelectionAction::CopyRequested => {
+                self.start_copy_frame();
+            }
             FrameCaptureSelectionAction::SaveQueueChanges
             | FrameCaptureSelectionAction::CancelQueueEdit
-            | FrameCaptureSelectionAction::PositionEdited(_)
-            | FrameCaptureSelectionAction::StepRequested(_)
             | FrameCaptureSelectionAction::None => {}
+            FrameCaptureSelectionAction::PositionEdited(_)
+            | FrameCaptureSelectionAction::StepRequested(_) => {
+                if let Some(session) = self.state.frame_capture.as_mut() {
+                    session.copy_status = FrameCopyStatus::Idle;
+                }
+            }
         }
         Ok(())
     }
@@ -4566,6 +4757,7 @@ fn show_operation_editor(
                     &edit.presentation.frame_capture,
                     &mut edit.frame_capture.selection,
                     position_surface,
+                    None,
                     mode,
                 ) {
                     FrameCaptureSelectionAction::BrowseOutput => QueueEditAction::BrowseOutput,
@@ -4758,6 +4950,7 @@ fn completed_output_folder(state: &QueueJobState) -> Option<&Path> {
 
 impl Drop for ApolloApp {
     fn drop(&mut self) {
+        self.cancel_copy_frame_work();
         self.handle_queue_action(QueueAction::CancelQueue);
     }
 }
@@ -4783,6 +4976,7 @@ impl eframe::App for ApolloApp {
                 self.poll_batch_inspection();
                 self.poll_frame_capture_preview();
                 self.poll_frame_capture_index();
+                self.poll_copy_frame();
                 self.poll_frame_capture_thumbnail();
 
                 self.handle_window_file_drop(ui.ctx());
@@ -4802,6 +4996,7 @@ impl eframe::App for ApolloApp {
 #[cfg(test)]
 mod tests {
     use std::{
+        ffi::{OsStr, OsString},
         fs,
         path::{Path, PathBuf},
         sync::{
@@ -4819,17 +5014,19 @@ mod tests {
         FrameStep, MediaInspection, MediaToolsState, NavigationState, PositionSettle,
         PreviewExtractionOwner, QueueEditOrigin, QueueExecutionEvent, QueueOrigin, Tool,
         ToolExecutionStates, audio_extract_output_dialog_request, audio_mix_output_dialog_request,
-        completed_output_folder, file_intake_enabled, frame_capture_output_dialog_request,
-        frame_navigation_availability, operation_workspace_visible, queue_event_matches_active,
-        queue_execution_wake, refresh_batch_items, remux_output_dialog_request,
-        settle_output_file_dialog, shows_audio_extract_lifecycle, shows_audio_mix_lifecycle,
-        shows_frame_capture_lifecycle, shows_remux_lifecycle, shows_upscale_lifecycle,
+        completed_output_folder, copy_frame_action_eligible, file_intake_enabled,
+        frame_capture_output_dialog_request, frame_navigation_availability,
+        operation_workspace_visible, queue_event_matches_active, queue_execution_wake,
+        refresh_batch_items, remux_output_dialog_request, settle_output_file_dialog,
+        shows_audio_extract_lifecycle, shows_audio_mix_lifecycle, shows_frame_capture_lifecycle,
+        shows_remux_lifecycle, shows_upscale_lifecycle,
     };
     use crate::file_dialog::{
         DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogOwner, FileDialogRequest,
         FileDialogStartError, OutputFormat,
     };
     use crate::progress_repaint::MediaProgressRepaintOwner;
+    use apollo::frame_capture::clipboard::CopyFrameExtractionOwner;
     use apollo::{
         audio_extract::{execution::AudioExtractExecutionState, model::AudioExtractFormat},
         audio_mix::{
@@ -5160,11 +5357,15 @@ mod tests {
             frame_preview_extraction: PreviewExtractionOwner::default(),
             frame_preview_decode: None,
             frame_index_query: FrameIndexQueryOwner::default(),
+            copy_frame_extraction: CopyFrameExtractionOwner::default(),
+            copy_frame_worker: None,
+            copy_frame_session_id: None,
             progress_repaint: MediaProgressRepaintOwner::new(egui_context.clone()),
             media_inspection: None,
             file_dialog: FileDialogOwner::new_for_test(egui_context.clone(), || {
                 Ok(|_: &FileDialogRequest| Ok(None))
             }),
+            clipboard_owner: None,
             settings: AppSettings::default(),
             egui_context,
             next_media_tools_attempt_id: 0,
@@ -9283,6 +9484,85 @@ mod tests {
                 )
             )
         ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn copy_frame_is_output_independent_and_never_creates_a_queue_job() {
+        let (directory, path) = temp_file("copy-frame-execute");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let session = app.state.frame_capture.as_mut().unwrap();
+        let resolved =
+            ResolvedFramePosition::new(1001, FrameTimeBase::new(1, 24_000).unwrap()).unwrap();
+        let FrameCaptureToolState { media, editor, .. } = session;
+        editor.selection.set_position(media, resolved.into());
+        editor.selection.set_output_filename_stem(OsString::new());
+        assert!(!editor.selection.can_capture(media));
+        assert!(copy_frame_action_eligible(media, resolved.into()));
+
+        app.handle_frame_capture_action(FrameCaptureSelectionAction::CopyRequested)
+            .unwrap();
+
+        assert!(app.media_queue.jobs().is_empty());
+        assert_eq!(
+            app.state
+                .operation_action_error
+                .as_ref()
+                .map(|(_, error)| error.kind()),
+            Some(MediaErrorKind::FfmpegUnavailable)
+        );
+        assert_eq!(
+            app.state
+                .frame_capture
+                .as_ref()
+                .unwrap()
+                .selection
+                .valid_position(&app.state.frame_capture.as_ref().unwrap().media),
+            Some(resolved.into())
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn oversized_copy_reaches_actionable_preflight_without_starting_work_or_mutating_output() {
+        let (directory, path) = temp_file("copy-frame-oversized");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(Tool::FrameCapture);
+        let session = app.state.frame_capture.as_mut().unwrap();
+        let position = session.selection.valid_position(&session.media).unwrap();
+        session.media.video_streams[0].width = Some(16_384);
+        session.media.video_streams[0].height = Some(16_384);
+        session
+            .selection
+            .set_output_filename_stem(OsString::from("unchanged-output"));
+        assert!(copy_frame_action_eligible(&session.media, position));
+
+        app.handle_frame_capture_action(FrameCaptureSelectionAction::CopyRequested)
+            .unwrap();
+
+        assert_eq!(
+            app.state
+                .operation_action_error
+                .as_ref()
+                .map(|(_, error)| error.kind()),
+            Some(MediaErrorKind::FrameTooLargeToCopy)
+        );
+        assert!(!app.copy_frame_extraction.is_active());
+        assert!(app.copy_frame_worker.is_none());
+        assert!(app.media_queue.jobs().is_empty());
+        assert!(app.frame_capture_thumbnail_load.is_none());
+        assert_eq!(
+            app.state
+                .frame_capture
+                .as_ref()
+                .unwrap()
+                .selection
+                .output_filename_stem(),
+            OsStr::new("unchanged-output")
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -34,6 +34,9 @@ const OUTPUT_LABEL: &str = "Output";
 const FORMAT_LABEL: &str = "Format";
 const BROWSE_LABEL: &str = "Browse";
 const CAPTURE_LABEL: &str = "Capture frame";
+const COPY_LABEL: &str = "Copy frame";
+const COPYING_LABEL: &str = "Copying…";
+const COPIED_LABEL: &str = "Copied frame";
 const FORMAT_OPTIONS: [&str; 2] = ["PNG", "JPEG"];
 const PREVIEW_ALT_TEXT: &str = "Frame preview at the selected timestamp";
 const PREVIEW_UPDATING_TEXT: &str = "Updating preview…";
@@ -132,10 +135,25 @@ pub enum FrameCaptureSelectionAction {
     BrowseOutput,
     QueueRequested,
     CaptureRequested,
+    CopyRequested,
     PositionEdited(PositionSettle),
     StepRequested(FrameDirection),
     SaveQueueChanges,
     CancelQueueEdit,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FrameCopyStatus {
+    #[default]
+    Idle,
+    Copying,
+    Copied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameCopyActionState {
+    pub enabled: bool,
+    pub status: FrameCopyStatus,
 }
 
 impl FrameCaptureSelectionState {
@@ -280,6 +298,7 @@ pub fn show<'a>(
     presentation: &FrameCapturePresentation,
     state: &mut FrameCaptureSelectionState,
     position_surface: FrameCapturePositionSurface,
+    copy: Option<FrameCopyActionState>,
     mode: impl Into<OperationSurfaceMode<'a>>,
 ) -> FrameCaptureSelectionAction {
     let mode = mode.into();
@@ -348,6 +367,10 @@ pub fn show<'a>(
                 ui.add_space(theme::SPACING.related);
                 media_error::show_operation_action(ui, error);
             }
+            if copy.is_some_and(|copy| copy.status == FrameCopyStatus::Copied) {
+                ui.add_space(theme::SPACING.related);
+                let _ = widgets::inline_status(ui, COPIED_LABEL, widgets::InlineStatusKind::Status);
+            }
         },
         |ui| match mode {
             OperationSurfaceMode::Immediate {
@@ -355,6 +378,10 @@ pub fn show<'a>(
                 queue_confirmation,
                 ..
             } => {
+                let copy = copy.unwrap_or(FrameCopyActionState {
+                    enabled: false,
+                    status: FrameCopyStatus::Idle,
+                });
                 if widgets::primary_button_enabled(
                     ui,
                     CAPTURE_LABEL,
@@ -363,6 +390,15 @@ pub fn show<'a>(
                 .clicked()
                 {
                     action.set(FrameCaptureSelectionAction::CaptureRequested);
+                }
+                if widgets::secondary_button_enabled(
+                    ui,
+                    copy_button_label(copy.status),
+                    copy.enabled && start_allowed && copy.status != FrameCopyStatus::Copying,
+                )
+                .clicked()
+                {
+                    action.set(FrameCaptureSelectionAction::CopyRequested);
                 }
                 if ui
                     .add_enabled_ui(validation.is_ok(), |ui| {
@@ -633,6 +669,14 @@ fn scrubber_settle(
     }
 }
 
+fn copy_button_label(status: FrameCopyStatus) -> &'static str {
+    if status == FrameCopyStatus::Copying {
+        COPYING_LABEL
+    } else {
+        COPY_LABEL
+    }
+}
+
 fn show_format_selector(ui: &mut Ui, state: &mut FrameCaptureSelectionState) {
     let mut requested = None;
     widgets::select_menu(ui, format_label(state.format()), &FORMAT_OPTIONS, |ui| {
@@ -738,6 +782,7 @@ mod tests {
 
     use crate::{
         frame_capture::{
+            clipboard::copy_frame_action_eligible,
             frame_index::FrameStep,
             model::{
                 FrameCaptureFormat, FramePosition, FrameTimeBase, FrameTimestamp,
@@ -750,8 +795,9 @@ mod tests {
 
     use super::{
         FrameCaptureLivePreview, FrameCapturePositionSurface, FrameCapturePresentation,
-        FrameCaptureSelectionState, FrameNavigationAvailability, LivePreviewStatus, PositionSettle,
-        format_detail, format_duration, ready_feedback, scrubber_maximum, scrubber_settle,
+        FrameCaptureSelectionState, FrameCopyStatus, FrameNavigationAvailability,
+        LivePreviewStatus, PositionSettle, copy_button_label, format_detail, format_duration,
+        ready_feedback, scrubber_maximum, scrubber_settle,
     };
 
     fn media(duration: Option<Duration>) -> MediaFile {
@@ -902,6 +948,7 @@ mod tests {
                 &presentation,
                 &mut state,
                 FrameCapturePositionSurface::Simple,
+                None,
                 true,
             );
         });
@@ -959,6 +1006,7 @@ mod tests {
                 &presentation,
                 &mut state,
                 FrameCapturePositionSurface::Simple,
+                None,
                 true,
             );
         });
@@ -1006,6 +1054,7 @@ mod tests {
                         failed: false,
                     },
                 },
+                None,
                 true,
             );
         });
@@ -1017,6 +1066,31 @@ mod tests {
                 .any(|shape| { shape_contains(&shape.shape, super::PREVIEW_UPDATING_TEXT) })
         );
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn copy_frame_status_uses_restrained_action_copy() {
+        assert_eq!(copy_button_label(FrameCopyStatus::Idle), super::COPY_LABEL);
+        assert_eq!(
+            copy_button_label(FrameCopyStatus::Copying),
+            super::COPYING_LABEL
+        );
+        assert_eq!(
+            copy_button_label(FrameCopyStatus::Copied),
+            super::COPY_LABEL
+        );
+        assert_eq!(super::COPIED_LABEL, "Copied frame");
+    }
+
+    #[test]
+    fn invalid_capture_output_does_not_block_copying_a_valid_frame() {
+        let media = media(Some(Duration::from_secs(10)));
+        let mut state = FrameCaptureSelectionState::new(&media);
+        state.set_output_filename_stem(OsString::new());
+
+        assert!(!state.can_capture(&media));
+        let position = state.valid_position(&media).unwrap();
+        assert!(copy_frame_action_eligible(&media, position));
     }
 
     #[test]
@@ -1077,6 +1151,7 @@ mod tests {
                         failed: false,
                     },
                 },
+                None,
                 true,
             );
         });
@@ -1130,6 +1205,7 @@ mod tests {
                         failed: false,
                     },
                 },
+                None,
                 true,
             );
         });
@@ -1189,6 +1265,7 @@ mod tests {
                         failed: false,
                     },
                 },
+                None,
                 true,
             );
         });
