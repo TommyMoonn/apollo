@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-16
+
+Apollo 0.7.0 turns Frame Capture into a precise still-frame selection workflow with live previews, scrubber navigation, actual-frame stepping, and full-resolution clipboard copying.
+
+### Added
+
+- A live still-frame preview that follows valid Frame Capture positions while keeping the last valid frame visible during updates.
+- A horizontal position scrubber with an editable `HH:MM:SS.mmm` current position and direct source-duration context.
+- Actual-frame previous and next controls with 1, 2, 5, and 10-frame step sizes, including precise navigation for variable-frame-rate sources.
+- A secondary `Copy frame` action that places the selected full-resolution frame on the Windows clipboard without creating an output file.
+
+### Changed
+
+- Preview, Capture frame, and Copy frame now use the same authoritative selected frame, including positions reached through exact frame stepping.
+- Queue Frame Capture edits and per-file Batch overrides now provide the same live preview, scrubber, and frame controls as the normal source workspace.
+- Preview updates are debounced during rapid position changes, cancel obsolete work, and reuse a bounded set of recent frames.
+
+### Fixed
+
+- Preview status updates retain stable layout space instead of shifting the preview while text appears and disappears.
+- Older preview or frame-navigation results can no longer replace a newer source or position after rapid edits.
+- Frames that exceed the safe clipboard allocation limit now show an actionable Copy error instead of leaving Copy frame silently disabled.
+
 ## [0.6.0] - 2026-09-14
 
 Apollo 0.6.0 adds a sequential in-application queue and a hybrid multi-file Batch workflow while preserving Apollo's source-first editing model and safe output publication.
@@ -177,7 +200,8 @@ Apollo 0.1.0 is the first public Windows release, bringing focused Audio Mix and
 - Missing optional FFprobe metadata falls back to usable media and track labels instead of preventing intake or selection.
 - Upscale sizing preserves the source aspect ratio within the selected target boundary without default cropping, stretching, or black padding.
 
-[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/TommyMoonn/apollo/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/TommyMoonn/apollo/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/TommyMoonn/apollo/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/TommyMoonn/apollo/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/TommyMoonn/apollo/compare/v0.3.2...v0.4.0
