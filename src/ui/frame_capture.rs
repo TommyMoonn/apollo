@@ -401,7 +401,7 @@ fn show_live_preview(
     media: &MediaFile,
     preview: FrameCaptureLivePreview,
     current: Option<FramePosition>,
-) {
+) -> egui::Response {
     let source_size = media
         .video_streams
         .first()
@@ -414,35 +414,34 @@ fn show_live_preview(
     let retained_position = preview.texture.map(|(_, _, position)| position);
     let retained_is_current = retained_position.is_some_and(|position| Some(position) == current);
 
+    let status_height = ui.text_style_height(&fonts::technical_text_style());
+    let (status_rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), status_height),
+        egui::Sense::hover(),
+    );
     match preview.status {
-        LivePreviewStatus::Updating => technical_context(ui, PREVIEW_UPDATING_TEXT),
-        LivePreviewStatus::Failed => technical_context(ui, PREVIEW_FAILED_TEXT),
+        LivePreviewStatus::Updating => {
+            paint_technical_context(ui, status_rect, PREVIEW_UPDATING_TEXT);
+        }
+        LivePreviewStatus::Failed => {
+            paint_technical_context(ui, status_rect, PREVIEW_FAILED_TEXT);
+        }
         LivePreviewStatus::Idle if retained_position.is_some() && !retained_is_current => {
-            technical_context(
-                ui,
-                &format!(
-                    "Last preview: {}",
-                    retained_position.expect("retained preview position checked above")
-                ),
+            let text = format!(
+                "Last preview: {}",
+                retained_position.expect("retained preview position checked above")
             );
+            paint_technical_context(ui, status_rect, &text);
         }
-        LivePreviewStatus::Idle | LivePreviewStatus::Ready => {
-            ui.add_space(ui.text_style_height(&fonts::technical_text_style()));
-        }
-    }
-    if matches!(preview.status, LivePreviewStatus::Updating)
-        && !retained_is_current
-        && let Some(retained_position) = retained_position
-    {
-        ui.add_space(theme::SPACING.tight);
-        technical_context(ui, &format!("Last preview: {retained_position}"));
+        LivePreviewStatus::Idle | LivePreviewStatus::Ready => {}
     }
     ui.add_space(theme::SPACING.tight);
 
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
         let texture = preview.texture.map(|(texture, _, _)| texture);
-        let _ = widgets::framed_preview(ui, texture, display_size, PREVIEW_ALT_TEXT);
-    });
+        widgets::framed_preview(ui, texture, display_size, PREVIEW_ALT_TEXT)
+    })
+    .inner
 }
 
 fn show_precision_position(
@@ -701,13 +700,26 @@ fn format_detail(format: FrameCaptureFormat) -> &'static str {
 }
 
 fn technical_context(ui: &mut Ui, text: &str) {
-    ui.add(
-        Label::new(
-            RichText::new(text)
-                .text_style(fonts::technical_text_style())
-                .color(theme::SECONDARY_FAINT),
-        )
-        .selectable(false),
+    ui.add(technical_context_label(text));
+}
+
+fn technical_context_label(text: &str) -> Label {
+    Label::new(
+        RichText::new(text)
+            .text_style(fonts::technical_text_style())
+            .color(theme::SECONDARY_FAINT),
+    )
+    .selectable(false)
+}
+
+fn paint_technical_context(ui: &Ui, rect: egui::Rect, text: &str) {
+    let font_id = ui.style().text_styles[&fonts::technical_text_style()].clone();
+    ui.painter().text(
+        rect.left_top(),
+        egui::Align2::LEFT_TOP,
+        text,
+        font_id,
+        theme::SECONDARY_FAINT,
     );
 }
 
@@ -727,7 +739,10 @@ mod tests {
     use crate::{
         frame_capture::{
             frame_index::FrameStep,
-            model::{FrameCaptureFormat, FrameTimeBase, FrameTimestamp, ResolvedFramePosition},
+            model::{
+                FrameCaptureFormat, FramePosition, FrameTimeBase, FrameTimestamp,
+                ResolvedFramePosition,
+            },
         },
         media::model::{MediaFile, MediaStream, StreamKind, VideoStream},
         ui::{fonts, theme},
@@ -1002,6 +1017,36 @@ mod tests {
                 .any(|shape| { shape_contains(&shape.shape, super::PREVIEW_UPDATING_TEXT) })
         );
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn updating_a_retained_preview_keeps_the_preview_layout_stable() {
+        fn preview_top(status: LivePreviewStatus, current: FramePosition) -> f32 {
+            let context = egui::Context::default();
+            fonts::install(&context);
+            theme::install(&context);
+            let media = media(Some(Duration::from_secs(10)));
+            let retained_position = FrameTimestamp::from_milliseconds(1_250).into();
+            let preview = FrameCaptureLivePreview {
+                status,
+                texture: Some((egui::TextureId::Managed(9), [640, 360], retained_position)),
+            };
+            let top = std::cell::Cell::new(0.0);
+
+            let output = context.run_ui(Default::default(), |ui| {
+                let response = super::show_live_preview(ui, &media, preview, Some(current));
+                top.set(response.rect.top());
+            });
+            output.drop_without_applying_deltas();
+            top.get()
+        }
+
+        let retained_position = FrameTimestamp::from_milliseconds(1_250).into();
+        let requested_position = FrameTimestamp::from_milliseconds(2_000).into();
+        assert_eq!(
+            preview_top(LivePreviewStatus::Updating, requested_position),
+            preview_top(LivePreviewStatus::Ready, retained_position)
+        );
     }
 
     #[test]
