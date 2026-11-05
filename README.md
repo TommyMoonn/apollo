@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  A native Windows utility for focused media workflows.
+  A native Windows media utility.
 </p>
 
 <p align="center">
@@ -22,67 +22,39 @@
   <img src="docs/assets/apollo-preview.png" alt="Apollo file intake screen" width="620" />
 </p>
 
-## About Apollo
+# About Apollo
 
-Apollo is a small native desktop media utility for audio mixing, video upscaling, stream-copy remuxing, audio extraction, and timestamped frame capture.
+I made this for the random clips I record now and then, it handles audio mixing, video upscaling, remuxing, audio extraction, and frame capture.
+
+This is entirely vibecoded and as of currently I have no goal to continue developing or maintaining this project.
+
+> [!IMPORTANT]
+> All of the stuff under here are written by LLMs.
 
 ## Download Apollo
 
-- **[Windows EXE installer](https://github.com/TommyMoonn/apollo/releases/latest/download/Apollo-Setup-x64.exe)** (recommended)
+- **[Windows installer](https://github.com/TommyMoonn/apollo/releases/latest/download/Apollo-Setup-x64.exe)** (recommended)
 - **[Portable Windows ZIP](https://github.com/TommyMoonn/apollo/releases/latest/download/Apollo-windows-x64.zip)**
 
-The installer registers Apollo for the current Windows user, creates a Start Menu shortcut, and provides normal Windows uninstall behavior. The portable ZIP does not register or install Apollo.
-
-Apollo Windows packages from v0.5.0 onward include FFmpeg and FFprobe, so no separate media-tool installation is needed. Keep the portable folder intact, including `licenses/`. Older releases, including v0.4.0, still require the tools on PATH; check the downloaded release version.
+The installer adds Apollo to the Start Menu and Windows uninstall list. The portable ZIP runs without installation.
 
 See the [latest release notes](https://github.com/TommyMoonn/apollo/releases/latest) or browse [all releases](https://github.com/TommyMoonn/apollo/releases).
 
 ## Features
 
-- **Audio Mix** - choose the embedded audio tracks to keep, mix them into one AAC stream, and write MP4 or MKV output without re-encoding the video.
-- **Video Upscale** - fit preset or custom boundaries while preserving the source aspect ratio, with H.264/H.265 output, CPU or NVIDIA encoding, and numeric quality controls.
-- **Remux** - copy all compatible streams into MKV or MP4 without re-encoding, with incompatibilities reported before processing.
-- **Audio Extract** - save one selected audio track as an original MKA copy, 256 kbps AAC, or lossless FLAC.
-- **Frame Capture** - save one timestamped frame as lossless PNG or high-quality JPEG, then confirm the result with a bounded image preview.
-- **Sequential media queue** - prepare multiple operations, reorder or edit Waiting jobs, and process one FFmpeg job at a time with progress and retained results.
-- **Multi-file batches** - choose one shared operation and defaults for several files, append more sources, review per-file readiness, and apply individual overrides before one atomic enqueue.
-- **Source workspace** - keep one source loaded while switching between media tools, or explicitly change or close it.
-- **Output control** - edit the output filename, choose the destination, and return to the last-used source and output directories in native file dialogs.
-- **Safe publication** - work is written to an owned temporary location and published only after successful completion; failed or cancelled work does not leave a misleading final file.
-- **Responsive native interface** - the compact egui interface adapts across narrow, normal, wide, tall, and fullscreen windows while keeping idle and progress updates restrained.
+- **Audio mixing:** Select embedded audio tracks and mix them into one AAC stream while keeping the video unchanged. Output MP4 or MKV.
+- **Video upscaling:** Fit video within 1440p, 4K, 8K, or custom dimensions while preserving its aspect ratio. Use H.264 or H.265 with CPU or NVIDIA encoding.
+- **Remuxing:** Copy compatible streams into MP4 or MKV without re-encoding.
+- **Audio extraction:** Export a selected audio track as MKA, AAC, or FLAC.
+- **Frame capture:** Save a frame at a timestamp as PNG or JPEG.
+- **Queue and batch processing:** Queue jobs, reorder or edit waiting jobs, and process batches with shared settings and per-file overrides.
+- **Output handling:** Choose the output filename and destination. Apollo publishes the final file only after processing succeeds.
 
 ## Requirements
 
-- Windows x64.
-- No separate FFmpeg installation is needed for the v0.5.0 Windows packages. They include CPU H.264 (`libx264`) and H.265 (`libx265`) encoders.
-- Optional NVIDIA encoding requires `h264_nvenc` or `hevc_nvenc` plus a compatible NVIDIA GPU and driver. Apollo checks whether each encoder can actually run.
+Apollo supports Windows x64. CPU H.264 and H.265 encoders are included. NVIDIA encoding is optional and requires a compatible GPU and driver.
 
-The pinned Windows x64 distribution is FFmpeg 7.0.2, Gyan build `7.0.2-essentials_build-www.gyan.dev`. Its tested NVIDIA baseline is driver **566.14** on an **RTX 3060 Laptop GPU**, with NVENC API **12.2**. This is a tested configuration, not a minimum-driver claim or a guarantee for every NVIDIA GPU. CPU workflows do not require NVIDIA hardware.
-
-Apollo prefers the complete pair beside `Apollo.exe`. Only when both files are absent does it search PATH, which remains useful for development. A partial or invalid bundle is an error: restore the complete package, then use Retry. Apollo never mixes bundled and PATH tools.
-
-See the [pinned manifest](distribution/media-tools.json), [build compatibility evidence](distribution/media-tools-acceptance.md), and [redistribution notices](THIRD_PARTY_NOTICES.md#bundled-ffmpeg-and-ffprobe).
-
-## Upscale controls
-
-- **Target:** choose 1440p, 4K, or 8K, or enter positive even Custom width and height boundaries. Presets adapt to source orientation; Custom uses the box exactly as entered. The calculated output fits inside it without cropping, padding, or stretching.
-- **Encoder:** Auto uses NVIDIA NVENC when its runtime check succeeds, otherwise CPU. Explicit NVIDIA NVENC selection never silently falls back. CPU remains usable while NVIDIA checks run.
-- **Quality:** lower values mean better quality and larger files. CPU defaults are CRF 18 for H.264 and CRF 20 for H.265, within 0..51. NVIDIA defaults to CQ 16, within 1..51. Values are retained separately for each codec and backend; CRF and CQ are not equivalent quality scales.
-- **Format:** supported 8-bit sources retain compatible pixel formats and available color signaling. Supported 10-bit sources require H.265 and a compatible encoder. Unsupported combinations are rejected, not silently downgraded. Mastering-display and content-light HDR metadata preservation is not guaranteed.
-
-Scaling remains Lanczos on the CPU. NVIDIA selection changes video encoding, not scaling or decoding.
-
-## Native and focused
-
-Apollo keeps the interface native and the workflow direct. The application owns media selection, validation, progress, cancellation, and safe output publication, while FFmpeg and FFprobe perform media inspection and processing.
-
-## Queue and batch workflow
-
-`Add to queue` keeps the current source and operation open, updates the pending Queue count, and confirms the enqueue inline. Waiting jobs can be edited from either their Queue row or the loaded-source queued-item selector. The source remains fixed during an edit, while the operation and its settings may change. Waiting jobs can also be reordered before the queue starts.
-
-The queue runs one media process at a time. `Cancel current` advances to the next Waiting job, `Stop after current` preserves Waiting work after the active job finishes, and `Cancel queue` cancels both active and Waiting work. Completed and Cancelled history stays visible until leaving Queue or starting Add files; Failed jobs remain for review until `Clear finished` is used. Failure details retain the underlying diagnostic.
-
-Selecting or dropping multiple files opens Batch setup. Choose shared defaults, append more files, exclude incompatible items, and use Review or Override where per-file settings are required. Apollo inspects at most two batch sources concurrently and adds the batch only when every included item can be enqueued together.
+See the [pinned media-tool manifest](distribution/media-tools.json), [compatibility notes](distribution/media-tools-acceptance.md), and [third-party notices](THIRD_PARTY_NOTICES.md#bundled-ffmpeg-and-ffprobe).
 
 ## Project documentation
 
