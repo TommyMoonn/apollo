@@ -56,7 +56,7 @@ The `CI Gate` check succeeds only when all four jobs succeed. It records their r
 
 `just verify` runs the same checks locally, stopping at the first failure. The optional `just test-scripts` smoke check, coverage diagnostics, `just test-media` and `just smoke-installer` are outside the required gate. See [Testing](TESTING.md#windows-artifact-acceptance) for runtime acceptance and [Releasing](RELEASING.md) for the shared packaging workflow.
 
-For branch protection or rulesets, require the GitHub Actions check named `CI Gate`. First observe a hosted run of the updated workflow, add the new required check and confirm it is enforced on a pull request. Only then remove the superseded individual required checks. Repository settings are owner-managed. The tagged release workflow continues to require successful push-triggered CI for the exact tagged commit. See [Releasing](RELEASING.md) for version preparation and the current publication procedure.
+For branch protection or rulesets, require the GitHub Actions check named `CI Gate`. First observe a hosted run of the updated workflow, add the new required check and confirm it is enforced on a pull request. Only then remove the superseded individual required checks. Repository settings are owner-managed. The automatic release workflow requires successful push-triggered CI for the exact main commit and publishes only validated version increases. See [Releasing](RELEASING.md) for version preparation and the current publication procedure.
 
 ## Rust coverage diagnostics
 

@@ -1,144 +1,176 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
 
-concurrency:
-  group: release-${{ github.ref_name }}
-  cancel-in-progress: false
-
 jobs:
-  verify-release:
-    name: Verify release commit
+  detect:
+    name: Detect release candidate
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.id == github.event.repository.id &&
+      github.event.workflow_run.repository.id == github.event.repository.id
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 10
     permissions:
       actions: read
       contents: read
-
+    outputs:
+      candidate: ${{ steps.candidate.outputs.candidate }}
+      sha: ${{ steps.candidate.outputs.sha }}
+      version: ${{ steps.candidate.outputs.version }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Verify tag belongs to main
-        shell: bash
-        run: |
-          set -euo pipefail
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-
-      - name: Require successful CI for tagged commit
+      - name: Authorize exact successful CI attempt
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          CI_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          CI_WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPOSITORY_ID: ${{ github.event.repository.id }}
         run: |
           set -euo pipefail
-
-          run_id=""
-          for attempt in {1..12}; do
-            runs_json=$(gh run list \
-              --workflow ci.yml \
-              --commit "$GITHUB_SHA" \
-              --event push \
-              --branch main \
-              --limit 20 \
-              --json databaseId,headSha,headBranch,event)
-
-            run_id=$(jq -r --arg sha "$GITHUB_SHA" \
-              '[.[] | select(.headSha == $sha and .headBranch == "main" and .event == "push")] | sort_by(.databaseId) | last | .databaseId // empty' \
-              <<<"$runs_json")
-
-            if [[ -n "$run_id" ]]; then
-              break
-            fi
-
-            echo "No CI run is visible for $GITHUB_SHA yet; retrying in 10 seconds."
-            sleep 10
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          for id in "$CI_RUN_ID" "$CI_ATTEMPT" "$CI_WORKFLOW_ID" "$REPOSITORY_ID"; do
+            [[ "$id" =~ ^[1-9][0-9]*$ ]]
           done
-
-          if [[ -z "$run_id" ]]; then
-            echo "No push-triggered CI run was found for tagged commit $GITHUB_SHA." >&2
-            echo "Push the release commit to main and wait for CI before creating the tag." >&2
+          workflow=$(gh api "repos/$GH_REPO/actions/workflows/ci.yml")
+          jq -e --argjson id "$CI_WORKFLOW_ID" \
+            '.id == $id and .path == ".github/workflows/ci.yml" and .name == "CI"' <<<"$workflow" >/dev/null
+          run=$(gh api "repos/$GH_REPO/actions/runs/$CI_RUN_ID/attempts/$CI_ATTEMPT")
+          jq -e --arg sha "$CANDIDATE_SHA" --argjson run "$CI_RUN_ID" \
+            --argjson attempt "$CI_ATTEMPT" --argjson workflow "$CI_WORKFLOW_ID" --argjson repo "$REPOSITORY_ID" \
+            '.id == $run and .run_attempt == $attempt and .workflow_id == $workflow and
+             .head_sha == $sha and .head_branch == "main" and .event == "push" and
+             .status == "completed" and .conclusion == "success" and
+             .repository.id == $repo and .head_repository.id == $repo' <<<"$run" >/dev/null
+          jobs=$(gh api --paginate --slurp "repos/$GH_REPO/actions/runs/$CI_RUN_ID/attempts/$CI_ATTEMPT/jobs?per_page=100")
+          jq -e --arg sha "$CANDIDATE_SHA" --argjson run "$CI_RUN_ID" \
+            '[.[].jobs[] | select(.name == "CI Gate")] |
+             length == 1 and all(.[]; .run_id == $run and .head_sha == $sha and
+               .status == "completed" and .conclusion == "success")' <<<"$jobs" >/dev/null
+          echo "Authorized CI run $CI_RUN_ID attempt $CI_ATTEMPT for $CANDIDATE_SHA." >> "$GITHUB_STEP_SUMMARY"
+      - name: Check out exact green main revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require candidate on trusted main history
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE_SHA" ]]
+          [[ "$(git rev-parse --is-shallow-repository)" == false ]]
+          git merge-base --is-ancestor "$CANDIDATE_SHA" refs/remotes/origin/main
+      - name: Detect version transition
+        id: candidate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          ./scripts/detect-release-candidate.ps1 $env:CANDIDATE_SHA $env:GITHUB_REPOSITORY
+      - name: Require a complete detection result
+        shell: bash
+        env:
+          CANDIDATE: ${{ steps.candidate.outputs.candidate }}
+          SHA: ${{ steps.candidate.outputs.sha }}
+          VERSION: ${{ steps.candidate.outputs.version }}
+          REASON: ${{ steps.candidate.outputs.reason }}
+          CI_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" == "$CI_SHA" && "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          if [[ "$CANDIDATE" == false && -n "$REASON" ]]; then
+            echo "No release candidate: $REASON" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$CANDIDATE" != true ]]; then
+            echo 'Incomplete candidate detection result.' >&2
             exit 1
           fi
 
-          echo "Reusing CI run $run_id for tagged commit $GITHUB_SHA."
-          gh run watch "$run_id" --exit-status
-          jobs=$(gh api "repos/$GH_REPO/actions/runs/$run_id/jobs?per_page=100")
-          jq -e '[.jobs[] | select(.name == "CI Gate" and .conclusion == "success")] | length == 1' <<<"$jobs" >/dev/null
-
   build:
-    name: Build and verify Windows release assets
-    needs: verify-release
+    name: Build and accept Windows release
+    needs: detect
+    if: needs.detect.outputs.candidate == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/windows-package.yml
     with:
-      sha: ${{ github.sha }}
+      sha: ${{ needs.detect.outputs.sha }}
+      expected-version: ${{ needs.detect.outputs.version }}
       validate-source: false
       release-candidate: true
 
-  draft-release:
-    name: Create or refresh draft release
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  verify:
+    name: Verify transferred release artifacts
+    needs: [detect, build]
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/windows-verify.yml
+    with:
+      sha: ${{ needs.detect.outputs.sha }}
+      version: ${{ needs.detect.outputs.version }}
+      artifact-id: ${{ needs.build.outputs.artifact-id }}
+      build-sha: ${{ needs.build.outputs.sha }}
+      build-version: ${{ needs.build.outputs.version }}
+      run-id: ${{ needs.build.outputs.run-id }}
+      run-attempt: ${{ needs.build.outputs.run-attempt }}
+
+  publish:
+    name: Publish verified release
+    needs: [detect, verify]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    concurrency:
+      group: apollo-release-publication
+      cancel-in-progress: false
     permissions:
       contents: write
-
+    env:
+      EXPECTED_SHA: ${{ needs.detect.outputs.sha }}
+      EXPECTED_VERSION: ${{ needs.detect.outputs.version }}
+      EXPECTED_PROVENANCE: ${{ needs.verify.outputs.provenance-sha256 }}
+      ARTIFACT_ID: ${{ needs.verify.outputs.artifact-id }}
     steps:
-      - name: Check out validated release source
+      - name: Check out authorized candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.detect.outputs.sha }}
+          fetch-depth: 0
           persist-credentials: false
-
-      - name: Download Windows release assets
+      - name: Recheck candidate ancestry
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:EXPECTED_SHA -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD) -cne $env:EXPECTED_SHA) { throw 'Unexpected candidate checkout.' }
+          git merge-base --is-ancestor $env:EXPECTED_SHA refs/remotes/origin/main
+      - name: Download the independently verified artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: release-assets
-
-      - name: Verify staged checksums
-        shell: bash
-        working-directory: release-assets
-        run: sha256sum --check SHA256SUMS.txt
-
-      - name: Create or refresh draft GitHub Release
-        shell: bash
+          artifact-ids: ${{ needs.verify.outputs.artifact-id }}
+          path: artifacts/publish
+      - name: Recheck transfer and publish
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: |
-          set -euo pipefail
-
-          tag="${GITHUB_REF_NAME}"
-          title="Apollo ${tag}"
-          # Provenance is internal evidence, never a public download.
-          assets=(release-assets/Apollo-Setup-x64.exe release-assets/Apollo-windows-x64.zip release-assets/SHA256SUMS.txt)
-          for asset in "${assets[@]}"; do
-            [[ -f "$asset" ]] || { echo "Missing public asset: $asset" >&2; exit 1; }
-          done
-
-          if release_state=$(gh release view "$tag" --json isDraft --jq '.isDraft' 2>/dev/null); then
-            if [[ "$release_state" != "true" ]]; then
-              echo "Release $tag is already published; refusing to replace its assets." >&2
-              exit 1
-            fi
-
-            gh release upload "$tag" "${assets[@]}" --clobber
-          else
-            gh release create "$tag" "${assets[@]}" \
-              --verify-tag \
-              --draft \
-              --title "$title" \
-              --notes-file "release-notes/${tag}.md"
-          fi
+          if ($env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or $env:EXPECTED_PROVENANCE -cnotmatch '^[0-9a-f]{64}$') { throw 'Missing verified artifact identity.' }
+          $digest = (Get-FileHash -LiteralPath artifacts/publish/release-provenance.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:EXPECTED_PROVENANCE) { throw 'Downloaded provenance differs from independent verification.' }
+          # The publisher verifies every asset against this provenance again before any remote write.
+          ./scripts/publish-release.ps1 --commit $env:EXPECTED_SHA --version $env:EXPECTED_VERSION --repo $env:GITHUB_REPOSITORY --artifacts-dir artifacts/publish
+          "Published or verified v$env:EXPECTED_VERSION at $env:EXPECTED_SHA (artifact $env:ARTIFACT_ID)." >> $env:GITHUB_STEP_SUMMARY

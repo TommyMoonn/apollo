@@ -7,6 +7,10 @@ on:
         description: Exact source commit to build
         required: true
         type: string
+      expected-version:
+        description: Validated candidate version (required for release candidates)
+        required: false
+        type: string
       validate-source:
         description: Run ordinary source checks if no trusted CI result exists
         required: true
@@ -17,15 +21,15 @@ on:
         type: boolean
     outputs:
       artifact-id:
-        value: ${{ jobs.verify.outputs.artifact-id }}
+        value: ${{ jobs.package.outputs.artifact-id }}
       sha:
         value: ${{ jobs.package.outputs.sha }}
       version:
         value: ${{ jobs.package.outputs.version }}
       run-id:
-        value: ${{ jobs.verify.outputs.run-id }}
+        value: ${{ jobs.package.outputs.run-id }}
       run-attempt:
-        value: ${{ jobs.verify.outputs.run-attempt }}
+        value: ${{ jobs.package.outputs.run-attempt }}
 
 permissions:
   contents: read
@@ -42,6 +46,7 @@ jobs:
       NSIS_VERSION: '3.11'
       EXPECTED_SHA: ${{ inputs.sha }}
       RELEASE_CANDIDATE: ${{ inputs.release-candidate }}
+      EXPECTED_VERSION: ${{ inputs.expected-version }}
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       version: ${{ steps.identity.outputs.version }}
@@ -63,6 +68,7 @@ jobs:
           Assert-ReleaseCandidateCheckout -ProjectRoot $PWD.Path -ExpectedSha $env:EXPECTED_SHA -IncludeUntracked
           $release = Invoke-ReleaseValidation -ProjectRoot $PWD.Path
           if ($env:RELEASE_CANDIDATE -eq 'true') {
+            if ($release.Version -cne $env:EXPECTED_VERSION) { throw 'Build version differs from detected candidate.' }
             $release = Invoke-ReleaseValidation -ProjectRoot $PWD.Path -Tag "v$($release.Version)" -RequireChangelog
           }
           "version=$($release.Version)" >> $env:GITHUB_OUTPUT
@@ -147,53 +153,16 @@ jobs:
           name: windows-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
           path: test-results/release-smoke/acceptance.log
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 30
       - name: Upload verified staging set
         id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: Apollo-${{ steps.identity.outputs.version }}-windows-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Apollo-${{ steps.identity.outputs.version }}-windows-x64-${{ steps.identity.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/windows/Apollo-Setup-x64.exe
             artifacts/windows/Apollo-windows-x64.zip
             artifacts/windows/SHA256SUMS.txt
             artifacts/windows/release-provenance.json
           if-no-files-found: error
-          retention-days: 7
-
-  verify:
-    name: Independently verify downloaded Windows artifacts
-    needs: package
-    runs-on: windows-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    outputs:
-      artifact-id: ${{ steps.verified.outputs.artifact-id }}
-      run-id: ${{ needs.package.outputs.run-id }}
-      run-attempt: ${{ needs.package.outputs.run-attempt }}
-    steps:
-      - name: Check out the matching revision
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ needs.package.outputs.sha }}
-          persist-credentials: false
-      - name: Download immutable build artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          artifact-ids: ${{ needs.package.outputs.artifact-id }}
-          path: artifacts/verified
-      - name: Verify artifact identity and integrity
-        id: verified
-        shell: pwsh
-        env:
-          EXPECTED_SHA: ${{ needs.package.outputs.sha }}
-          VERSION: ${{ needs.package.outputs.version }}
-          ARTIFACT_ID: ${{ needs.package.outputs.artifact-id }}
-          BUILD_RUN_ID: ${{ needs.package.outputs.run-id }}
-          BUILD_RUN_ATTEMPT: ${{ needs.package.outputs.run-attempt }}
-        run: |
-          if ($env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or $env:BUILD_RUN_ID -cne $env:GITHUB_RUN_ID) { throw 'Missing or unexpected build artifact identity.' }
-          ./scripts/verify-windows-release.ps1 --artifacts-dir artifacts/verified --expected-sha $env:EXPECTED_SHA --expected-version $env:VERSION
-          "artifact-id=$env:ARTIFACT_ID" >> $env:GITHUB_OUTPUT
-          "Verified artifact $env:ARTIFACT_ID, version $env:VERSION, SHA $env:EXPECTED_SHA (run $env:BUILD_RUN_ID attempt $env:BUILD_RUN_ATTEMPT)" >> $env:GITHUB_STEP_SUMMARY
+          retention-days: 30

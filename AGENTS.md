@@ -103,7 +103,7 @@ Keep setup, architecture and testing guidance in their dedicated guides:
 - [Repository scripts](scripts/README.md) for export, review, transfer, recovery and cleanup.
 - [Media-tool acceptance](distribution/media-tools-acceptance.md) for the pinned distribution and compatibility evidence.
 
-Update user documentation when a supported workflow changes. Document architectural decisions and constraints that are hard to recover from the source. Do not document every method or component. Keep technical version history in `CHANGELOG.md` and the canonical GitHub release body in `release-notes/vX.Y.Z.md`. Follow [the releasing guide](docs/RELEASING.md) for version changes, candidate validation and publication authorization.
+Update user documentation when a supported workflow changes. Document architectural decisions and constraints that are hard to recover from the source. Do not document every method or component. Keep technical version history in `CHANGELOG.md` and the canonical GitHub release body in `release-notes/vX.Y.Z.md`. Follow [the releasing guide](docs/RELEASING.md) for version changes and candidate validation. A version increase merged to main can publish automatically after CI; prepare and review release metadata before merging.
 
 ## Planning and work artifacts
 

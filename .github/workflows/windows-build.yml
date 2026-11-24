@@ -47,3 +47,18 @@ jobs:
       sha: ${{ github.sha }}
       validate-source: ${{ needs.source-validation.outputs.validate-source != 'false' }}
       release-candidate: false
+
+  verify:
+    needs: package
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/windows-verify.yml
+    with:
+      sha: ${{ github.sha }}
+      version: ${{ needs.package.outputs.version }}
+      artifact-id: ${{ needs.package.outputs.artifact-id }}
+      build-sha: ${{ needs.package.outputs.sha }}
+      build-version: ${{ needs.package.outputs.version }}
+      run-id: ${{ needs.package.outputs.run-id }}
+      run-attempt: ${{ needs.package.outputs.run-attempt }}

@@ -1,0 +1,93 @@
+name: Windows artifact verification
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      artifact-id:
+        required: true
+        type: string
+      build-sha:
+        required: true
+        type: string
+      build-version:
+        required: true
+        type: string
+      run-id:
+        required: true
+        type: string
+      run-attempt:
+        required: true
+        type: string
+    outputs:
+      artifact-id:
+        value: ${{ jobs.verify.outputs.artifact-id }}
+      provenance-sha256:
+        value: ${{ jobs.verify.outputs.provenance-sha256 }}
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  verify:
+    name: Independently verify downloaded Windows artifacts
+    runs-on: windows-latest
+    timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.verified.outputs.artifact-id }}
+      provenance-sha256: ${{ steps.verified.outputs.provenance-sha256 }}
+    env:
+      EXPECTED_SHA: ${{ inputs.sha }}
+      EXPECTED_VERSION: ${{ inputs.version }}
+      BUILD_SHA: ${{ inputs.build-sha }}
+      BUILD_VERSION: ${{ inputs.build-version }}
+      ARTIFACT_ID: ${{ inputs.artifact-id }}
+      BUILD_RUN_ID: ${{ inputs.run-id }}
+      BUILD_RUN_ATTEMPT: ${{ inputs.run-attempt }}
+      REPOSITORY_ID: ${{ github.repository_id }}
+    steps:
+      - name: Authorize exact build artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:EXPECTED_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:BUILD_SHA -cne $env:EXPECTED_SHA -or
+              $env:EXPECTED_VERSION -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -or $env:BUILD_VERSION -cne $env:EXPECTED_VERSION -or
+              $env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or $env:BUILD_RUN_ID -cne $env:GITHUB_RUN_ID -or
+              $env:BUILD_RUN_ATTEMPT -notmatch '^[1-9][0-9]*$' -or [long]$env:BUILD_RUN_ATTEMPT -gt [long]$env:GITHUB_RUN_ATTEMPT) {
+            throw 'Invalid build artifact identity.'
+          }
+          $artifact = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:ARTIFACT_ID" | ConvertFrom-Json
+          $name = "Apollo-$($env:EXPECTED_VERSION)-windows-x64-$($env:EXPECTED_SHA)-$($env:BUILD_RUN_ID)-$($env:BUILD_RUN_ATTEMPT)"
+          if ([string]$artifact.id -cne $env:ARTIFACT_ID -or $artifact.name -cne $name -or $artifact.expired -ne $false -or
+              [string]$artifact.workflow_run.id -cne $env:BUILD_RUN_ID -or [string]$artifact.workflow_run.repository_id -cne $env:REPOSITORY_ID) {
+            throw 'Artifact metadata does not match the accepted build.'
+          }
+      - name: Check out the matching revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Download immutable build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ inputs.artifact-id }}
+          path: artifacts/verified
+      - name: Verify artifact identity and integrity
+        id: verified
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ((git rev-parse HEAD) -cne $env:EXPECTED_SHA) { throw 'Unexpected verification checkout.' }
+          ./scripts/verify-windows-release.ps1 --artifacts-dir artifacts/verified --expected-sha $env:EXPECTED_SHA --expected-version $env:EXPECTED_VERSION
+          $digest = (Get-FileHash -LiteralPath artifacts/verified/release-provenance.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          "artifact-id=$env:ARTIFACT_ID" >> $env:GITHUB_OUTPUT
+          "provenance-sha256=$digest" >> $env:GITHUB_OUTPUT
+          "Verified artifact $env:ARTIFACT_ID, version $env:EXPECTED_VERSION, SHA $env:EXPECTED_SHA (run $env:BUILD_RUN_ID attempt $env:BUILD_RUN_ATTEMPT); provenance SHA-256: $digest" >> $env:GITHUB_STEP_SUMMARY

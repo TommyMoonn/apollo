@@ -6,4 +6,4 @@ Describe changes users can see or benefit from. Keep implementation history in [
 
 Validate the complete candidate with `just check-release --tag vX.Y.Z --require-changelog`, substituting the actual version. Keep working drafts in `.plans/` until they are ready. Earlier published notes do not require a backfill. Preserve published history rather than revising it to match a draft.
 
-See [Releasing](../docs/RELEASING.md) for the release procedure.
+Commit the note with the version increase and changelog in the release preparation PR. Successful main-push CI initiates automatic publication using this exact note. See [Releasing](../docs/RELEASING.md) for the release procedure.

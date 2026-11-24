@@ -175,12 +175,6 @@ verify-release *flags:
     $ErrorActionPreference = 'Stop'
     & ./scripts/verify-windows-release.ps1 @args
 
-# Build and stage the Windows release.
-[group("release")]
-release-stage:
-    cargo build --locked --release --target x86_64-pc-windows-msvc
-    pwsh -NoProfile -File .\scripts\stage-windows-release.ps1
-
 # Run installed and portable acceptance against verified artifacts in an isolated user.
 [group("release")]
 [positional-arguments]

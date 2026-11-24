@@ -118,7 +118,7 @@ just check-release --tag v0.7.0 --require-changelog
 
 The direct equivalent is `pwsh -NoProfile -File scripts/check-release.ps1`. It accepts `--project <path>` for an alternate project root. Validation is read-only: the Cargo manifest and root lock entry must agree on a stable `X.Y.Z` version with components from 0 to 65535. A supplied tag must exactly equal `v<version>` and agree with inherited GitHub tag context, if present. Normal checks do not require a release note or changelog entry.
 
-`--require-changelog` requires a supplied or inherited tag, one dated release heading and matching comparison URL in `CHANGELOG.md`, and the corresponding canonical `release-notes/vX.Y.Z.md`. The legacy `--release-changelog` flag still checks the changelog alone during the transition. Use the full candidate check for release preparation.
+`--require-changelog` requires a supplied or inherited tag, one dated release heading and matching comparison URL in `CHANGELOG.md`, and the corresponding canonical `release-notes/vX.Y.Z.md`. The legacy `--release-changelog` flag remains accepted for compatibility with owner-managed release tooling; it checks the changelog alone. Use the full candidate check for release preparation.
 
 ### Detect a release candidate
 
@@ -130,7 +130,7 @@ The direct equivalent is `pwsh -NoProfile -File scripts/detect-release-candidate
 
 ### Publish a verified candidate (workflow-only)
 
-`publish-release.ps1` is reserved for the forthcoming authorized publication job. It accepts `--commit`, `--version`, `--repo`, `--artifacts-dir` and optional `--project`. It requires GitHub Actions repository context, `GH_TOKEN`, a clean checkout with full history and the original independently verified Windows artifacts. It verifies local candidate metadata and artifact integrity again, resolves the exact remote tag and draft, reconciles assets by digest, and publishes only a complete matching release. A published replay performs no writes. There is no Just recipe or local publishing procedure; use [Publication recovery](../docs/RELEASING.md#publication-recovery-forthcoming-automatic-workflow) for conflict and retry policy. The current tag-based workflow remains active until cutover.
+`publish-release.ps1` is reserved for the authorized publication job. It accepts `--commit`, `--version`, `--repo`, `--artifacts-dir` and optional `--project`. It requires GitHub Actions repository context, `GH_TOKEN`, a clean checkout with full history and the original independently verified Windows artifacts. It verifies local candidate metadata and artifact integrity again, resolves the exact remote tag and draft, reconciles assets by digest, and publishes only a complete matching release. A published replay performs no writes. There is no Just recipe or local publishing procedure; use [Publication recovery](../docs/RELEASING.md#publication-recovery) for conflict and retry policy.
 
 ### Set the release version
 

@@ -138,7 +138,7 @@ just smoke-installer --local --expected-version 0.7.0 --require-nvenc
 
 This adds both successful real NVENC probes, explicit H.264/H.265 Upscale at CQ 16, and Auto choosing NVENC for each codec. Every output is probed for codec/dimensions, and process failure is fatal. Confirm there is no required-NVENC-API-newer-than-driver failure. If a deliberately incompatible-driver machine is available, also record its explicit NVENC diagnostic and Auto CPU result; do not alter a user's driver merely to obtain that evidence.
 
-GPU success is a manual publication gate. GitHub-hosted CI does not require it. Rebuilt artifacts need new acceptance even when the FFmpeg pin is unchanged.
+Complete applicable manual GPU acceptance before approving the release preparation PR, and record any unavailable hardware or unresolved limitations for owner review. Neither hosted CI nor automatic publication verifies successful NVENC on real hardware. A pre-merge build provides acceptance evidence for its own bytes only; repeat the hardware check on rebuilt artifacts when verifying the published distribution.
 
 For pin changes, repeat the relevant checks in [the media-tool acceptance record](../distribution/media-tools-acceptance.md) and review redistribution obligations for the exact binaries. Retain the required license and notice material. Artifact tests do not establish corresponding-source compliance by themselves.
 
