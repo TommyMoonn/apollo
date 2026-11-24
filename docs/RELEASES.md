@@ -61,16 +61,15 @@ Validate the version, intended tag, and dated changelog entry together:
 .\scripts\check-release.ps1 --tag $tag --release-changelog
 ```
 
-Run the complete local quality gate:
+Run the local verification gate:
 
 ```powershell
-cargo fmt --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets
-pwsh -NoProfile -File .\tests\scripts\run.ps1
+just verify
 ```
 
-Commit the release preparation and get that exact commit onto `main`. Push it and resolve any failures reported by the `CI` workflow before tagging. The tag workflow requires the push-triggered `ci.yml` run for the exact tagged revision to succeed, then runs PowerShell tooling checks again in the Windows build job. It does not dispatch a second CI run for the tag.
+The separate `just test-scripts` smoke check is optional and is not required for release preparation.
+
+Commit the release preparation and get that exact commit onto `main`. Push it and resolve any failures reported by the `CI` workflow before tagging. The tag workflow requires the push-triggered `ci.yml` run for the exact tagged revision to succeed, and validates the actual release artifacts in the Windows build job. It does not dispatch a second CI run for the tag.
 
 Before creating the tag, verify the working tree is clean and local `HEAD` matches `origin/main`:
 
@@ -86,7 +85,7 @@ git rev-parse origin/main
 
 ## Optional pre-tag Windows artifact check
 
-The manually dispatched `Windows Installer Build` workflow runs formatting, Clippy and Rust tests before its Windows build job, which also runs PowerShell tooling checks. It uses the same staging owner as tagged releases and uploads one Actions artifact named `Apollo-windows-x64` containing the three staged release files. Both workflows run the installed/portable CPU and failure-path acceptance below before uploading; neither requires NVIDIA hardware.
+The manually dispatched `Windows Installer Build` workflow runs formatting, Clippy and Rust tests before its Windows build job. It uses the same staging owner as tagged releases and uploads one Actions artifact named `Apollo-windows-x64` containing the three staged release files. Both workflows run the installed/portable CPU and failure-path acceptance below before uploading; neither requires NVIDIA hardware.
 
 That Actions artifact is temporary build output with short retention. It is **not** a GitHub Release and does not publish anything to users.
 
@@ -106,7 +105,7 @@ Pushing `v*` starts the `Release` workflow. Before building, the workflow verifi
 - the tag exactly matches the Cargo package version;
 - `CHANGELOG.md` has the dated release section and matching version link;
 - the tagged commit is contained in `main`;
-- the existing push CI run for the exact tagged revision succeeds, and the Windows job's PowerShell tooling checks pass.
+- the existing push CI run for the exact tagged revision succeeds.
 
 The verification job checks `main` ancestry and waits for that CI run. The Windows job then validates release metadata, builds the GUI x64 release, stages the installer, portable ZIP and checksum file, and checks the actual payloads. The final job verifies staged checksums and creates or refreshes a **draft** GitHub Release titled `Apollo <tag>`.
 

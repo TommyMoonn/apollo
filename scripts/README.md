@@ -161,6 +161,8 @@ Install NSIS 3.11 so `makensis.exe` is available on `PATH`, or pass its path exp
 
 The installer is per-user, installs under `%LOCALAPPDATA%\Programs\Apollo`, and creates an Apollo Start Menu shortcut and Installed Apps entry, but no desktop shortcut. Uninstall removes its owned media tools and license files without removing unrelated user files. The installer, uninstaller, installed executable, Start Menu shortcut, and Installed Apps entry use the repository-owned Apollo icon.
 
-## Tests
+## Optional tooling smoke check
 
-Run `just test-scripts` from the repository root, or run an individual suite with `pwsh -NoProfile -File tests/scripts/ProjectTooling.Tests.ps1`. `just verify` includes the tooling suite alongside Rust checks, the locked build and read-only release metadata validation.
+Run `just test-scripts` (or `pwsh -NoProfile -File tests/scripts/run.ps1`) to check PowerShell syntax, workspace export and review, changed-file transfer and rollback, unsafe ZIP rejection, and cleanup protection in disposable repositories. It reports a failure when a check fails but is not part of `just verify`, CI or release packaging.
+
+Actual release metadata, artifact integrity and installed/portable payload checks remain part of their respective release workflows.

@@ -54,10 +54,12 @@ Run `just` or `just --list` from the repository root to discover available recip
 | `just fmt` / `just fmt-check` | Apply or check Rust formatting. |
 | `just lint` | Run locked Clippy across all targets and features, denying warnings. |
 | `just test` | Run locked Rust tests across all targets. |
-| `just test-scripts` | Run the PowerShell tooling suite. |
+| `just test-scripts` | Run an optional local tooling smoke check. |
 | `just verify` | Run the complete local verification gate. |
 
-`just verify` runs `fmt-check`, `lint`, `test`, `test-scripts`, `build` and `check-release` in order, stopping at the first failure. Metadata validation is read-only; no version bump, release changelog, installer build or GPU smoke test is required for normal local verification.
+`just verify` runs `fmt-check`, `lint`, `test`, `build` and `check-release` in order, stopping at the first failure. Metadata validation is read-only; no version bump, release changelog, installer build or GPU smoke test is required for normal local verification.
+
+`just test-scripts` is independent of `just verify` and CI. It checks PowerShell syntax and a few high-risk workspace operations in temporary repositories. It does not build the application, download dependencies or require an installer.
 
 For a focused check during development, run the relevant recipe or individual test. Report unavailable or failed checks separately from passing checks.
 

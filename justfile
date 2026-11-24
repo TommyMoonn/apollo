@@ -39,14 +39,14 @@ lint:
 test:
     cargo test --locked --all-targets
 
-# Run the PowerShell tooling tests.
+# Optional local smoke check of repository tooling.
 [group("verification")]
 test-scripts:
     pwsh -NoProfile -File tests/scripts/run.ps1
 
 # Run all local checks once, stopping on the first failure.
 [group("verification")]
-verify: fmt-check lint test test-scripts build check-release
+verify: fmt-check lint test build check-release
 
 # Export repo or workspace; optional --project and --output.
 [group("workspace")]

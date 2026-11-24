@@ -83,7 +83,6 @@ unsupported-driver behavior and the complete release gate remain unverified here
 ```powershell
 pwsh -NoProfile -File scripts/stage-media-tools.ps1 --output .scratch/media-payload
 pwsh -NoProfile -File scripts/stage-media-tools.ps1 --offline --output .scratch/media-payload-offline
-pwsh -NoProfile -File tests/scripts/run.ps1
 ```
 
 The default archive cache is `.scratch/media-tools-cache`. Each output must be a

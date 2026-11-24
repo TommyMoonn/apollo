@@ -58,7 +58,7 @@ See the [pinned media-tool manifest](distribution/media-tools.json), [compatibil
 
 ## Development
 
-Use the pinned Rust toolchain, PowerShell 7 and Just. Run `just --list` to discover commands, `just run` to start Apollo, and `just verify` to run the local verification gate. See the [development guide](docs/DEVELOPMENT.md) for setup and workspace commands.
+Use the pinned Rust toolchain, PowerShell 7 and Just. Run `just --list` to discover commands, `just run` to start Apollo, and `just verify` to run the local verification gate. Use `just test-scripts` for the optional local tooling smoke check. See the [development guide](docs/DEVELOPMENT.md) for setup and workspace commands.
 
 ## Project documentation
 

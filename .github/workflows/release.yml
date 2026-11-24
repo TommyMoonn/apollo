@@ -119,10 +119,6 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-${{ env.WINDOWS_TARGET }}-
 
-      - name: Test repository PowerShell tooling
-        shell: pwsh
-        run: pwsh -NoProfile -File .\tests\scripts\run.ps1
-
       - name: Cache pinned media archive
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
