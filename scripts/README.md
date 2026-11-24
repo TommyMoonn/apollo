@@ -120,6 +120,14 @@ The direct equivalent is `pwsh -NoProfile -File scripts/check-release.ps1`. It a
 
 `--require-changelog` requires a supplied or inherited tag, one dated release heading and matching comparison URL in `CHANGELOG.md`, and the corresponding canonical `release-notes/vX.Y.Z.md`. The legacy `--release-changelog` flag still checks the changelog alone during the transition. Use the full candidate check for release preparation.
 
+### Detect a release candidate
+
+```powershell
+just detect-release-candidate SHA TommyMoonn/apollo
+```
+
+The direct equivalent is `pwsh -NoProfile -File scripts/detect-release-candidate.ps1 SHA TommyMoonn/apollo`; replace `SHA` with the full lowercase checkout SHA. Use `--project <path>` for an alternate clean checkout with complete history. The script also accepts `--commit` and `--repo` instead of positional arguments. It checks stable first-parent version transitions, candidate metadata and exact remote tag/release identity; an increase requires authenticated `gh` access with release visibility. GitHub may hide drafts from restricted credentials, so publication must recheck identity with its authorized credential. JSON and optional `GITHUB_OUTPUT` fields report `candidate`, `version`, `sha` and `reason`. Failed checks exit nonzero without emitting a candidate. It neither creates tags/releases nor checks CI authorization. See [Releasing](../docs/RELEASING.md#detect-release-candidates-read-only).
+
 ### Set the release version
 
 ```powershell

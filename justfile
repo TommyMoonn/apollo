@@ -125,6 +125,15 @@ check-release *flags:
     $ErrorActionPreference = 'Stop'
     & ./scripts/check-release.ps1 @args
 
+# Detect a release candidate without modifying GitHub or creating tags.
+[group("release")]
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+detect-release-candidate sha repo *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/detect-release-candidate.ps1 @args
+
 # Build the Windows release executable.
 [group("release")]
 build-release:

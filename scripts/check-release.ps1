@@ -32,7 +32,12 @@ function Get-CargoManifestPackageInfo {
         throw "Cargo manifest does not exist: $ManifestPath"
     }
 
-    $content = [System.IO.File]::ReadAllText($ManifestPath)
+    return ConvertFrom-CargoManifestPackageInfo -Content ([System.IO.File]::ReadAllText($ManifestPath))
+}
+
+function ConvertFrom-CargoManifestPackageInfo {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Content)
+
     $packageHeaders = [regex]::Matches($content, '(?m)^[ \t]*\[package\][ \t]*(?:#[^\r\n]*)?\r?$')
     if ($packageHeaders.Count -ne 1) {
         throw 'Cargo.toml must contain exactly one [package] section.'

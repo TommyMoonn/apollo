@@ -19,11 +19,11 @@ function Assert-Rejected([scriptblock]$Action, [string]$Case) {
 
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('apollo-release-policy-' + [guid]::NewGuid().ToString('N'))
 $environment = @{}
-foreach ($name in @('GITHUB_REF', 'GITHUB_REF_TYPE', 'GITHUB_REF_NAME', 'CARGO_NET_OFFLINE')) {
+foreach ($name in @('GITHUB_REF', 'GITHUB_REF_TYPE', 'GITHUB_REF_NAME', 'GITHUB_REPOSITORY', 'CARGO_NET_OFFLINE')) {
     $environment[$name] = [Environment]::GetEnvironmentVariable($name)
 }
 try {
-    foreach ($name in @('GITHUB_REF', 'GITHUB_REF_TYPE', 'GITHUB_REF_NAME')) {
+    foreach ($name in @('GITHUB_REF', 'GITHUB_REF_TYPE', 'GITHUB_REF_NAME', 'GITHUB_REPOSITORY')) {
         [Environment]::SetEnvironmentVariable($name, $null)
     }
     $env:CARGO_NET_OFFLINE = 'true'
@@ -124,6 +124,159 @@ fixture-dep = { path = "dep" }
     }
     [IO.File]::WriteAllText($notePath, $note)
     Write-Host 'PASS candidate changelog, exact asset destinations and unchanged note body'
+
+    # Use real Git commits and local tag objects. Substitute only the remote
+    # transport: ls-remote reads the fixture itself, and gh returns fixture JSON.
+    & {
+        . (Join-Path $repo 'scripts/detect-release-candidate.ps1')
+        $history = Join-Path $fixture 'candidate-history'
+        $null = New-Item -ItemType Directory -Path $history, (Join-Path $history 'release-notes') -Force
+        $identity = 'TommyMoonn/apollo'
+        $state = @{ calls = 0; exact = $null; records = @(); fail = $false; malformed = $false; listFailure = $false; invalidList = $false; gitFailure = $false }
+        function GitFixture([string[]]$Arguments) {
+            (Invoke-RepositoryGit -ProjectRoot $history -Arguments $Arguments).StdOut.Trim()
+        }
+        function Read-CandidateGit([string]$ProjectRoot, [string[]]$Arguments) {
+            if ($Arguments[0] -ceq 'ls-remote') {
+                $remotePath = if ($state.gitFailure) { Join-Path $history "missing-remote.git" } else { $history }
+                $Arguments = @($Arguments[0], $Arguments[1], $remotePath) + $Arguments[3..($Arguments.Count - 1)]
+            }
+            (Invoke-RepositoryGit -ProjectRoot $ProjectRoot -Arguments (@('--no-optional-locks', '--no-replace-objects') + $Arguments)).StdOut
+        }
+        function gh {
+            $state.calls++
+            $global:LASTEXITCODE = 0
+            if ($args[0] -cne 'api' -or $args[1] -cne '--hostname' -or $args[2] -cne 'github.com') {
+                throw 'Unexpected GitHub command in read-only fixture.'
+            }
+            if ($state.fail) { $global:LASTEXITCODE = 1; 'HTTP 401'; return }
+            if ($args[3] -ceq 'graphql' -and $args -ccontains '--method' -and $args -ccontains 'POST' -and
+                $args -ccontains 'tag=v0.10.0' -and @($args | Where-Object { $_ -clike 'query=query(*' }).Count -eq 1) {
+                if ($state.malformed) { '{'; return }
+                @{ data = @{ repository = @{ nameWithOwner = $identity; release = $state.exact } } } | ConvertTo-Json -Depth 8 -Compress
+            }
+            elseif ($args -ccontains 'GET' -and $args -ccontains '--paginate' -and $args -ccontains '--slurp' -and
+                $args -ccontains "repos/$identity/releases?per_page=100") {
+                if ($state.listFailure) { $global:LASTEXITCODE = 1; 'HTTP 403'; return }
+                if ($state.invalidList) { '{}'; return }
+                ConvertTo-Json -InputObject (,@($state.records)) -Depth 8 -Compress
+            }
+            else { throw 'Unexpected GitHub operation; no writes are permitted in this fixture.' }
+        }
+        function Write-FixtureVersion([string]$Version) {
+            [IO.File]::WriteAllText((Join-Path $history 'Cargo.toml'), "[package]`nname = `"apollo`"`nversion = `"$Version`"`n")
+            [IO.File]::WriteAllText((Join-Path $history 'Cargo.lock'), "version = 4`n`n[[package]]`nname = `"apollo`"`nversion = `"$Version`"`n")
+        }
+        function Commit-Fixture([string]$Message) {
+            $null = GitFixture @('add', '-A')
+            $null = GitFixture @('commit', '--allow-empty', '-m', $Message)
+            GitFixture @('rev-parse', 'HEAD')
+        }
+        $null = GitFixture @('init', '--initial-branch=main')
+        $null = GitFixture @('config', 'user.name', 'Release fixture')
+        $null = GitFixture @('config', 'user.email', 'fixture@example.invalid')
+        $null = GitFixture @('config', 'commit.gpgsign', 'false')
+        $null = GitFixture @('config', 'tag.gpgsign', 'false')
+        $null = GitFixture @('config', 'core.hooksPath', (Join-Path $fixture 'no-hooks'))
+        $null = GitFixture @('remote', 'add', 'origin', "https://github.com/$identity.git")
+        Write-FixtureVersion '0.9.0'
+        $rootCommit = Commit-Fixture 'root'
+        Assert-Rejected { Find-ReleaseCandidate $history $rootCommit $identity } 'root commit'
+        $ordinary = Commit-Fixture 'ordinary change'
+        $outputPath = Join-Path $fixture 'candidate-output.txt'
+        $oldOutput = $env:GITHUB_OUTPUT
+        try {
+            $env:GITHUB_OUTPUT = $outputPath
+            $result = Invoke-DetectReleaseCandidateCli @($ordinary, $identity, '--project', $history) | ConvertFrom-Json
+            Assert-Check (-not $result.candidate -and $result.version -ceq '0.9.0' -and $result.sha -ceq $ordinary -and $result.reason) 'Ordinary commit was not skipped.'
+            $lines = Get-Content -LiteralPath $outputPath
+            Assert-Check (($lines -join "`n") -ceq "candidate=false`nversion=0.9.0`nsha=$ordinary`nreason=$($result.reason)") 'Noncandidate machine outputs differ from JSON.'
+            Assert-Check ($state.calls -eq 0) 'Unchanged version contacted GitHub.'
+        } finally { $env:GITHUB_OUTPUT = $oldOutput }
+        Assert-Rejected { Find-ReleaseCandidate $history $rootCommit $identity } 'wrong checkout SHA'
+        Assert-Rejected { Find-ReleaseCandidate $history 'abc' $identity } 'short SHA'
+        Assert-Rejected { Find-ReleaseCandidate $history $ordinary 'owner/repo/extra' } 'invalid repository'
+        Assert-Rejected { Find-ReleaseCandidate $history $ordinary 'other/apollo' } 'wrong repository'
+        Write-FixtureVersion '0.10.0'
+        Assert-Rejected { Find-ReleaseCandidate $history $ordinary $identity } 'dirty checkout'
+        $badMetadata = Commit-Fixture 'version without release metadata'
+        Assert-Rejected { Find-ReleaseCandidate $history $badMetadata $identity } 'missing candidate metadata'
+        $null = GitFixture @('reset', '--hard', $ordinary)
+        $null = GitFixture @('switch', '-c', 'release')
+        Write-FixtureVersion '0.10.0'
+        [IO.File]::WriteAllText((Join-Path $history 'CHANGELOG.md'), "## [0.10.0] - 2028-02-29`n`n[0.10.0]: https://github.com/TommyMoonn/apollo/compare/v0.9.0...v0.10.0`n")
+        [IO.File]::WriteAllText((Join-Path $history 'release-notes/v0.10.0.md'), $note.Replace('v1.2.3', 'v0.10.0'))
+        $null = Commit-Fixture 'release branch'
+        $null = GitFixture @('switch', 'main')
+        $null = Commit-Fixture 'main branch change'
+        $null = GitFixture @('merge', '--no-ff', '--no-edit', 'release')
+        $sha = GitFixture @('rev-parse', 'HEAD')
+        $detect = { Find-ReleaseCandidate $history $sha $identity }
+        $before = GitFixture @('show-ref')
+        $oldOutput = $env:GITHUB_OUTPUT
+        try {
+            $env:GITHUB_OUTPUT = $outputPath
+            [IO.File]::WriteAllText($outputPath, '')
+            $candidate = Invoke-DetectReleaseCandidateCli @($sha, $identity, '--project', $history) | ConvertFrom-Json
+            Assert-Check ($candidate.candidate -and $candidate.version -ceq '0.10.0' -and $candidate.sha -ceq $sha) 'Numeric increase on merge first parent was not detected.'
+            Assert-Check (((Get-Content -LiteralPath $outputPath) -join "`n") -ceq "candidate=true`nversion=0.10.0`nsha=$sha`nreason=") 'Candidate machine outputs differ from JSON.'
+        } finally { $env:GITHUB_OUTPUT = $oldOutput }
+        Assert-Check ((GitFixture @('show-ref')) -ceq $before) 'Detection changed Git refs.'
+        Assert-Check ((GitFixture @('status', '--porcelain')).Length -eq 0) 'Detection changed the checkout.'
+        $null = GitFixture @('tag', 'v0.10.0', $ordinary)
+        Assert-Rejected $detect 'wrong remote tag target'
+        $null = GitFixture @('tag', '-d', 'v0.10.0')
+        $null = GitFixture @('tag', 'v0.10.0', $sha)
+        Assert-Check ((& $detect).candidate) 'Matching lightweight tag was rejected.'
+        $null = GitFixture @('tag', '-d', 'v0.10.0')
+        $null = GitFixture @('tag', '-a', 'v0.10.0', '-m', 'fixture tag', $sha)
+        $state.exact = @{ databaseId = 42; isDraft = $true }
+        $record = @{ id = 42; draft = $true; tag_name = 'untagged-aabb'; name = 'Apollo v0.10.0'; target_commitish = $sha }
+        $state.records = @($record)
+        Assert-Check ((& $detect).candidate) 'Matching annotated tag and pending draft were rejected.'
+        $state.records = @($record, @{ id = 43; draft = $true; tag_name = 'untagged-bbcc'; name = 'Apollo v0.10.0'; target_commitish = $sha })
+        Assert-Rejected $detect 'ambiguous draft'
+        $state.records = @($record)
+        $record.target_commitish = $ordinary
+        Assert-Rejected $detect 'conflicting draft commit'
+        $record.target_commitish = $sha
+        $state.exact = $null
+        Assert-Rejected $detect 'unresolved draft'
+        $state.exact = @{ databaseId = 42; isDraft = $false }
+        $record.draft = $false
+        $record.tag_name = 'v0.10.0'
+        Assert-Check ((& $detect).candidate) 'Matching published release replay was rejected.'
+        $null = GitFixture @('tag', '-d', 'v0.10.0')
+        Assert-Rejected $detect 'release without matching tag'
+        $state.exact = $null
+        $state.records = @()
+        $state.fail = $true
+        Assert-Rejected $detect 'authentication failure'
+        $state.fail = $false
+        $state.malformed = $true
+        Assert-Rejected $detect 'malformed GitHub JSON'
+        $state.malformed = $false
+        $state.listFailure = $true
+        Assert-Rejected $detect 'failed release enumeration'
+        $state.listFailure = $false
+        $state.invalidList = $true
+        Assert-Rejected $detect 'malformed release list'
+        $state.invalidList = $false
+        $state.gitFailure = $true
+        Assert-Rejected $detect 'failed Git tag lookup'
+        $state.gitFailure = $false
+        Assert-Check ((& $detect).candidate) 'Confirmed missing tag and release were rejected.'
+        Write-FixtureVersion '0.9.0'
+        $down = Commit-Fixture 'downgrade'
+        Assert-Rejected { Find-ReleaseCandidate $history $down $identity } 'downgrade'
+        Write-FixtureVersion '0.11.0-rc.1'
+        $invalid = Commit-Fixture 'prerelease'
+        Assert-Rejected { Find-ReleaseCandidate $history $invalid $identity } 'prerelease'
+        Write-FixtureVersion '0.11.0'
+        $invalidParent = Commit-Fixture 'stable after prerelease'
+        Assert-Rejected { Find-ReleaseCandidate $history $invalidParent $identity } 'invalid parent version'
+        Write-Host 'PASS read-only candidate transitions, first-parent identity, remote conflicts and machine outputs'
+    }
 
     & $updater 1.2.4 --project $fixture
     $expectedLock = $originalLock.Replace('version = "1.2.3"', 'version = "1.2.4"')

@@ -14,6 +14,20 @@ Apollo distributes a per-user Windows x64 NSIS installer and a portable ZIP. Bot
 
 The version update is transactional: if Cargo fails or modifies the lockfile beyond the root version, both version files are restored. A focused local release-policy fixture check is available with `pwsh -NoProfile -File tests/scripts/ReleasePolicy.Tests.ps1`. It is independent of CI and `just verify`. Run it after `just build-release` on Windows with NSIS 3.11 installed to include the artifact and staging failure cases; without the built executable or compiler the unavailable fixture cases are reported as skipped. Real installer and media acceptance use the Windows smoke path.
 
+## Detect release candidates (read-only)
+
+The candidate detector is available for inspection before the automatic workflow is activated:
+
+```powershell
+just detect-release-candidate SHA TommyMoonn/apollo
+```
+
+Replace `SHA` with the full lowercase commit SHA of a clean checkout with complete Git history. The checkout origin must identify the supplied GitHub repository. The detector validates current version metadata and compares the Cargo package version against the commit's first parent, including on merge commits. An unchanged stable version is a noncandidate; a downgrade, invalid version or missing history is an error. An increase must also satisfy the full changelog and release-note checks.
+
+For an increase, authenticated GitHub CLI access is required. Detection checks the exact remote tag (including annotated tags), exact release identity and all pages of release records visible to that credential. A matching tag, draft or published release can be recognized for retry; missing or ambiguous identities, conflicting targets and failed queries stop detection. A published release is not modified. GitHub can hide drafts from credentials without sufficient access; a candidate result is not proof that no hidden draft exists. The command emits JSON with `candidate`, `version`, `sha` and `reason`, and writes the same fields to `GITHUB_OUTPUT` when configured. It does not authorize publication or prove CI success. The future publisher must recheck remote state and artifact integrity before any write.
+
+The active tag-based workflow below remains unchanged. Do not create a tag or release merely to test detection.
+
 ## Build and inspect packages
 
 Run the `Windows Installer Build` workflow manually for a nonpublishing build of the selected branch or tag revision. It reuses successful main-push `CI Gate` evidence for that exact SHA when available; otherwise it runs the ordinary source checks once. Manual and tagged release builds call the same `windows-package.yml` workflow, which builds the Windows release once, stages and accepts it, uploads the four fixed files, and independently verifies the downloaded artifact by ID. The workflow summary identifies the version, SHA, artifact ID, run ID and attempt. Acceptance logs are uploaded separately; neither the logs nor provenance are published as release assets.
