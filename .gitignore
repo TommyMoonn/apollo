@@ -1,10 +1,9 @@
 /target/
 /artifacts/
 
-/.planning/
+/.plans/
 /.project/
 /.scratch/
-/.dev/
 /.agent-work/
 
 /.dev/chatgpt/bundles/
