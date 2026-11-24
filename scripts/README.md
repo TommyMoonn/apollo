@@ -17,7 +17,7 @@ Public commands use:
 
 Do not add script-local argument parsers. The shared CLI, export and review commands are adapted from [Archeion at `4b711fc2`](https://github.com/TommyMoonn/archeion/tree/4b711fc2af4c70e321edd8b9072527c08c13fbf2/scripts) under GPL-3.0-only. Apollo retains its stricter option validation and Git inventory, writes workspace files directly to the final temporary ZIP, and uses a no-overwrite publish step.
 
-For the end-to-end release operator workflow, see [`docs/RELEASES.md`](../docs/RELEASES.md).
+For installed and portable artifact checks, see [Testing](../docs/TESTING.md#windows-artifact-acceptance).
 
 ## Commands
 

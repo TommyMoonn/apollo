@@ -1,5 +1,8 @@
 # Apollo Development
 
+> [!IMPORTANT]
+> All of the documentation here are written by LLMs.
+
 ## Prerequisites
 
 Apollo targets Windows as its primary development and validation platform.
@@ -14,7 +17,7 @@ Required development tools:
 
 Rustup is the recommended way to install the pinned Rust toolchain. From the repository root, the toolchain file should select the required version automatically.
 
-FFmpeg and FFprobe run as separate processes. The v0.5.0 Windows packages include the pinned pair; `cargo build` does not download or copy media tools. Apollo discovers and validates them through one shared application owner rather than feature-specific checks.
+FFmpeg and FFprobe run as separate processes. The Windows release packages include the pinned pair; `cargo build` does not download or copy media tools. Apollo discovers and validates them through one shared application owner rather than feature-specific checks.
 
 ### Pinned media tools for development
 
@@ -30,17 +33,7 @@ pwsh -NoProfile -File .\scripts\stage-media-tools.ps1 --offline --output .scratc
 
 The default cache is `.scratch/media-tools-cache`; `--cache <path>` selects another cache. A checksum mismatch fails before extraction. Offline cache misses fail without a download. Existing staging destinations are refused. The stager validates both versions and required encoders, but never attempts a GPU encode.
 
-For `just run`, prepend the staged directory to PATH in that development shell, or copy the complete staged payload beside the built Apollo executable. Do not copy just one executable. The runtime policy is:
-
-1. Validate and use the complete adjacent pair.
-2. If neither adjacent file exists, resolve both via explicit PATH.
-3. If the bundle is partial or invalid, retain its path and diagnostic; do not fall back. Retry repeats this policy.
-
-Capability results are keyed by resolved FFmpeg path, file size and modification time. Changing from PATH to the bundle invalidates the cached result. This is a runtime cache identity, not a cryptographic release attestation; release staging verifies the pinned archive hash separately.
-
-## Releases
-
-The operator workflow for versioning, tagging, Windows artifacts, draft GitHub Releases, verification, and publication is documented in [RELEASES.md](RELEASES.md).
+For `just run`, prepend the staged directory to PATH in that development shell, or copy the complete staged payload beside the built Apollo executable. Do not copy just one executable. Apollo prefers a complete valid pair beside the executable. See [Architecture](ARCHITECTURE.md#media-tool-discovery) for discovery and caching rules.
 
 ## Local commands
 
@@ -52,16 +45,8 @@ Run `just` or `just --list` from the repository root to discover available recip
 | `just build` | Build the application. |
 | `just check` | Check compilation without producing a binary. |
 | `just fmt` / `just fmt-check` | Apply or check Rust formatting. |
-| `just lint` | Run locked Clippy across all targets and features, denying warnings. |
-| `just test` | Run locked Rust tests across all targets. |
-| `just test-scripts` | Run an optional local tooling smoke check. |
-| `just verify` | Run the complete local verification gate. |
 
-`just verify` runs `fmt-check`, `lint`, `test`, `build` and `check-release` in order, stopping at the first failure. Metadata validation is read-only; no version bump, release changelog, installer build or GPU smoke test is required for normal local verification.
-
-`just test-scripts` is independent of `just verify` and CI. It checks PowerShell syntax and a few high-risk workspace operations in temporary repositories. It does not build the application, download dependencies or require an installer.
-
-For a focused check during development, run the relevant recipe or individual test. Report unavailable or failed checks separately from passing checks.
+See [Testing](TESTING.md) for focused tests, `just verify`, optional tooling checks and native Windows acceptance.
 
 ## Workspace commands
 
@@ -79,196 +64,9 @@ just clean --dry-run
 
 See [repository scripts](../scripts/README.md) for all transfer and cleanup options. Offline preparation and maintenance are owner-managed, outside Just.
 
-## Queue and Batch Architecture
+For module ownership, media policy and native assets, see [Architecture](ARCHITECTURE.md).
 
-`MediaQueue` owns immutable queued jobs, monotonic `JobId` values, destination reservations, source revalidation, sequential advancement, cancellation, terminal history, and atomic batch insertion. `MediaExecution` remains the only process-lifecycle and staged-output publication owner. Queue progress and completion are routed by the active `JobId`; repainting a Queue or Batch surface must not inspect media or touch the filesystem.
-
-Only Waiting jobs are editable or reorderable, and editing is disabled while automatic advancement is Running or Stopping after current. Queue-row Edit and the loaded-source queued-item selector enter the same queue editor and hydrate the retained `MediaFile` and immutable request without another FFprobe invocation. The source is fixed, while the operation and settings may change. Saving replaces the Waiting request atomically without changing its `JobId` or queue position. Entry origin owns the return route.
-
-`Add to queue` from a normal source workspace keeps the source and operation active, increments the pending count, and shows operation-local success or failure feedback. Pending counts include Waiting and Running jobs only. A destination reserved by another non-terminal job is distinct from a file that already exists on disk.
-
-Batch setup is temporary pre-queue state. It applies one shared operation and source-independent defaults, then projects and validates a request independently for each inspected source. Per-file overrides survive later shared-default changes. `BatchInspectionOwner` is the single inspection owner and permits at most two concurrent FFprobe processes. Appending sources reuses that owner and preserves the current operation, defaults, inclusion choices, and overrides. No queued job exists until `MediaQueue` accepts the complete included batch atomically.
-
-Queue control semantics are intentionally distinct:
-
-- `Cancel current` cancels the active job and continues normal advancement.
-- `Stop after current` lets the active job finish, stops advancement, and preserves Waiting jobs.
-- `Cancel queue` cancels the active job and marks all Waiting jobs Cancelled.
-- `Clear finished` removes every terminal job, including failures.
-- Leaving Queue through Back or starting Add files removes only disposable Completed and Cancelled history. Failed jobs remain available with diagnostic Details.
-
-### Queue release smoke
-
-Before releasing a Queue change, exercise the native application at wide, default, and narrow widths with empty, Waiting, Running, Completed, Cancelled, Failed, mixed-state, and long-path queues. Check the aligned Queue header and columns, stacked narrow rows, disabled reorder-arrow legibility, active-`JobId` progress, and separation of Back from process controls.
-
-Also verify both queue-edit entry points with same-source duplicate jobs and different sources; Save and Cancel return to the correct origin; changing operation preserves the queued source; retained queued media opens without FFprobe; and successful single-item enqueue keeps its source workspace with `Added to queue` feedback and an updated pending count.
-
-For Batch setup, cover native multi-select, multi-file drop, Add files, normalized duplicate sources, shared defaults, Ready Override, Needs attention Review, inspection failure, Include/Exclude, and atomic enqueue. Confirm that appending preserves existing state, inspection never exceeds two concurrent probes, and failed or incompatible sources expose no inert actions.
-
-Finally, exercise duplicate queued destinations, genuine existing output files, invalid requests, changed or missing sources, and short and long diagnostics. Concise corrective guidance must remain visible without opening Details, while expanded diagnostics use only the required height up to the shared maximum.
-
-## Typography
-
-Apollo does not depend on machine-installed fonts for application typography. The repository font assets live under:
-
-```text
-assets/fonts/
-```
-
-`src/ui/fonts.rs` is the single owner for loading those assets, stable font-family names, the typography scale, and egui text-style mapping. IBM Plex Sans is the primary UI family; Fira Code is reserved for the Apollo wordmark and compact technical metadata. Individual screens should request the shared text styles rather than configuring fonts locally.
-
-Missing or invalid required font assets are startup configuration errors. Apollo must not silently fall back to whatever fonts happen to be installed on the development machine.
-
-## FFmpeg Expectations
-
-Apollo uses FFmpeg and FFprobe as external media engines instead of reimplementing codecs or linking libav.
-
-Repository rules for media execution:
-
-- never build shell command strings
-- pass process arguments separately
-- use probed stream indexes for stream mappings
-- do not silently re-encode unrelated streams
-- process exit is authoritative for success
-- cancellation must terminate only the owned child process
-- failed or cancelled jobs must not publish misleading partial outputs
-
-`src/media/tools.rs` owns FFmpeg/FFprobe discovery and bounded version validation. `src/media/probe.rs` owns FFprobe invocation, JSON deserialization, and normalization into the shared types in `src/media/model.rs`. `src/media/container.rs` owns shared MP4 and Matroska stream-copy compatibility. `src/media/process.rs` owns long-running child-process spawning, cancellation, lifecycle settlement, bounded diagnostic stderr capture, and nonblocking output/progress channels. `src/media/output.rs` owns validation, operation-owned temporary paths, success-only publication, and failed/cancelled cleanup. `src/media/progress.rs` owns parsing machine-readable FFmpeg progress records into shared progress state; process exit remains the success/failure authority.
-
-Each workflow keeps its request model, validation, structured FFmpeg command construction, and execution policy under its feature module:
-
-```text
-src/audio_mix/
-src/upscale/
-src/remux/
-src/audio_extract/
-src/frame_capture/
-```
-
-The corresponding ready and lifecycle surfaces live under `src/ui/`. Remux remains stream copy only, Audio Extract maps one selected audio stream, and Frame Capture maps one video stream for one still image. Do not broaden these focused workflows into conversion, stream-editing, or timeline tools without an explicit release plan.
-
-## Upscale Sizing, Encoding, and Format Policy
-
-`src/upscale/sizing.rs` owns exact aspect-preserving even output dimensions. Preset boundaries remain orientation-aware. Custom boundaries are explicit positive even width/height values and are never swapped. Sizing rejects boxes that cannot enlarge the source without boundary overshoot or source-edge downscale from quantization. Execution uses the calculated dimensions, not raw UI input.
-
-Scaling remains `scale=<width>:<height>:flags=lanczos`. Encoder selection does not enable hardware decoding or CUDA/NPP scaling.
-
-| Backend | H.264 | H.265 | Quality policy |
-| --- | --- | --- | --- |
-| CPU | `libx264`, CRF 18 default | `libx265`, CRF 20 default | CRF 0..51, `slow` preset |
-| NVIDIA NVENC | `h264_nvenc`, CQ 16 default | `hevc_nvenc`, CQ 16 default | CQ 1..51, `p5`, VBR, explicit CQ |
-
-Lower quality numbers favor quality over file size. CRF and CQ are not interchangeable scales. State retains values independently for each codec/backend, alongside the last custom boundary and manual output name.
-
-The shared media-tool owner checks compiled NVENC availability and runs bounded, hidden, minimal real encode probes off the egui thread. H.264 and H.265 results are independent and cached for the resolved FFmpeg identity. Base tool discovery can finish before these probes: normal workspace use and CPU Upscale remain available while Auto and explicit NVENC show checking state. Auto selects NVENC only after success; explicit unavailable NVENC retains diagnostics and never silently falls back. Do not probe on repaint or command construction.
-
-The pinned build uses `ffnvcodec n12.2.72.0-1-g9934f17` (NVENC API 12.2). Its measured baseline is Windows NVIDIA driver 566.14 on an RTX 3060 Laptop GPU. Neither the FFmpeg source version nor `-encoders` proves driver compatibility. Older drivers and other GPUs remain unverified by that measurement. If initialization fails, Auto resolves to CPU; explicit NVIDIA selection retains the real probe error. An error after an encode has started remains a job failure, not a silent CPU rerun.
-
-### Pixel Format and Color Limits
-
-The probe retains pixel format, derivable bit depth, range, matrix, transfer, and primaries. Shared Upscale validation resolves the output format for both ready feedback and execution:
-
-- 8-bit `yuv420p` is supported on CPU and NVENC. `nv12` uses `yuv420p` on CPU or `nv12` on NVENC; `yuvj420p` is CPU-only.
-- Supported 10-bit 4:2:0 sources require H.265, using `yuv420p10le` on CPU or `p010le` on NVENC. PQ/HLG signaling requires known compatible 10-bit input.
-- Unsupported or contradictory known format information is rejected. When both pixel identity and depth are absent, strict FFmpeg format selection preserves the filter output rather than guessing an 8-bit format.
-- Commands use strict `-pix_fmt` selection and map only available color values. External encoder/hardware limitations can still fail execution instead of silently choosing a different format.
-- This is not a guarantee of full HDR preservation: mastering-display/content-light side data is not explicitly preserved or verified, and format checks do not establish visual fidelity.
-
-### Runtime Regression Checks
-
-The normal Rust gate covers sizing, encoder resolution, quality bounds, command construction, and format validation without requiring GPU hardware. Opt-in tests exercise real CPU/NVENC encoding and FFprobe verification:
-
-```powershell
-cargo test --test upscale real_cpu_upscale -- --ignored --nocapture
-cargo test --test upscale real_nvenc_upscale -- --ignored --nocapture
-```
-
-These require FFmpeg/FFprobe, FFV1 fixture generation, and the corresponding working encoders. They check controlled 8-bit H.264/H.265 and 10-bit H.265 PQ/HLG output dimensions, bit depth, and color signaling. They do not replace native-window review or quality comparisons.
-
-For release artifacts, use the [installed/portable acceptance gate](RELEASES.md#self-contained-media-acceptance) instead of relying on PATH-based tests. It runs the production discovery, probe, feature executors, command builders and output publication against each extracted/installed pair with an empty PATH. Its default CPU and failure-path checks need no NVIDIA GPU. `-RequireNvenc` additionally requires both real probes and H.264/H.265 CQ 16 Upscale to succeed on the recorded baseline.
-
-Before release, smoke-test preset 1440p/4K output and 8K sizing, custom landscape/ultrawide/portrait boxes, both NVENC codecs at CQ 16 and custom CQ, Auto success/fallback, explicit unavailable NVENC, and supported/unsupported video formats. Compare a controlled source using the previous CPU defaults, the new equivalent CPU settings, and NVENC CQ 16 for regression sanity, not to claim one encoder is universally better. Record actual results and unavailable cases separately.
-
-## Repository Scripts
-
-Apollo uses PowerShell 7 repository tooling with two shared owners:
-
-- `scripts/Cli.Common.ps1` parses public CLI arguments.
-- `scripts/Repository.Common.ps1` owns shared repository slug derivation, safe project-relative path resolution, Git process invocation, and ChatGPT import backup location.
-
-Canonical commands:
-
-```text
-apply-changes.ps1
-package-changes.ps1
-review-changes.ps1
-restore-changes.ps1
-clean-generated.ps1
-zip-project.ps1
-```
-
-Public command conventions:
-
-- PowerShell 7
-- `Set-StrictMode -Version Latest`
-- `$ErrorActionPreference = "Stop"`
-- lowercase `--kebab-case` long options
-- `-h` and `--help` on every public command
-- consistent shared option names
-- no duplicated script-local argument parsing
-
-### Review and changed-files workflow
-
-Review first:
-
-```powershell
-just review --files
-```
-
-Package the reviewed working-tree delta:
-
-```powershell
-just package my-task
-just package my-task --tracked-only
-```
-
-The exporter includes staged and unstaged changes against HEAD and, by default, eligible untracked files. It writes `apollo-<task-or-phase>-changed-files.zip` beside the project, with provenance and deletion metadata. It excludes local-only, sensitive and generated paths. Use `--output` to choose another archive and `--force` to replace a previous archive safely.
-
-Preview and apply a changed-files package:
-
-```powershell
-just apply --zip 'C:/Downloads/apollo-task-changed-files.zip' --dry-run
-just apply --zip 'C:/Downloads/apollo-task-changed-files.zip'
-```
-
-Omitting `--zip` selects the newest Apollo changed-files package (including browser-renamed copies), not a snapshot or release archive. The importer checks provenance, archive entries, targets and deletion operations before writing. It skips identical files and protects tracked dirty changes unless explicitly allowed. Backups include original content and a journal of new paths, stored under `%LOCALAPPDATA%/Apollo/ChatGPTImports/<project-slug>/` by default.
-
-Preview or restore the latest backup:
-
-```powershell
-just restore --dry-run
-just restore
-```
-
-Restore refuses conflicting later edits before mutation, reinstates overwritten/deleted paths and removes unchanged import-created files and empty recorded directories. Legacy backups can restore only saved content and cannot detect later edits. See [script documentation](../scripts/README.md#package-changed-files) for full options and recovery limitations.
-
-### Repository and workspace ZIP workflow
-
-```powershell
-just zip repo
-just zip workspace
-just zip workspace --output 'C:/Exports/apollo workspace.zip'
-```
-
-Use `repo` to share committed source and `workspace` to include current edits and eligible local context. Defaults are `apollo-repo(yyMMddHHmm).zip` and `apollo-workspace(yyMMddHHmm).zip` beside the project. Both contain a root-level `EXPORT_MANIFEST.json` recording provenance. Existing archives are never overwritten. The workspace export applies [the `.zipignore` rules](../scripts/README.md#repository-and-workspace-exports); repo export uses Git archive and refuses committed local records.
-
-Use `--project` and `--output` to override the project root and destination. To run directly, use `pwsh -NoProfile -File scripts/zip-project.ps1 --mode workspace`. Snapshots are for inspection or workspace transfer; extract them separately rather than applying them as changed-files packages.
-
-### Generated-output cleanup
-
-Use `just clean --dry-run` to preview the root `target/` directory, or `just clean` to remove it. The direct script accepts `--rust` for compatibility. Tracked files require `--force`; root, link and protected-content checks remain active regardless. See [cleanup options](../scripts/README.md#clean-generated-output).
-
-## Local Workspace Roots
+## Local workspace roots
 
 The repository reserves these local roots:
 

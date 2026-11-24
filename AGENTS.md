@@ -39,7 +39,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 - `src/audio_mix/`, `src/upscale/`, `src/remux/`, `src/audio_extract/` and `src/frame_capture/` contain operation requests, validation, command construction and execution. Frame Capture also handles frame indexing, previews and clipboard extraction.
 - `src/settings.rs` persists remembered source and output directories. `src/file_dialog.rs` handles native file dialogs. `src/progress_repaint.rs` coordinates repaints in response to progress updates.
 - `tests/` contains Rust integration tests, FFprobe fixtures, the optional tooling smoke check and Windows release acceptance support. Rust unit tests live alongside the implementation.
-- `scripts/` contains repository and release tooling. `distribution/` contains media-tool version pins and acceptance records. `installer/` contains Windows installer sources. `docs/` contains engineering and release guides.
+- `scripts/` contains repository and release tooling. `distribution/` contains media-tool version pins and acceptance records. `installer/` contains Windows installer sources. `docs/` contains engineering guides.
 
 ## Keep ownership clear
 
@@ -51,7 +51,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 
 `MediaExecution` manages processing and finalizes staged output for file-producing operations. Operation executors prepare validated requests and structured commands. `MediaProcess` manages child processes and diagnostics. Frame preview and clipboard extraction have their own owners in `src/frame_capture/`. Extend these execution paths instead of creating competing workers or output publishers.
 
-`src/media/tools.rs` handles FFmpeg and FFprobe discovery and caches encoder capabilities. Preserve the adjacent-pair-first discovery policy and explicit NVENC failure behavior described in the development guide.
+`src/media/tools.rs` handles FFmpeg and FFprobe discovery and caches encoder capabilities. Preserve the adjacent-pair-first discovery policy and explicit NVENC failure behavior described in the [architecture guide](docs/ARCHITECTURE.md).
 
 Give each piece of state one owner. Keep temporary presentation state in its UI or editor, shared application state in the application and processing policy in the relevant operation or media module.
 
@@ -67,7 +67,7 @@ Prefer early returns and readable control flow. Write comments for invariants an
 
 ## Build a consistent, accessible interface
 
-Follow the current interface and the typography and layout guidance in [the development guide](docs/DEVELOPMENT.md). Reuse the shared controls, layout, theme and typography definitions in `src/ui/widgets.rs`, `src/ui/layout.rs`, `src/ui/theme.rs` and `src/ui/fonts.rs`.
+Follow the current interface and the typography and layout guidance in [the architecture guide](docs/ARCHITECTURE.md). Reuse the shared controls, layout, theme and typography definitions in `src/ui/widgets.rs`, `src/ui/layout.rs`, `src/ui/theme.rs` and `src/ui/fonts.rs`.
 
 Handle applicable loading, empty, error, success and cancellation states. Keep dimensions stable when feedback changes. Preserve keyboard access, visible focus, readable labels and appropriate hit areas. Follow the shared motion policy and keep animations restrained.
 
@@ -91,18 +91,19 @@ Prefer focused Cargo tests, such as `cargo test --locked --test remux` or `cargo
 
 `just test-scripts` is an optional local smoke check for repository tooling. Keep it small and independent of application verification, CI and release packaging. Release metadata validation, artifact integrity checks and installed/portable acceptance remain part of the release process.
 
-Follow the development and release guides for tests with real FFmpeg, NVENC and native Windows behavior. A Linux build, mocked process or encoder inventory cannot establish Windows, GPU or rendered-interface behavior. Report any checks you could not run.
+Follow [the testing guide](docs/TESTING.md) for tests with real FFmpeg, NVENC and native Windows behavior. A Linux build, mocked process or encoder inventory cannot establish Windows, GPU or rendered-interface behavior. Report any checks you could not run.
 
 ## Keep documentation useful
 
-Keep setup, architecture, design guidance and release procedures in their dedicated guides:
+Keep setup, architecture and testing guidance in their dedicated guides:
 
-- [Development guide](docs/DEVELOPMENT.md) for setup, media policy, architecture and local commands.
+- [Development guide](docs/DEVELOPMENT.md) for setup and local commands.
+- [Architecture](docs/ARCHITECTURE.md) for module ownership, media policy and native resources.
+- [Testing](docs/TESTING.md) for verification and Windows artifact acceptance.
 - [Repository scripts](scripts/README.md) for export, review, transfer, recovery and cleanup.
-- [Release process](docs/RELEASES.md) for versioning, packaging, acceptance and publication.
 - [Media-tool acceptance](distribution/media-tools-acceptance.md) for the pinned distribution and compatibility evidence.
 
-Update user documentation when a supported workflow changes. Document architectural decisions and constraints that are hard to recover from the source. Do not document every method or component. Keep technical version history in `CHANGELOG.md` and follow the release guide for release notes.
+Update user documentation when a supported workflow changes. Document architectural decisions and constraints that are hard to recover from the source. Do not document every method or component. Keep technical version history in `CHANGELOG.md`.
 
 ## Planning and work artifacts
 

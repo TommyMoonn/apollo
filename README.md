@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/apollo-wordmark.png" alt="Apollo" width="240" />
+  <img src="assets/docs/apollo-wordmark.png" alt="Apollo" width="240" />
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/apollo-preview.png" alt="Apollo file intake screen" width="620" />
+  <img src="assets/docs/apollo-preview.png" alt="Apollo file intake screen" width="620" />
 </p>
 
 # About Apollo
@@ -56,14 +56,11 @@ Apollo supports Windows x64. CPU H.264 and H.265 encoders are included. NVIDIA e
 
 See the [pinned media-tool manifest](distribution/media-tools.json), [compatibility notes](distribution/media-tools-acceptance.md), and [third-party notices](THIRD_PARTY_NOTICES.md#bundled-ffmpeg-and-ffprobe).
 
-## Development
-
-Use the pinned Rust toolchain, PowerShell 7 and Just. Run `just --list` to discover commands, `just run` to start Apollo, and `just verify` to run the local verification gate. Use `just test-scripts` for the optional local tooling smoke check. See the [development guide](docs/DEVELOPMENT.md) for setup and workspace commands.
-
 ## Project documentation
 
 - [Development guide](docs/DEVELOPMENT.md)
-- [Release process](docs/RELEASES.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Testing](docs/TESTING.md)
 - [Project scripts](scripts/README.md)
 - [Changelog](CHANGELOG.md)
 
