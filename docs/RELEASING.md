@@ -12,21 +12,25 @@ Apollo distributes a per-user Windows x64 NSIS installer and a portable ZIP. Bot
 3. Run `just check-release --tag vX.Y.Z --require-changelog` with the intended tag, then `just verify`. Review the final diff. Candidate validation requires an exact tag, one valid dated changelog heading, the matching comparison URL and the versioned note with both download links and at least one change. Normal CI checks only version metadata; ordinary changes need not create a release entry.
 4. Submit the release preparation PR. Wait for `CI Gate` to succeed on the merged commit's main-push run before creating a release tag. Only the repository owner or an explicitly authorized release operator may create tags or publish releases.
 
-The version update is transactional: if Cargo fails or modifies the lockfile beyond the root version, both version files are restored. A focused local release-policy fixture check is available with `pwsh -NoProfile -File tests/scripts/ReleasePolicy.Tests.ps1`. It is independent of CI and `just verify`.
+The version update is transactional: if Cargo fails or modifies the lockfile beyond the root version, both version files are restored. A focused local release-policy fixture check is available with `pwsh -NoProfile -File tests/scripts/ReleasePolicy.Tests.ps1`. It is independent of CI and `just verify`. Run it after `just build-release` on Windows with NSIS 3.11 installed to include the artifact and staging failure cases; without the built executable or compiler the unavailable fixture cases are reported as skipped. Real installer and media acceptance use the Windows smoke path.
 
 ## Build and inspect packages
 
 Run the `Windows Installer Build` workflow manually for a nonpublishing build, or use the local Windows x64 development environment with NSIS 3.11:
 
 ```powershell
-just release-stage
+just build-release
+just stage-release
+just verify-release --local --expected-version 0.7.0
 ```
 
-The local command builds the locked release executable and stages the following files in `artifacts/windows/`:
+The commands build the locked release executable, stage the artifacts and verify them without another build. Substitute the current Cargo version in the verification command. The three public files in `artifacts/windows/` are:
 
 - `Apollo-Setup-x64.exe`
 - `Apollo-windows-x64.zip`
 - `SHA256SUMS.txt`
+
+The same directory contains `release-provenance.json`, an internal schema-versioned record of the candidate identity, selected Rust and NSIS versions, pinned media archive, and asset and payload digests and sizes. It is transferred with CI artifacts but never published. Without explicit candidate identity, staging records a null SHA even for a clean local tree. For a clean candidate checkout, pass `--expected-sha <full-sha> --expected-version X.Y.Z` to both `just stage-release` and `just verify-release`. Use `--artifacts-dir <path>` to verify a downloaded copy. The verifier reads trusted metadata, notices and the media manifest from that checkout, and needs neither the original build output nor media cache. Media redistribution bytes are checked against the recorded digests from the validated archive. Provenance is not a signature and does not independently prove the origin of a build. Windows resource inspection requires Windows; runtime installer acceptance is separate.
 
 Use [Testing](TESTING.md) for checksum, installed and portable acceptance, CPU encoding and manual NVIDIA checks. The [media-tool acceptance record](../distribution/media-tools-acceptance.md) describes the pinned binaries and recorded hardware evidence. A previous release's acceptance is not evidence for newly built artifacts. See [repository scripts](../scripts/README.md) for staging options and prerequisites.
 
@@ -34,7 +38,7 @@ Use [Testing](TESTING.md) for checksum, installed and portable acceptance, CPU e
 
 The following procedure remains active until the automatic release workflow replaces it:
 
-1. With authorization, create and push the exact `vX.Y.Z` tag on the intended green main commit. The `Release` workflow verifies that the tag belongs to main and reuses the successful push CI run for that commit. It validates the full candidate metadata, builds Windows artifacts, runs release smoke acceptance, and verifies the downloaded checksums before creating or refreshing a draft.
+1. With authorization, create and push the exact `vX.Y.Z` tag on the intended green main commit. The `Release` workflow verifies that the tag belongs to main and reuses the successful push CI run for that commit. It validates the full candidate metadata, builds Windows artifacts, runs release smoke acceptance, and independently verifies the downloaded artifact set before creating or refreshing a draft.
 2. Review the draft and verify its three assets. A newly created draft uses the canonical note file; when refreshing an existing draft, the workflow leaves its body unchanged. Confirm the draft body matches the tracked note before publishing. The workflow refuses to replace published release assets.
 3. Complete the manual hardware acceptance in [Testing](TESTING.md), using the actual staged artifacts. Resolve any failed acceptance before publication. Publish the draft only after the required checks and review succeed.
 

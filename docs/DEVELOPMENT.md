@@ -93,6 +93,8 @@ See [repository scripts](../scripts/README.md) for all transfer and cleanup opti
 
 For module ownership, media policy and native assets, see [Architecture](ARCHITECTURE.md).
 
+For release packaging, use `just build-release`, `just stage-release` and `just verify-release` as described in [Releasing](RELEASING.md). These commands are separate from ordinary verification. `just stage-media-tools` and `just build-installer` support direct diagnostic staging without rebuilding Apollo.
+
 ## Local workspace roots
 
 The repository reserves these local roots:

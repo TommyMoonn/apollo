@@ -110,7 +110,9 @@ function Invoke-BuildWindowsInstallerCli {
         [AllowEmptyCollection()]
         [object[]]$Arguments,
         # Internal release orchestration supplies the already validated shared pair.
-        [string]$MediaToolsPath
+        [string]$MediaToolsPath,
+        $Release,
+        $MediaManifest
     )
 
     $cli = ConvertFrom-CliArguments -Arguments $Arguments -OptionSpecs @{
@@ -162,12 +164,15 @@ The output filename must be exactly Apollo-Setup-x64.exe.
     if (-not $outputName.Equals('Apollo-Setup-x64.exe', [System.StringComparison]::Ordinal)) {
         throw "Installer output must be named exactly 'Apollo-Setup-x64.exe', found '$outputName'."
     }
+    if (Test-PathAtOrBelow -Path $outputPath -Parent (Join-Path $projectRoot '.git')) { throw 'Installer output must not write into Git metadata.' }
     if (Test-Path -LiteralPath $outputPath -PathType Container) {
         throw "Installer output must be a file path: $outputPath"
     }
 
-    $release = Invoke-ReleaseValidation -ProjectRoot $projectRoot
-    Assert-WindowsX64ApolloExecutable -Path $executablePath
+    if ($null -eq $Release) { $Release = Invoke-ReleaseValidation -ProjectRoot $projectRoot }
+    Assert-ApolloResourceVersion -Path $executablePath -Version $Release.Version
+    Assert-TransferUnlinked $executablePath
+    Assert-TransferUnlinked $outputPath
 
     $licensePath = Join-Path $projectRoot 'LICENSE'
     $noticesPath = Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md'
@@ -192,17 +197,17 @@ The output filename must be exactly Apollo-Setup-x64.exe.
 
     try {
         $manifestPath = Join-Path $projectRoot 'distribution/media-tools.json'
-        $manifest = Read-MediaToolsManifest $manifestPath
+        $manifest = if ($null -ne $MediaManifest) { $MediaManifest } else { Read-MediaToolsManifest $manifestPath }
         if ([string]::IsNullOrEmpty($MediaToolsPath)) {
             $cacheValue = if ($null -eq $cli['media-cache']) { '.scratch/media-tools-cache' } else { [string]$cli['media-cache'] }
             $cachePath = Resolve-ReleasePath -ProjectRoot $projectRoot -Path $cacheValue -OptionName '--media-cache'
-            $MediaToolsPath = Publish-MediaTools -ManifestPath $manifestPath -CachePath $cachePath -OutputPath (Join-Path $temporaryDirectory 'media-tools') -Offline:$cli['offline']
+            $MediaToolsPath = Publish-MediaTools -ManifestPath $manifestPath -Manifest $manifest -CachePath $cachePath -OutputPath (Join-Path $temporaryDirectory 'media-tools') -Offline:$cli['offline']
         }
         $includePath = Join-Path $temporaryDirectory 'media-tools.nsh'
         Write-MediaToolsInstallerInclude -MediaToolsPath $MediaToolsPath -Manifest $manifest -OutputPath $includePath
         $compilerArguments = @(
             '/V2',
-            "/DVERSION=$($release.Version)",
+            "/DVERSION=$($Release.Version)",
             "/DPROJECT_ROOT=$projectRoot",
             "/DAPOLLO_EXE=$executablePath",
             "/DAPP_ICON=$iconPath",

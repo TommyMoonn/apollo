@@ -135,16 +135,16 @@ Adapted from Archeion commit `4b711fc2` (GPL-3.0-only), retaining Cargo as Apoll
 ### Stage pinned media tools
 
 ```powershell
-.\scripts\stage-media-tools.ps1 --output .scratch/media-payload
-.\scripts\stage-media-tools.ps1 --offline --output .scratch/media-payload-offline
+just stage-media-tools --output .scratch/media-payload
+just stage-media-tools --offline --output .scratch/media-payload-offline
 ```
 
 Uses the exact archive URL and SHA-256 in `distribution/media-tools.json`. The default cache is `.scratch/media-tools-cache`; `--cache` selects another cache. Staging verifies the archive before extraction, validates both executable versions and required encoders, and publishes only the pair, required redistribution material and pinned metadata. It requires a new output directory and no NVIDIA GPU. Offline mode requires a valid cached archive and never downloads. Explicit relative paths resolve from the current directory.
 
-### Stage Windows release artifacts
+### Stage and verify Windows release artifacts
 
 ```powershell
-.\scripts\stage-windows-release.ps1
+just stage-release
 ```
 
 Validates the current release metadata, verifies the Windows GUI x64 `apollo.exe`, builds the repository-owned NSIS installer, and atomically recreates `artifacts/windows/` with:
@@ -153,7 +153,10 @@ Validates the current release metadata, verifies the Windows GUI x64 `apollo.exe
 Apollo-Setup-x64.exe
 Apollo-windows-x64.zip
 SHA256SUMS.txt
+release-provenance.json
 ```
+
+`release-provenance.json` is internal to artifact transfer; the other three files are the public release assets. Staging validates the complete set before replacement and refuses unrelated content, linked destinations and tracked output. Both `--expected-sha` and `--expected-version` are required to record candidate identity; without them the set is local-only. Use `just verify-release --local --expected-version X.Y.Z` for a local build, or `just verify-release --expected-sha <sha> --expected-version X.Y.Z --artifacts-dir <path>` for a clean candidate. The verifier checks exact artifact names, checksums, provenance, portable entries and Apollo's resource identity without rebuilding or downloading tools. It does not execute the installer. See [Releasing](../docs/RELEASING.md).
 
 The installer is the primary Windows distribution artifact. Both packages include `Apollo.exe`, `ffmpeg.exe`, `ffprobe.exe`, the root `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `licenses/ffmpeg/{LICENSE,README.txt,media-tools.json}`. Release staging supplies one verified media-tool payload to both packaging consumers through `stage-media-tools.ps1`. `SHA256SUMS.txt` contains lowercase SHA-256 entries for the installer and ZIP, in that order.
 
@@ -164,7 +167,7 @@ Use `--media-cache <path>` to select the archive cache and `--offline` to requir
 ### Build the Windows installer
 
 ```powershell
-.\scripts\build-windows-installer.ps1
+just build-installer
 ```
 
 Builds Apollo's per-user NSIS installer from the validated Windows GUI x64 release executable. The default output is:

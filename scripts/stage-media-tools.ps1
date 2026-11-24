@@ -3,6 +3,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Cli.Common.ps1')
+. (Join-Path $PSScriptRoot 'Repository.Common.ps1')
 
 function Assert-MediaText {
     param($Value, [string]$Name)
@@ -135,13 +136,15 @@ function Get-MediaToolPayloadPaths {
 }
 
 function Publish-MediaTools {
-    param([string]$ManifestPath, [string]$CachePath, [string]$OutputPath, [switch]$Offline)
-    $manifest = Read-MediaToolsManifest $ManifestPath
+    param([string]$ManifestPath, [string]$CachePath, [string]$OutputPath, [switch]$Offline, $Manifest)
+    if ($null -eq $Manifest) { $Manifest = Read-MediaToolsManifest $ManifestPath }
     $output = [IO.Path]::GetFullPath($OutputPath)
+    Assert-TransferUnlinked $output
     # Publish only to a new destination. Never delete caller-owned release artifacts.
     if (Test-Path -LiteralPath $output) { throw "Media-tool output already exists: $output" }
     $cache = [IO.Path]::GetFullPath($CachePath)
     $archivePath = Join-Path $cache $manifest.archive.filename
+    Assert-TransferUnlinked $archivePath
     if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
         if ($Offline) { throw "Offline cache miss: $archivePath" }
         New-Item -ItemType Directory -Path $cache -Force | Out-Null

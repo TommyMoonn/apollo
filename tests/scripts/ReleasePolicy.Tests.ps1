@@ -161,6 +161,155 @@ fixture-dep = { path = "dep" }
     Assert-Check ((& $hashes) -ceq $updatedHashes) 'Unexpected lock mutation did not restore both files.'
     Assert-Check (([IO.File]::ReadAllText($notePath) -ceq $note) -and ([IO.File]::ReadAllText($changelogPath) -ceq $changelog)) 'Version update modified release prose.'
     Write-Host 'PASS real Cargo version-only update, no-op and byte-for-byte rollback'
+    # Use a real built Apollo executable for PE/resource checks. The other fixture
+    # bytes only exercise artifact integrity; they are not installer/media acceptance.
+    . (Join-Path $repo 'scripts/stage-windows-release.ps1')
+    $mediaManifestPath = Join-Path $repo 'distribution/media-tools.json'
+    $media = Read-MediaToolsManifest $mediaManifestPath
+    $badCache = Join-Path $fixture 'corrupt-cache'
+    [void][IO.Directory]::CreateDirectory($badCache)
+    [IO.File]::WriteAllText((Join-Path $badCache $media.archive.filename), 'corrupt archive')
+    $mediaDestination = Join-Path $fixture 'media-output'
+    Assert-Rejected { Publish-MediaTools -ManifestPath $mediaManifestPath -CachePath $badCache -OutputPath $mediaDestination -Offline } 'corrupt cached media archive'
+    Assert-Check (-not (Test-Path -LiteralPath $mediaDestination)) 'Corrupt cache published a payload.'
+    Write-Host 'PASS corrupt media cache cannot publish a payload'
+
+    $builtExecutable = Join-Path $repo 'target/x86_64-pc-windows-msvc/release/apollo.exe'
+    if (-not $IsWindows -or -not (Test-Path -LiteralPath $builtExecutable -PathType Leaf)) {
+        Write-Host 'SKIP artifact fixtures: run just build-release on Windows first, then rerun this check.'
+    } else {
+        Assert-ApolloResourceVersion -Path $builtExecutable -Version $current.Version
+        $sourceRoot = Join-Path $fixture 'artifact-source'
+        $payloadRoot = Join-Path $fixture 'artifact-payload'
+        $artifactRoot = Join-Path $fixture 'artifact-output'
+        foreach ($dir in @($sourceRoot, $payloadRoot, $artifactRoot, (Join-Path $sourceRoot 'distribution'))) {
+            [void][IO.Directory]::CreateDirectory($dir)
+        }
+        foreach ($name in @('Cargo.toml','Cargo.lock','rust-toolchain.toml','LICENSE','THIRD_PARTY_NOTICES.md','distribution/media-tools.json')) {
+            Copy-Item -LiteralPath (Join-Path $repo $name) -Destination (Join-Path $sourceRoot $name)
+        }
+        $null = Invoke-RepositoryGit -ProjectRoot $sourceRoot -Arguments @('init','--quiet')
+        $null = Invoke-RepositoryGit -ProjectRoot $sourceRoot -Arguments @('add','--all')
+        $null = Invoke-RepositoryGit -ProjectRoot $sourceRoot -Arguments @('-c','user.name=Release fixture','-c','user.email=fixture@example.invalid','-c','commit.gpgsign=false','commit','--quiet','-m','fixture')
+        $sha = (Invoke-RepositoryGit -ProjectRoot $sourceRoot -Arguments @('rev-parse','HEAD')).StdOut.Trim()
+        foreach ($name in (Get-MediaToolPayloadPaths $media)) {
+            $path = Join-Path $payloadRoot $name
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))
+            if ($name -ceq 'licenses/ffmpeg/media-tools.json') { Copy-Item -LiteralPath $mediaManifestPath -Destination $path }
+            else { [IO.File]::WriteAllText($path, "fixture bytes for $name") }
+        }
+        $sources = Get-WindowsPayloadSources -ProjectRoot $sourceRoot -ExecutablePath $builtExecutable -MediaToolsPath $payloadRoot -MediaManifest $media
+        $zipPath = Join-Path $artifactRoot 'Apollo-windows-x64.zip'
+        $sumPath = Join-Path $artifactRoot 'SHA256SUMS.txt'
+        $provenancePath = Join-Path $artifactRoot 'release-provenance.json'
+        $installerPath = Join-Path $artifactRoot 'Apollo-Setup-x64.exe'
+        [IO.File]::WriteAllText($installerPath, 'fixture installer bytes, not executable')
+        New-WindowsReleaseZip -ZipPath $zipPath -PayloadSources $sources
+        $pristineZip = Join-Path $fixture 'pristine.zip'
+        Copy-Item -LiteralPath $zipPath -Destination $pristineZip
+        $payloadRecords = [ordered]@{}
+        foreach ($name in $sources.Keys) { $payloadRecords[$name] = Get-ReleaseFileRecord $sources[$name] }
+        $provenance = [ordered]@{
+            schemaVersion = 1; candidateSha = $sha; version = $current.Version
+            target = 'x86_64-pc-windows-msvc'; rustVersion = Get-ReleaseRustPin $sourceRoot; nsisVersion = '3.11'
+            mediaArchive = [ordered]@{ filename = $media.archive.filename; url = $media.archive.url; sha256 = $media.archive.sha256; buildIdentity = $media.buildIdentity }
+            assets = [ordered]@{}; payload = $payloadRecords
+        }
+        function Write-FixtureProvenance {
+            foreach ($name in @('Apollo-Setup-x64.exe','Apollo-windows-x64.zip')) { $provenance.assets[$name] = Get-ReleaseFileRecord (Join-Path $artifactRoot $name) }
+            $lines = foreach ($name in @('Apollo-Setup-x64.exe','Apollo-windows-x64.zip')) { "$($provenance.assets[$name].sha256)  $name" }
+            [IO.File]::WriteAllText($sumPath, (($lines -join "`n") + "`n"))
+            $provenance.assets['SHA256SUMS.txt'] = Get-ReleaseFileRecord $sumPath
+            [IO.File]::WriteAllText($provenancePath, ($provenance | ConvertTo-Json -Depth 8))
+        }
+        Write-FixtureProvenance
+        $verify = { Assert-WindowsReleaseArtifacts -ProjectRoot $sourceRoot -ArtifactsDirectory $artifactRoot -ExpectedSha $sha -ExpectedVersion $current.Version }
+        & $verify
+        $originalJson = [IO.File]::ReadAllText($provenancePath)
+        foreach ($field in @('candidateSha','version','target','schemaVersion','rustVersion','nsisVersion')) {
+            $original = $provenance[$field]
+            $provenance[$field] = 'invalid'
+            [IO.File]::WriteAllText($provenancePath, ($provenance | ConvertTo-Json -Depth 8))
+            Assert-Rejected $verify "wrong provenance $field"
+            $provenance[$field] = $original
+        }
+        foreach ($json in @('{', ('{"schemaVersion":1,' + $originalJson.TrimStart().Substring(1)))) {
+            [IO.File]::WriteAllText($provenancePath, $json)
+            Assert-Rejected $verify 'malformed or duplicate-key provenance'
+        }
+        [IO.File]::WriteAllText($provenancePath, $originalJson)
+        $provenance.candidateSha = $null
+        [IO.File]::WriteAllText($provenancePath, ($provenance | ConvertTo-Json -Depth 8))
+        Assert-Rejected $verify 'local provenance presented as a candidate'
+        Assert-WindowsReleaseArtifacts -ProjectRoot $sourceRoot -ArtifactsDirectory $artifactRoot -ExpectedVersion $current.Version -Local
+        $provenance.candidateSha = $sha
+        [IO.File]::WriteAllText($provenancePath, $originalJson)
+        $extra = Join-Path $artifactRoot 'unrelated.txt'
+        [IO.File]::WriteAllText($extra, 'keep')
+        Assert-Rejected $verify 'extra artifact'
+        Assert-Rejected { Assert-SafeStagingDirectory -ProjectRoot $sourceRoot -ExecutablePath $builtExecutable -OutputPath $artifactRoot } 'unrelated staging content'
+        Assert-Check ([IO.File]::ReadAllText($extra) -ceq 'keep') 'Unrelated file changed.'
+        Remove-Item -LiteralPath $extra
+        Move-Item -LiteralPath $installerPath -Destination (Join-Path $fixture 'saved-installer')
+        Assert-Rejected $verify 'missing artifact'
+        Move-Item -LiteralPath (Join-Path $fixture 'saved-installer') -Destination $installerPath
+        $originalSums = [IO.File]::ReadAllText($sumPath)
+        foreach ($sums in @($originalSums.Replace('  Apollo-', ' Apollo-'), ($originalSums + $originalSums.Split("`n")[0] + "`n"))) {
+            [IO.File]::WriteAllText($sumPath, $sums)
+            $provenance.assets['SHA256SUMS.txt'] = Get-ReleaseFileRecord $sumPath
+            [IO.File]::WriteAllText($provenancePath, ($provenance | ConvertTo-Json -Depth 8))
+            Assert-Rejected $verify 'malformed or duplicate checksum'
+        }
+        foreach ($case in @('duplicate','case collision','traversal','rooted','missing license','corrupt payload')) {
+            Copy-Item -LiteralPath $pristineZip -Destination $zipPath -Force
+            $archive = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Update)
+            try {
+                switch ($case) {
+                    'duplicate' { $null = $archive.CreateEntry('Apollo.exe') }
+                    'case collision' { $null = $archive.CreateEntry('apollo.exe') }
+                    'traversal' { $null = $archive.CreateEntry('../outside.txt') }
+                    'rooted' { $null = $archive.CreateEntry('/outside.txt') }
+                    'missing license' { $archive.GetEntry('licenses/ffmpeg/LICENSE').Delete() }
+                    'corrupt payload' {
+                        $entry = $archive.GetEntry('ffmpeg.exe')
+                        $stream = $entry.Open()
+                        try { $stream.WriteByte(0) } finally { $stream.Dispose() }
+                    }
+                }
+            } finally { $archive.Dispose() }
+            # Update the outer hashes, not payload records, to reach the ZIP checks.
+            Write-FixtureProvenance
+            Assert-Rejected $verify $case
+        }
+        Copy-Item -LiteralPath $pristineZip -Destination $zipPath -Force
+        Write-FixtureProvenance
+        & $verify
+        $otherVersion = if ($current.Version -ceq '0.0.0') { '0.0.1' } else { '0.0.0' }
+        Assert-Rejected { Assert-ApolloResourceVersion -Path $builtExecutable -Version $otherVersion } 'incorrect resource version'
+        $wrongExe = Join-Path $fixture 'apollo.exe'
+        Copy-Item -LiteralPath $builtExecutable -Destination $wrongExe
+        $bytes = [IO.File]::ReadAllBytes($wrongExe)
+        $offset = [BitConverter]::ToInt32($bytes, 0x3c) + 4
+        $bytes[$offset] = 0x4c; $bytes[$offset + 1] = 0x01
+        [IO.File]::WriteAllBytes($wrongExe, $bytes)
+        Assert-Rejected { Assert-ApolloResourceVersion -Path $wrongExe -Version $current.Version } 'incorrect PE architecture'
+        Write-Host 'PASS independent artifact identity, checksum coverage, ZIP payload and PE checks'
+
+        $compiler = $null
+        try { $compiler = Resolve-NsisCompilerPath -ProjectRoot $repo -Value $null } catch { }
+        if ($null -eq $compiler) { Write-Host 'SKIP staging failure fixture: install NSIS 3.11 first.' }
+        else {
+            $compilerVersion = & $compiler /VERSION
+            Assert-Check ($LASTEXITCODE -eq 0 -and "$compilerVersion".Trim() -ceq 'v3.11') 'Staging failure fixture requires NSIS v3.11.'
+            $before = @((Get-WindowsArtifactNames) | ForEach-Object { (Get-ReleaseFileRecord (Join-Path $artifactRoot $_)).sha256 }) -join ':'
+            Assert-Rejected { Invoke-StageWindowsReleaseCli -Arguments @('--project',$repo,'--executable',$builtExecutable,'--output',$artifactRoot,'--makensis',$compiler,'--media-cache',$badCache,'--offline') } 'failed staging with corrupt cache'
+            $after = @((Get-WindowsArtifactNames) | ForEach-Object { (Get-ReleaseFileRecord (Join-Path $artifactRoot $_)).sha256 }) -join ':'
+            Assert-Check ($before -ceq $after) 'Failed staging modified the previous set.'
+            & $verify
+            Write-Host 'PASS failed staging preserved previous output'
+        }
+    }
+
 }
 finally {
     foreach ($name in $environment.Keys) { [Environment]::SetEnvironmentVariable($name, $environment[$name]) }

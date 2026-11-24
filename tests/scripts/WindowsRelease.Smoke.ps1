@@ -10,6 +10,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'Windows release smoke requires Windows.' }
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+. (Join-Path $projectRoot 'scripts/WindowsRelease.Common.ps1')
 . (Join-Path $projectRoot 'scripts/stage-media-tools.ps1')
 $release = (Resolve-Path -LiteralPath $ReleaseDirectory).Path
 $harness = (Resolve-Path -LiteralPath $DiscoveryHarness).Path
@@ -86,7 +87,7 @@ function Invoke-SmokeProcess {
 
 function Assert-Payload {
     param([string]$Directory)
-    $expected = @('Apollo.exe','LICENSE','THIRD_PARTY_NOTICES.md') + @(Get-MediaToolPayloadPaths $manifest)
+    $expected = @(Get-WindowsPayloadPaths $manifest)
     $actual = @(Get-ChildItem -LiteralPath $Directory -Recurse -File | ForEach-Object {
         [IO.Path]::GetRelativePath($Directory, $_.FullName).Replace('\','/')
     } | Where-Object { $_ -ne 'Uninstall.exe' })
@@ -112,7 +113,7 @@ function Assert-Payload {
 }
 
 try {
-    Publish-MediaTools -ManifestPath $manifestPath -CachePath ([IO.Path]::GetFullPath($MediaCache, $projectRoot)) -OutputPath (Join-Path $scratch 'reference') -Offline | Out-Null
+    Publish-MediaTools -ManifestPath $manifestPath -Manifest $manifest -CachePath ([IO.Path]::GetFullPath($MediaCache, $projectRoot)) -OutputPath (Join-Path $scratch 'reference') -Offline | Out-Null
     [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $release 'Apollo-windows-x64.zip'), $portable)
     Assert-Payload $portable
     # NSIS requires /D= to be the final, unquoted command-line argument.
@@ -123,7 +124,7 @@ try {
     'keep user file' | Set-Content (Join-Path $installed 'keep.txt')
     'keep license-adjacent user file' | Set-Content (Join-Path $installed 'licenses/ffmpeg/keep.txt')
     Invoke-SmokeProcess (Join-Path $installed 'Uninstall.exe') ("/S _?=$installed")
-    foreach ($name in (@('Apollo.exe','LICENSE','THIRD_PARTY_NOTICES.md') + @(Get-MediaToolPayloadPaths $manifest))) {
+    foreach ($name in (@(Get-WindowsPayloadPaths $manifest))) {
         if (Test-Path -LiteralPath (Join-Path $installed $name)) { throw "Uninstall retained owned file: $name" }
     }
     foreach ($path in ($registryPaths + $shortcuts)) {

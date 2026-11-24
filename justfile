@@ -130,15 +130,41 @@ check-release *flags:
 build-release:
     cargo build --locked --release --target x86_64-pc-windows-msvc
 
-# Build the Windows installer.
+# Stage the pinned media payload without building Apollo.
 [group("release")]
-build-installer:
-    pwsh -NoProfile -File .\scripts\build-windows-installer.ps1
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+stage-media-tools *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/stage-media-tools.ps1 @args
 
-# Stage Windows release artifacts.
+# Build the Windows installer from an existing executable.
 [group("release")]
-stage-release:
-    pwsh -NoProfile -File .\scripts\stage-windows-release.ps1
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+build-installer *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/build-windows-installer.ps1 @args
+
+# Stage Windows release artifacts without rebuilding Apollo.
+[group("release")]
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+stage-release *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/stage-windows-release.ps1 @args
+
+# Verify a staged or downloaded Windows artifact set.
+[group("release")]
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+verify-release *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/verify-windows-release.ps1 @args
 
 # Build and stage the Windows release.
 [group("release")]
