@@ -12,14 +12,14 @@ This guide describes the egui implementation in the current checkout.
 | Area | Responsibility |
 | --- | --- |
 | `src/main.rs` | Native entry point and window configuration. |
-| `src/app/` | `Application`: renderer-independent route state, source intake, queue and immediate executors. |
+| `src/app/` | `Application`: renderer-independent route state, media-tool discovery, source intake, queue and immediate executors. |
 | `src/ui/legacy/` | `ApolloApp`: egui composition, ordered background updates, renderer-dependent editors and existing feature actions. |
 | `src/ui/` | Operation views, shared widgets, queue and batch views, layout, themes and typography. |
 | `src/media/` | Source inspection, media models, tool discovery, process lifecycle, progress and output publication. |
 | `src/queue/` | Queued requests, destination reservations, job identity and execution order. |
 | `src/audio_mix/`, `src/upscale/`, `src/remux/`, `src/audio_extract/`, `src/frame_capture/` | Operation requests, validation, command construction and execution. |
 | `src/settings.rs` | Remembers source and output directories using eframe storage (`apollo.settings.v1`). |
-| `src/file_dialog.rs`, `src/progress_repaint.rs` | Native file selection and progress-driven repaint coordination. |
+| `src/file_dialog.rs`, `src/progress_repaint.rs` | Native file selection and callback-based progress notifications. |
 
 The library exports the application core and UI modules through `src/lib.rs`. The native binary configures the window and constructs the egui adapter, which owns exactly one core. The core does not import UI or native adapters. Keep operation policy in its domain module and use the shared media and queue owners. Views display state and collect input; repainting must not start probes or processing.
 
@@ -55,9 +55,13 @@ Each operation owns its request model, validator, command builder and executor. 
 
 ## Media-tool discovery
 
-`src/media/tools.rs` owns FFmpeg/FFprobe discovery and bounded version validation. Apollo first validates the complete pair beside its executable. If neither file exists there, it resolves both on PATH. A partial or invalid adjacent pair is reported as an error without falling back to PATH. Retry uses the same policy.
+`src/app/discovery.rs` owns the discovery lifecycle, including checking, ready and unavailable states, the active attempt and capability settlement. `src/media/tools.rs` resolves FFmpeg and FFprobe and performs bounded version validation. Apollo first validates the complete pair beside its executable. If neither file exists there, it resolves both on PATH. A partial or invalid adjacent pair is reported as an error without falling back to PATH. Retry uses the same policy.
 
-Encoder capability results are cached by resolved FFmpeg path, file size and modification time. This identifies the runtime cache entry; release staging separately verifies the pinned archive checksum. The distribution contract lives in [media-tools.json](../distribution/media-tools.json), with measured compatibility in [the acceptance record](../distribution/media-tools-acceptance.md).
+One background worker validates the base tools, publishes their paths, then checks optional NVENC capabilities. Retry is single-flight; the owner rejects stale attempts and capabilities for a different tool pair. A capability failure after base discovery leaves the base tools usable. Encoder capability results are cached by resolved FFmpeg path, file size and modification time. This identifies the runtime cache entry; release staging separately verifies the pinned archive checksum. The distribution contract lives in [media-tools.json](../distribution/media-tools.json), with measured compatibility in [the acceptance record](../distribution/media-tools-acceptance.md).
+
+## Worker notifications
+
+Workers publish results to their existing channels before invoking a completion callback. When a panic is reported through disconnection, the worker drops its result sender before notifying. The callback carries no application state; the owner consumes and validates the result on the application side. The egui adapter supplies a repaint callback for discovery, inspection, preview decoding, thumbnail loading, native dialogs and clipboard completion. `MediaProcessWake` carries process progress and terminal events. `MediaProgressRepaintOwner` coalesces progress notifications at 34 ms, rejects stale operation generations and wakes immediately on terminal events. Idle workers do not schedule periodic repaints. Delayed frame-preview scheduling remains in the egui adapter.
 
 ## Queue and batch ownership
 

@@ -43,7 +43,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 
 ## Keep ownership clear
 
-`Application` owns the route, source intake, queue and immediate executors. `ApolloApp` owns one core and coordinates the egui shell and background work. Keep route transitions in the core and renderer-dependent editor state in the adapter until its owner is extracted. Keep execution input validation in the operation request models and validators so presentation code does not introduce a separate execution path.
+`Application` owns the route, media-tool discovery, source intake, queue and immediate executors. `ApolloApp` owns one core and coordinates the egui shell and background work. Keep route transitions in the core and renderer-dependent editor state in the adapter until its owner is extracted. Keep execution input validation in the operation request models and validators so presentation code does not introduce a separate execution path.
 
 `MediaIntake` manages source identity, retained probe results and pending intake requests. `BatchInspectionOwner` manages batch probing and limits it to two concurrent probes. Preserve request identity checks so results from an earlier request cannot replace the current source or batch state.
 
@@ -51,7 +51,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 
 `MediaExecution` manages processing and finalizes staged output for file-producing operations. Operation executors prepare validated requests and structured commands. `MediaProcess` manages child processes and diagnostics. Frame preview and clipboard extraction have their own owners in `src/frame_capture/`. Extend these execution paths instead of creating competing workers or output publishers.
 
-`src/media/tools.rs` handles FFmpeg and FFprobe discovery and caches encoder capabilities. Preserve the adjacent-pair-first discovery policy and explicit NVENC failure behavior described in the [architecture guide](docs/ARCHITECTURE.md).
+`MediaToolsDiscovery` in `src/app/discovery.rs` owns availability, the active discovery attempt and capability settlement. `src/media/tools.rs` resolves and validates FFmpeg and FFprobe and caches encoder capabilities by executable identity. Preserve the adjacent-pair-first discovery policy and explicit NVENC failure behavior described in the [architecture guide](docs/ARCHITECTURE.md).
 
 Give each piece of state one owner. Keep temporary presentation state in its UI or editor, shared application state in the application and processing policy in the relevant operation or media module.
 
@@ -77,7 +77,7 @@ Check affected source, queue and batch views at supported window sizes when chan
 
 Keep media discovery, probing, preview decoding and processing off the UI thread. Reuse existing background workers, bound concurrent work and preserve cancellation and stale-result checks when sources, requests or active jobs change.
 
-Do not probe media, access output files or launch processes just because a view repaints. Reuse retained inspection and capability results while they remain valid. Use `MediaProgressRepaintOwner` for progress notifications so completion and failure appear promptly without continuous repainting.
+Do not probe media, access output files or launch processes just because a view repaints. Reuse retained inspection and capability results while they remain valid. Pass completion callbacks to workers and settle their results in the owning application state. Use `MediaProcessWake` and `MediaProgressRepaintOwner` for process notifications so progress and terminal results appear promptly without continuous repainting.
 
 Guard actions that mutate files or start background work against repeated activation. Cancellation must stop only the process owned by the operation and leave its state consistent.
 

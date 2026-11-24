@@ -1,6 +1,7 @@
 //! Renderer-independent application state. Native adapters coordinate the existing
 //! feature workflows until their dedicated owners are extracted.
 
+pub(crate) mod discovery;
 mod navigation;
 pub use navigation::{BatchOrigin, NavigationState, Operation, QueueEditOrigin, QueueOrigin};
 
@@ -17,6 +18,7 @@ use crate::{
 #[derive(Default)]
 pub struct Application {
     navigation: NavigationState,
+    pub(crate) discovery: discovery::MediaToolsDiscovery,
     pub(crate) media_intake: MediaIntake,
     pub(crate) audio_mix_executor: AudioMixExecutor,
     pub(crate) upscale_executor: UpscaleExecutor,

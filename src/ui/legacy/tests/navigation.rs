@@ -387,10 +387,10 @@ fn workspace_queue_edit_is_blocked_during_automatic_advancement() {
         .unwrap();
     // The test harness rejects FFmpeg arguments without touching media. The queue
     // stays active until its owner polls the terminal process event.
-    app.media_tools = MediaToolsState::Ready(MediaTools::new(
+    app.core.discovery = MediaToolsDiscovery::with_state(MediaToolsState::Ready(MediaTools::new(
         std::env::current_exe().unwrap(),
         "missing-ffprobe",
-    ));
+    )));
 
     assert!(app.start_media_queue());
     assert_ne!(app.core.media_queue.run_state(), QueueRunState::Stopped);
@@ -614,17 +614,21 @@ fn root_update_defers_source_completion_until_tools_are_ready() {
             .drop_without_applying_deltas();
     };
 
-    app.media_tools = MediaToolsState::Checking { attempt_id: 1 };
+    app.core.discovery = MediaToolsDiscovery::with_state(MediaToolsState::Checking);
     render(&mut app);
     assert_no_source(&app.core);
     assert!(app.media_inspection.is_some());
 
-    app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
+    app.core.discovery =
+        MediaToolsDiscovery::with_state(MediaToolsState::Unavailable(MediaToolsError::MissingBoth));
     render(&mut app);
     assert_no_source(&app.core);
     assert!(app.media_inspection.is_some());
 
-    app.media_tools = MediaToolsState::Ready(MediaTools::new("missing-ffmpeg", "missing-ffprobe"));
+    app.core.discovery = MediaToolsDiscovery::with_state(MediaToolsState::Ready(MediaTools::new(
+        "missing-ffmpeg",
+        "missing-ffprobe",
+    )));
     render(&mut app);
     assert_workspace(&app.core, Operation::AudioMix);
     assert_eq!(app.core.media_intake.current().unwrap().path, path);

@@ -12,11 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::ApolloApp;
 use super::state::{
     BatchDefaults, BatchEditTarget, BatchItem, BatchSetupState, BatchSourceState,
     FrameCaptureThumbnailLoad, FrameCaptureToolState, FramePreviewDecode, MediaInspection,
-    MediaToolsState, QueueExecutionEvent, frame_navigation_availability,
+    QueueExecutionEvent, frame_navigation_availability,
 };
 use super::workflows::{
     ToolExecutionStates, audio_extract_output_dialog_request, audio_mix_output_dialog_request,
@@ -25,6 +24,8 @@ use super::workflows::{
     settle_output_file_dialog, shows_audio_extract_lifecycle, shows_audio_mix_lifecycle,
     shows_frame_capture_lifecycle, shows_remux_lifecycle, shows_upscale_lifecycle,
 };
+use super::{ApolloApp, completion_wake};
+use crate::app::discovery::{MediaToolsDiscovery, MediaToolsState};
 use crate::app::{
     Application, BatchOrigin, NavigationState, Operation, QueueEditOrigin,
     operation_workspace_visible,
@@ -95,7 +96,7 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
     use crate::upscale::model::{CpuQuality, VideoEncoderSelection};
     let (directory, path) = temp_file("pending-nvenc-workspace");
     let mut app = app();
-    let context = egui::Context::default();
+    let context = app.egui_context.clone();
     fonts::install(&context);
     theme::install(&context);
     let (wake_tx, wake_rx) = mpsc::channel();
@@ -104,8 +105,8 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
     });
     let (release_tx, release_rx) = mpsc::channel();
     let (started_tx, started_rx) = mpsc::channel();
-    assert!(app.start_progressive_media_tools_discovery(
-        context.clone(),
+    assert!(app.core.discovery.start_with(
+        completion_wake(&context),
         || Ok(MediaTools::new("missing-ffmpeg", "missing-ffprobe")),
         move |_| {
             started_tx.send(std::thread::current().id()).unwrap();
@@ -122,9 +123,9 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
         started_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
         std::thread::current().id()
     );
-    app.poll_media_tools_discovery();
+    app.poll_background_work();
     assert!(app.ready_media_tools().is_some());
-    assert!(app.media_tools_discovery.is_some());
+    assert!(app.core.discovery.is_pending());
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
     app.select_tool(Operation::VideoUpscale);
     let render = |app: &mut ApolloApp| {
@@ -198,12 +199,14 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
         Duration::MAX
     );
     while wake_rx.try_recv().is_ok() {}
+    app.tools_error_details_open = true;
     release_tx.send(()).unwrap();
     wake_rx
         .recv_timeout(Duration::from_secs(10))
         .expect("capability completion wakes egui");
-    app.poll_media_tools_discovery();
-    assert!(app.media_tools_discovery.is_none());
+    app.poll_background_work();
+    assert!(!app.core.discovery.is_pending());
+    assert!(!app.tools_error_details_open);
     assert_eq!(app.state.upscale.as_ref().unwrap().selection, before);
     assert!(output_contains_text(
         &render(&mut app),
@@ -228,51 +231,6 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
         Duration::MAX
     );
     fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn stale_capability_attempt_or_path_cannot_replace_current_tools() {
-    let mut app = app();
-    app.next_media_tools_attempt_id = 3;
-    let (_sender, receiver) = mpsc::sync_channel(1);
-    app.media_tools_discovery = Some(super::MediaToolsDiscovery {
-        attempt_id: 2,
-        receiver,
-        base_receiver: None,
-    });
-    let current = app.ready_media_tools().unwrap().clone();
-    assert!(!app.complete_media_tools_discovery(1, Ok(current.clone())));
-    assert!(
-        !app.complete_media_tools_discovery(
-            2,
-            Ok(MediaTools::new("other-ffmpeg", "other-ffprobe"))
-        )
-    );
-    assert_eq!(app.ready_media_tools(), Some(&current));
-    assert!(app.complete_media_tools_discovery(2, Ok(current)));
-}
-
-#[test]
-fn capability_disconnect_preserves_base_tools_and_retires_pending_state() {
-    let mut app = app();
-    app.next_media_tools_attempt_id = 1;
-    let (sender, receiver) = mpsc::sync_channel(1);
-    app.media_tools_discovery = Some(super::MediaToolsDiscovery {
-        attempt_id: 0,
-        receiver,
-        base_receiver: None,
-    });
-    drop(sender);
-    app.poll_media_tools_discovery();
-    let tools = app.ready_media_tools().expect("base tools remain usable");
-    assert!(matches!(&tools.video_encoders.h264_nvenc,
-        crate::media::tools::VideoEncoderCapability::RuntimeUnavailable { reason }
-        if reason.contains("stopped before returning")));
-    assert_eq!(
-        tools.video_encoders.h264_nvenc,
-        tools.video_encoders.h265_nvenc
-    );
-    assert!(app.media_tools_discovery.is_none());
 }
 
 #[derive(Debug)]
@@ -343,11 +301,14 @@ fn thumbnail() -> FrameCaptureThumbnail {
 
 fn app() -> ApolloApp {
     let egui_context = egui::Context::default();
-    let file_dialog = FileDialogOwner::new_for_test(egui_context.clone(), || {
+    let file_dialog = FileDialogOwner::new_for_test(completion_wake(&egui_context), || {
         Ok(|_: &FileDialogRequest| Ok(None))
     });
     let mut app = ApolloApp::with_adapters(egui_context, file_dialog, None, AppSettings::default());
-    app.media_tools = MediaToolsState::Ready(MediaTools::new("missing-ffmpeg", "missing-ffprobe"));
+    app.core.discovery = MediaToolsDiscovery::with_state(MediaToolsState::Ready(MediaTools::new(
+        "missing-ffmpeg",
+        "missing-ffprobe",
+    )));
     app
 }
 
@@ -430,133 +391,6 @@ fn assert_workspace(state: &Application, operation: Operation) {
         }
     );
     assert!(state.media_intake.current().is_some());
-}
-
-#[test]
-fn media_tool_discovery_starts_in_checking_without_blocking() {
-    let mut app = app();
-    app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
-    let (release_sender, release_receiver) = mpsc::channel();
-
-    assert!(
-        app.start_media_tools_discovery_with(egui::Context::default(), move || {
-            release_receiver
-                .recv_timeout(Duration::from_secs(10))
-                .unwrap();
-            Err(MediaToolsError::MissingBoth)
-        },)
-    );
-
-    assert!(matches!(app.media_tools, MediaToolsState::Checking { .. }));
-    assert!(app.media_tools_discovery.is_some());
-    release_sender.send(()).unwrap();
-}
-
-#[test]
-fn media_tool_capability_work_runs_on_the_dedicated_discovery_worker() {
-    let mut app = app();
-    app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
-    let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
-
-    assert!(
-        app.start_media_tools_discovery_with(egui::Context::default(), move || {
-            thread_sender.send(std::thread::current().id()).unwrap();
-            Err(MediaToolsError::MissingBoth)
-        },)
-    );
-
-    assert_ne!(
-        thread_receiver
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap(),
-        std::thread::current().id()
-    );
-}
-
-#[test]
-fn media_tool_discovery_completion_requests_repaint_and_transitions_to_ready() {
-    let mut app = app();
-    app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
-    app.tools_error_details_open = true;
-    let expected = MediaTools::new(
-        PathBuf::from(r"C:\Media Tools\ffmpeg.exe"),
-        PathBuf::from(r"C:\Media Tools\ffprobe.exe"),
-    );
-    let context = egui::Context::default();
-    let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
-    context.set_request_repaint_callback(move |_| {
-        let _ = repaint_sender.try_send(());
-    });
-
-    assert!(app.start_media_tools_discovery_with(context, {
-        let expected = expected.clone();
-        move || Ok(expected)
-    }));
-    repaint_receiver
-        .recv_timeout(Duration::from_secs(10))
-        .expect("discovery completion should request repaint");
-    app.poll_media_tools_discovery();
-
-    assert_eq!(app.media_tools, MediaToolsState::Ready(expected));
-    assert!(app.media_tools_discovery.is_none());
-    assert!(!app.tools_error_details_open);
-}
-
-#[test]
-fn media_tool_discovery_failure_transitions_to_unavailable() {
-    let mut app = app();
-    app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
-    let context = egui::Context::default();
-    let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
-    context.set_request_repaint_callback(move |_| {
-        let _ = repaint_sender.try_send(());
-    });
-
-    assert!(
-        app.start_media_tools_discovery_with(context, || { Err(MediaToolsError::MissingFfprobe) })
-    );
-    repaint_receiver
-        .recv_timeout(Duration::from_secs(10))
-        .expect("failed discovery completion should request repaint");
-    app.poll_media_tools_discovery();
-
-    assert_eq!(
-        app.media_tools,
-        MediaToolsState::Unavailable(MediaToolsError::MissingFfprobe)
-    );
-}
-
-#[test]
-fn media_tool_retry_is_single_flight() {
-    let mut app = app();
-    app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
-    let (release_sender, release_receiver) = mpsc::channel();
-
-    assert!(
-        app.start_media_tools_discovery_with(egui::Context::default(), move || {
-            release_receiver
-                .recv_timeout(Duration::from_secs(10))
-                .unwrap();
-            Err(MediaToolsError::MissingBoth)
-        },)
-    );
-    assert!(
-        !app.start_media_tools_discovery_with(egui::Context::default(), || {
-            panic!("overlapping retry discovery must not start")
-        })
-    );
-
-    release_sender.send(()).unwrap();
-}
-
-#[test]
-fn stale_media_tool_discovery_completion_is_rejected() {
-    let mut app = app();
-    app.media_tools = MediaToolsState::Checking { attempt_id: 7 };
-    let stale = MediaTools::new("stale-ffmpeg", "stale-ffprobe");
-
-    assert!(!app.complete_media_tools_discovery(6, Ok(stale)));
-    assert_eq!(app.media_tools, MediaToolsState::Checking { attempt_id: 7 });
 }
 
 fn dropped_file(path: &Path) -> egui::DroppedFileHandle {
@@ -739,26 +573,25 @@ fn inspection_completion_enters_default_source_workspace() {
 }
 
 #[test]
-fn inspection_completion_requests_repaint_without_fixed_polling() {
+fn inspection_completion_notifies_owner_without_polling() {
     let (directory, path) = temp_file("inspection-repaint");
     let mut app = app();
     let request = app
         .begin_media_path(&path)
         .expect("new source should require inspection");
-    let context = egui::Context::default();
     let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
-    context.set_request_repaint_callback(move |_| {
+    let wake = move || {
         let _ = repaint_sender.try_send(());
-    });
+    };
     let media = media(&path);
     app.media_inspection = Some(
-        MediaInspection::spawn_with(request, context, move || Ok(media))
+        MediaInspection::spawn_with(request, wake, move || Ok(media))
             .expect("inspection worker should start"),
     );
 
     repaint_receiver
         .recv_timeout(Duration::from_secs(10))
-        .expect("inspection completion should request repaint");
+        .expect("inspection completion should notify the owner");
     app.poll_media_inspection();
 
     assert!(app.media_inspection.is_none());
@@ -770,19 +603,18 @@ fn inspection_completion_requests_repaint_without_fixed_polling() {
 }
 
 #[test]
-fn inspection_worker_panic_requests_repaint_and_surfaces_probe_failure() {
+fn inspection_worker_panic_notifies_owner_and_surfaces_probe_failure() {
     let (directory, path) = temp_file("inspection-worker-panic");
     let mut app = app();
     let request = app
         .begin_media_path(&path)
         .expect("new source should require inspection");
-    let context = egui::Context::default();
     let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
-    context.set_request_repaint_callback(move |_| {
+    let wake = move || {
         let _ = repaint_sender.try_send(());
-    });
+    };
     app.media_inspection = Some(
-        MediaInspection::spawn_with(request, context, || {
+        MediaInspection::spawn_with(request, wake, || {
             panic!("simulated inspection worker failure")
         })
         .expect("inspection worker should start"),
@@ -790,7 +622,7 @@ fn inspection_worker_panic_requests_repaint_and_surfaces_probe_failure() {
 
     repaint_receiver
         .recv_timeout(Duration::from_secs(10))
-        .expect("failed inspection worker should request repaint");
+        .expect("failed inspection worker should notify the owner");
     app.poll_media_inspection();
 
     assert!(app.media_inspection.is_none());
@@ -804,7 +636,11 @@ fn inspection_worker_panic_requests_repaint_and_surfaces_probe_failure() {
 #[test]
 fn frame_thumbnail_decode_runs_on_the_dedicated_worker() {
     let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
-    let load = FrameCaptureThumbnailLoad::spawn_with(7, 11, egui::Context::default(), move || {
+    let (wake_tx, wake_rx) = mpsc::channel();
+    let wake = move || {
+        let _ = wake_tx.send(());
+    };
+    let load = FrameCaptureThumbnailLoad::spawn_with(7, 11, wake, move || {
         thread_sender.send(std::thread::current().id()).unwrap();
         Ok(thumbnail())
     })
@@ -816,12 +652,8 @@ fn frame_thumbnail_decode_runs_on_the_dedicated_worker() {
             .unwrap(),
         std::thread::current().id()
     );
-    assert!(
-        load.receiver
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap()
-            .is_ok()
-    );
+    wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(load.receiver.try_recv().unwrap().is_ok());
 }
 
 #[test]
@@ -835,7 +667,11 @@ fn live_preview_decode_runs_on_the_dedicated_worker() {
         state => panic!("expected debouncing preview, got {state:?}"),
     };
     let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
-    let decode = FramePreviewDecode::spawn_with(request, egui::Context::default(), move || {
+    let (wake_tx, wake_rx) = mpsc::channel();
+    let wake = move || {
+        let _ = wake_tx.send(());
+    };
+    let decode = FramePreviewDecode::spawn_with(request, wake, move || {
         thread_sender.send(std::thread::current().id()).unwrap();
         Ok(PreviewImage::from_rgba([2, 1], vec![255; 8]).unwrap())
     })
@@ -847,13 +683,8 @@ fn live_preview_decode_runs_on_the_dedicated_worker() {
             .unwrap(),
         std::thread::current().id()
     );
-    assert!(
-        decode
-            .receiver
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap()
-            .is_ok()
-    );
+    wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(decode.receiver.try_recv().unwrap().is_ok());
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -1098,10 +929,10 @@ fn leaving_cached_frame_coverage_starts_one_new_neighborhood_query() {
         .unwrap()
         .selection
         .set_step(FrameStep::One);
-    app.media_tools = MediaToolsState::Ready(MediaTools::new(
+    app.core.discovery = MediaToolsDiscovery::with_state(MediaToolsState::Ready(MediaTools::new(
         "missing-ffmpeg",
         std::env::current_exe().expect("current test executable is available"),
-    ));
+    )));
 
     app.request_frame_step(FrameDirection::Next);
 
@@ -2604,7 +2435,8 @@ fn successful_dialog_selections_update_only_their_directory_history() {
     let output_directory = directory.join("output");
     fs::create_dir_all(&output_directory).unwrap();
     let mut app = app();
-    app.media_tools = MediaToolsState::Unavailable(MediaToolsError::MissingBoth);
+    app.core.discovery =
+        MediaToolsDiscovery::with_state(MediaToolsState::Unavailable(MediaToolsError::MissingBoth));
 
     app.settle_file_dialog(FileDialogCompletion {
         target: DialogTarget::MediaInput,
@@ -2846,7 +2678,7 @@ fn pending_dialog_blocks_conflicting_app_actions_and_a_second_request() {
     context.set_request_repaint_callback(move |_| {
         let _ = wake_tx.send(());
     });
-    app.file_dialog = FileDialogOwner::new_for_test(context, move || {
+    app.file_dialog = FileDialogOwner::new_for_test(completion_wake(&context), move || {
         Ok(move |_: &FileDialogRequest| {
             if let Some(receiver) = release_receiver.take() {
                 receiver.recv_timeout(Duration::from_secs(10)).unwrap();

@@ -5,7 +5,6 @@ use std::{
 };
 
 use crate::media::process::{MediaProcessEvent, MediaProcessWake};
-use egui::Context;
 
 const MIN_PROGRESS_REPAINT_INTERVAL: Duration = Duration::from_millis(34);
 
@@ -21,11 +20,7 @@ pub(crate) struct MediaProgressRepaintOwner {
 }
 
 impl MediaProgressRepaintOwner {
-    pub(crate) fn new(context: Context) -> Self {
-        Self::new_with_repaint(move || context.request_repaint())
-    }
-
-    fn new_with_repaint(request_repaint: impl Fn() + Send + 'static) -> Self {
+    pub(crate) fn new(request_repaint: impl Fn() + Send + 'static) -> Self {
         let (sender, receiver) = mpsc::channel();
         thread::Builder::new()
             .name("apollo-progress-repaint".to_owned())
@@ -186,7 +181,7 @@ mod tests {
     #[test]
     fn worker_delivers_initial_coalesced_and_terminal_repaints() {
         let (sender, receiver) = mpsc::channel();
-        let mut owner = MediaProgressRepaintOwner::new_with_repaint(move || {
+        let mut owner = MediaProgressRepaintOwner::new(move || {
             let _ = sender.send(());
         });
         let wake = owner.begin();

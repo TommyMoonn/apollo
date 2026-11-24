@@ -34,10 +34,7 @@ use crate::media::intake::{MediaIntakeRequest, MediaLoadStart, MediaProbeDisposi
 use crate::media::model::MediaFile;
 use crate::media::probe::MediaProbeError;
 use crate::media::process::{MediaProcessEvent, MediaProcessWake};
-use crate::media::tools::{
-    MediaTools, MediaToolsError, VideoEncoderCapabilities, VideoEncoderCapability,
-    cached_video_encoder_capabilities, discover_base_media_tools,
-};
+use crate::media::tools::{MediaTools, VideoEncoderCapabilities};
 use crate::queue::{
     JobId, QueueEnqueueError, QueueJobState, QueueRunState, QueuedJob, QueuedOperation,
     WaitingJobMove,
@@ -68,14 +65,14 @@ use crate::upscale::execution::{UpscaleExecutionState, UpscaleStartError};
 use crate::upscale::model::VideoCodec;
 use crate::upscale::validation::validate_upscale_request;
 
-use super::ApolloApp;
 use super::state::{
     AudioExtractToolState, AudioMixToolState, BatchDefaults, BatchEditState, BatchEditTarget,
     BatchInspectionSession, BatchItem, BatchSetupState, BatchSourceState, FrameCaptureEditorState,
     FrameCaptureThumbnailLoad, FrameCaptureToolState, FramePreviewDecode, FramePreviewTexture,
-    LegacyEditorState, MediaInspection, MediaToolsDiscovery, MediaToolsState, OperationEditorState,
-    PendingFrameStep, QueueEditState, QueueExecutionEvent, RemuxToolState, UpscaleToolState,
+    LegacyEditorState, MediaInspection, OperationEditorState, PendingFrameStep, QueueEditState,
+    QueueExecutionEvent, RemuxToolState, UpscaleToolState,
 };
+use super::{ApolloApp, completion_wake};
 
 impl ApolloApp {
     pub(super) fn resolve_navigation(&mut self) -> Option<NavigationState> {
@@ -114,10 +111,7 @@ impl ApolloApp {
     }
 
     pub(super) fn ready_media_tools(&self) -> Option<&MediaTools> {
-        match &self.media_tools {
-            MediaToolsState::Ready(tools) => Some(tools),
-            MediaToolsState::Checking { .. } | MediaToolsState::Unavailable(_) => None,
-        }
+        self.core.discovery.ready()
     }
 
     pub(super) fn copy_frame_active(&self) -> bool {
@@ -409,7 +403,7 @@ impl ApolloApp {
                 let Some(session) = self.state.upscale.as_ref() else {
                     return Ok(None);
                 };
-                if self.media_tools_discovery.is_some()
+                if self.core.discovery.is_pending()
                     && session.selection.encoder_selection()
                         != crate::upscale::model::VideoEncoderSelection::Cpu
                 {
@@ -1025,7 +1019,11 @@ impl ApolloApp {
         match completion.result {
             Ok(bytes) => {
                 let request = completion.request;
-                match FramePreviewDecode::spawn(request.clone(), bytes, self.egui_context.clone()) {
+                match FramePreviewDecode::spawn(
+                    request.clone(),
+                    bytes,
+                    completion_wake(&self.egui_context),
+                ) {
                     Ok(decode) => self.frame_preview_decode = Some(decode),
                     Err(error) => {
                         self.settle_frame_preview(
@@ -1188,14 +1186,11 @@ impl ApolloApp {
         }
         match completion.result {
             Ok(bytes) => {
-                let context = self.egui_context.clone();
                 match CopyFrameWorker::spawn(
                     completion.request.clone(),
                     bytes,
                     self.clipboard_owner,
-                    move || {
-                        context.request_repaint();
-                    },
+                    completion_wake(&self.egui_context),
                 ) {
                     Ok(worker) => {
                         self.copy_frame_worker = Some(worker);
@@ -1274,174 +1269,12 @@ impl ApolloApp {
     }
 
     pub(super) fn retry_media_tools(&mut self) {
-        self.start_progressive_media_tools_discovery(
-            self.egui_context.clone(),
-            discover_base_media_tools,
-            cached_video_encoder_capabilities,
-        );
-    }
-
-    pub(super) fn start_progressive_media_tools_discovery<B, C>(
-        &mut self,
-        context: Context,
-        base: B,
-        capabilities: C,
-    ) -> bool
-    where
-        B: FnOnce() -> Result<MediaTools, MediaToolsError> + Send + 'static,
-        C: FnOnce(&Path) -> VideoEncoderCapabilities + Send + 'static,
-    {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let wake = context.clone();
-        if !self.start_media_tools_discovery_with(context, move || {
-            let mut tools = base()?;
-            let _ = sender.send(tools.clone());
-            wake.request_repaint();
-            tools.video_encoders = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                capabilities(&tools.ffmpeg)
-            }))
-            .unwrap_or_else(|_| {
-                let failure = VideoEncoderCapability::RuntimeUnavailable {
-                    reason: "The encoder capability worker stopped unexpectedly.".to_owned(),
-                };
-                VideoEncoderCapabilities {
-                    h264_nvenc: failure.clone(),
-                    h265_nvenc: failure,
-                }
-            });
-            Ok(tools)
-        }) {
-            return false;
+        if !self.core.discovery.is_pending() {
+            self.tools_error_details_open = false;
+            self.core
+                .discovery
+                .start(completion_wake(&self.egui_context));
         }
-        self.media_tools_discovery
-            .as_mut()
-            .expect("discovery started")
-            .base_receiver = Some(receiver);
-        true
-    }
-
-    pub(super) fn start_media_tools_discovery_with<F>(
-        &mut self,
-        context: Context,
-        discover: F,
-    ) -> bool
-    where
-        F: FnOnce() -> Result<MediaTools, MediaToolsError> + Send + 'static,
-    {
-        if matches!(&self.media_tools, MediaToolsState::Checking { .. })
-            || self.media_tools_discovery.is_some()
-        {
-            return false;
-        }
-
-        let attempt_id = self.next_media_tools_attempt_id;
-        self.next_media_tools_attempt_id = self.next_media_tools_attempt_id.wrapping_add(1);
-        self.tools_error_details_open = false;
-
-        match MediaToolsDiscovery::spawn(attempt_id, context, discover) {
-            Ok(discovery) => {
-                self.media_tools = MediaToolsState::Checking { attempt_id };
-                self.media_tools_discovery = Some(discovery);
-                true
-            }
-            Err(error) => {
-                self.media_tools = MediaToolsState::Unavailable(MediaToolsError::DiscoveryFailed(
-                    format!("Media tool discovery worker could not start: {error}"),
-                ));
-                false
-            }
-        }
-    }
-
-    pub(super) fn poll_media_tools_discovery(&mut self) {
-        if let Some(discovery) = self.media_tools_discovery.as_mut()
-            && let Some(receiver) = discovery.base_receiver.as_ref()
-            && let Ok(tools) = receiver.try_recv()
-        {
-            if matches!(self.media_tools, MediaToolsState::Checking { attempt_id } if attempt_id == discovery.attempt_id)
-            {
-                self.media_tools = MediaToolsState::Ready(tools);
-            }
-            discovery.base_receiver = None;
-        }
-        let result = match self.media_tools_discovery.as_ref() {
-            Some(discovery) => discovery.receiver.try_recv(),
-            None => return,
-        };
-
-        match result {
-            Ok(result) => {
-                let attempt_id = self
-                    .media_tools_discovery
-                    .as_ref()
-                    .expect("media tool discovery exists while its result is settled")
-                    .attempt_id;
-                self.complete_media_tools_discovery(attempt_id, result);
-                self.media_tools_discovery = None;
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                let attempt_id = self
-                    .media_tools_discovery
-                    .as_ref()
-                    .expect("media tool discovery exists while disconnect is settled")
-                    .attempt_id;
-                self.complete_media_tools_discovery(
-                    attempt_id,
-                    Err(MediaToolsError::DiscoveryFailed(
-                        "The media tool discovery worker stopped before returning a result."
-                            .to_owned(),
-                    )),
-                );
-                self.media_tools_discovery = None;
-            }
-        }
-    }
-
-    pub(super) fn complete_media_tools_discovery(
-        &mut self,
-        attempt_id: u64,
-        result: Result<MediaTools, MediaToolsError>,
-    ) -> bool {
-        if let MediaToolsState::Ready(tools) = &mut self.media_tools
-            && let Err(error) = &result
-            && self
-                .media_tools_discovery
-                .as_ref()
-                .is_some_and(|discovery| discovery.attempt_id == attempt_id)
-            && self.next_media_tools_attempt_id == attempt_id.wrapping_add(1)
-        {
-            let failure = VideoEncoderCapability::RuntimeUnavailable {
-                reason: error.to_string(),
-            };
-            tools.video_encoders = VideoEncoderCapabilities {
-                h264_nvenc: failure.clone(),
-                h265_nvenc: failure,
-            };
-            return true;
-        }
-        let pending_base_matches = matches!((&self.media_tools, &result),
-            (MediaToolsState::Ready(current), Ok(completed))
-                if self.next_media_tools_attempt_id == attempt_id.wrapping_add(1)
-                    && self.media_tools_discovery.as_ref().is_some_and(|discovery| discovery.attempt_id == attempt_id)
-                    && current.ffmpeg == completed.ffmpeg && current.ffprobe == completed.ffprobe);
-        if !pending_base_matches
-            && !matches!(
-                &self.media_tools,
-                MediaToolsState::Checking {
-                    attempt_id: current
-                } if *current == attempt_id
-            )
-        {
-            return false;
-        }
-
-        self.media_tools = match result {
-            Ok(tools) => MediaToolsState::Ready(tools),
-            Err(error) => MediaToolsState::Unavailable(error),
-        };
-        self.tools_error_details_open = false;
-        true
     }
 
     pub(super) fn handle_file_intake_action(&mut self, action: FileIntakeAction) {
@@ -1465,7 +1298,7 @@ impl ApolloApp {
         };
         let request_for_failure = request.clone();
 
-        match MediaInspection::spawn(tools, request, self.egui_context.clone()) {
+        match MediaInspection::spawn(tools, request, completion_wake(&self.egui_context)) {
             Ok(inspection) => self.media_inspection = Some(inspection),
             Err(error) => {
                 self.core.media_intake.retire_probe(&request_for_failure);
@@ -1502,16 +1335,16 @@ impl ApolloApp {
                 overridden: false,
             })
             .collect();
-        let inspection = match BatchInspectionOwner::spawn(tools, paths, self.egui_context.clone())
-        {
-            Ok(inspection) => inspection,
-            Err(error) => {
-                self.core.intake_error = Some(MediaError::probe_failure(format!(
-                    "Batch inspection workers could not start: {error}"
-                )));
-                return false;
-            }
-        };
+        let inspection =
+            match BatchInspectionOwner::spawn(tools, paths, completion_wake(&self.egui_context)) {
+                Ok(inspection) => inspection,
+                Err(error) => {
+                    self.core.intake_error = Some(MediaError::probe_failure(format!(
+                        "Batch inspection workers could not start: {error}"
+                    )));
+                    return false;
+                }
+            };
         self.batch_edit = None;
         self.batch_setup = Some(BatchSetupState {
             origin,
@@ -1613,17 +1446,19 @@ impl ApolloApp {
             return false;
         }
         let offset = batch.items.len();
-        let owner =
-            match BatchInspectionOwner::spawn(tools, unique.clone(), self.egui_context.clone()) {
-                Ok(owner) => owner,
-                Err(error) => {
-                    if let Some(batch) = self.batch_setup.as_mut() {
-                        batch.error =
-                            Some(format!("Additional files could not be inspected: {error}"));
-                    }
-                    return false;
+        let owner = match BatchInspectionOwner::spawn(
+            tools,
+            unique.clone(),
+            completion_wake(&self.egui_context),
+        ) {
+            Ok(owner) => owner,
+            Err(error) => {
+                if let Some(batch) = self.batch_setup.as_mut() {
+                    batch.error = Some(format!("Additional files could not be inspected: {error}"));
                 }
-            };
+                return false;
+            }
+        };
         let batch = self.batch_setup.as_mut().expect("batch remains active");
         batch.append_error = None;
         batch.append_error_details_open = false;
@@ -2040,7 +1875,7 @@ impl ApolloApp {
                 let Some(upscale) = self.state.upscale.as_ref() else {
                     return Ok(());
                 };
-                if self.media_tools_discovery.is_some()
+                if self.core.discovery.is_pending()
                     && upscale.selection.encoder_selection()
                         != crate::upscale::model::VideoEncoderSelection::Cpu
                 {
@@ -2279,7 +2114,11 @@ impl ApolloApp {
         else {
             return;
         };
-        match FrameCaptureThumbnailLoad::spawn(session_id, &request, self.egui_context.clone()) {
+        match FrameCaptureThumbnailLoad::spawn(
+            session_id,
+            &request,
+            completion_wake(&self.egui_context),
+        ) {
             Ok(load) => self.frame_capture_thumbnail_load = Some(load),
             Err(error) => {
                 if let Some(session) = self

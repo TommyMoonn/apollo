@@ -36,7 +36,7 @@ Unit tests live alongside the Rust implementation. Integration tests live under 
 | `media_probe` | FFprobe fixture parsing and shared media models. |
 | `bundled_media_tools` | Media-tool discovery and installed/portable acceptance harness. |
 
-Queue state, intake identity, output publication, process lifecycle, UI state and settings also have unit tests. The application core has renderer-independent navigation tests; the legacy adapter tests cover editor return flows and root update behavior. Choose the module or integration target that owns the behavior.
+Queue state, intake identity, output publication, process lifecycle, UI state and settings also have unit tests. The application core has renderer-independent navigation and media-tool discovery tests. The legacy adapter tests cover editor return flows, root update behavior and pending encoder capability presentation. Choose the module or integration target that owns the behavior.
 
 ```powershell
 cargo test --locked --test remux
@@ -47,7 +47,7 @@ cargo test --locked --lib ui::legacy::tests::
 
 Add a name filter to narrow a test run further. Use existing fixtures where possible. Test observable outcomes and failure handling, not exact error text, incidental implementation details or duplicated assertions. Prefer explicit completion conditions with bounded waits over fixed sleeps. Use disposable media and temporary directories; never use the user's media library as a test fixture.
 
-For concurrency tests, hold work at a controlled boundary and release it explicitly. Check completion, identity and ordering, not the time a worker takes to run. For command construction, assert external command semantics and connected filter stages rather than incidental labels or whole-string snapshots. Remove tests that duplicate coverage without protecting a distinct behavior.
+For concurrency tests, hold work at a controlled boundary and release it explicitly. Use completion callbacks to verify results are available before notification without requiring a renderer. Check completion, identity and ordering, not the time a worker takes to run. For command construction, assert external command semantics and connected filter stages rather than incidental labels or whole-string snapshots. Remove tests that duplicate coverage without protecting a distinct behavior.
 
 For application and UI tests, drive lifecycle events with explicit timestamps or completion signals. Check interaction, selection, focus, clipping, non-overlap and reachability at narrow and normal widths; avoid exact paint snapshots, copied theme constants and incidental pixel geometry. Retain renderer-specific regressions until their replacement proves the same behavior.
 

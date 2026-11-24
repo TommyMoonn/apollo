@@ -5,7 +5,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 use std::{io, thread};
 
-use egui::{Context, TextureHandle};
+use egui::TextureHandle;
 
 use crate::app::{BatchOrigin, Operation};
 use crate::audio_extract::model::AudioExtractFormat;
@@ -26,7 +26,7 @@ use crate::media::intake::{MediaIntakeRequest, SourceIdentity};
 use crate::media::model::MediaFile;
 use crate::media::probe::{MediaProbeError, probe_media};
 use crate::media::process::MediaProcessEvent;
-use crate::media::tools::{MediaTools, MediaToolsError};
+use crate::media::tools::MediaTools;
 use crate::queue::{JobId, QueuedJob, QueuedOperation};
 use crate::ui::audio_extract::AudioExtractSelectionState;
 use crate::ui::audio_extract_progress::AudioExtractLifecycleUiState;
@@ -499,10 +499,10 @@ impl FrameCaptureThumbnailLoad {
     pub(super) fn spawn(
         session_id: u64,
         request: &FrameCaptureThumbnailRequest,
-        context: Context,
+        wake: impl FnOnce() + Send + 'static,
     ) -> io::Result<Self> {
         let output = request.output().to_path_buf();
-        Self::spawn_with(session_id, request.request_id(), context, move || {
+        Self::spawn_with(session_id, request.request_id(), wake, move || {
             decode_frame_capture_thumbnail(&output)
         })
     }
@@ -510,7 +510,7 @@ impl FrameCaptureThumbnailLoad {
     pub(super) fn spawn_with<F>(
         session_id: u64,
         request_id: u64,
-        context: Context,
+        wake: impl FnOnce() + Send + 'static,
         decode: F,
     ) -> io::Result<Self>
     where
@@ -525,7 +525,7 @@ impl FrameCaptureThumbnailLoad {
                     let _ = sender.send(result);
                 }
                 drop(sender);
-                context.request_repaint();
+                wake();
             })?;
         Ok(Self {
             session_id,
@@ -539,14 +539,14 @@ impl FramePreviewDecode {
     pub(super) fn spawn(
         request: PreviewRequest,
         bytes: Vec<u8>,
-        context: Context,
+        wake: impl FnOnce() + Send + 'static,
     ) -> io::Result<Self> {
-        Self::spawn_with(request, context, move || decode_preview_png(&bytes))
+        Self::spawn_with(request, wake, move || decode_preview_png(&bytes))
     }
 
     pub(super) fn spawn_with<F>(
         request: PreviewRequest,
-        context: Context,
+        wake: impl FnOnce() + Send + 'static,
         decode: F,
     ) -> io::Result<Self>
     where
@@ -563,7 +563,7 @@ impl FramePreviewDecode {
                         ))
                     });
                 let _ = sender.send(result);
-                context.request_repaint();
+                wake();
             })?;
         Ok(Self { request, receiver })
     }
@@ -573,15 +573,15 @@ impl MediaInspection {
     pub(super) fn spawn(
         tools: MediaTools,
         request: MediaIntakeRequest,
-        context: Context,
+        wake: impl FnOnce() + Send + 'static,
     ) -> io::Result<Self> {
         let path = request.path().to_path_buf();
-        Self::spawn_with(request, context, move || probe_media(&tools, &path))
+        Self::spawn_with(request, wake, move || probe_media(&tools, &path))
     }
 
     pub(super) fn spawn_with<F>(
         request: MediaIntakeRequest,
-        context: Context,
+        wake: impl FnOnce() + Send + 'static,
         inspect: F,
     ) -> io::Result<Self>
     where
@@ -596,50 +596,9 @@ impl MediaInspection {
                     let _ = sender.send(result);
                 }
                 drop(sender);
-                context.request_repaint();
+                wake();
             })?;
 
         Ok(Self { request, receiver })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum MediaToolsState {
-    Checking { attempt_id: u64 },
-    Ready(MediaTools),
-    Unavailable(MediaToolsError),
-}
-
-pub(super) struct MediaToolsDiscovery {
-    pub(super) attempt_id: u64,
-    pub(super) receiver: Receiver<Result<MediaTools, MediaToolsError>>,
-    pub(super) base_receiver: Option<Receiver<MediaTools>>,
-}
-
-impl MediaToolsDiscovery {
-    pub(super) fn spawn<F>(attempt_id: u64, context: Context, discover: F) -> io::Result<Self>
-    where
-        F: FnOnce() -> Result<MediaTools, MediaToolsError> + Send + 'static,
-    {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        thread::Builder::new()
-            .name("apollo-media-tools".to_owned())
-            .spawn(move || {
-                let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(discover))
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(MediaToolsError::DiscoveryFailed(
-                        "The media tool discovery worker stopped unexpectedly.".to_owned(),
-                    )),
-                };
-                let _ = sender.send(result);
-                context.request_repaint();
-            })?;
-
-        Ok(Self {
-            attempt_id,
-            receiver,
-            base_receiver: None,
-        })
     }
 }

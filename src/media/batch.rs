@@ -10,8 +10,6 @@ use std::{
     thread,
 };
 
-use egui::Context;
-
 use super::{intake::SourceIdentity, model::MediaFile, tools::MediaTools};
 
 pub const MAX_BATCH_INSPECTIONS: usize = 2;
@@ -35,8 +33,12 @@ pub struct BatchInspectionOwner {
 }
 
 impl BatchInspectionOwner {
-    pub fn spawn(tools: MediaTools, paths: Vec<PathBuf>, context: Context) -> io::Result<Self> {
-        Self::spawn_with(paths, context, move |path| {
+    pub fn spawn(
+        tools: MediaTools,
+        paths: Vec<PathBuf>,
+        wake: impl Fn() + Clone + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::spawn_with(paths, wake, move |path| {
             let source_identity = SourceIdentity::read(path).map_err(|error| error.to_string())?;
             let media =
                 super::probe::probe_media(&tools, path).map_err(|error| error.to_string())?;
@@ -47,7 +49,11 @@ impl BatchInspectionOwner {
         })
     }
 
-    fn spawn_with<F>(paths: Vec<PathBuf>, context: Context, inspect: F) -> io::Result<Self>
+    fn spawn_with<F>(
+        paths: Vec<PathBuf>,
+        wake: impl Fn() + Clone + Send + 'static,
+        inspect: F,
+    ) -> io::Result<Self>
     where
         F: Fn(&std::path::Path) -> Result<BatchInspectedMedia, String> + Send + Sync + 'static,
     {
@@ -65,7 +71,7 @@ impl BatchInspectionOwner {
             let inspect = Arc::clone(&inspect);
             let cancellation = Arc::clone(&cancellation);
             let sender = sender.clone();
-            let context = context.clone();
+            let wake = wake.clone();
             thread::Builder::new()
                 .name(format!("apollo-batch-inspection-{worker_index}"))
                 .spawn(move || {
@@ -92,7 +98,7 @@ impl BatchInspectionOwner {
                         {
                             break;
                         }
-                        context.request_repaint();
+                        wake();
                     }
                 })?;
         }
@@ -180,9 +186,12 @@ mod tests {
         let peak = Arc::new(AtomicUsize::new(0));
         let worker_active = Arc::clone(&active);
         let worker_peak = Arc::clone(&peak);
+        let (wake_tx, wake_rx) = mpsc::channel();
         let mut owner = BatchInspectionOwner::spawn_with(
             paths.clone(),
-            egui::Context::default(),
+            move || {
+                let _ = wake_tx.send(());
+            },
             move |path: &Path| {
                 let index: usize = path.file_stem().unwrap().to_str().unwrap().parse().unwrap();
                 let current = worker_active.fetch_add(1, Ordering::AcqRel) + 1;
@@ -224,16 +233,10 @@ mod tests {
 
         // Finish the second source first. Its result must keep index 1 and its own media.
         permits[1].send(()).unwrap();
-        while results.is_empty() {
-            assert!(
-                Instant::now() < deadline,
-                "second inspection did not finish"
-            );
-            results.extend(owner.poll());
-            if results.is_empty() {
-                thread::sleep(Duration::from_millis(1));
-            }
-        }
+        wake_rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
+        results.extend(owner.poll());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].index, 1);
         // Release only jobs that have started; every job's worker identity is observed.
@@ -248,11 +251,10 @@ mod tests {
             permits[index].send(()).unwrap();
         }
         while !owner.is_complete() {
-            assert!(Instant::now() < deadline, "batch did not finish");
+            wake_rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
             results.extend(owner.poll());
-            if !owner.is_complete() {
-                thread::sleep(Duration::from_millis(1));
-            }
         }
         results.sort_unstable_by_key(|result| result.index);
         assert_eq!(results.len(), SOURCES);

@@ -6,7 +6,6 @@ use std::{
     thread,
 };
 
-use egui::Context;
 use raw_window_handle::HasWindowHandle;
 #[cfg(target_os = "windows")]
 use raw_window_handle::RawWindowHandle;
@@ -179,14 +178,17 @@ pub(crate) struct FileDialogOwner {
 }
 
 impl FileDialogOwner {
-    pub(crate) fn new(context: Context, owner: Result<WindowOwner, String>) -> Self {
+    pub(crate) fn new(
+        wake: impl Fn() + Send + 'static,
+        owner: Result<WindowOwner, String>,
+    ) -> Self {
         match owner {
-            Ok(owner) => Self::spawn(context, move || native_dialog_runner(owner)),
+            Ok(owner) => Self::spawn(wake, move || native_dialog_runner(owner)),
             Err(error) => Self::unavailable(FileDialogStartError::WindowOwnerUnavailable(error)),
         }
     }
 
-    fn spawn<F, R>(context: Context, runner_factory: F) -> Self
+    fn spawn<F, R>(wake: impl Fn() + Send + 'static, runner_factory: F) -> Self
     where
         F: FnOnce() -> Result<R, String> + Send + 'static,
         R: DialogBackend + Send + 'static,
@@ -196,7 +198,7 @@ impl FileDialogOwner {
         match thread::Builder::new()
             .name("apollo-file-dialog".to_owned())
             .spawn(move || {
-                run_dialog_service(request_receiver, completion_sender, context, runner_factory);
+                run_dialog_service(request_receiver, completion_sender, wake, runner_factory);
             }) {
             Ok(_) => Self {
                 request_sender: Some(request_sender),
@@ -214,12 +216,12 @@ impl FileDialogOwner {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_for_test<F, R>(context: Context, runner_factory: F) -> Self
+    pub(crate) fn new_for_test<F, R>(wake: impl Fn() + Send + 'static, runner_factory: F) -> Self
     where
         F: FnOnce() -> Result<R, String> + Send + 'static,
         R: DialogBackend + Send + 'static,
     {
-        Self::spawn(context, runner_factory)
+        Self::spawn(wake, runner_factory)
     }
 
     fn unavailable(error: FileDialogStartError) -> Self {
@@ -289,7 +291,7 @@ impl FileDialogOwner {
 fn run_dialog_service<F, R>(
     request_receiver: Receiver<FileDialogRequest>,
     completion_sender: SyncSender<FileDialogCompletion>,
-    context: Context,
+    wake: impl Fn() + Send + 'static,
     runner_factory: F,
 ) where
     F: FnOnce() -> Result<R, String>,
@@ -326,7 +328,7 @@ fn run_dialog_service<F, R>(
         {
             break;
         }
-        context.request_repaint();
+        wake();
     }
 }
 
@@ -627,13 +629,14 @@ mod tests {
 
     const COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
 
-    fn dialog_context() -> (egui::Context, mpsc::Receiver<()>) {
-        let context = egui::Context::default();
+    fn dialog_wake() -> (impl Fn() + Send + 'static, mpsc::Receiver<()>) {
         let (sender, receiver) = mpsc::channel();
-        context.set_request_repaint_callback(move |_| {
-            let _ = sender.send(());
-        });
-        (context, receiver)
+        (
+            move || {
+                let _ = sender.send(());
+            },
+            receiver,
+        )
     }
 
     fn open_request() -> FileDialogRequest {
@@ -646,8 +649,8 @@ mod tests {
     fn open_request_routes_selected_path_through_owner() {
         let expected = PathBuf::from(r"C:\media\clip.mp4");
         let selected = expected.clone();
-        let (context, wake) = dialog_context();
-        let mut owner = FileDialogOwner::new_for_test(context, move || {
+        let (callback, wake) = dialog_wake();
+        let mut owner = FileDialogOwner::new_for_test(callback, move || {
             Ok(move |request: &FileDialogRequest| {
                 assert_eq!(request, &open_request());
                 Ok(Some(selected.clone()))
@@ -667,9 +670,9 @@ mod tests {
             PathBuf::from(r"C:\media\second.mkv"),
         ];
         let expected = paths.clone();
-        let (context, wake) = dialog_context();
+        let (callback, wake) = dialog_wake();
         let mut owner =
-            FileDialogOwner::new_for_test(context, move || Ok(MultiSelectBackend(paths)));
+            FileDialogOwner::new_for_test(callback, move || Ok(MultiSelectBackend(paths)));
         owner
             .request(FileDialogRequest::OpenSources {
                 initial_directory: Some(PathBuf::from(r"C:\media")),
@@ -684,9 +687,9 @@ mod tests {
 
     #[test]
     fn cancellation_is_not_a_failure() {
-        let (context, wake) = dialog_context();
+        let (callback, wake) = dialog_wake();
         let mut owner =
-            FileDialogOwner::new_for_test(context, || Ok(|_: &FileDialogRequest| Ok(None)));
+            FileDialogOwner::new_for_test(callback, || Ok(|_: &FileDialogRequest| Ok(None)));
         owner.request(open_request()).unwrap();
 
         assert_eq!(
@@ -706,8 +709,8 @@ mod tests {
             },
         };
         let expected = request.clone();
-        let (context, wake) = dialog_context();
-        let mut owner = FileDialogOwner::new_for_test(context, move || {
+        let (callback, wake) = dialog_wake();
+        let mut owner = FileDialogOwner::new_for_test(callback, move || {
             Ok(move |actual: &FileDialogRequest| {
                 assert_eq!(actual, &expected);
                 let FileDialogRequest::SaveOutput { options, .. } = actual else {
@@ -753,8 +756,8 @@ mod tests {
     fn owner_rejects_a_second_pending_request() {
         let (release_sender, release_receiver) = mpsc::channel();
         let mut release_receiver = Some(release_receiver);
-        let (context, wake) = dialog_context();
-        let mut owner = FileDialogOwner::new_for_test(context, move || {
+        let (callback, wake) = dialog_wake();
+        let mut owner = FileDialogOwner::new_for_test(callback, move || {
             Ok(move |_: &FileDialogRequest| {
                 if let Some(receiver) = release_receiver.take() {
                     receiver.recv_timeout(COMPLETION_TIMEOUT).unwrap();
@@ -777,8 +780,8 @@ mod tests {
 
     #[test]
     fn backend_failure_remains_distinct_from_cancellation() {
-        let (context, wake) = dialog_context();
-        let mut owner = FileDialogOwner::new_for_test(context, || {
+        let (callback, wake) = dialog_wake();
+        let mut owner = FileDialogOwner::new_for_test(callback, || {
             Ok(|_: &FileDialogRequest| Err("native dialog diagnostic".to_owned()))
         });
         owner.request(open_request()).unwrap();
@@ -804,7 +807,7 @@ mod tests {
             super::run_dialog_service(
                 request_rx,
                 completion_tx,
-                egui::Context::default(),
+                || {},
                 move || {
                     initializations.send(()).unwrap();
                     Ok(move |_: &FileDialogRequest| {
@@ -833,10 +836,10 @@ mod tests {
         wake: &mpsc::Receiver<()>,
     ) -> super::FileDialogCompletion {
         wake.recv_timeout(COMPLETION_TIMEOUT)
-            .expect("dialog completion must wake the UI");
+            .expect("dialog completion must notify the owner");
         let completion = owner
             .poll()
-            .expect("dialog result must be published before repaint");
+            .expect("dialog result must be published before notification");
         assert!(!owner.is_pending());
         assert!(owner.poll().is_none());
         completion

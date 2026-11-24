@@ -8,29 +8,23 @@ use std::sync::mpsc::{self, Receiver};
 
 use egui::{Context, Ui};
 
-use crate::app::Application;
+use crate::app::{Application, discovery::MediaToolsState};
 use crate::file_dialog::{FileDialogOwner, WindowOwner};
 use crate::frame_capture::clipboard::{CopyFrameExtractionOwner, CopyFrameWorker};
 use crate::frame_capture::frame_index::FrameIndexQueryOwner;
 use crate::frame_capture::preview::PreviewExtractionOwner;
-use crate::media::tools::{
-    MediaToolsError, cached_video_encoder_capabilities, discover_base_media_tools,
-};
 use crate::progress_repaint::MediaProgressRepaintOwner;
 use crate::settings::AppSettings;
 use crate::ui::{fonts, theme};
 
 use state::{
     BatchEditState, BatchInspectionSession, BatchSetupState, FrameCaptureThumbnailLoad,
-    FramePreviewDecode, LegacyEditorState, MediaInspection, MediaToolsDiscovery, MediaToolsState,
-    QueueEditState, QueueExecutionEvent,
+    FramePreviewDecode, LegacyEditorState, MediaInspection, QueueEditState, QueueExecutionEvent,
 };
 
 pub struct ApolloApp {
     core: Application,
     state: LegacyEditorState,
-    media_tools: MediaToolsState,
-    media_tools_discovery: Option<MediaToolsDiscovery>,
     queue_edit: Option<QueueEditState>,
     batch_setup: Option<BatchSetupState>,
     batch_edit: Option<BatchEditState>,
@@ -50,9 +44,13 @@ pub struct ApolloApp {
     clipboard_owner: Option<isize>,
     settings: AppSettings,
     egui_context: Context,
-    next_media_tools_attempt_id: u64,
     next_session_id: u64,
     tools_error_details_open: bool,
+}
+
+fn completion_wake(context: &Context) -> impl Fn() + Clone + Send + 'static {
+    let context = context.clone();
+    move || context.request_repaint()
 }
 
 impl ApolloApp {
@@ -70,15 +68,11 @@ impl ApolloApp {
             .map(WindowOwner::native_handle);
         #[cfg(not(target_os = "windows"))]
         let clipboard_owner = None;
-        let file_dialog = FileDialogOwner::new(egui_context.clone(), native_window_owner);
+        let file_dialog = FileDialogOwner::new(completion_wake(&egui_context), native_window_owner);
         let settings = AppSettings::load(creation_context.storage);
         let mut app =
             Self::with_adapters(egui_context.clone(), file_dialog, clipboard_owner, settings);
-        app.start_progressive_media_tools_discovery(
-            egui_context,
-            discover_base_media_tools,
-            cached_video_encoder_capabilities,
-        );
+        app.retry_media_tools();
         app
     }
 
@@ -92,10 +86,6 @@ impl ApolloApp {
         Self {
             core: Application::default(),
             state: LegacyEditorState::default(),
-            media_tools: MediaToolsState::Unavailable(MediaToolsError::DiscoveryFailed(
-                "Media tool discovery has not started.".to_owned(),
-            )),
-            media_tools_discovery: None,
             queue_edit: None,
             batch_setup: None,
             batch_edit: None,
@@ -109,22 +99,23 @@ impl ApolloApp {
             copy_frame_extraction: CopyFrameExtractionOwner::default(),
             copy_frame_worker: None,
             copy_frame_session_id: None,
-            progress_repaint: MediaProgressRepaintOwner::new(egui_context.clone()),
+            progress_repaint: MediaProgressRepaintOwner::new(completion_wake(&egui_context)),
             media_inspection: None,
             file_dialog,
             clipboard_owner,
             settings,
             egui_context,
-            next_media_tools_attempt_id: 0,
             next_session_id: 1,
             tools_error_details_open: false,
         }
     }
 
     fn poll_background_work(&mut self) {
-        self.poll_media_tools_discovery();
+        if self.core.discovery.poll() {
+            self.tools_error_details_open = false;
+        }
         self.poll_media_queue();
-        if !matches!(&self.media_tools, MediaToolsState::Ready(_)) {
+        if !matches!(self.core.discovery.state(), MediaToolsState::Ready(_)) {
             return;
         }
         self.poll_file_dialog();

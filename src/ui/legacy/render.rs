@@ -28,14 +28,15 @@ use crate::ui::{
 
 use super::ApolloApp;
 use super::state::{
-    BatchEditTarget, BatchSourceState, FrameCaptureToolState, MediaToolsState,
-    OperationEditorState, QueueEditAction, frame_navigation_availability,
+    BatchEditTarget, BatchSourceState, FrameCaptureToolState, OperationEditorState,
+    QueueEditAction, frame_navigation_availability,
 };
 use super::workflows::{
     batch_defaults_from_editor, editor_output_dialog_request, refresh_batch_items,
     shows_audio_extract_lifecycle, shows_audio_mix_lifecycle, shows_frame_capture_lifecycle,
     shows_remux_lifecycle, shows_upscale_lifecycle,
 };
+use crate::app::discovery::MediaToolsState;
 
 impl ApolloApp {
     pub(super) fn show_root(&mut self, ui: &mut Ui) {
@@ -43,8 +44,8 @@ impl ApolloApp {
             .frame(layout::root_frame(ui.style()))
             .show(ui, |ui| {
                 self.poll_background_work();
-                match &self.media_tools {
-                    MediaToolsState::Checking { .. } => {
+                match self.core.discovery.state() {
+                    MediaToolsState::Checking => {
                         layout::padded_content(ui, |ui| self.show_media_tools_checking(ui));
                         return;
                     }
@@ -63,9 +64,9 @@ impl ApolloApp {
     }
 
     fn show_media_tools_unavailable(&mut self, ui: &mut Ui) {
-        let error = match &self.media_tools {
+        let error = match self.core.discovery.state() {
             MediaToolsState::Unavailable(error) => MediaError::from_tools_error(error),
-            MediaToolsState::Checking { .. } | MediaToolsState::Ready(_) => {
+            MediaToolsState::Checking | MediaToolsState::Ready(_) => {
                 MediaError::invalid_request("media tools are unavailable")
             }
         };
@@ -379,12 +380,10 @@ impl ApolloApp {
                 },
             )
         });
-        let capabilities = match &self.media_tools {
-            MediaToolsState::Ready(tools) if self.media_tools_discovery.is_none() => {
-                upscale_ui::UpscaleEncoderCapabilities::Ready(&tools.video_encoders)
-            }
-            _ => upscale_ui::UpscaleEncoderCapabilities::Checking,
-        };
+        let capabilities = self.core.discovery.settled_capabilities().map_or(
+            upscale_ui::UpscaleEncoderCapabilities::Checking,
+            upscale_ui::UpscaleEncoderCapabilities::Ready,
+        );
         let Some(edit) = self.batch_edit.as_mut() else {
             return;
         };
@@ -472,12 +471,10 @@ impl ApolloApp {
                 ui.add_space(theme::SPACING.related);
             });
         }
-        let capabilities = match &self.media_tools {
-            MediaToolsState::Ready(tools) if self.media_tools_discovery.is_none() => {
-                upscale_ui::UpscaleEncoderCapabilities::Ready(&tools.video_encoders)
-            }
-            _ => upscale_ui::UpscaleEncoderCapabilities::Checking,
-        };
+        let capabilities = self.core.discovery.settled_capabilities().map_or(
+            upscale_ui::UpscaleEncoderCapabilities::Checking,
+            upscale_ui::UpscaleEncoderCapabilities::Ready,
+        );
         let action = show_operation_editor(
             ui,
             edit,
@@ -642,12 +639,10 @@ impl ApolloApp {
             .as_ref()
             .filter(|(tool, _)| *tool == Operation::VideoUpscale)
             .map(|(_, error)| error.clone());
-        let capabilities = match &self.media_tools {
-            MediaToolsState::Ready(tools) if self.media_tools_discovery.is_none() => {
-                upscale_ui::UpscaleEncoderCapabilities::Ready(&tools.video_encoders)
-            }
-            _ => upscale_ui::UpscaleEncoderCapabilities::Checking,
-        };
+        let capabilities = self.core.discovery.settled_capabilities().map_or(
+            upscale_ui::UpscaleEncoderCapabilities::Checking,
+            upscale_ui::UpscaleEncoderCapabilities::Ready,
+        );
         let action = ui
             .add_enabled_ui(enabled, |ui| {
                 let upscale = self
