@@ -138,7 +138,7 @@ $deleted = @($allChanges | Where-Object Status -eq 'D')
 $sourceChanges = @($allChanges | Where-Object { (Get-ChangeCategory -Path $_.Path) -eq 'Rust' -and $_.Status -ne 'D' })
 $testChanges = @($allChanges | Where-Object { (Get-ChangeCategory -Path $_.Path) -eq 'Tests' })
 $generatedPaths = @($allChanges | Where-Object {
-    @($_.Path, $_.OldPath) -match '^(target|artifacts|\.scratch|\.agent-work|\.dev/chatgpt/bundles|\.plans|\.planning|\.project|test-results|coverage)(/|$)|\.(zip|tmp|log|pem|key|pfx|p12)$|(^|/)(\.env(?:\..*)?|\.DS_Store|Thumbs\.db|Desktop\.ini)$'
+    (Test-TransferExcluded -Path $_.Path) -or ($_.OldPath -and (Test-TransferExcluded -Path $_.OldPath))
 })
 $dependencyFiles = @($allChanges | Where-Object {
     [System.IO.Path]::GetFileName($_.Path) -in @('Cargo.toml', 'Cargo.lock') -or

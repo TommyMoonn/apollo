@@ -30,7 +30,7 @@ pwsh -NoProfile -File .\scripts\stage-media-tools.ps1 --offline --output .scratc
 
 The default cache is `.scratch/media-tools-cache`; `--cache <path>` selects another cache. A checksum mismatch fails before extraction. Offline cache misses fail without a download. Existing staging destinations are refused. The stager validates both versions and required encoders, but never attempts a GPU encode.
 
-For `cargo run`, prepend the staged directory to PATH in that development shell, or copy the complete staged payload beside the built Apollo executable. Do not copy just one executable. The runtime policy is:
+For `just run`, prepend the staged directory to PATH in that development shell, or copy the complete staged payload beside the built Apollo executable. Do not copy just one executable. The runtime policy is:
 
 1. Validate and use the complete adjacent pair.
 2. If neither adjacent file exists, resolve both via explicit PATH.
@@ -42,73 +42,40 @@ Capability results are keyed by resolved FFmpeg path, file size and modification
 
 The operator workflow for versioning, tagging, Windows artifacts, draft GitHub Releases, verification, and publication is documented in [RELEASES.md](RELEASES.md).
 
-## Build
+## Local commands
 
-Build the native application:
+Run `just` or `just --list` from the repository root to discover available recipes. Rust commands use the toolchain pinned in `rust-toolchain.toml` and the checked-in Cargo lockfile.
 
-```powershell
-cargo build
-```
+| Command | Purpose |
+| --- | --- |
+| `just run` | Start the native application. |
+| `just build` | Build the application. |
+| `just check` | Check compilation without producing a binary. |
+| `just fmt` / `just fmt-check` | Apply or check Rust formatting. |
+| `just lint` | Run locked Clippy across all targets and features, denying warnings. |
+| `just test` | Run locked Rust tests across all targets. |
+| `just test-scripts` | Run the PowerShell tooling suite. |
+| `just verify` | Run the complete local verification gate. |
 
-For a faster compile-only validation when a runnable binary is not required:
+`just verify` runs `fmt-check`, `lint`, `test`, `test-scripts`, `build` and `check-release` in order, stopping at the first failure. Metadata validation is read-only; no version bump, release changelog, installer build or GPU smoke test is required for normal local verification.
 
-```powershell
-cargo check
-```
+For a focused check during development, run the relevant recipe or individual test. Report unavailable or failed checks separately from passing checks.
 
-## Test
-
-Run the Rust test suite with:
-
-```powershell
-cargo test --all-targets
-```
-
-For early bootstrap phases where no target-specific tests exist yet, `cargo test` is also sufficient for the phase-specific gate when the plan explicitly says so.
-
-Run the PowerShell tooling tests with the repository-owned runner:
+## Workspace commands
 
 ```powershell
-pwsh -NoProfile -File .\tests\scripts\run.ps1
+just zip repo
+just zip workspace
+just review --files
+just package my-task --tracked-only
+just apply --zip 'C:/Downloads/apollo-task-changed-files.zip' --dry-run
+just restore --backup 'C:/Backups/apollo import' --dry-run
+just clean --dry-run
 ```
 
-## Formatting
+`just clean` removes only the project's `target/` directory. Tracked files require explicit `--force`; invalid roots, links and protected local content are always refused. Offline bundles, local plans and staged release artifacts outside `target/` are not cleanup targets.
 
-Check Rust formatting:
-
-```powershell
-cargo fmt --check
-```
-
-Apply Rust formatting locally when needed:
-
-```powershell
-cargo fmt
-```
-
-Do not use formatting changes as an excuse for unrelated cleanup outside the active phase.
-
-## Clippy
-
-The standard lint gate is:
-
-```powershell
-cargo clippy --all-targets --all-features -- -D warnings
-```
-
-Warnings are treated as errors for the project gate.
-
-## Standard Rust Gate
-
-Before completing an application-code phase, run:
-
-```powershell
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
-```
-
-Report checks truthfully. If a required tool or dependency is unavailable, record the check as not run rather than inferring success.
+See [repository scripts](../scripts/README.md) for all transfer and cleanup options. Offline preparation and maintenance are owner-managed, outside Just.
 
 ## Queue and Batch Architecture
 
@@ -259,8 +226,8 @@ just review --files
 Package the reviewed working-tree delta:
 
 ```powershell
-just package phase-f01.2
-just package phase-f01.2 --tracked-only
+just package my-task
+just package my-task --tracked-only
 ```
 
 The exporter includes staged and unstaged changes against HEAD and, by default, eligible untracked files. It writes `apollo-<task-or-phase>-changed-files.zip` beside the project, with provenance and deletion metadata. It excludes local-only, sensitive and generated paths. Use `--output` to choose another archive and `--force` to replace a previous archive safely.
@@ -297,16 +264,7 @@ Use `--project` and `--output` to override the project root and destination. To 
 
 ### Generated-output cleanup
 
-Preview or remove only recognized generated roots:
-
-```powershell
-.\scripts\clean-generated.ps1 --rust --dry-run
-.\scripts\clean-generated.ps1 --rust
-```
-
-Rust cleanup targets `target/`. Offline bundle maintenance is owner-managed. The legacy cleanup interface remains temporarily compatible until F01.3.
-
-The cleanup command refuses paths outside the repository, never touches `.git`, and protects tracked files unless `--force` is explicitly used.
+Use `just clean --dry-run` to preview the root `target/` directory, or `just clean` to remove it. The direct script accepts `--rust` for compatibility. Tracked files require `--force`; root, link and protected-content checks remain active regardless. See [cleanup options](../scripts/README.md#clean-generated-output).
 
 ## Local Workspace Roots
 

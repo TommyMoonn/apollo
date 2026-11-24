@@ -1,35 +1,55 @@
 set shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
+# List available commands.
 default:
     @just --list
 
+# Run the application using the pinned toolchain.
+[group("development")]
 run:
-    cargo run
+    cargo run --locked
 
+# Build the application.
+[group("development")]
 build:
-    cargo build
+    cargo build --locked
 
+# Check compilation without producing a binary.
+[group("development")]
 check:
-    cargo check
+    cargo check --locked
 
-test:
-    cargo test --all-targets
-
+# Format Rust source.
+[group("verification")]
 fmt:
     cargo fmt
 
+# Check Rust formatting without writing files.
+[group("verification")]
 fmt-check:
     cargo fmt --check
 
+# Run Clippy across supported targets and features; deny warnings.
+[group("verification")]
 lint:
-    cargo clippy --all-targets --all-features -- -D warnings
-
-gate:
-    cargo fmt --check
     cargo clippy --locked --all-targets --all-features -- -D warnings
+
+# Run the Rust tests.
+[group("verification")]
+test:
     cargo test --locked --all-targets
 
-# Forward each argument literally through a PowerShell script recipe.
+# Run the PowerShell tooling tests.
+[group("verification")]
+test-scripts:
+    pwsh -NoProfile -File tests/scripts/run.ps1
+
+# Run all local checks once, stopping on the first failure.
+[group("verification")]
+verify: fmt-check lint test test-scripts build check-release
+
+# Export repo or workspace; optional --project and --output.
+[group("workspace")]
 [positional-arguments]
 [script("pwsh", "-NoProfile", "-File")]
 [extension(".ps1")]
@@ -37,6 +57,8 @@ zip mode *flags:
     $ErrorActionPreference = 'Stop'
     & ./scripts/zip-project.ps1 --mode @args
 
+# Review working-tree changes; use --files for paths.
+[group("workspace")]
 [positional-arguments]
 [script("pwsh", "-NoProfile", "-File")]
 [extension(".ps1")]
@@ -44,9 +66,8 @@ review *flags:
     $ErrorActionPreference = 'Stop'
     & ./scripts/review-changes.ps1 @args
 
-review-files:
-    pwsh -NoProfile -File scripts/review-changes.ps1 --files
-
+# Package a named change set; optional --tracked-only.
+[group("workspace")]
 [positional-arguments]
 [script("pwsh", "-NoProfile", "-File")]
 [extension(".ps1")]
@@ -54,13 +75,8 @@ package name="changes" *flags:
     $ErrorActionPreference = 'Stop'
     & ./scripts/package-changes.ps1 --name @args
 
-[positional-arguments]
-[script("pwsh", "-NoProfile", "-File")]
-[extension(".ps1")]
-package-tracked name *flags:
-    $ErrorActionPreference = 'Stop'
-    & ./scripts/package-changes.ps1 --tracked-only --name @args
-
+# Apply a changed-files ZIP; optional --zip and --dry-run.
+[group("workspace")]
 [positional-arguments]
 [script("pwsh", "-NoProfile", "-File")]
 [extension(".ps1")]
@@ -68,13 +84,8 @@ apply *flags:
     $ErrorActionPreference = 'Stop'
     & ./scripts/apply-changes.ps1 @args
 
-[positional-arguments]
-[script("pwsh", "-NoProfile", "-File")]
-[extension(".ps1")]
-apply-file zip *flags:
-    $ErrorActionPreference = 'Stop'
-    & ./scripts/apply-changes.ps1 --zip @args
-
+# Restore an import backup; optional --backup and --dry-run.
+[group("workspace")]
 [positional-arguments]
 [script("pwsh", "-NoProfile", "-File")]
 [extension(".ps1")]
@@ -82,50 +93,52 @@ restore *flags:
     $ErrorActionPreference = 'Stop'
     & ./scripts/restore-changes.ps1 @args
 
+# Clean Rust target/; use --dry-run to preview or --force for tracked content.
+[group("workspace")]
 [positional-arguments]
 [script("pwsh", "-NoProfile", "-File")]
 [extension(".ps1")]
-restore-from backup *flags:
+clean *flags:
     $ErrorActionPreference = 'Stop'
-    & ./scripts/restore-changes.ps1 --backup @args
+    & ./scripts/clean-generated.ps1 @args
 
-clean:
-    pwsh -NoProfile -File scripts/clean-generated.ps1 --rust
-
-clean-dry:
-    pwsh -NoProfile -File scripts/clean-generated.ps1 --all --dry-run
-
-clean-all:
-    pwsh -NoProfile -File scripts/clean-generated.ps1 --all
-
-test-scripts:
-    pwsh -NoProfile -File tests/scripts/run.ps1
-
-test-all:
-    cargo test --all-targets
-    pwsh -NoProfile -File tests/scripts/run.ps1
-
+# Update release version metadata.
+[group("release")]
 set-version version:
     pwsh -NoProfile -File .\scripts\set-version.ps1 {{version}}
 
+# Validate version metadata without modifying files.
+[group("release")]
 check-release:
-    pwsh -NoProfile -File .\scripts\check-release.ps1
+    pwsh -NoProfile -File scripts/check-release.ps1
 
+# Validate a release tag and changelog.
+[group("release")]
 check-release-tag tag:
     pwsh -NoProfile -File .\scripts\check-release.ps1 --tag {{tag}} --release-changelog
 
+# Build the Windows release executable.
+[group("release")]
 build-release:
     cargo build --locked --release --target x86_64-pc-windows-msvc
 
+# Build the Windows installer.
+[group("release")]
 build-installer:
     pwsh -NoProfile -File .\scripts\build-windows-installer.ps1
 
+# Stage Windows release artifacts.
+[group("release")]
 stage-release:
     pwsh -NoProfile -File .\scripts\stage-windows-release.ps1
 
+# Validate metadata for a specified release version.
+[group("release")]
 release-check version:
     pwsh -NoProfile -File .\scripts\check-release.ps1 --tag v{{version}} --release-changelog
 
+# Build and stage the Windows release.
+[group("release")]
 release-stage:
     cargo build --locked --release --target x86_64-pc-windows-msvc
     pwsh -NoProfile -File .\scripts\stage-windows-release.ps1

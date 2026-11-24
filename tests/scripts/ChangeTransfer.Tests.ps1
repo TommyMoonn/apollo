@@ -575,6 +575,14 @@ try {
                 Set-Content -LiteralPath (Join-Path $repo 'new.txt') -Value 'value' -NoNewline
                 Push-Location $projectRoot
                 try {
+                    # Tracked-only must exclude untracked files even when a path contains spaces.
+                    Set-Content -LiteralPath (Join-Path $repo 'seed.txt') -Value 'changed' -NoNewline
+                    $trackedZip = Join-Path $folder 'tracked only.zip'
+                    & just package transfer --tracked-only --project $repo --output $trackedZip
+                    Assert-Equal 0 $LASTEXITCODE 'Just tracked-only package failed.'
+                    Assert-True (@(Get-ZipEntryNames -Path $trackedZip) -notcontains 'new.txt') 'Just must forward --tracked-only.'
+                    & git -C $repo restore -- seed.txt
+                    Assert-Equal 0 $LASTEXITCODE 'Unable to reset tracked fixture.'
                     & just package transfer --project $repo --output $zip
                     Assert-Equal 0 $LASTEXITCODE 'Just package failed.'
                     Assert-PathExists $zip 'Just must forward output path.'
@@ -582,13 +590,14 @@ try {
                     & just apply --project $repo --zip $zip --dry-run
                     Assert-Equal 0 $LASTEXITCODE 'Just apply dry run failed.'
                     Assert-PathMissing (Join-Path $repo 'new.txt') 'Just must forward dry-run.'
-                    & just apply-file $zip --project $repo
-                    Assert-Equal 0 $LASTEXITCODE 'Just apply-file failed.'
+                    & just apply --zip $zip --project $repo
+                    Assert-Equal 0 $LASTEXITCODE 'Just apply failed.'
                     Assert-PathExists (Join-Path $repo 'new.txt') 'Just must forward archive path.'
-                    & just restore --project $repo --dry-run
+                    $backup = Get-ChildItem -LiteralPath (Join-Path (Get-ApolloImportBase) (Get-RepositorySlug -ProjectRoot $repo)) -Directory | Select-Object -First 1
+                    & just restore --project $repo --backup $backup.FullName --dry-run
                     Assert-Equal 0 $LASTEXITCODE 'Just restore dry run failed.'
                     Assert-PathExists (Join-Path $repo 'new.txt') 'Restore preview must not remove the file.'
-                    & just restore --project $repo
+                    & just restore --project $repo --backup $backup.FullName
                     Assert-Equal 0 $LASTEXITCODE 'Just restore failed.'
                     Assert-PathMissing (Join-Path $repo 'new.txt') 'Just must forward restore project path.'
                 } finally { Pop-Location }

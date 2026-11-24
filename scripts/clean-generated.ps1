@@ -1,7 +1,8 @@
 #requires -Version 7.0
 
+# Adapted from Archeion scripts/clean-generated.ps1 at 4b711fc2 (GPL-3.0-only).
+$ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot 'Cli.Common.ps1')
 . (Join-Path $PSScriptRoot 'Repository.Common.ps1')
@@ -9,8 +10,6 @@ $ErrorActionPreference = "Stop"
 $cli = ConvertFrom-CliArguments -Arguments $args -OptionSpecs @{
     project = @{ Aliases = @('-p', '-ProjectRoot'); Default = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
     rust = @{ Kind = 'Switch'; Aliases = @('-Rust') }
-    'chatgpt-bundles' = @{ Kind = 'Switch'; Aliases = @('-ChatGptBundles') }
-    all = @{ Kind = 'Switch'; Aliases = @('-All') }
     'dry-run' = @{ Kind = 'Switch'; Aliases = @('-n', '-DryRun') }
     force = @{ Kind = 'Switch'; Aliases = @('-f', '-Force') }
 }
@@ -21,111 +20,106 @@ Usage: .\scripts\clean-generated.ps1 [options]
 
 Options:
   -p, --project <path>          Project root to clean.
-  --rust                        Remove target/.
-  --chatgpt-bundles             Remove .dev/chatgpt/bundles/.
-  --all                         Enable all known generated targets.
+  --rust                        Remove target/ (the default).
   -n, --dry-run                 Preview cleanup only.
-  -f, --force                   Permit cleanup when a selected target contains tracked files.
+  -f, --force                   Allow selected tracked content to be removed.
   -h, --help                    Show this help.
 
-Legacy PowerShell flags remain accepted for compatibility.
+Legacy PowerShell aliases for these options remain accepted.
 '@
     return
 }
 
+if (Test-RepositoryFileSystemRoot -Path $cli['project']) {
+    throw 'Cleanup cannot target a filesystem root.'
+}
 $projectRoot = Resolve-RepositoryRoot -Path $cli['project']
-$rust = [bool]$cli['rust']
-$chatGptBundles = [bool]$cli['chatgpt-bundles']
-$all = [bool]$cli['all']
+Assert-TransferUnlinked -Path $projectRoot
+if ($projectRoot -match '(^|[\\/])(?:\.git|\.agent-work|\.dev|\.plans|\.planning|\.project|artifacts)([\\/]|$)') {
+    throw "Cleanup cannot target a protected directory: $projectRoot"
+}
 $dryRun = [bool]$cli['dry-run']
 $force = [bool]$cli['force']
 
-if ($all) {
-    $rust = $true
-    $chatGptBundles = $true
+# Refuse a subdirectory of a repository or a broken Git checkout. An extracted
+# source snapshot may be cleaned without Git metadata if it has a Cargo manifest.
+$gitRoot = Invoke-RepositoryGit -ProjectRoot $projectRoot -Arguments @('rev-parse', '--show-toplevel') -AllowFailure
+if ($gitRoot.ExitCode -eq 0) {
+    $topLevel = [IO.Path]::GetFullPath($gitRoot.StdOut.TrimEnd([char[]]@("`r", "`n"))).TrimEnd([char[]]@('\', '/'))
+    if (-not $topLevel.Equals($projectRoot, (Get-RepositoryPathComparison))) {
+        throw "Cleanup requires the repository root: $topLevel"
+    }
+} elseif ((Test-Path -LiteralPath (Join-Path $projectRoot '.git')) -or -not (Test-Path -LiteralPath (Join-Path $projectRoot 'Cargo.toml') -PathType Leaf)) {
+    throw "Unable to establish a Git or Cargo project root: $projectRoot"
 }
-if (-not $rust -and -not $chatGptBundles) {
-    Write-Host 'No cleanup target selected. Use --rust, --chatgpt-bundles, or --all.'
+
+$modeLabel = if ($dryRun) { 'dry run' } else { 'apply' }
+Write-CliHeading -Text 'Generated output cleanup'
+Write-CliDetail -Label 'Project' -Value $projectRoot -ValueTone 'Important'
+Write-CliDetail -Label 'Scope' -Value 'Rust target/'
+Write-CliDetail -Label 'Mode' -Value $modeLabel
+if ($force) {
+    Write-CliWarning -Message 'Tracked-file protection is disabled by --force.'
+}
+
+$relativePath = 'target'
+$fullPath = Resolve-RepositoryRelativePath -ProjectRoot $projectRoot -RelativePath $relativePath -Operation 'remove'
+Assert-TransferUnlinked -Path $fullPath
+Assert-TransferPathSpelling -Root $projectRoot -Path $fullPath
+
+if (-not (Test-Path -LiteralPath $fullPath)) {
+    Write-CliSuccess -Message 'No selected generated output exists.'
     return
 }
+if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) {
+    throw "Cleanup target must be a directory: $fullPath"
+}
 
-function Get-PathSize {
-    param([Parameter(Mandatory)][string]$Path)
-    if (Test-Path -LiteralPath $Path -PathType Leaf) {
-        return [long](Get-Item -LiteralPath $Path).Length
+if ($gitRoot.ExitCode -eq 0) {
+    $trackedPaths = @(Get-GitNulValues -ProjectRoot $projectRoot -Arguments @('ls-files', '-z', '--', $relativePath))
+    if ($trackedPaths.Count -gt 0 -and -not $force) {
+        throw "Refusing to remove '$relativePath' because it contains tracked files. Use --force only after reviewing: $($trackedPaths -join ', ')"
     }
-    $measurement = Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum
-    if ($null -eq $measurement.Sum) { return 0L }
-    return [long]$measurement.Sum
 }
 
-function Format-ByteSize {
-    param([Parameter(Mandatory)][long]$Bytes)
-    if ($Bytes -ge 1GB) { return '{0:N2} GB' -f ($Bytes / 1GB) }
-    if ($Bytes -ge 1MB) { return '{0:N2} MB' -f ($Bytes / 1MB) }
-    if ($Bytes -ge 1KB) { return '{0:N2} KB' -f ($Bytes / 1KB) }
-    return "$Bytes B"
-}
-
-function Get-TrackedPathsUnder {
-    param([Parameter(Mandatory)][string]$RelativePath)
-
-    $gitProbe = Invoke-RepositoryGit -ProjectRoot $projectRoot -Arguments @('rev-parse', '--is-inside-work-tree') -AllowFailure
-    if ($gitProbe.ExitCode -ne 0 -or $gitProbe.StdOut.Trim() -ne 'true') {
-        return @()
-    }
-
-    $normalized = $RelativePath.Replace('\', '/')
-    $result = Invoke-RepositoryGit -ProjectRoot $projectRoot -Arguments @('ls-files', '--', $normalized, "$normalized/**")
-    return @($result.StdOut -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-}
-
-$targets = [System.Collections.Generic.List[string]]::new()
-if ($rust) { $targets.Add('target') }
-if ($chatGptBundles) { $targets.Add('.dev/chatgpt/bundles') }
-
-$existingTargets = [System.Collections.Generic.List[object]]::new()
-foreach ($relativePath in $targets) {
-    $fullPath = Resolve-RepositoryRelativePath -ProjectRoot $projectRoot -RelativePath $relativePath -Operation 'remove'
-    if (-not (Test-Path -LiteralPath $fullPath)) {
-        continue
-    }
-
-    $tracked = @(Get-TrackedPathsUnder -RelativePath $relativePath)
-    if ($tracked.Count -gt 0 -and -not $force) {
-        throw "Refusing to remove '$relativePath' because it contains tracked files. Use --force only after reviewing: $($tracked -join ', ')"
-    }
-
-    $existingTargets.Add([pscustomobject]@{
-        RelativePath = $relativePath
-        FullPath = $fullPath
-        Size = Get-PathSize -Path $fullPath
-    })
-}
-
-if ($existingTargets.Count -eq 0) {
-    Write-Host 'No selected generated output exists.'
-    return
-}
-
+# Measure and validate in one walk. Never recurse into a link, even with --force.
 $totalBytes = 0L
-foreach ($target in $existingTargets) {
-    $totalBytes += $target.Size
-    $sizeLabel = Format-ByteSize -Bytes $target.Size
-    if ($dryRun) {
-        Write-Host ('WOULD REMOVE {0,-32} {1,12}' -f $target.RelativePath, $sizeLabel)
+$pending = [Collections.Generic.Stack[IO.DirectoryInfo]]::new()
+$pending.Push([IO.DirectoryInfo]::new($fullPath))
+while ($pending.Count -gt 0) {
+    $directory = $pending.Pop()
+    if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Symbolic links and reparse points are not supported: $($directory.FullName)"
     }
-    else {
-        Remove-Item -LiteralPath $target.FullPath -Recurse -Force
-        Write-Host ('REMOVED      {0,-32} {1,12}' -f $target.RelativePath, $sizeLabel)
+    foreach ($entry in $directory.EnumerateFileSystemInfos()) {
+        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Symbolic links and reparse points are not supported: $($entry.FullName)"
+        }
+        if ($entry.Name -match '^(?:\.git|\.agent-work|\.dev|\.plans|\.planning|\.project|artifacts)$|^.+-offline-bundle(?:\.part-\d+)?\.zip$') {
+            throw "Protected local content inside cleanup target: $($entry.FullName)"
+        }
+        if ($entry -is [IO.DirectoryInfo]) {
+            $pending.Push($entry)
+        } else {
+            $totalBytes += $entry.Length
+        }
     }
 }
 
-Write-Host ''
+$message = "$relativePath ($(Format-CliByteSize -Bytes $totalBytes))"
+Write-CliText -Text ''
 if ($dryRun) {
-    Write-Host "Would free approximately: $(Format-ByteSize -Bytes $totalBytes)"
-    Write-Host 'Mode: dry run, nothing was removed'
-}
-else {
-    Write-Host "Freed approximately: $(Format-ByteSize -Bytes $totalBytes)"
+    Write-CliHeading -Text 'Cleanup preview'
+    Write-CliStatus -Label 'WOULD REMOVE' -Message $message -Tone 'Important'
+    Write-CliSuccess -Message 'Cleanup preview complete'
+    Write-CliDetail -Label 'Would remove' -Value '1 target'
+    Write-CliDetail -Label 'Would free' -Value (Format-CliByteSize -Bytes $totalBytes)
+} else {
+    Write-CliHeading -Text 'Cleanup'
+    Assert-TransferUnlinked -Path $fullPath
+    Remove-Item -LiteralPath $fullPath -Recurse -Force
+    Write-CliStatus -Label 'REMOVE' -Message $message -Tone 'Important'
+    Write-CliSuccess -Message 'Cleanup complete'
+    Write-CliDetail -Label 'Removed' -Value '1 target'
+    Write-CliDetail -Label 'Freed' -Value (Format-CliByteSize -Bytes $totalBytes)
 }

@@ -7,7 +7,7 @@
 /.scratch/
 /.agent-work/
 
-/.dev/chatgpt/bundles/
+/.dev/
 
 *.log
 *.tmp

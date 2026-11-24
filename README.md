@@ -58,7 +58,7 @@ See the [pinned media-tool manifest](distribution/media-tools.json), [compatibil
 
 ## Development
 
-Use the pinned Rust toolchain, PowerShell 7 and Just. Run `just --list` to discover commands. Use `just review --files` to inspect changes, `just zip repo` to export committed source, or `just zip workspace` to export the filtered working tree. See the development guide for setup and verification.
+Use the pinned Rust toolchain, PowerShell 7 and Just. Run `just --list` to discover commands, `just run` to start Apollo, and `just verify` to run the local verification gate. See the [development guide](docs/DEVELOPMENT.md) for setup and workspace commands.
 
 ## Project documentation
 

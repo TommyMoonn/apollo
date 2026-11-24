@@ -87,11 +87,16 @@ Direct commands: `scripts/package-changes.ps1`, `scripts/apply-changes.ps1` and 
 ### Clean generated output
 
 ```powershell
-.\scripts\clean-generated.ps1 --rust
-.\scripts\clean-generated.ps1 --rust --dry-run
+just clean
+just clean --dry-run
+just clean --project 'C:/Projects/Apollo Copy' --dry-run
 ```
 
-Rust cleanup targets `target/`. Tracked files are protected unless `--force` is explicitly supplied. The retired bundle cleanup interface remains temporarily compatible pending F01.3; offline preparation and maintenance are owner-managed.
+The direct equivalent is `pwsh -NoProfile -File scripts/clean-generated.ps1`. Cleanup selects only the root `target/` directory; `--rust` remains an explicit alias for that selection. `--dry-run` reports the path and estimated size without deleting anything. `--force` permits tracked generated files to be removed and prints a warning. It does not bypass root, reparse-point or protected-content checks. The project must be a Git worktree root or an extracted Cargo project containing `Cargo.toml`.
+
+Local plans, `.agent-work/`, legacy `.dev/`, offline archives and staged release artifacts are not cleanup targets. The retired bundle and all-target flags are no longer supported. Offline preparation and maintenance are owner-managed.
+
+Adapted from Archeion commit `4b711fc2` (GPL-3.0-only): Rust output is the only target, with Apollo's shared repository checks, link-safe size traversal and shared CLI reporting.
 
 ### Validate release metadata
 
@@ -158,8 +163,4 @@ The installer is per-user, installs under `%LOCALAPPDATA%\Programs\Apollo`, and 
 
 ## Tests
 
-Run all PowerShell tooling tests from the repository root:
-
-```powershell
-pwsh -NoProfile -File .\tests\scripts\run.ps1
-```
+Run `just test-scripts` from the repository root, or run an individual suite with `pwsh -NoProfile -File tests/scripts/ProjectTooling.Tests.ps1`. `just verify` includes the tooling suite alongside Rust checks, the locked build and read-only release metadata validation.

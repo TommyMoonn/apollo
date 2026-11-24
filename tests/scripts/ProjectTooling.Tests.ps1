@@ -80,7 +80,7 @@ Invoke-TestCase 'zip-project uses real exclusions and preserves required source 
         Copy-Item -LiteralPath (Join-Path $projectRoot '.zipignore') -Destination $repo
         $included = @('README.md', 'Cargo.toml', 'Cargo.lock', 'src/main.rs', 'assets/icon.png', 'tests/sample.rs',
             '.plans/plan.md', '.planning/legacy.md', '.project/review.md', '.agents/skills/example/SKILL.md', 'docs/space name.md', 'tests/fixtures/target/fixture.txt', 'tests/fixtures/artifacts/fixture.txt')
-        $excluded = @('.git/config', 'target/build.txt', 'artifacts/result.txt', '.dev/chatgpt/bundles/bundle.txt',
+        $excluded = @('.git/config', 'target/build.txt', 'artifacts/result.txt', '.dev/chatgpt/bundles/bundle.txt', '.dev/other-local.txt',
             '.scratch/cache.txt', '.agent-work/prepare.ps1', 'nested/.env.local', '.env', 'private.pem',
             'nested/run.log', 'test-results/report.txt', 'coverage/report.txt', 'apollo-cargo-vendor-offline-bundle.part-000.zip', 'temporary.tmp', 'Desktop.ini')
         foreach ($path in ($included + $excluded)) { New-SnapshotFixtureFile -Repository $repo -RelativePath $path }
@@ -370,37 +370,40 @@ if (Get-Command just -ErrorAction SilentlyContinue) {
 
 } else { Write-Host 'SKIP Just recipe forwarding (Just not installed; run locally with Just available).' }
 
-Invoke-TestCase 'clean-generated selects Rust and ChatGPT bundle targets with dry run and all' {
+Invoke-TestCase 'clean-generated defaults to Rust output and preserves local files' {
     $repo = New-TestGitRepository
     try {
-        New-Item -ItemType Directory -Path (Join-Path $repo 'target') -Force | Out-Null
-        New-Item -ItemType Directory -Path (Join-Path $repo '.dev/chatgpt/bundles') -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $repo 'target/build.bin') -Value 'rust' -Encoding utf8
-        Set-Content -LiteralPath (Join-Path $repo '.dev/chatgpt/bundles/bundle.zip') -Value 'bundle' -Encoding utf8
-        $output = Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--rust', '--dry-run')
+        Copy-Item -LiteralPath (Join-Path $projectRoot '.gitignore') -Destination $repo
+        $preserved = @('.dev/chatgpt/bundles/bundle.zip', '.agent-work/prepare.ps1', '.plans/plan.md', '.project/review.md', 'artifacts/windows/Apollo.zip', 'apollo-rust-toolchain-offline-bundle.zip', 'coverage/report.txt', 'test-results/report.txt', 'src/target/fixture.txt')
+        foreach ($path in ($preserved + @('target/debug/build.bin'))) { New-SnapshotFixtureFile -Repository $repo -RelativePath $path }
+        $output = Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--dry-run')
         Assert-Contains $output 'WOULD REMOVE' 'Dry run should preview Rust cleanup.'
-        Assert-PathExists (Join-Path $repo 'target') 'Dry run should preserve target.'
-        Assert-PathExists (Join-Path $repo '.dev/chatgpt/bundles') 'Unselected bundles should remain.'
-        Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--chatgpt-bundles') | Out-Null
-        Assert-PathExists (Join-Path $repo 'target') 'ChatGPT bundle selection should preserve target.'
-        Assert-PathMissing (Join-Path $repo '.dev/chatgpt/bundles') 'ChatGPT bundle selection should remove only bundles.'
-        New-Item -ItemType Directory -Path (Join-Path $repo '.dev/chatgpt/bundles') -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $repo '.dev/chatgpt/bundles/bundle.zip') -Value 'bundle' -Encoding utf8
-        Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--all') | Out-Null
-        Assert-PathMissing (Join-Path $repo 'target') 'All should remove Rust target.'
-        Assert-PathMissing (Join-Path $repo '.dev/chatgpt/bundles') 'All should remove ChatGPT bundles.'
-        $emptyOutput = Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--all')
-        Assert-Contains $emptyOutput 'No selected generated output exists.' 'Missing targets should be handled cleanly.'
+        Assert-Contains $output 'Would free' 'Dry run should report size.'
+        Assert-PathExists (Join-Path $repo 'target/debug/build.bin') 'Dry run should preserve target.'
+        $output = Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo)
+        Assert-Contains $output 'Cleanup complete' 'Default cleanup should succeed.'
+        Assert-Contains $output 'Freed' 'Cleanup should report freed size.'
+        Assert-PathMissing (Join-Path $repo 'target') 'Default should remove only Rust target.'
+        foreach ($path in $preserved) { Assert-PathExists (Join-Path $repo $path) "Cleanup must preserve $path." }
+        $emptyOutput = Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('-ProjectRoot', $repo, '-Rust')
+        Assert-Contains $emptyOutput 'No selected generated output exists' 'Missing targets should be handled cleanly.'
+        New-SnapshotFixtureFile -Repository $repo -RelativePath 'target/debug/again.bin'
+        Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--rust') | Out-Null
+        Assert-PathMissing (Join-Path $repo 'target') 'Explicit Rust selection should still work.'
     }
     finally { Remove-Item -LiteralPath $repo -Recurse -Force }
 }
 
-
-Invoke-TestCase 'clean-generated rejects obsolete npm and Tauri cleanup flags' {
+Invoke-TestCase 'clean-generated rejects retired cleanup options without deleting files' {
     $repo = New-TestGitRepository
     try {
-        Assert-Throws { Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--deps') } 'Unknown option*'
-        Assert-Throws { Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--installers') } 'Unknown option*'
+        New-SnapshotFixtureFile -Repository $repo -RelativePath 'target/debug/build.bin'
+        New-SnapshotFixtureFile -Repository $repo -RelativePath '.dev/chatgpt/bundles/bundle.zip'
+        foreach ($option in @('--deps', '--installers', '--chatgpt-bundles', '--all')) {
+            Assert-Throws { Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, $option) } 'Unknown option*'
+        }
+        Assert-PathExists (Join-Path $repo 'target/debug/build.bin') 'Invalid options must not clean target.'
+        Assert-PathExists (Join-Path $repo '.dev/chatgpt/bundles/bundle.zip') 'Invalid options must not clean bundles.'
     }
     finally { Remove-Item -LiteralPath $repo -Recurse -Force }
 }
@@ -408,15 +411,149 @@ Invoke-TestCase 'clean-generated rejects obsolete npm and Tauri cleanup flags' {
 Invoke-TestCase 'clean-generated protects tracked files unless forced' {
     $repo = New-TestGitRepository
     try {
-        New-Item -ItemType Directory -Path (Join-Path $repo 'target') -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $repo 'target/tracked.txt') -Value 'tracked' -Encoding utf8
+        New-SnapshotFixtureFile -Repository $repo -RelativePath 'target/tracked.txt'
         & git -C $repo add -f target/tracked.txt
+        Assert-Equal 0 $LASTEXITCODE 'Unable to stage generated fixture.'
         & git -C $repo commit --quiet -m 'test: force-track generated fixture'
+        Assert-Equal 0 $LASTEXITCODE 'Unable to commit generated fixture.'
         Assert-Throws { Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--rust') } '*contains tracked files*'
-        Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--rust', '--force') | Out-Null
+        Assert-PathExists (Join-Path $repo 'target/tracked.txt') 'Tracked file must survive refusal.'
+        $output = Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--force', '--dry-run')
+        Assert-Contains $output 'Tracked-file protection is disabled' 'Force must be reported.'
+        Assert-PathExists (Join-Path $repo 'target/tracked.txt') 'Forced preview must not delete.'
+        Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--force') | Out-Null
         Assert-PathMissing (Join-Path $repo 'target') 'Force should allow selected tracked generated content to be removed.'
     }
     finally { Remove-Item -LiteralPath $repo -Recurse -Force }
 }
+
+Invoke-TestCase 'clean-generated refuses unsafe roots and protected nested content even with force' {
+    $repo = New-TestGitRepository
+    try {
+        $root = [IO.Path]::GetPathRoot($repo)
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $root, '--dry-run', '--force') } '*filesystem root*'
+        New-SnapshotFixtureFile -Repository $repo -RelativePath 'nested/target/keep.txt'
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', (Join-Path $repo 'nested'), '--force') } '*repository root*'
+        Assert-PathExists (Join-Path $repo 'nested/target/keep.txt') 'Nested repository directory must be preserved.'
+        New-SnapshotFixtureFile -Repository $repo -RelativePath 'target/.agent-work/prepare.ps1'
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--force') } '*Protected local content*'
+        Assert-PathExists (Join-Path $repo 'target/.agent-work/prepare.ps1') 'Protected content must survive refusal.'
+        Remove-Item -LiteralPath (Join-Path $repo 'target') -Recurse -Force
+        New-SnapshotFixtureFile -Repository $repo -RelativePath 'target/apollo-cargo-vendor-offline-bundle.part-000.zip'
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--force') } '*Protected local content*'
+        Assert-PathExists (Join-Path $repo 'target/apollo-cargo-vendor-offline-bundle.part-000.zip') 'Offline bundle must survive refusal.'
+    }
+    finally { Remove-Item -LiteralPath $repo -Recurse -Force }
+}
+
+Invoke-TestCase 'clean-generated refuses linked targets and nested links' {
+    $repo = New-TestGitRepository
+    $outside = New-TestDirectory -Name 'apollo cleanup outside'
+    $target = Join-Path $repo 'target'
+    $nested = Join-Path $target 'linked'
+    $linkType = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+    try {
+        New-SnapshotFixtureFile -Repository $outside -RelativePath 'keep.txt'
+        New-Item -ItemType $linkType -Path $target -Target $outside | Out-Null
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--force') } '*reparse points*'
+        Assert-PathExists (Join-Path $outside 'keep.txt') 'Linked target must not be followed.'
+        Remove-Item -LiteralPath $target -Force
+        New-Item -ItemType Directory -Path $target | Out-Null
+        New-Item -ItemType $linkType -Path $nested -Target $outside | Out-Null
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--force') } '*reparse points*'
+        Assert-PathExists (Join-Path $outside 'keep.txt') 'Nested link must not be followed.'
+    }
+    finally {
+        foreach ($link in @($nested, $target)) {
+            $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+            if ($null -ne $item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Remove-Item -LiteralPath $link -Force }
+        }
+        Remove-Item -LiteralPath $repo, $outside -Recurse -Force
+    }
+}
+
+Invoke-TestCase 'clean-generated supports extracted Cargo roots but refuses unrelated directories' {
+    $repo = New-TestDirectory
+    try {
+        New-SnapshotFixtureFile -Repository $repo -RelativePath 'target/debug/build.bin'
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo, '--force') } '*Git or Cargo project root*'
+        Assert-PathExists (Join-Path $repo 'target/debug/build.bin') 'Unrelated target must survive refusal.'
+        New-SnapshotFixtureFile -Repository $repo -RelativePath 'Cargo.toml'
+        Invoke-ScriptCapture -ScriptPath $cleanScript -Arguments @('--project', $repo) | Out-Null
+        Assert-PathMissing (Join-Path $repo 'target') 'Extracted Cargo project should be cleanable.'
+    }
+    finally { Remove-Item -LiteralPath $repo -Recurse -Force }
+}
+
+if (Get-Command just -ErrorAction SilentlyContinue) {
+    Invoke-TestCase 'Just clean forwards project paths with spaces and dry-run flags' {
+        $repo = New-TestGitRepository -Name 'apollo clean project'
+        try {
+            New-SnapshotFixtureFile -Repository $repo -RelativePath 'target/debug/build.bin'
+            Push-Location $projectRoot
+            try {
+                & just clean --project $repo --dry-run
+                Assert-Equal 0 $LASTEXITCODE 'Just clean preview failed.'
+                Assert-PathExists (Join-Path $repo 'target/debug/build.bin') 'Just must forward dry-run.'
+                & just clean --project $repo
+                Assert-Equal 0 $LASTEXITCODE 'Just clean failed.'
+                Assert-PathMissing (Join-Path $repo 'target') 'Just must forward project root.'
+            } finally { Pop-Location }
+        } finally { Remove-Item -LiteralPath $repo -Recurse -Force }
+    }
+    Invoke-TestCase 'Just verify runs canonical checks once and stops on failure' {
+        $fixture = New-TestDirectory -Name 'apollo verify project'
+        $bin = Join-Path $fixture 'bin'
+        $log = Join-Path $fixture 'verification.log'
+        $originalPath = $env:PATH
+        $originalLog = $env:APOLLO_TEST_VERIFY_LOG
+        $originalFailure = $env:APOLLO_TEST_VERIFY_FAIL_LINT
+        try {
+            Copy-Item -LiteralPath (Join-Path $projectRoot 'justfile') -Destination $fixture
+            New-Item -ItemType Directory -Path $bin, (Join-Path $fixture 'scripts'), (Join-Path $fixture 'tests/scripts') -Force | Out-Null
+            # Substitute only the expensive checks; execute the real Just recipe and shell.
+            if ($IsWindows) {
+                Set-Content -LiteralPath (Join-Path $bin 'cargo.cmd') -Encoding ascii -Value @'
+@echo off
+>>"%APOLLO_TEST_VERIFY_LOG%" echo cargo %*
+if "%~1"=="clippy" if "%APOLLO_TEST_VERIFY_FAIL_LINT%"=="1" exit /b 7
+exit /b 0
+'@
+            } else {
+                $shim = Join-Path $bin 'cargo'
+                Set-Content -LiteralPath $shim -Encoding utf8 -Value @'
+#!/bin/sh
+printf 'cargo %s\n' "$*" >> "$APOLLO_TEST_VERIFY_LOG"
+if [ "$1" = clippy ] && [ "$APOLLO_TEST_VERIFY_FAIL_LINT" = 1 ]; then exit 7; fi
+'@
+                & chmod +x $shim
+                Assert-Equal 0 $LASTEXITCODE 'Unable to prepare Cargo test shim.'
+            }
+            Set-Content -LiteralPath (Join-Path $fixture 'tests/scripts/run.ps1') -Value 'Add-Content -LiteralPath $env:APOLLO_TEST_VERIFY_LOG -Value test-scripts'
+            Set-Content -LiteralPath (Join-Path $fixture 'scripts/check-release.ps1') -Value 'Add-Content -LiteralPath $env:APOLLO_TEST_VERIFY_LOG -Value check-release'
+            $env:PATH = $bin + [IO.Path]::PathSeparator + $originalPath
+            $env:APOLLO_TEST_VERIFY_LOG = $log
+            $env:APOLLO_TEST_VERIFY_FAIL_LINT = '0'
+            Push-Location $fixture
+            try {
+                & just verify
+                Assert-Equal 0 $LASTEXITCODE 'Successful verification should exit zero.'
+                $expected = @('cargo fmt --check', 'cargo clippy --locked --all-targets --all-features -- -D warnings', 'cargo test --locked --all-targets', 'test-scripts', 'cargo build --locked', 'check-release')
+                Assert-Equal $expected @(Get-Content -LiteralPath $log) 'Verification must run each canonical check once and in order.'
+                Remove-Item -LiteralPath $log
+                $env:APOLLO_TEST_VERIFY_FAIL_LINT = '1'
+                $PSNativeCommandUseErrorActionPreference = $false
+                & just verify 2>&1 | Out-Null
+                Assert-True ($LASTEXITCODE -ne 0) 'Verification must propagate a failing check.'
+                Assert-Equal @($expected[0], $expected[1]) @(Get-Content -LiteralPath $log) 'Verification must stop at the first failure.'
+            } finally { Pop-Location }
+        } finally {
+            $env:PATH = $originalPath
+            $env:APOLLO_TEST_VERIFY_LOG = $originalLog
+            $env:APOLLO_TEST_VERIFY_FAIL_LINT = $originalFailure
+            Remove-Item -LiteralPath $fixture -Recurse -Force
+        }
+    }
+} else { Write-Host 'SKIP Just cleanup and verification forwarding (Just not installed).' }
 
 Complete-TestRun

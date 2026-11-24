@@ -5,7 +5,7 @@
 ^artifacts
 ^.scratch
 ^.agent-work
-^.dev/chatgpt/bundles
+^.dev
 
 # Sensitive local configuration
 .env
