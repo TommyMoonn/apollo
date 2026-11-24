@@ -138,11 +138,12 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{BatchInspectedMedia, BatchInspectionOwner, MAX_BATCH_INSPECTIONS};
+    use super::{BatchInspectedMedia, BatchInspectionOwner};
     use crate::media::{intake::SourceIdentity, model::MediaFile};
 
     const TIMEOUT: Duration = Duration::from_secs(10);
     const SOURCES: usize = 8;
+    const EXPECTED_CONCURRENCY: usize = 2;
 
     #[test]
     fn inspection_concurrency_is_bounded_and_results_keep_source_order_identity() {
@@ -209,7 +210,7 @@ mod tests {
         let mut results = Vec::new();
 
         // Hold the first two inspections open until both have actually started.
-        for _ in 0..MAX_BATCH_INSPECTIONS {
+        for _ in 0..EXPECTED_CONCURRENCY {
             let (index, worker) = started_rx
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .unwrap();
@@ -217,7 +218,7 @@ mod tests {
             workers.insert(worker);
         }
         assert_eq!(started, HashSet::from([0, 1]));
-        assert_eq!(active.load(Ordering::Acquire), MAX_BATCH_INSPECTIONS);
+        assert_eq!(active.load(Ordering::Acquire), EXPECTED_CONCURRENCY);
         assert!(owner.poll().is_empty());
         assert!(!owner.is_complete());
 
@@ -237,13 +238,13 @@ mod tests {
         assert_eq!(results[0].index, 1);
         // Release only jobs that have started; every job's worker identity is observed.
         permits[0].send(()).unwrap();
-        for _ in MAX_BATCH_INSPECTIONS..SOURCES {
+        for _ in EXPECTED_CONCURRENCY..SOURCES {
             let (index, worker) = started_rx
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .unwrap();
             assert!(started.insert(index));
             workers.insert(worker);
-            assert!(workers.len() <= MAX_BATCH_INSPECTIONS);
+            assert!(workers.len() <= EXPECTED_CONCURRENCY);
             permits[index].send(()).unwrap();
         }
         while !owner.is_complete() {
@@ -264,8 +265,8 @@ mod tests {
                 SourceIdentity::read(&paths[index]).unwrap()
             );
         }
-        assert_eq!(peak.load(Ordering::Acquire), MAX_BATCH_INSPECTIONS);
-        assert_eq!(workers.len(), MAX_BATCH_INSPECTIONS);
+        assert_eq!(peak.load(Ordering::Acquire), EXPECTED_CONCURRENCY);
+        assert_eq!(workers.len(), EXPECTED_CONCURRENCY);
         assert!(owner.poll().is_empty());
     }
 }

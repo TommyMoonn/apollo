@@ -472,11 +472,6 @@ impl FrameNavigator {
             self.cache.pop_front();
         }
     }
-
-    #[cfg(test)]
-    fn cache_len(&self) -> usize {
-        self.cache.len()
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1012,31 +1007,79 @@ mod tests {
                 .is_none()
         );
 
-        fs::write(&media.path, b"replacement source with new identity").unwrap();
-        let replacement = SourceIdentity::read(&media.path).unwrap();
+        // A file replaced at the same path also needs a fresh query.
+        fs::write(&media.path, b"replacement source with a new identity").unwrap();
+        let current_identity = SourceIdentity::read(&media.path).unwrap();
+        let current_request = navigator
+            .schedule(&current_identity, &media, requested(2_000))
+            .unwrap()
+            .expect("changed file identity must invalidate the neighborhood");
+        assert!(navigator.settle(
+            current_request,
+            Ok(frame_json("1/1000", &[1000, 2000, 3000]))
+        ));
+
+        let replacement_path = directory.join("replacement.mkv");
+        fs::write(&replacement_path, b"replacement source").unwrap();
+        let replacement = SourceIdentity::read(&replacement_path).unwrap();
+        let mut replacement_media = media.clone();
+        replacement_media.path = replacement_path;
         assert!(
             navigator
-                .schedule(&replacement, &media, requested(2_000))
+                .schedule(&replacement, &replacement_media, requested(2_000))
                 .unwrap()
                 .is_some()
         );
-        assert_eq!(navigator.cache_len(), 0);
+        // Returning to the earlier source must not resurrect its cached neighborhood.
+        assert!(
+            navigator
+                .schedule(&current_identity, &media, requested(2_000))
+                .unwrap()
+                .is_some()
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn neighborhood_cache_has_a_deterministic_explicit_bound() {
+    fn neighborhood_cache_evicts_least_recently_used_and_keeps_recent_hits() {
         let (directory, media, identity) = source("bounded-cache");
         let mut navigator = FrameNavigator::default();
-        for index in 0..=NEIGHBORHOOD_CACHE_CAPACITY {
-            let center = 5_000 + index as i64 * 4_000;
+        // Touch the first neighborhood before inserting a fifth, so eviction
+        // must discard the second rather than the first.
+        for center in [5_000, 9_000, 13_000, 17_000] {
             let request = navigator
                 .schedule(&identity, &media, requested(center))
                 .unwrap()
                 .unwrap();
             assert!(navigator.settle(request, Ok(frame_json("1/1000", &[center]))));
         }
-        assert_eq!(navigator.cache_len(), NEIGHBORHOOD_CACHE_CAPACITY);
+        assert!(
+            navigator
+                .schedule(&identity, &media, requested(5_000))
+                .unwrap()
+                .is_none()
+        );
+        let request = navigator
+            .schedule(&identity, &media, requested(21_000))
+            .unwrap()
+            .unwrap();
+        assert!(navigator.settle(request, Ok(frame_json("1/1000", &[21_000]))));
+        for center in [5_000, 13_000, 17_000, 21_000] {
+            assert!(
+                navigator
+                    .schedule(&identity, &media, requested(center))
+                    .unwrap()
+                    .is_none(),
+                "expected a cache hit at {center}"
+            );
+        }
+        assert!(
+            navigator
+                .schedule(&identity, &media, requested(9_000))
+                .unwrap()
+                .is_some(),
+            "least recently used neighborhood should have been evicted"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

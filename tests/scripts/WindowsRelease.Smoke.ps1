@@ -76,7 +76,7 @@ function Invoke-SmokeProcess {
         $diagnostic = if ($Discovery) { $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult() } else { '' }
         if ($process.ExitCode -ne 0) { throw "Smoke process failed ($($process.ExitCode)): $Executable`n$diagnostic" }
         if ($Discovery) {
-            if ($diagnostic -notmatch 'Resolved .*ffmpeg.exe:' -or $diagnostic -notmatch '1 passed') { throw "Discovery harness did not run: $diagnostic" }
+            if (-not $diagnostic.Contains('PASS discovery: bundle')) { throw "Discovery harness did not run: $diagnostic" }
             if (-not $diagnostic.Contains("PASS release acceptance: $Acceptance")) { throw "Operation acceptance did not run: $diagnostic" }
             Write-Host $diagnostic.Trim()
         }
@@ -104,9 +104,9 @@ function Assert-Payload {
     $probe = Join-Path $Directory 'discovery-test.exe'
     Copy-Item -LiteralPath $harness -Destination $probe
     try {
-        Invoke-SmokeProcess $probe '--exact discovery_subprocess --nocapture' -Discovery -Acceptance cpu
-        Invoke-SmokeProcess $probe '--exact discovery_subprocess --nocapture' -Discovery -Acceptance unavailable
-        if ($RequireNvenc) { Invoke-SmokeProcess $probe '--exact discovery_subprocess --nocapture' -Discovery -Acceptance nvenc }
+        Invoke-SmokeProcess $probe '--ignored --exact discovery_subprocess --nocapture' -Discovery -Acceptance cpu
+        Invoke-SmokeProcess $probe '--ignored --exact discovery_subprocess --nocapture' -Discovery -Acceptance unavailable
+        if ($RequireNvenc) { Invoke-SmokeProcess $probe '--ignored --exact discovery_subprocess --nocapture' -Discovery -Acceptance nvenc }
     }
     finally { Remove-Item -LiteralPath $probe -Force }
 }

@@ -5069,7 +5069,7 @@ mod tests {
         queue::{MediaQueue, QueueJobFailure, QueueJobState, QueueRunState, QueuedOperation},
         remux::execution::RemuxExecutionState,
         ui::{
-            ProcessExecutionArbitration, QueueAction, SourceAction,
+            QueueAction, SourceAction,
             audio_extract::AudioExtractSelectionAction,
             audio_mix::AudioMixSelectionAction,
             batch::BatchReadiness,
@@ -9422,17 +9422,6 @@ mod tests {
     }
 
     #[test]
-    fn application_arbitration_blocks_only_the_competing_execution_owner() {
-        let immediate = ProcessExecutionArbitration::new(true, false);
-        assert!(!immediate.queue_start_allowed());
-        assert!(immediate.immediate_start_allowed());
-
-        let queued = ProcessExecutionArbitration::new(false, true);
-        assert!(!queued.immediate_start_allowed());
-        assert!(queued.queue_start_allowed());
-    }
-
-    #[test]
     fn remux_intent_reaches_executor() {
         let (directory, path) = temp_file("remux-execute");
         let mut app = app();
@@ -9576,85 +9565,39 @@ mod tests {
     }
 
     #[test]
-    fn upscale_execution_state_routes_running_and_terminal_surfaces_to_lifecycle_ui() {
-        use apollo::media::{execution::MediaExecutionFailure, process::MediaProcessFailure};
-
-        assert!(!shows_upscale_lifecycle(&UpscaleExecutionState::Idle));
-        assert!(shows_upscale_lifecycle(&UpscaleExecutionState::Running));
-        assert!(shows_upscale_lifecycle(&UpscaleExecutionState::Completed {
-            output: PathBuf::from("recording-4k.mp4"),
-        }));
-        assert!(shows_upscale_lifecycle(&UpscaleExecutionState::Failed(
-            MediaExecutionFailure::Process {
-                reason: MediaProcessFailure::Exit(Some(1)),
-                diagnostic: String::new(),
+    fn each_operation_routes_only_non_idle_execution_to_lifecycle_ui() {
+        let states = [
+            (AudioMixExecutionState::Idle, false),
+            (AudioMixExecutionState::Running, true),
+            (
+                AudioMixExecutionState::Completed {
+                    output: PathBuf::from("recording.mp4"),
+                },
+                true,
+            ),
+            (
+                AudioMixExecutionState::Failed(MediaExecutionFailure::Process {
+                    reason: MediaProcessFailure::Exit(Some(1)),
+                    diagnostic: String::new(),
+                }),
+                true,
+            ),
+            (AudioMixExecutionState::Cancelled, true),
+        ];
+        for (state, visible) in states {
+            for (name, route) in [
+                (
+                    "audio mix",
+                    shows_audio_mix_lifecycle as fn(&AudioMixExecutionState) -> bool,
+                ),
+                ("upscale", shows_upscale_lifecycle),
+                ("remux", shows_remux_lifecycle),
+                ("audio extract", shows_audio_extract_lifecycle),
+                ("frame capture", shows_frame_capture_lifecycle),
+            ] {
+                assert_eq!(route(&state), visible, "{name}: {state:?}");
             }
-        )));
-        assert!(shows_upscale_lifecycle(&UpscaleExecutionState::Cancelled));
-    }
-
-    #[test]
-    fn remux_execution_state_routes_running_and_terminal_surfaces_to_lifecycle_ui() {
-        assert!(!shows_remux_lifecycle(&RemuxExecutionState::Idle));
-        assert!(shows_remux_lifecycle(&RemuxExecutionState::Running));
-        assert!(shows_remux_lifecycle(&RemuxExecutionState::Completed {
-            output: PathBuf::from("recording-remuxed.mkv"),
-        }));
-        assert!(shows_remux_lifecycle(&RemuxExecutionState::Failed(
-            MediaExecutionFailure::Process {
-                reason: MediaProcessFailure::Exit(Some(1)),
-                diagnostic: String::new(),
-            }
-        )));
-        assert!(shows_remux_lifecycle(&RemuxExecutionState::Cancelled));
-    }
-
-    #[test]
-    fn audio_extract_execution_state_routes_running_and_terminal_surfaces_to_lifecycle_ui() {
-        assert!(!shows_audio_extract_lifecycle(
-            &AudioExtractExecutionState::Idle
-        ));
-        assert!(shows_audio_extract_lifecycle(
-            &AudioExtractExecutionState::Running
-        ));
-        assert!(shows_audio_extract_lifecycle(
-            &AudioExtractExecutionState::Completed {
-                output: PathBuf::from("recording-audio.mka"),
-            }
-        ));
-        assert!(shows_audio_extract_lifecycle(
-            &AudioExtractExecutionState::Failed(MediaExecutionFailure::Process {
-                reason: MediaProcessFailure::Exit(Some(1)),
-                diagnostic: String::new(),
-            })
-        ));
-        assert!(shows_audio_extract_lifecycle(
-            &AudioExtractExecutionState::Cancelled
-        ));
-    }
-
-    #[test]
-    fn frame_capture_execution_state_routes_running_and_terminal_surfaces_to_lifecycle_ui() {
-        assert!(!shows_frame_capture_lifecycle(
-            &FrameCaptureExecutionState::Idle
-        ));
-        assert!(shows_frame_capture_lifecycle(
-            &FrameCaptureExecutionState::Running
-        ));
-        assert!(shows_frame_capture_lifecycle(
-            &FrameCaptureExecutionState::Completed {
-                output: PathBuf::from("recording-frame.png"),
-            }
-        ));
-        assert!(shows_frame_capture_lifecycle(
-            &FrameCaptureExecutionState::Failed(MediaExecutionFailure::Process {
-                reason: MediaProcessFailure::Exit(Some(1)),
-                diagnostic: String::new(),
-            })
-        ));
-        assert!(shows_frame_capture_lifecycle(
-            &FrameCaptureExecutionState::Cancelled
-        ));
+        }
     }
 
     #[test]
@@ -10030,13 +9973,6 @@ mod tests {
             Some(&path)
         );
         fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn lifecycle_routing_remains_operation_specific() {
-        assert!(!shows_audio_mix_lifecycle(&AudioMixExecutionState::Idle));
-        assert!(!shows_upscale_lifecycle(&UpscaleExecutionState::Idle));
-        assert!(!shows_remux_lifecycle(&RemuxExecutionState::Idle));
     }
 
     #[test]

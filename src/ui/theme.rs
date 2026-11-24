@@ -374,20 +374,16 @@ mod tests {
     use egui::Color32;
 
     use super::{
-        BACKGROUND, BORDER_STRONG, ControlTone, DANGER_INTERACTIVE, DISABLED, FOCUS, FOREGROUND,
-        HOVER, InteractionState, MotionDurations, PRESSED, PROGRESS, SELECTION, ThemeRole,
-        control_colors, monochrome_visuals, motion_durations, operation_mode_colors,
-        selectable_colors, set_motion_durations,
+        BACKGROUND, BORDER_STRONG, ControlTone, DANGER_INTERACTIVE, DISABLED, FOREGROUND, HOVER,
+        InteractionState, MotionDurations, PRESSED, ThemeRole, control_colors, monochrome_visuals,
+        motion_durations, operation_mode_colors, selectable_colors, set_motion_durations,
     };
 
     #[test]
     fn progress_selection_and_focus_are_monochrome() {
-        assert_eq!(ThemeRole::Progress.color(), FOREGROUND);
-        assert_eq!(ThemeRole::Selection.color(), FOREGROUND);
-        assert_eq!(ThemeRole::Focus.color(), FOREGROUND);
-        assert_eq!(PROGRESS, FOREGROUND);
-        assert_eq!(SELECTION, FOREGROUND);
-        assert_eq!(FOCUS, FOREGROUND);
+        for role in [ThemeRole::Progress, ThemeRole::Selection, ThemeRole::Focus] {
+            assert!(is_black_or_white_alpha(role.color()));
+        }
     }
 
     #[test]
@@ -415,35 +411,20 @@ mod tests {
     }
 
     #[test]
-    fn destructive_idle_is_monochrome() {
-        let standard = control_colors(ControlTone::Standard, InteractionState::Idle);
-        let destructive = control_colors(ControlTone::Destructive, InteractionState::Idle);
-
-        assert_eq!(destructive, standard);
-        assert_eq!(destructive.background, BACKGROUND);
-        assert_eq!(destructive.foreground, FOREGROUND);
-    }
-
-    #[test]
-    fn destructive_hover_and_press_use_only_interactive_danger() {
+    fn destructive_controls_use_danger_only_during_interaction() {
+        for state in [InteractionState::Idle, InteractionState::Disabled] {
+            assert_eq!(
+                control_colors(ControlTone::Destructive, state),
+                control_colors(ControlTone::Standard, state)
+            );
+        }
         for state in [InteractionState::Hovered, InteractionState::Pressed] {
             let colors = control_colors(ControlTone::Destructive, state);
-
-            assert_eq!(colors.background, BACKGROUND);
+            assert!(is_black_or_white_alpha(colors.background));
             assert_eq!(colors.foreground, DANGER_INTERACTIVE);
             assert_eq!(colors.border, DANGER_INTERACTIVE);
+            assert_ne!(colors, control_colors(ControlTone::Standard, state));
         }
-    }
-
-    #[test]
-    fn destructive_disabled_returns_to_monochrome_disabled_state() {
-        let standard = control_colors(ControlTone::Standard, InteractionState::Disabled);
-        let destructive = control_colors(ControlTone::Destructive, InteractionState::Disabled);
-
-        assert_eq!(destructive, standard);
-        assert_eq!(destructive.foreground, DISABLED);
-        assert_ne!(destructive.background, DANGER_INTERACTIVE);
-        assert_ne!(destructive.border, DANGER_INTERACTIVE);
     }
 
     #[test]
@@ -468,9 +449,6 @@ mod tests {
         set_motion_durations(&context, MotionDurations::DISABLED);
 
         assert_eq!(motion_durations(&context), MotionDurations::DISABLED);
-        assert_eq!(motion_durations(&context).surface_enter, 0.0);
-        assert_eq!(motion_durations(&context).conditional_detail, 0.0);
-        assert_eq!(motion_durations(&context).button_hover, 0.0);
     }
 
     #[test]

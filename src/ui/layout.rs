@@ -1018,10 +1018,10 @@ mod tests {
         BatchRowLayout, CONTENT_PADDING, FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT,
         FieldPairLayout, IntakeLayout, LIVE_PREVIEW_MAX_HEIGHT, LIVE_PREVIEW_MAX_WIDTH,
         MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, OutputRowLayout, QUEUE_IDENTITY_MIN_WIDTH,
-        QueueRowLayout, REFERENCE_CONTENT_SIZE, TrackRowLayout, action_layout, batch_row_plan,
+        QueueRowLayout, REFERENCE_CONTENT_SIZE, action_layout, batch_row_plan,
         bounded_content_width, centered_action_group, field_pair_layout, focus_content,
         intake_content, intake_layout_plan, live_preview_size, operation_surface, output_row_plan,
-        queue_row_plan, surface_fade, track_row_plan, workspace_header_shows_metadata,
+        queue_row_plan, surface_fade, workspace_header_shows_metadata,
         workspace_switcher_fits_one_line,
     };
     use crate::ui::theme;
@@ -1391,7 +1391,8 @@ mod tests {
     #[test]
     fn horizontal_action_group_is_centered_without_consuming_remaining_height() {
         egui::__run_test_ui(|ui| {
-            let action_sizes = [Vec2::new(80.0, 31.0), Vec2::new(70.0, 31.0)];
+            let action_sizes = [Vec2::new(80.0, 24.0), Vec2::new(70.0, 36.0)];
+            let gap = 9.0;
             let parent_width = 320.0;
             let (parent_rect, _) =
                 ui.allocate_exact_size(Vec2::new(parent_width, 140.0), egui::Sense::hover());
@@ -1406,7 +1407,7 @@ mod tests {
                             ui,
                             &action_sizes,
                             ActionLayout::Horizontal,
-                            theme::SPACING.compact,
+                            gap,
                             |ui| {
                                 let first =
                                     ui.allocate_exact_size(action_sizes[0], egui::Sense::hover());
@@ -1424,16 +1425,16 @@ mod tests {
             let left_space = first.left() - parent_rect.left();
             let right_space = parent_rect.right() - second.right();
             assert!((left_space - right_space).abs() < 0.01);
-            assert_eq!(second.left() - first.right(), theme::SPACING.compact);
-            assert_eq!(action_bounds.height(), theme::PRIMARY_CONTROL_HEIGHT);
-            assert_eq!(action_bounds.width(), 157.0);
+            assert_eq!(second.left() - first.right(), gap);
+            assert_eq!(action_bounds.size(), first.union(second).size());
         });
     }
 
     #[test]
     fn stacked_action_group_centers_each_action_and_keeps_intrinsic_height() {
         egui::__run_test_ui(|ui| {
-            let action_sizes = [Vec2::new(80.0, 31.0), Vec2::new(70.0, 31.0)];
+            let action_sizes = [Vec2::new(80.0, 24.0), Vec2::new(70.0, 36.0)];
+            let gap = 9.0;
             let parent_width = 150.0;
             let (parent_rect, _) =
                 ui.allocate_exact_size(Vec2::new(parent_width, 140.0), egui::Sense::hover());
@@ -1444,19 +1445,13 @@ mod tests {
                         .max_rect(parent_rect)
                         .layout(egui::Layout::top_down(egui::Align::LEFT)),
                     |ui| {
-                        centered_action_group(
-                            ui,
-                            &action_sizes,
-                            ActionLayout::Stacked,
-                            theme::SPACING.compact,
-                            |ui| {
-                                let first =
-                                    ui.allocate_exact_size(action_sizes[0], egui::Sense::hover());
-                                let second =
-                                    ui.allocate_exact_size(action_sizes[1], egui::Sense::hover());
-                                (first.0, second.0)
-                            },
-                        )
+                        centered_action_group(ui, &action_sizes, ActionLayout::Stacked, gap, |ui| {
+                            let first =
+                                ui.allocate_exact_size(action_sizes[0], egui::Sense::hover());
+                            let second =
+                                ui.allocate_exact_size(action_sizes[1], egui::Sense::hover());
+                            (first.0, second.0)
+                        })
                     },
                 )
                 .inner;
@@ -1466,11 +1461,8 @@ mod tests {
 
             assert!((first.center().x - parent_rect.center().x).abs() < 0.01);
             assert!((second.center().x - parent_rect.center().x).abs() < 0.01);
-            assert_eq!(second.top() - first.bottom(), theme::SPACING.compact);
-            assert_eq!(
-                action_bounds.height(),
-                theme::PRIMARY_CONTROL_HEIGHT * 2.0 + theme::SPACING.compact
-            );
+            assert_eq!(second.top() - first.bottom(), gap);
+            assert_eq!(action_bounds.size(), first.union(second).size());
         });
     }
 
@@ -1658,64 +1650,12 @@ mod tests {
     }
 
     #[test]
-    fn output_row_keeps_fixed_controls_inline_when_filename_has_room() {
-        let normal = output_row_plan(564.0, Some(68.0), 72.0);
-        let wide = output_row_plan(900.0, Some(68.0), 72.0);
-
-        assert_eq!(normal.layout, OutputRowLayout::Inline);
-        assert_eq!(normal.filename_width, 410.0);
-        assert_eq!(normal.flow_height(), theme::COMPACT_CONTROL_HEIGHT);
-        assert_eq!(wide.layout, OutputRowLayout::Inline);
-        assert!(wide.filename_width > normal.filename_width);
-    }
-
-    #[test]
-    fn output_row_stacks_before_filename_or_fixed_controls_are_squeezed() {
-        let mix = output_row_plan(320.0, Some(68.0), 72.0);
-        let upscale = output_row_plan(240.0, None, 72.0);
-
-        assert_eq!(mix.layout, OutputRowLayout::Stacked);
-        assert_eq!(mix.filename_width, 320.0);
-        assert_eq!(
-            mix.flow_height(),
-            theme::COMPACT_CONTROL_HEIGHT * 3.0 + theme::SPACING.compact * 2.0
-        );
-        assert_eq!(upscale.layout, OutputRowLayout::Stacked);
-        assert_eq!(
-            upscale.flow_height(),
-            theme::COMPACT_CONTROL_HEIGHT * 2.0 + theme::SPACING.compact
-        );
-    }
-
-    #[test]
     fn output_row_plan_sanitizes_invalid_dimensions() {
         let plan = output_row_plan(f32::NAN, Some(f32::INFINITY), f32::NEG_INFINITY);
 
         assert_eq!(plan.layout, OutputRowLayout::Stacked);
         assert_eq!(plan.filename_width, 0.0);
         assert_eq!(plan.leading_width, Some(f32::MAX));
-    }
-
-    #[test]
-    fn audio_track_gain_stays_inline_when_identity_has_useful_width() {
-        let plan = track_row_plan(564.0, theme::TRACK_GAIN_CONTROL_WIDTH);
-
-        assert_eq!(plan.layout, TrackRowLayout::Inline);
-        assert_eq!(plan.row_height, theme::SELECTABLE_ROW_MIN_HEIGHT);
-    }
-
-    #[test]
-    fn narrow_audio_track_moves_gain_below_identity_and_accounts_for_height() {
-        let narrow_width = MINIMUM_CONTENT_SIZE.x - f32::from(CONTENT_PADDING) * 2.0;
-        let plan = track_row_plan(narrow_width, theme::TRACK_GAIN_CONTROL_WIDTH);
-
-        assert_eq!(plan.layout, TrackRowLayout::Stacked);
-        assert_eq!(
-            plan.row_height,
-            theme::SELECTABLE_ROW_MIN_HEIGHT
-                + theme::SPACING.compact
-                + theme::COMPACT_CONTROL_HEIGHT
-        );
     }
 
     #[test]

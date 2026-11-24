@@ -211,7 +211,7 @@ mod tests {
         error::MediaErrorKind,
         model::{AudioStream, MediaFile, VideoStream},
         output::MediaOutputError,
-        process::{MediaProcessCommand, MediaProcessFailure, MediaProcessState},
+        process::{MediaProcessFailure, MediaProcessState},
         tools::MediaTools,
     };
 
@@ -253,11 +253,13 @@ mod tests {
         let tools = fake_tools(&directory);
         let observed_args = Arc::new(Mutex::new(Vec::<OsString>::new()));
         let args_capture = Arc::clone(&observed_args);
+        let expected_program = tools.ffmpeg.clone();
         let control = FakeProcessControl::running();
         let mut executor = AudioMixExecutor::new();
 
         executor
             .start_with_launcher(&tools, &media, &request, move |command| {
+                assert_eq!(command.program(), expected_program);
                 *args_capture.lock().unwrap() = command.arguments().to_vec();
                 Ok(control)
             })
@@ -676,15 +678,5 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
-    }
-
-    #[test]
-    fn production_command_keeps_ffmpeg_program_separate_from_arguments() {
-        let directory = TestDirectory::new("structured-command");
-        let tools = fake_tools(&directory);
-        let command = MediaProcessCommand::new(&tools.ffmpeg).args(["-version"]);
-
-        assert_eq!(command.program(), tools.ffmpeg);
-        assert_eq!(command.arguments(), [OsString::from("-version")]);
     }
 }

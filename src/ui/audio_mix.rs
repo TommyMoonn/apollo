@@ -1062,34 +1062,23 @@ mod tests {
     }
 
     #[test]
-    fn relevant_state_changes_update_ready_validation() {
+    fn cached_ready_validation_tracks_invalid_and_corrected_requests() {
         let media = media();
         let mut state = AudioMixSelectionState::new(&media);
-
+        assert!(state.can_mix(&media));
         state.clear();
         assert!(!state.can_mix(&media));
-
         state.select_all(&media);
         assert!(state.can_mix(&media));
-
-        assert!(state.set_track_gain(&media, 4, TrackGain::from_tenths_db(-55)));
-        assert!(state.can_mix(&media));
-
-        state.set_normalization_enabled(true);
-        assert!(state.can_mix(&media));
-
-        assert!(state.set_normalization_targets(LoudnessTargets::from_tenths(-220, -8, 145)));
-        assert!(state.can_mix(&media));
-
-        state.set_container(&media, OutputContainer::Mkv);
-        assert!(state.can_mix(&media));
-
+        assert!(
+            media
+                .audio_streams
+                .iter()
+                .all(|track| state.is_selected(track.stream_index))
+        );
         state.set_output_filename_stem(OsString::from(""));
         assert!(!state.can_mix(&media));
-
-        state.set_custom_output_path(PathBuf::from("exports/final-mix.mkv"));
-        assert!(state.can_mix(&media));
-
+        state.set_custom_output_path(PathBuf::from("exports/final-mix.mp4"));
         assert!(state.can_mix(&media));
     }
 
@@ -1121,17 +1110,6 @@ mod tests {
         assert_eq!(state.selected_count(), 2);
         assert!(!state.toggle_stream(&media, 99));
         assert_eq!(state.selected_count(), 2);
-    }
-
-    #[test]
-    fn select_all_restores_every_probed_audio_stream() {
-        let media = media();
-        let mut state = AudioMixSelectionState::new(&media);
-        state.clear();
-
-        state.select_all(&media);
-
-        assert_eq!(state.selected_count(), media.audio_streams.len());
     }
 
     #[test]

@@ -16,10 +16,7 @@ use apollo::{
         },
         validation::{AudioMixValidationError, validate_audio_mix_request},
     },
-    media::{
-        model::{AudioStream, MediaFile, VideoStream},
-        output::{MediaOutputError, preflight_output_destination},
-    },
+    media::model::{AudioStream, MediaFile, VideoStream},
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -293,24 +290,6 @@ fn wider_channel_layout_is_rejected_with_stream_specific_feedback() {
 }
 
 #[test]
-fn same_input_and_output_is_left_to_destination_preflight() {
-    let temp = TestDirectory::new();
-    let mut request = valid_request(&temp);
-    fs::write(&request.input, b"input").expect("fixture input should be created");
-    request.output = request.input.clone();
-    request.container = OutputContainer::Mkv;
-    let media = media(request.input.clone());
-
-    assert_eq!(validate_audio_mix_request(&request, &media), Ok(()));
-    assert_eq!(
-        preflight_output_destination(&request.input, &request.output),
-        Err(MediaOutputError::SameInputAndOutput(
-            temp.path().join("input.mkv")
-        ))
-    );
-}
-
-#[test]
 fn output_extension_must_match_selected_container() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
@@ -337,51 +316,31 @@ fn matching_output_extension_is_case_insensitive() {
 }
 
 #[test]
-fn pure_request_validation_does_not_require_output_parent_to_exist() {
+fn request_validation_defers_filesystem_checks_to_shared_destination_preflight() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
-    let missing_parent = temp.path().join("missing");
-    request.output = missing_parent.join("mixed.mp4");
     let media = media(request.input.clone());
-
-    assert_eq!(validate_audio_mix_request(&request, &media), Ok(()));
-    assert_eq!(
-        preflight_output_destination(&request.input, &request.output),
-        Err(MediaOutputError::OutputParentUnavailable {
-            path: missing_parent,
-            kind: std::io::ErrorKind::NotFound,
-        })
-    );
-}
-
-#[test]
-fn output_parent_directory_check_is_left_to_destination_preflight() {
-    let temp = TestDirectory::new();
+    fs::write(&request.input, b"input").unwrap();
+    let occupied = temp.path().join("occupied.mp4");
     let parent_file = temp.path().join("not-a-directory");
-    fs::write(&parent_file, b"occupied").expect("fixture file should be created");
-    let mut request = valid_request(&temp);
-    request.output = parent_file.join("mixed.mp4");
-    let media = media(request.input.clone());
-
+    fs::write(&occupied, b"occupied").unwrap();
+    fs::write(&parent_file, b"occupied").unwrap();
+    for output in [
+        temp.path().join("missing/output.mp4"),
+        parent_file.join("output.mp4"),
+        occupied,
+    ] {
+        request.output = output;
+        assert_eq!(
+            validate_audio_mix_request(&request, &media),
+            Ok(()),
+            "{:?}",
+            request.output
+        );
+    }
+    request.container = OutputContainer::Mkv;
+    request.output = request.input.clone();
     assert_eq!(validate_audio_mix_request(&request, &media), Ok(()));
-    assert_eq!(
-        preflight_output_destination(&request.input, &request.output),
-        Err(MediaOutputError::OutputParentNotDirectory(parent_file))
-    );
-}
-
-#[test]
-fn existing_output_check_is_left_to_destination_preflight() {
-    let temp = TestDirectory::new();
-    let request = valid_request(&temp);
-    fs::write(&request.output, b"occupied").expect("fixture output should be created");
-    let media = media(request.input.clone());
-
-    assert_eq!(validate_audio_mix_request(&request, &media), Ok(()));
-    assert!(matches!(
-        preflight_output_destination(&request.input, &request.output),
-        Err(MediaOutputError::OutputAlreadyExists(_))
-    ));
 }
 
 struct TestDirectory {

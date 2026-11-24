@@ -17,10 +17,10 @@ use apollo::media::tools::{
 };
 
 #[test]
+#[ignore = "subprocess entry point; requires an explicit discovery mode and isolated environment"]
 fn discovery_subprocess() {
-    let Ok(mode) = env::var("APOLLO_DISCOVERY_TEST_MODE") else {
-        return;
-    };
+    let mode = env::var("APOLLO_DISCOVERY_TEST_MODE")
+        .expect("discovery harness requires APOLLO_DISCOVERY_TEST_MODE");
     let directory = env::current_exe().unwrap().parent().unwrap().to_path_buf();
     let result = discover_base_media_tools();
     match mode.as_str() {
@@ -76,6 +76,7 @@ fn discovery_subprocess() {
         }
         _ => panic!("unknown subprocess mode: {mode}"),
     }
+    println!("PASS discovery: {mode}");
 }
 
 #[cfg(windows)]
@@ -143,7 +144,12 @@ fn real_pair_uses_application_directory_and_explicit_path_fallback() {
         let stdout = scenario.join("stdout.log");
         let stderr = scenario.join("stderr.log");
         let mut child = Command::new(&executable)
-            .args(["--exact", "discovery_subprocess", "--nocapture"])
+            .args([
+                "--ignored",
+                "--exact",
+                "discovery_subprocess",
+                "--nocapture",
+            ])
             .env("APOLLO_DISCOVERY_TEST_MODE", mode)
             .env_remove("APOLLO_RELEASE_ACCEPTANCE")
             .env_remove("APOLLO_RELEASE_OUTPUT_DIRECTORY")
@@ -168,6 +174,10 @@ fn real_pair_uses_application_directory_and_explicit_path_fallback() {
         let stdout = fs::read_to_string(stdout).unwrap();
         let stderr = fs::read_to_string(stderr).unwrap();
         assert!(status.success(), "{mode}: {stdout}\n{stderr}");
+        assert!(
+            stdout.contains(&format!("PASS discovery: {mode}")),
+            "discovery scenario did not execute: {stdout}\n{stderr}"
+        );
         print!("{stdout}");
     }
 }

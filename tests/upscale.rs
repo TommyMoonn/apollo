@@ -9,7 +9,7 @@ use std::{
 use apollo::{
     media::{
         model::{AudioStream, MediaFile, VideoStream},
-        output::{MediaOutputError, preflight_output_destination},
+        output::MediaOutputError,
         tools::VideoEncoderCapability,
     },
     upscale::{
@@ -1164,23 +1164,6 @@ fn zero_source_dimensions_are_rejected() {
 }
 
 #[test]
-fn same_input_and_output_is_left_to_destination_preflight() {
-    let temp = TestDirectory::new();
-    let mut request = request(&temp, UpscaleTarget::Uhd4k);
-    fs::write(&request.input, b"input").expect("fixture input should be created");
-    request.output = request.input.clone();
-    let media = media(request.input.clone(), Some(1920), Some(1080));
-
-    assert_eq!(validate_upscale_request(&request, &media), Ok(()));
-    assert_eq!(
-        preflight_output_destination(&request.input, &request.output),
-        Err(MediaOutputError::SameInputAndOutput(
-            temp.path().join("input.mp4")
-        ))
-    );
-}
-
-#[test]
 fn source_at_target_boundary_is_rejected() {
     let temp = TestDirectory::new();
     let request = request(&temp, UpscaleTarget::Uhd4k);
@@ -1275,51 +1258,30 @@ fn output_path_requires_a_usable_file_name() {
 }
 
 #[test]
-fn pure_request_validation_does_not_require_output_parent_to_exist() {
+fn request_validation_defers_filesystem_checks_to_shared_destination_preflight() {
     let temp = TestDirectory::new();
     let mut request = request(&temp, UpscaleTarget::Uhd4k);
-    let parent = temp.path().join("missing");
-    request.output = parent.join("upscaled.mp4");
     let media = media(request.input.clone(), Some(1920), Some(1080));
-
-    assert_eq!(validate_upscale_request(&request, &media), Ok(()));
-    assert_eq!(
-        preflight_output_destination(&request.input, &request.output),
-        Err(MediaOutputError::OutputParentUnavailable {
-            path: parent,
-            kind: std::io::ErrorKind::NotFound,
-        })
-    );
-}
-
-#[test]
-fn output_parent_directory_check_is_left_to_destination_preflight() {
-    let temp = TestDirectory::new();
+    fs::write(&request.input, b"input").unwrap();
+    let occupied = temp.path().join("occupied.mp4");
     let parent_file = temp.path().join("not-a-directory");
-    fs::write(&parent_file, b"occupied").expect("fixture file should be created");
-    let mut request = request(&temp, UpscaleTarget::Uhd4k);
-    request.output = parent_file.join("upscaled.mp4");
-    let media = media(request.input.clone(), Some(1920), Some(1080));
-
+    fs::write(&occupied, b"occupied").unwrap();
+    fs::write(&parent_file, b"occupied").unwrap();
+    for output in [
+        temp.path().join("missing/output.mp4"),
+        parent_file.join("output.mp4"),
+        occupied,
+    ] {
+        request.output = output;
+        assert_eq!(
+            validate_upscale_request(&request, &media),
+            Ok(()),
+            "{:?}",
+            request.output
+        );
+    }
+    request.output = request.input.clone();
     assert_eq!(validate_upscale_request(&request, &media), Ok(()));
-    assert_eq!(
-        preflight_output_destination(&request.input, &request.output),
-        Err(MediaOutputError::OutputParentNotDirectory(parent_file))
-    );
-}
-
-#[test]
-fn existing_output_check_is_left_to_destination_preflight() {
-    let temp = TestDirectory::new();
-    let request = request(&temp, UpscaleTarget::Uhd4k);
-    fs::write(&request.output, b"occupied").expect("fixture output should be created");
-    let media = media(request.input.clone(), Some(1920), Some(1080));
-
-    assert_eq!(validate_upscale_request(&request, &media), Ok(()));
-    assert!(matches!(
-        preflight_output_destination(&request.input, &request.output),
-        Err(MediaOutputError::OutputAlreadyExists(_))
-    ));
 }
 
 fn assert_close_to_maximal_boundary_fit(

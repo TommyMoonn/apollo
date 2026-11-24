@@ -63,6 +63,8 @@ cargo test --locked --test upscale real_nvenc_upscale -- --ignored --nocapture
 
 These require FFmpeg/FFprobe, FFV1 fixture generation, and the corresponding working encoders. They check controlled 8-bit H.264/H.265 and 10-bit H.265 PQ/HLG output dimensions, bit depth, and color signaling. They do not replace native-window review or quality comparisons.
 
+The discovery subprocess is an ignored harness entry point, not a standalone passing test. The Windows discovery and release acceptance callers select it explicitly and verify that the scenario completes.
+
 For the real Windows tool-discovery test, stage the pinned pair as described in [Development](DEVELOPMENT.md#pinned-media-tools-for-development):
 
 ```powershell
