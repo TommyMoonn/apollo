@@ -165,4 +165,22 @@ Invoke-TestCase "rejects duplicate alias definitions" {
     } '*configured more than once*'
 }
 
+Invoke-TestCase 'preserves spaces and Unicode in separate and attached option values' {
+    $path = 'C:\Apollo Sample\媒體.zip'
+    $cli = ConvertFrom-CliArguments -Arguments @('--project', $path, "--output=$path") -OptionSpecs $optionSpecs
+    Assert-Equal $path $cli['project'] 'Separate path value should be preserved.'
+    Assert-Equal $path $cli['output'] 'Attached path value should be preserved.'
+}
+
+Invoke-TestCase 'rejects blank CLI values and invalid switch values' {
+    Assert-Throws { ConvertFrom-CliArguments -Arguments @('--project', ' ') -OptionSpecs $optionSpecs } '*requires a value*'
+    Assert-Throws { ConvertFrom-CliArguments -Arguments @('--output= ') -OptionSpecs $optionSpecs } '*requires a value*'
+    Assert-Throws { ConvertFrom-CliArguments -Arguments @('--dry-run=maybe') -OptionSpecs $optionSpecs } '*expects a boolean value*'
+}
+
+Invoke-TestCase 'accepts an attached value starting with a dash' {
+    $cli = ConvertFrom-CliArguments -Arguments @('--output=-file.zip') -OptionSpecs $optionSpecs
+    Assert-Equal '-file.zip' $cli['output'] 'Attached dash-prefixed values should be preserved.'
+}
+
 Complete-TestRun

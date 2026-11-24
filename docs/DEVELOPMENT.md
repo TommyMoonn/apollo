@@ -311,7 +311,7 @@ The script derives the repository slug and creates a timestamped archive beside 
 apollo(yyMMddHHmm).zip
 ```
 
-`.zipignore` controls exclusions. `.planning/` and `.project/` remain eligible for full-project snapshots even though Git ignores them.
+`.zipignore` controls exclusions (see [pattern rules](../scripts/README.md#full-project-snapshot)). `.plans/` and `.project/` remain eligible for full-project snapshots even though Git ignores them.
 
 ### Generated-output cleanup
 
@@ -337,11 +337,13 @@ The cleanup command refuses paths outside the repository, never touches `.git`, 
 The repository reserves these local roots:
 
 ```text
-.planning/   local implementation plans
+.plans/      local implementation plans
+.planning/   legacy local plans (retained if present)
 .project/    local project records and reviews
 .scratch/    disposable working data
+.agent-work/ owner-managed offline tooling and local files
 ```
 
 They are intentionally ignored by Git and must never become build prerequisites. A clean clone must build and test without them.
 
-Tracked development tooling belongs under `.dev/`. Generated ChatGPT dependency bundles belong under `.dev/chatgpt/bundles/` and are ignored.
+Tracked development tooling belongs under `scripts/`. Offline bundle preparation is owner-managed; `.agent-work/`, generated archives and the former `.dev/chatgpt/bundles/` location are excluded from snapshots.

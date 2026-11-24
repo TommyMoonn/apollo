@@ -72,14 +72,6 @@ test-all:
     cargo test --all-targets
     pwsh -NoProfile -File tests/scripts/run.ps1
 
-vendor:
-    pwsh -NoProfile -File .dev/chatgpt/scripts/rust/prepare-chatgpt-cargo-vendor.ps1
-
-toolchain:
-    pwsh -NoProfile -File .dev/chatgpt/scripts/rust/prepare-chatgpt-rust-toolchain.ps1
-
-bundles: vendor toolchain
-
 set-version version:
     pwsh -NoProfile -File .\scripts\set-version.ps1 {{version}}
 

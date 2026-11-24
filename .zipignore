@@ -1,10 +1,23 @@
-artifacts
+# Git metadata, generated output and local working data
 .git
-target
-.agent-work
-.scratch
+/target/
+/artifacts/
+/.scratch/
+/.agent-work/
+/.dev/chatgpt/bundles/
+
+# Sensitive local configuration
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Temporary files and archives
 .DS_Store
 Thumbs.db
+Desktop.ini
 *.log
 *.tmp
 *.zip

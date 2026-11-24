@@ -17,7 +17,7 @@ Usage: .\scripts\review-changes.ps1 [options]
 
 Options:
   -p, --project <path>          Project root to review.
-  --files                       List every changed path.
+  --files                       List each changed path and index/worktree state.
   -h, --help                    Show this help.
 
 Legacy PowerShell flags remain accepted for compatibility.
@@ -63,10 +63,10 @@ $untrackedPaths = @(Get-GitUntrackedPaths -ProjectRoot $projectRoot)
 $stagedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $unstagedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 
-foreach ($path in (Get-GitNulValues -ProjectRoot $projectRoot -Arguments @('diff', '--cached', '--name-only', '-z', '--'))) {
+foreach ($path in (Get-GitNulValues -ProjectRoot $projectRoot -Arguments @('diff', '--cached', '--name-only', '--no-renames', '-z', '--'))) {
     [void]$stagedPaths.Add($path)
 }
-foreach ($path in (Get-GitNulValues -ProjectRoot $projectRoot -Arguments @('diff', '--name-only', '-z', '--'))) {
+foreach ($path in (Get-GitNulValues -ProjectRoot $projectRoot -Arguments @('diff', '--name-only', '--no-renames', '-z', '--'))) {
     [void]$unstagedPaths.Add($path)
 }
 
@@ -78,28 +78,44 @@ foreach ($path in $untrackedPaths) {
     $allChanges.Add([pscustomobject]@{ Status = '?'; Path = $path; OldPath = $null })
 }
 
+# HEAD-to-worktree is the exportable delta, but the index may contain a
+# change that the worktree reverses. Report those paths without inventing a
+# package operation for them (or incorrectly calling the tree clean).
+$representedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+foreach ($change in $allChanges) {
+    [void]$representedPaths.Add($change.Path)
+    if ($change.OldPath) { [void]$representedPaths.Add($change.OldPath) }
+}
+foreach ($path in (@($stagedPaths) + @($unstagedPaths) | Sort-Object -CaseSensitive -Unique)) {
+    if ($representedPaths.Add($path)) {
+        $allChanges.Add([pscustomobject]@{ Status = '~'; Path = $path; OldPath = $null })
+    }
+}
+
 if ($allChanges.Count -eq 0) {
     Write-Host 'Working tree is clean.'
     return
 }
 
 $statusLabels = @{
-    A = 'Added'; C = 'Copied'; D = 'Deleted'; M = 'Modified'; R = 'Renamed'; T = 'Type changed'; U = 'Unmerged'; '?' = 'Untracked'
+    A = 'Added'; C = 'Copied'; D = 'Deleted'; M = 'Modified'; R = 'Renamed'; T = 'Type changed'; U = 'Unmerged'; '?' = 'Untracked'; '~' = 'Index/worktree only'
 }
 
 Write-Host 'Change review'
 Write-Host "Project: $projectRoot"
+$branch = Invoke-RepositoryGit -ProjectRoot $projectRoot -Arguments @('symbolic-ref', '--quiet', '--short', 'HEAD') -AllowFailure
+if ($branch.ExitCode -eq 0) { Write-Host "Branch: $($branch.StdOut.Trim())" }
 Write-Host ''
 Write-Host 'Summary'
-foreach ($status in @('A', 'M', 'D', 'R', 'C', 'T', 'U', '?')) {
+foreach ($status in @('A', 'M', 'D', 'R', 'C', 'T', 'U', '?', '~')) {
     $count = @($allChanges | Where-Object Status -eq $status).Count
     if ($count -gt 0) {
-        Write-Host ('  {0,-13} {1}' -f $statusLabels[$status], $count)
+        Write-Host ('  {0,-20} {1}' -f $statusLabels[$status], $count)
     }
 }
-Write-Host ('  {0,-13} {1}' -f 'Staged', $stagedPaths.Count)
-Write-Host ('  {0,-13} {1}' -f 'Unstaged', $unstagedPaths.Count)
-Write-Host ('  {0,-13} {1}' -f 'Total', $allChanges.Count)
+Write-Host ('  {0,-20} {1}' -f 'Staged paths', $stagedPaths.Count)
+Write-Host ('  {0,-20} {1}' -f 'Unstaged paths', $unstagedPaths.Count)
+Write-Host ('  {0,-20} {1}' -f 'Total', $allChanges.Count)
 
 Write-Host ''
 Write-Host 'Areas'
@@ -107,13 +123,26 @@ foreach ($group in ($allChanges | Group-Object { Get-ChangeCategory -Path $_.Pat
     Write-Host ('  {0,-16} {1}' -f $group.Name, $group.Count)
 }
 
-$generatedPaths = @($allChanges | Where-Object {
-    $_.Path.Replace('\', '/') -match '(^|/)(target|\.dev/chatgpt/bundles)(/|$)' -or $_.Path -match '\.(zip|tmp|log)$'
-})
-if ($generatedPaths.Count -gt 0) {
+$flaggedPaths = @(
+    foreach ($change in $allChanges) {
+        foreach ($path in @($change.Path, $change.OldPath)) {
+            if (-not $path) { continue }
+            if ($path -match '^(target|artifacts|\.scratch|\.agent-work|\.dev/chatgpt/bundles|\.plans|\.planning|\.project)(/|$)' -or
+                $path -match '\.(zip|tmp|log|pem|key|pfx|p12)$' -or
+                $path -match '(^|/)(\.env(?:\..*)?|\.DS_Store|Thumbs\.db|Desktop\.ini)$') {
+                $path
+            }
+        }
+    }
+)
+if ($flaggedPaths.Count -gt 0) {
     Write-Host ''
     Write-Host 'Flags'
-    Write-Host "  Generated or disposable output appears in the change set: $($generatedPaths.Path -join ', ')"
+    Write-Host "  Generated, local or sensitive paths appear in the change set (review before packaging): $($flaggedPaths -join ', ')"
+}
+
+if (@($allChanges | Where-Object Status -eq '~').Count -gt 0) {
+    Write-Host '  ~ indicates index/worktree changes with no separate HEAD-to-worktree export operation.'
 }
 
 if ($detailed) {

@@ -3,6 +3,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Preserve Unicode filenames in redirected CLI output.
+if ([Console]::IsOutputRedirected) {
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+}
+
 function ConvertTo-CliBoolean {
     param(
         [Parameter(Mandatory)]
@@ -172,6 +177,12 @@ function ConvertFrom-CliArguments {
         }
     }
 
+    foreach ($positional in $Positionals) {
+        if (-not $OptionSpecs.ContainsKey($positional)) {
+            throw "Positional argument '$positional' has no matching CLI option specification."
+        }
+    }
+
     $positionIndex = 0
     $parseOptions = $true
 
@@ -236,7 +247,7 @@ function ConvertFrom-CliArguments {
             }
 
             if ($hasAttachedValue) {
-                if ([string]::IsNullOrEmpty([string]$attachedValue)) {
+                if ([string]::IsNullOrWhiteSpace([string]$attachedValue)) {
                     throw "Option '$optionToken' requires a value."
                 }
                 $result[$name] = $attachedValue
@@ -248,7 +259,7 @@ function ConvertFrom-CliArguments {
             }
 
             $nextToken = [string]$Arguments[$index + 1]
-            if ($nextToken -eq '--' -or @('--help', '-h', '-Help', '-?') -contains $nextToken) {
+            if ([string]::IsNullOrWhiteSpace($nextToken) -or $nextToken -eq '--' -or @('--help', '-h', '-Help', '-?') -contains $nextToken) {
                 throw "Option '$optionToken' requires a value."
             }
 
@@ -268,13 +279,13 @@ function ConvertFrom-CliArguments {
         $name = $Positionals[$positionIndex]
         $positionIndex++
 
-        if (-not $OptionSpecs.ContainsKey($name)) {
-            throw "Positional argument '$name' has no matching CLI option specification."
-        }
         if (-not $seen.Add($name)) {
             throw "Argument '$name' was provided both positionally and by option."
         }
 
+        if ([string]::IsNullOrWhiteSpace($token)) {
+            throw "Argument '$name' requires a value."
+        }
         $result[$name] = $argumentObject
     }
 
@@ -288,4 +299,39 @@ function Write-CliHelp {
     )
 
     Write-Host $Text.Trim()
+}
+
+# Progress is presentation only; redirected and CI output stays readable.
+function Test-CliProgressEnabled {
+    if ($null -ne $env:NO_COLOR -or -not [string]::IsNullOrWhiteSpace($env:CI)) { return $false }
+    try { return (-not [Console]::IsOutputRedirected -and $null -ne $Host.UI.RawUI) }
+    catch { return $false }
+}
+
+function Write-CliProgress {
+    param(
+        [Parameter(Mandatory)][string]$Activity,
+        [Parameter(Mandatory)][string]$Status,
+        [ValidateRange(0, 2147483647)][int]$Current,
+        [ValidateRange(1, 2147483647)][int]$Total,
+        [ValidateRange(0, 2147483647)][int]$Id = 1
+    )
+
+    if (-not (Test-CliProgressEnabled)) { return }
+    $percent = -1
+    if ($PSBoundParameters.ContainsKey('Total')) {
+        $percent = [int][Math]::Min(100, [Math]::Floor(100 * $Current / [double]$Total))
+    }
+    try { Write-Progress -Id $Id -Activity $Activity -Status $Status -PercentComplete $percent }
+    catch { # An unsupported host must not interrupt filesystem operations.
+    }
+}
+
+function Complete-CliProgress {
+    param([int]$Id = 1, [string]$Activity = 'Working')
+
+    if (-not (Test-CliProgressEnabled)) { return }
+    try { Write-Progress -Id $Id -Activity $Activity -Completed }
+    catch { # Completion is safe in finally paths.
+    }
 }

@@ -27,7 +27,11 @@ For the end-to-end release operator workflow, see [`docs/RELEASES.md`](../docs/R
 .\scripts\zip-project.ps1
 ```
 
-Creates `<project-slug>(yyMMddHHmm).zip` beside the repository. The command is intentionally zero-config and respects `.zipignore`.
+Creates `<project-slug>(yyMMddHHmm).zip` beside the repository. The command is intentionally zero-config and requires `.zipignore`. It prunes excluded directories before enumeration, reports scanning and compression progress, and replaces an existing same-minute archive only after successful compression. Symbolic links and reparse points that are not excluded cause an error rather than silently exporting external content.
+
+Patterns use `/` or `\` as separators. Blank lines and lines starting with `#` are ignored. A leading `/` or an internal separator anchors the pattern to the project root; a bare name matches at any depth. A trailing `/` matches directories only. `*` matches characters within a path segment, `?` matches one character, and `**` spans segments (including zero directories in `**/`). Negation is not supported; other characters are literal. Matching is case-insensitive on Windows. Excluded directories are not traversed.
+
+`.plans/`, legacy `.planning/`, `.project/` and skills remain eligible for snapshots. Generated output, local agent tooling, common secret files and temporary archives are excluded. Review local context before sharing; these rules cannot identify every possible secret.
 
 ### Review the working tree
 
@@ -36,7 +40,7 @@ Creates `<project-slug>(yyMMddHHmm).zip` beside the repository. The command is i
 .\scripts\review-changes.ps1 --files
 ```
 
-Summarizes tracked and non-ignored untracked changes against `HEAD`, including staged/unstaged state, renames, deletions, and Rust-repository categories.
+Summarizes tracked and non-ignored untracked changes against `HEAD`, including staged/unstaged state, renames, deletions, and Rust-repository categories. Index changes reversed in the worktree are marked `~` because there is no separate net export operation. Ignored untracked files are omitted; tracked local or generated paths are flagged for inspection before packaging.
 
 ### Package changed files
 

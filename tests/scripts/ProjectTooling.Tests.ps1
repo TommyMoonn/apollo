@@ -35,44 +35,94 @@ Invoke-TestCase 'repository path guard rejects traversal and .git' {
     finally { Remove-Item -LiteralPath $repo -Recurse -Force }
 }
 
-Invoke-TestCase 'zip-project derives slug, respects zipignore, and retains local context' {
+function Copy-SnapshotFixtureScripts {
+    param([string]$Repository)
+    New-Item -ItemType Directory -Path (Join-Path $Repository 'scripts') -Force | Out-Null
+    foreach ($name in @('zip-project.ps1', 'Cli.Common.ps1', 'Repository.Common.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $projectRoot "scripts/$name") -Destination (Join-Path $Repository "scripts/$name")
+    }
+}
+
+function New-SnapshotFixtureFile {
+    param([string]$Repository, [string]$RelativePath)
+    $path = Join-Path $Repository $RelativePath
+    New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
+    Set-Content -LiteralPath $path -Value 'fixture' -Encoding utf8
+}
+
+Invoke-TestCase 'zip-project uses real exclusions and preserves required source and local context' {
     $parent = New-TestDirectory -Name 'apollo-zip-parent'
     $repo = Join-Path $parent 'Apollo Sample'
-    New-Item -ItemType Directory -Path (Join-Path $repo 'scripts') -Force | Out-Null
     try {
-        Copy-Item -LiteralPath $zipProjectScript -Destination (Join-Path $repo 'scripts/zip-project.ps1')
-        Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts/Cli.Common.ps1') -Destination (Join-Path $repo 'scripts/Cli.Common.ps1')
-        Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts/Repository.Common.ps1') -Destination (Join-Path $repo 'scripts/Repository.Common.ps1')
-        @('.git', 'target', '.dev/chatgpt/bundles', '.scratch', '*.zip') | Set-Content -LiteralPath (Join-Path $repo '.zipignore') -Encoding utf8
-        New-Item -ItemType Directory -Path (Join-Path $repo '.git') -Force | Out-Null
-        New-Item -ItemType Directory -Path (Join-Path $repo 'target') -Force | Out-Null
-        New-Item -ItemType Directory -Path (Join-Path $repo '.dev/chatgpt/bundles') -Force | Out-Null
-        New-Item -ItemType Directory -Path (Join-Path $repo '.planning') -Force | Out-Null
-        New-Item -ItemType Directory -Path (Join-Path $repo '.project') -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $repo 'README.md') -Value 'ordinary' -Encoding utf8
-        Set-Content -LiteralPath (Join-Path $repo '.git/config') -Value 'ignored' -Encoding utf8
-        Set-Content -LiteralPath (Join-Path $repo 'target/build.txt') -Value 'ignored' -Encoding utf8
-        Set-Content -LiteralPath (Join-Path $repo '.dev/chatgpt/bundles/bundle.txt') -Value 'ignored' -Encoding utf8
-        Set-Content -LiteralPath (Join-Path $repo '.planning/plan.md') -Value 'included' -Encoding utf8
-        Set-Content -LiteralPath (Join-Path $repo '.project/review.md') -Value 'included' -Encoding utf8
+        Copy-SnapshotFixtureScripts -Repository $repo
+        Copy-Item -LiteralPath (Join-Path $projectRoot '.zipignore') -Destination $repo
+        $included = @('README.md', 'Cargo.toml', 'Cargo.lock', 'src/main.rs', 'assets/icon.png', 'tests/sample.rs',
+            '.plans/plan.md', '.planning/legacy.md', '.project/review.md', '.agents/skills/example/SKILL.md', 'docs/space name.md')
+        $excluded = @('.git/config', 'target/build.txt', 'artifacts/result.txt', '.dev/chatgpt/bundles/bundle.txt',
+            '.scratch/cache.txt', '.agent-work/prepare.ps1', 'nested/.env.local', '.env', 'private.pem',
+            'nested/run.log', 'apollo-cargo-vendor-offline-bundle.part-000.zip', 'temporary.tmp', 'Desktop.ini')
+        foreach ($path in ($included + $excluded)) { New-SnapshotFixtureFile -Repository $repo -RelativePath $path }
 
-        $scriptCopy = Join-Path $repo 'scripts/zip-project.ps1'
-        $beforeTemps = @(Get-ChildItem ([System.IO.Path]::GetTempPath()) -Filter 'apollo-sample-zip-filelist-*' -ErrorAction SilentlyContinue |
-            ForEach-Object { $_.FullName })
-        Invoke-ScriptCapture -ScriptPath $scriptCopy | Out-Null
-        $afterTemps = @(Get-ChildItem ([System.IO.Path]::GetTempPath()) -Filter 'apollo-sample-zip-filelist-*' -ErrorAction SilentlyContinue |
-            ForEach-Object { $_.FullName })
-        Assert-Equal $beforeTemps $afterTemps 'Temporary file list should be cleaned up.'
-
+        Invoke-ScriptCapture -ScriptPath (Join-Path $repo 'scripts/zip-project.ps1') | Out-Null
         $archives = @(Get-ChildItem -LiteralPath $parent -File -Filter 'apollo-sample(*).zip')
         Assert-Equal 1 $archives.Count 'Expected one project snapshot.'
         Assert-True ($archives[0].Name -match '^apollo-sample\(\d{10}\)\.zip$') 'Snapshot filename should use slug and yyMMddHHmm timestamp.'
         $entries = @(Get-ZipEntryNames -Path $archives[0].FullName)
-        Assert-True ($entries -contains 'README.md') 'Ordinary project file should be included.'
-        Assert-True ($entries -contains '.planning/plan.md') '.planning should be included by default.'
-        Assert-True ($entries -contains '.project/review.md') '.project should be included by default.'
-        $excludedCount = @($entries | Where-Object { $_ -match '^(\.git|target|\.dev/chatgpt/bundles)/' }).Count
-        Assert-Equal 0 $excludedCount 'Excluded generated paths should not be archived.'
+        foreach ($path in ($included + @('scripts/zip-project.ps1', '.zipignore'))) {
+            Assert-True ($entries -ccontains $path) "Required project-relative entry missing: $path"
+        }
+        foreach ($path in $excluded) { Assert-False ($entries -ccontains $path) "Excluded entry leaked: $path" }
+    }
+    finally { Remove-Item -LiteralPath $parent -Recurse -Force }
+}
+
+Invoke-TestCase 'zip-project respects anchored, basename, directory and wildcard patterns' {
+    $parent = New-TestDirectory -Name 'apollo-zip-patterns'
+    $repo = Join-Path $parent 'Apollo Patterns'
+    try {
+        Copy-SnapshotFixtureScripts -Repository $repo
+        @('# comment', '', '/root-only', 'cache/', 'build/**/report?.txt', '*.log') | Set-Content -LiteralPath (Join-Path $repo '.zipignore') -Encoding utf8
+        $included = @('nested/root-only', 'cache', 'build/report12.txt', 'build/a/other.txt')
+        $excluded = @('root-only', 'nested/cache/file.txt', 'build/report1.txt', 'build/a/b/report2.txt', 'nested/run.log')
+        foreach ($path in ($included + $excluded)) { New-SnapshotFixtureFile -Repository $repo -RelativePath $path }
+        Invoke-ScriptCapture -ScriptPath (Join-Path $repo 'scripts/zip-project.ps1') | Out-Null
+        $archive = Get-ChildItem -LiteralPath $parent -File -Filter '*.zip' | Select-Object -First 1
+        $entries = @(Get-ZipEntryNames -Path $archive.FullName)
+        foreach ($path in $included) { Assert-True ($entries -ccontains $path) "Expected entry missing: $path" }
+        foreach ($path in $excluded) { Assert-False ($entries -ccontains $path) "Excluded entry leaked: $path" }
+    }
+    finally { Remove-Item -LiteralPath $parent -Recurse -Force }
+}
+
+Invoke-TestCase 'zip-project rejects invalid options and ignore negation without producing an archive' {
+    $parent = New-TestDirectory -Name 'apollo-zip-invalid'
+    $repo = Join-Path $parent 'Apollo Invalid'
+    try {
+        Copy-SnapshotFixtureScripts -Repository $repo
+        $scriptCopy = Join-Path $repo 'scripts/zip-project.ps1'
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $scriptCopy -Arguments @('--unknown') } 'Unknown option*'
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $scriptCopy -Arguments @('--help', '-h') } '*provided more than once*'
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $scriptCopy } '*.zipignore*'
+        '!secret.txt' | Set-Content -LiteralPath (Join-Path $repo '.zipignore')
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $scriptCopy } '*negation is not supported*'
+        Assert-Equal 0 @(Get-ChildItem -LiteralPath $parent -File).Count 'Invalid requests must not leave output.'
+    }
+    finally { Remove-Item -LiteralPath $parent -Recurse -Force }
+}
+
+Invoke-TestCase 'zip-project removes partial output when compression cannot read a file' {
+    $parent = New-TestDirectory -Name 'apollo-zip-failure'
+    $repo = Join-Path $parent 'Apollo Failure'
+    try {
+        Copy-SnapshotFixtureScripts -Repository $repo
+        '# no exclusions needed' | Set-Content -LiteralPath (Join-Path $repo '.zipignore')
+        New-SnapshotFixtureFile -Repository $repo -RelativePath 'locked.txt'
+        $locked = [System.IO.File]::Open((Join-Path $repo 'locked.txt'), [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try {
+            Assert-Throws { Invoke-ScriptCapture -ScriptPath (Join-Path $repo 'scripts/zip-project.ps1') } '*locked.txt*'
+        }
+        finally { $locked.Dispose() }
+        Assert-Equal 0 @(Get-ChildItem -LiteralPath $parent -File -Force).Count 'Failure must leave neither final nor temporary archives.'
     }
     finally { Remove-Item -LiteralPath $parent -Recurse -Force }
 }
@@ -107,8 +157,9 @@ Invoke-TestCase 'review-changes reports clean and rejects non-Git directories' {
 }
 
 Invoke-TestCase 'review-changes detects staged, unstaged, untracked, deleted, and renamed paths' {
-    $repo = New-TestGitRepository
+    $repo = New-TestGitRepository -Name 'apollo review space'
     try {
+        Copy-Item -LiteralPath (Join-Path $projectRoot '.gitignore') -Destination $repo
         Set-Content -LiteralPath (Join-Path $repo 'staged.txt') -Value 'staged-base' -Encoding utf8
         Set-Content -LiteralPath (Join-Path $repo 'unstaged.txt') -Value 'unstaged-base' -Encoding utf8
         Set-Content -LiteralPath (Join-Path $repo 'deleted.txt') -Value 'delete-base' -Encoding utf8
@@ -123,13 +174,40 @@ Invoke-TestCase 'review-changes detects staged, unstaged, untracked, deleted, an
         Set-Content -LiteralPath (Join-Path $repo 'untracked.txt') -Value 'untracked' -Encoding utf8
         New-Item -ItemType Directory -Path (Join-Path $repo 'target') -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $repo 'target/ignored.txt') -Value 'ignored' -Encoding utf8
-        Set-Content -LiteralPath (Join-Path $repo '.gitignore') -Value '/target/' -Encoding utf8
+        New-SnapshotFixtureFile -Repository $repo -RelativePath '.plans/private.md'
+        New-SnapshotFixtureFile -Repository $repo -RelativePath '.planning/legacy.md'
+        New-SnapshotFixtureFile -Repository $repo -RelativePath '.agent-work/private.ps1'
+        New-SnapshotFixtureFile -Repository $repo -RelativePath 'artifacts/forced.txt'
+        & git -C $repo add -f artifacts/forced.txt
 
         $output = Invoke-ScriptCapture -ScriptPath $reviewScript -Arguments @('--project', $repo, '--files')
         foreach ($expected in @('staged.txt', 'unstaged.txt', 'untracked.txt', 'deleted.txt', 'rename-old.txt', 'rename-new.txt', 'Staged', 'Unstaged')) {
             Assert-Contains $output $expected 'Review output is missing expected state.'
         }
-        Assert-False ($output.Contains('target/ignored.txt', [System.StringComparison]::OrdinalIgnoreCase)) 'Ignored target content should not surface.'
+        foreach ($line in @('M staged.txt [staged]', 'M unstaged.txt [unstaged]', 'D deleted.txt [unstaged]', 'R rename-old.txt -> rename-new.txt [staged]', '? untracked.txt [untracked]')) {
+            Assert-Contains $output $line 'Review must report the correct status and index/worktree state.'
+        }
+        foreach ($path in @('target/ignored.txt', '.plans/private.md', '.planning/legacy.md', '.agent-work/private.ps1')) {
+            Assert-False ($output.Contains($path, [System.StringComparison]::OrdinalIgnoreCase)) 'Ignored local files should not surface.'
+        }
+        Assert-Contains $output 'review before packaging): artifacts/forced.txt' 'Force-tracked generated paths should be flagged.'
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $reviewScript -Arguments @('--project', $repo, '--files', '-Detailed') } '*provided more than once*'
+        Assert-Throws { Invoke-ScriptCapture -ScriptPath $reviewScript -Arguments @('--project', $repo, '--invalid') } 'Unknown option*'
+    }
+    finally { Remove-Item -LiteralPath $repo -Recurse -Force }
+}
+
+Invoke-TestCase 'review-changes reports index changes reversed in the worktree' {
+    $repo = New-TestGitRepository
+    try {
+        $path = Join-Path $repo 'seed.txt'
+        $original = [System.IO.File]::ReadAllBytes($path)
+        Set-Content -LiteralPath $path -Value 'staged change' -Encoding utf8
+        & git -C $repo add seed.txt
+        [System.IO.File]::WriteAllBytes($path, $original)
+        $output = Invoke-ScriptCapture -ScriptPath $reviewScript -Arguments @('--project', $repo, '--files')
+        Assert-Contains $output '~ seed.txt [staged, unstaged]' 'A reversed staged edit is not a clean worktree.'
+        Assert-False ($output.Contains('Working tree is clean.')) 'Index-only changes must not be hidden.'
     }
     finally { Remove-Item -LiteralPath $repo -Recurse -Force }
 }
