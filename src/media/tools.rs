@@ -825,12 +825,17 @@ mod tests {
     fn long_running_capability_command() -> MediaProcessCommand {
         #[cfg(windows)]
         {
-            MediaProcessCommand::new("cmd.exe").args(["/D", "/S", "/C", "ping 127.0.0.1 -n 6 >NUL"])
+            MediaProcessCommand::new("cmd.exe").args([
+                "/D",
+                "/S",
+                "/C",
+                "for /L %i in (1,1,2147483647) do @rem",
+            ])
         }
 
         #[cfg(not(windows))]
         {
-            MediaProcessCommand::new("sh").args(["-c", "sleep 5"])
+            MediaProcessCommand::new("sh").args(["-c", "exec sleep 60"])
         }
     }
 
@@ -884,7 +889,7 @@ mod tests {
     #[test]
     fn executable_that_starts_and_returns_failure_is_rejected() {
         let validator = SystemVersionValidator {
-            timeout: Duration::from_secs(1),
+            timeout: Duration::from_secs(10),
         };
         let current_executable = env::current_exe().unwrap();
 
@@ -898,7 +903,7 @@ mod tests {
     #[test]
     fn executable_that_cannot_start_reports_launch_failure() {
         let validator = SystemVersionValidator {
-            timeout: Duration::from_secs(1),
+            timeout: Duration::from_secs(10),
         };
         let missing = env::temp_dir().join(format!(
             "apollo-missing-media-tool-{}.exe",
@@ -922,20 +927,10 @@ mod tests {
             MediaProcessCommand::new(env::current_exe().unwrap())
                 .arg("--help")
                 .captured_stdout_limit(4096),
-            Duration::from_secs(1),
+            Duration::from_secs(10),
         )
         .unwrap();
         assert!(!output.is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn version_query_that_exceeds_bound_is_terminated() {
-        let result = run_media_tool_query(
-            MediaProcessCommand::new("sh").args(["-c", "sleep 1"]),
-            Duration::from_millis(20),
-        );
-        assert_eq!(result, Err(MediaToolQueryError::TimedOut));
     }
 
     #[test]

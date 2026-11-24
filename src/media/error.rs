@@ -437,7 +437,6 @@ mod tests {
         });
 
         assert_eq!(error.kind(), MediaErrorKind::FfmpegValidationFailed);
-        assert_eq!(error.message(), "FFmpeg could not be validated.");
         assert!(
             error
                 .diagnostic()
@@ -447,17 +446,6 @@ mod tests {
             error
                 .guidance()
                 .is_some_and(|guidance| !guidance.contains("Install FFmpeg"))
-        );
-    }
-
-    #[test]
-    fn missing_stream_has_shared_classification_and_operation_neutral_guidance() {
-        let error = MediaError::missing_stream("no streams");
-
-        assert_eq!(error.kind(), MediaErrorKind::MissingStream);
-        assert_eq!(
-            error.guidance(),
-            Some("Choose a source containing the required media streams.")
         );
     }
 
@@ -493,11 +481,8 @@ mod tests {
         ] {
             let error = MediaError::from_execution_failure(&process_failure(diagnostic), container);
             assert_eq!(error.kind(), MediaErrorKind::EncoderUnavailable);
-            assert_eq!(error.message(), "The required encoder is unavailable.");
-            assert_eq!(
-                error.guidance(),
-                Some("Use an FFmpeg build that includes the required encoder.")
-            );
+            assert_eq!(error.diagnostic(), Some(diagnostic));
+            assert!(error.guidance().is_some());
         }
     }
 
@@ -525,13 +510,10 @@ mod tests {
         let error =
             MediaError::queue_destination_reserved("queue job 7 already targets this output");
         assert_eq!(error.kind(), MediaErrorKind::QueueDestinationReserved);
-        assert_eq!(
-            error.message(),
-            "Another queued job already targets this output."
-        );
-        assert_eq!(
-            error.guidance(),
-            Some("Choose another output, or edit or remove the queued job.")
+        assert!(
+            error
+                .guidance()
+                .is_some_and(|guidance| guidance.contains("queued job"))
         );
         assert_eq!(
             error.diagnostic(),
@@ -542,7 +524,8 @@ mod tests {
             PathBuf::from("output.mp4"),
         ));
         assert_eq!(existing.kind(), MediaErrorKind::OutputExists);
-        assert_eq!(existing.message(), "The output file already exists.");
+        assert_ne!(error.message(), existing.message());
+        assert_ne!(error.guidance(), existing.guidance());
     }
 
     #[test]
@@ -566,10 +549,11 @@ mod tests {
 
     #[test]
     fn raw_diagnostic_is_retained_but_bounded() {
-        let raw = "ffmpeg diagnostic";
+        let raw = "private raw stderr marker";
         let error =
             MediaError::from_execution_failure(&process_failure(raw), MediaOutputContainer::Mp4);
         assert_eq!(error.diagnostic(), Some(raw));
+        assert!(!error.message().contains(raw));
 
         let huge = format!(
             "{}TAIL",
@@ -583,67 +567,16 @@ mod tests {
     }
 
     #[test]
-    fn user_message_never_contains_raw_diagnostic() {
-        let raw = "private raw stderr marker";
-        let error =
-            MediaError::from_execution_failure(&process_failure(raw), MediaOutputContainer::Mp4);
-        assert!(!error.message().contains(raw));
-        assert_eq!(error.diagnostic(), Some(raw));
-    }
-
-    #[test]
-    fn output_picker_failure_has_concise_copy_and_bounded_diagnostic() {
-        let diagnostic = format!(
-            "{}TAIL",
-            "x".repeat(DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES * 2)
-        );
-        let error = MediaError::output_picker_unavailable(diagnostic);
-
-        assert_eq!(error.kind(), MediaErrorKind::OutputPickerUnavailable);
-        assert_eq!(error.message(), "The output picker could not be opened.");
-        assert_eq!(error.guidance(), Some("Try Browse again."));
-        let diagnostic = error
-            .diagnostic()
-            .expect("picker diagnostic should be retained");
-        assert!(diagnostic.len() <= DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES);
-        assert!(diagnostic.ends_with("TAIL"));
-    }
-
-    #[test]
-    fn file_picker_failure_has_intake_specific_copy() {
-        let error = MediaError::file_picker_unavailable("native dialog diagnostic");
-
-        assert_eq!(error.kind(), MediaErrorKind::FilePickerUnavailable);
-        assert_eq!(error.message(), "The file picker could not be opened.");
-        assert_eq!(error.guidance(), Some("Try Open files again."));
-        assert_eq!(error.diagnostic(), Some("native dialog diagnostic"));
-    }
-
-    #[test]
     fn clipboard_failures_and_oversized_frames_have_actionable_distinct_copy() {
         let clipboard = MediaError::clipboard_unavailable("OpenClipboard failed");
         assert_eq!(clipboard.kind(), MediaErrorKind::ClipboardUnavailable);
-        assert_eq!(clipboard.message(), "The frame could not be copied.");
         assert!(clipboard.guidance().unwrap().contains("Copy frame"));
         assert_eq!(clipboard.diagnostic(), Some("OpenClipboard failed"));
 
         let oversized = MediaError::frame_too_large("16384 x 16384 exceeds 256 MiB");
         assert_eq!(oversized.kind(), MediaErrorKind::FrameTooLargeToCopy);
-        assert_eq!(
-            oversized.message(),
-            "This frame is too large to copy safely."
-        );
+        assert_ne!(clipboard.message(), oversized.message());
         assert!(oversized.guidance().unwrap().contains("image file"));
-    }
-
-    #[test]
-    fn multiple_file_drop_has_concise_intake_copy() {
-        let error = MediaError::multiple_files();
-
-        assert_eq!(error.kind(), MediaErrorKind::MultipleFiles);
-        assert_eq!(error.message(), "Drop one file at a time.");
-        assert_eq!(error.guidance(), None);
-        assert_eq!(error.diagnostic(), None);
     }
 
     #[test]

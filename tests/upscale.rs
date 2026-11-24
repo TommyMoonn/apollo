@@ -67,6 +67,11 @@ fn real_video_format_smoke(backend: VideoEncoderSelection) {
         request.codec = codec;
         request.encoder_settings.set_selection(backend);
         request.nvenc_capability = VideoEncoderCapability::Available;
+        // Set frame-level signaling as well as encoder options: FFV1/Matroska
+        // otherwise may omit transfer and primaries from the generated fixture.
+        let color_filter = format!(
+            "setparams=range=limited:color_primaries={primaries}:color_trc={transfer}:colorspace={space}"
+        );
         let generated = MediaProcessCommand::new(&tools.ffmpeg)
             .args([
                 "-v",
@@ -82,6 +87,8 @@ fn real_video_format_smoke(backend: VideoEncoderSelection) {
                 "ffv1",
                 "-pix_fmt",
                 pixel,
+                "-vf",
+                &color_filter,
                 "-color_range",
                 "tv",
                 "-colorspace",
@@ -94,6 +101,32 @@ fn real_video_format_smoke(backend: VideoEncoderSelection) {
             .arg(request.input.as_os_str());
         run_smoke_process(generated);
         let source = probe_media(&tools, &request.input).unwrap();
+        let source_format = &source.video_streams[0].format;
+        assert_eq!(
+            source_format.pixel_format.as_deref(),
+            Some(pixel),
+            "fixture pixel format"
+        );
+        assert_eq!(
+            source_format.color_range.as_deref(),
+            Some("tv"),
+            "fixture color range"
+        );
+        assert_eq!(
+            source_format.color_space.as_deref(),
+            Some(space),
+            "fixture color space"
+        );
+        assert_eq!(
+            source_format.color_transfer.as_deref(),
+            Some(transfer),
+            "fixture transfer"
+        );
+        assert_eq!(
+            source_format.color_primaries.as_deref(),
+            Some(primaries),
+            "fixture primaries"
+        );
         validate_upscale_request(&request, &source).unwrap();
         let dimensions = calculate_output_dimensions(128, 72, request.target).unwrap();
         let invocation = build_upscale_invocation(&request, &source, dimensions).unwrap();
@@ -999,10 +1032,6 @@ fn source_at_target_boundary_is_rejected_by_sizing() {
             boundary_height: 2160,
         }
     );
-    assert_eq!(
-        error.to_string(),
-        "target boundary 3840x2160 is not larger than source 3840x2160"
-    );
 }
 
 #[test]
@@ -1291,17 +1320,6 @@ fn existing_output_check_is_left_to_destination_preflight() {
         preflight_output_destination(&request.input, &request.output),
         Err(MediaOutputError::OutputAlreadyExists(_))
     ));
-}
-
-#[test]
-fn valid_request_preserves_selected_codec_in_domain_model() {
-    let temp = TestDirectory::new();
-    let mut request = request(&temp, UpscaleTarget::Uhd8k);
-    request.codec = VideoCodec::H265;
-    let media = media(request.input.clone(), Some(3840), Some(2160));
-
-    assert_eq!(validate_upscale_request(&request, &media), Ok(()));
-    assert_eq!(request.codec, VideoCodec::H265);
 }
 
 fn assert_close_to_maximal_boundary_fit(

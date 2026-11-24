@@ -777,23 +777,27 @@ mod tests {
     fn background_worker_keeps_the_original_request_and_runs_publication_work() {
         let (directory, request) = request([4, 2]);
         let observed = Arc::new(Mutex::new(None));
-        let worker = CopyFrameWorker::spawn_with(request.clone(), || {}, {
-            let observed = Arc::clone(&observed);
-            move |request| {
-                *observed.lock().unwrap() =
-                    Some((request.source_identity.clone(), request.position));
-                Ok(())
-            }
-        })
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+        let worker = CopyFrameWorker::spawn_with(
+            request.clone(),
+            move || {
+                let _ = wake_tx.send(());
+            },
+            {
+                let observed = Arc::clone(&observed);
+                move |request| {
+                    *observed.lock().unwrap() =
+                        Some((request.source_identity.clone(), request.position));
+                    Ok(())
+                }
+            },
+        )
         .unwrap();
 
-        let result = loop {
-            if let Some(result) = worker.poll() {
-                break result;
-            }
-            std::thread::yield_now();
-        };
-        assert_eq!(result, Ok(()));
+        wake_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("copy worker did not signal completion");
+        assert_eq!(worker.poll(), Some(Ok(())));
         assert_eq!(
             observed.lock().unwrap().as_ref(),
             Some(&(request.source_identity, request.position))

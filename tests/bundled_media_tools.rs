@@ -3,10 +3,17 @@ use std::env;
 #[path = "support/release_media_acceptance.rs"]
 mod release_media_acceptance;
 #[cfg(windows)]
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::PathBuf,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 use apollo::media::tools::{
-    MediaToolKind, MediaToolsError, cached_video_encoder_capabilities, discover_base_media_tools,
+    MediaToolKind, MediaToolValidationError, MediaToolsError, cached_video_encoder_capabilities,
+    discover_base_media_tools,
 };
 
 #[test]
@@ -62,10 +69,10 @@ fn discovery_subprocess() {
                 "ffprobe.exe"
             };
             assert_eq!(path, directory.join(name));
-            assert!(
-                reason.to_string().contains("Unrecognized option"),
-                "{reason}"
-            );
+            let MediaToolValidationError::QueryFailed(diagnostic) = reason else {
+                panic!("expected rejected version query, got {reason:?}");
+            };
+            assert!(!diagnostic.trim().is_empty());
         }
         _ => panic!("unknown subprocess mode: {mode}"),
     }
@@ -78,12 +85,19 @@ fn real_pair_uses_application_directory_and_explicit_path_fallback() {
     let source = PathBuf::from(
         env::var_os("APOLLO_TEST_MEDIA_TOOLS_DIR").expect("set staged pair directory"),
     );
-    let root = env::temp_dir().join(format!("apollo runtime discovery {}", std::process::id()));
+    let root = env::temp_dir().join(format!(
+        "apollo runtime discovery {}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     fs::create_dir(&root).unwrap();
     struct Cleanup(PathBuf);
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).unwrap();
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
     let _cleanup = Cleanup(root.clone());
@@ -125,19 +139,35 @@ fn real_pair_uses_application_directory_and_explicit_path_fallback() {
         } else {
             path_tools.to_str().unwrap()
         };
-        let output = Command::new(&executable)
+        // Redirect to files so waiting for process exit cannot deadlock on full output pipes.
+        let stdout = scenario.join("stdout.log");
+        let stderr = scenario.join("stderr.log");
+        let mut child = Command::new(&executable)
             .args(["--exact", "discovery_subprocess", "--nocapture"])
             .env("APOLLO_DISCOVERY_TEST_MODE", mode)
+            .env_remove("APOLLO_RELEASE_ACCEPTANCE")
+            .env_remove("APOLLO_RELEASE_OUTPUT_DIRECTORY")
             .env("PATH", path)
             .current_dir(&decoy)
-            .output()
+            .stdout(Stdio::from(fs::File::create(&stdout).unwrap()))
+            .stderr(Stdio::from(fs::File::create(&stderr).unwrap()))
+            .spawn()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "{mode}: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        print!("{}", String::from_utf8_lossy(&output.stdout));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{mode}: discovery subprocess timed out");
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let stdout = fs::read_to_string(stdout).unwrap();
+        let stderr = fs::read_to_string(stderr).unwrap();
+        assert!(status.success(), "{mode}: {stdout}\n{stderr}");
+        print!("{stdout}");
     }
 }

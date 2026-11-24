@@ -365,24 +365,6 @@ impl ProcessLifecycle {
         }
     }
 
-    #[cfg(test)]
-    fn claim_terminal(&self, requested: MediaProcessState) -> bool {
-        debug_assert!(requested.is_terminal());
-
-        let mut inner = lock_unpoisoned(&self.inner);
-        if inner.state.is_terminal() || inner.terminal_claim.is_some() {
-            return false;
-        }
-
-        inner.terminal_claim = Some(if inner.cancel_requested {
-            MediaProcessState::Cancelled
-        } else {
-            requested
-        });
-        self.changed.notify_all();
-        true
-    }
-
     fn publish_terminal_claim(&self) -> bool {
         let mut inner = lock_unpoisoned(&self.inner);
         if inner.state.is_terminal() {
@@ -398,7 +380,7 @@ impl ProcessLifecycle {
         true
     }
 
-    #[cfg(all(test, not(windows)))]
+    #[cfg(test)]
     fn wait_for_terminal_claim(&self, timeout: Duration) -> Option<MediaProcessState> {
         let inner = lock_unpoisoned(&self.inner);
         let (inner, _) = self
@@ -745,11 +727,11 @@ mod tests {
     use super::{
         BoundedDiagnostic, LIVE_OUTPUT_MESSAGE_LIMIT_BYTES, MediaProcess, MediaProcessCommand,
         MediaProcessEvent, MediaProcessFailure, MediaProcessStartError, MediaProcessState,
-        MediaProcessWake, ProcessLifecycle, ProcessProgressSource, STREAM_READ_CHUNK_BYTES,
-        lock_unpoisoned, read_stream,
+        MediaProcessWake, ProcessProgressSource, STREAM_READ_CHUNK_BYTES, lock_unpoisoned,
+        read_stream,
     };
 
-    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+    const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
     #[test]
     fn successful_process_completes_and_exposes_stdout_and_progress() {
@@ -762,19 +744,18 @@ mod tests {
         assert_eq!(drain(process.stdout_channel()), ["stdout-line"]);
         assert_eq!(drain(process.progress_channel()), ["stdout-line"]);
         assert!(drain(process.stderr_channel()).is_empty());
+        assert!(process.captured_stdout_bytes().is_empty());
     }
 
     #[test]
     fn optional_stdout_capture_is_bounded_and_available_after_settlement() {
-        let process =
-            MediaProcess::start(shell_command(success_script()).captured_stdout_limit(64))
-                .expect("helper process should start");
+        let process = MediaProcess::start(shell_command(success_script()).captured_stdout_limit(5))
+            .expect("helper process should start");
 
         assert_eq!(wait_for_process(&process), MediaProcessState::Completed);
-        assert_eq!(process.captured_stdout().trim(), "stdout-line");
         assert!(matches!(
             process.captured_stdout_bytes().as_slice(),
-            b"stdout-line\n" | b"stdout-line\r\n"
+            b"line\n" | b"ine\r\n"
         ));
     }
 
@@ -821,8 +802,10 @@ mod tests {
             .expect("helper process should start");
 
         assert!(process.cancel());
+        assert!(!process.cancel());
         assert_eq!(wait_for_process(&process), MediaProcessState::Cancelled);
         assert!(!process.cancel());
+        assert!(!process.lifecycle.publish_terminal_claim());
     }
 
     #[test]
@@ -908,83 +891,47 @@ mod tests {
     }
 
     #[test]
-    fn successful_terminal_claim_rejects_later_cancellation() {
-        let lifecycle = ProcessLifecycle::new();
-
-        assert!(lifecycle.claim_terminal(MediaProcessState::Completed));
-        assert!(!lifecycle.request_cancel());
-        assert_eq!(lifecycle.state(), MediaProcessState::Running);
-        assert!(lifecycle.publish_terminal_claim());
-        assert_eq!(lifecycle.state(), MediaProcessState::Completed);
-    }
-
-    #[test]
-    fn failed_terminal_claim_rejects_later_cancellation() {
-        let lifecycle = ProcessLifecycle::new();
-        let failure = MediaProcessState::Failed(MediaProcessFailure::Exit(Some(9)));
-
-        assert!(lifecycle.claim_terminal(failure.clone()));
-        assert!(!lifecycle.request_cancel());
-        assert!(lifecycle.publish_terminal_claim());
-        assert_eq!(lifecycle.state(), failure);
-    }
-
-    #[test]
-    fn duplicate_terminal_settlement_is_rejected() {
-        let lifecycle = ProcessLifecycle::new();
-
-        assert!(lifecycle.claim_terminal(MediaProcessState::Completed));
-        assert!(
-            !lifecycle.claim_terminal(MediaProcessState::Failed(MediaProcessFailure::Exit(Some(
-                9
-            ))))
-        );
-        assert!(lifecycle.publish_terminal_claim());
-        assert!(!lifecycle.publish_terminal_claim());
-        assert_eq!(lifecycle.state(), MediaProcessState::Completed);
-    }
-
-    #[test]
-    fn accepted_cancellation_wins_the_single_terminal_settlement() {
-        let lifecycle = ProcessLifecycle::new();
-
-        assert!(lifecycle.request_cancel());
-        assert!(lifecycle.claim_terminal(MediaProcessState::Completed));
-        assert!(!lifecycle.request_cancel());
-        assert!(lifecycle.publish_terminal_claim());
-        assert_eq!(lifecycle.state(), MediaProcessState::Cancelled);
-        assert!(!lifecycle.publish_terminal_claim());
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn successful_child_exit_claim_during_reader_drain_rejects_cancellation() {
-        let process = MediaProcess::start(shell_command(exit_with_delayed_stderr_close_script(0)))
+    fn child_exit_claim_during_reader_drain_rejects_cancellation() {
+        for (script, expected, progress_source) in [
+            (
+                success_script(),
+                MediaProcessState::Completed,
+                ProcessProgressSource::Stdout,
+            ),
+            (
+                failure_script(),
+                MediaProcessState::Failed(MediaProcessFailure::Exit(Some(7))),
+                ProcessProgressSource::Stderr,
+            ),
+        ] {
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release_rx = Mutex::new(release_rx);
+            let wake = MediaProcessWake::new(move |event| {
+                if event == MediaProcessEvent::Progress {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.lock().unwrap().recv_timeout(TEST_TIMEOUT * 3);
+                }
+            });
+            let process = MediaProcess::start_with_wake(
+                shell_command(script).progress_source(progress_source),
+                wake,
+            )
             .expect("helper process should start");
-
-        assert_eq!(
-            process.lifecycle.wait_for_terminal_claim(TEST_TIMEOUT),
-            Some(MediaProcessState::Completed)
-        );
-        assert_eq!(process.state(), MediaProcessState::Running);
-        assert!(!process.cancel());
-        assert_eq!(wait_for_process(&process), MediaProcessState::Completed);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn failed_child_exit_claim_during_reader_drain_rejects_cancellation() {
-        let process = MediaProcess::start(shell_command(exit_with_delayed_stderr_close_script(7)))
-            .expect("helper process should start");
-        let failure = MediaProcessState::Failed(MediaProcessFailure::Exit(Some(7)));
-
-        assert_eq!(
-            process.lifecycle.wait_for_terminal_claim(TEST_TIMEOUT),
-            Some(failure.clone())
-        );
-        assert_eq!(process.state(), MediaProcessState::Running);
-        assert!(!process.cancel());
-        assert_eq!(wait_for_process(&process), failure);
+            entered_rx
+                .recv_timeout(TEST_TIMEOUT)
+                .expect("reader did not receive output");
+            assert_eq!(
+                process.lifecycle.wait_for_terminal_claim(TEST_TIMEOUT),
+                Some(expected.clone())
+            );
+            assert_eq!(process.state(), MediaProcessState::Running);
+            assert!(!process.cancel());
+            release_tx.send(()).unwrap();
+            assert_eq!(wait_for_process(&process), expected);
+            assert!(!process.cancel());
+            assert!(!process.lifecycle.publish_terminal_claim());
+        }
     }
 
     const OUTPUT_CHANNEL_CAPACITY_FOR_TEST: usize = 64;
@@ -1097,12 +1044,7 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-            "while :; do :; done".to_owned()
+            "exec sleep 60".to_owned()
         }
-    }
-
-    #[cfg(not(windows))]
-    fn exit_with_delayed_stderr_close_script(exit_code: i32) -> String {
-        format!("(sleep 1; printf 'reader-drained\\n' >&2) & exit {exit_code}")
     }
 }

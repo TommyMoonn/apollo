@@ -384,12 +384,6 @@ fn existing_output_check_is_left_to_destination_preflight() {
     ));
 }
 
-#[test]
-fn output_container_exposes_its_required_extension() {
-    assert_eq!(OutputContainer::Mp4.extension(), "mp4");
-    assert_eq!(OutputContainer::Mkv.extension(), "mkv");
-}
-
 struct TestDirectory {
     path: PathBuf,
 }
@@ -436,250 +430,140 @@ fn option_values<'a>(args: &'a [String], option: &str) -> Vec<&'a str> {
         .collect()
 }
 
-#[test]
-fn one_selected_stream_builds_single_input_amix_filter() {
-    let temp = TestDirectory::new();
-    let mut request = valid_request(&temp);
-    request.selected_tracks = vec![default_track(3)];
-    let media = media(request.input.clone());
-    let args = invocation_args(&request, &media);
-
+// Validate the filter graph's connections as well as its media policy. The temporary
+// label names are incidental; every produced label must be consumed by the next stage.
+fn assert_mix_graph(args: &[String], tracks: &[(u32, &str)], layout: &str, final_filter: &str) {
+    let filters = option_values(args, "-filter_complex");
+    assert_eq!(filters.len(), 1);
+    let stages: Vec<_> = filters[0].split(';').collect();
+    assert_eq!(stages.len(), tracks.len() + 2);
+    let mut labels = Vec::new();
+    for (stage, (index, gain)) in stages.iter().zip(tracks) {
+        let (body, label) = stage.rsplit_once('[').expect("volume output label");
+        assert_eq!(
+            body,
+            format!("[0:{index}]volume={gain},aformat=channel_layouts={layout}")
+        );
+        let label = label.strip_suffix(']').expect("closing volume label");
+        assert!(!label.is_empty() && !labels.contains(&label));
+        labels.push(label);
+    }
+    let (body, label) = stages[tracks.len()]
+        .rsplit_once('[')
+        .expect("mix output label");
+    let inputs: String = labels.iter().map(|label| format!("[{label}]")).collect();
     assert_eq!(
-        option_values(&args, "-filter_complex"),
-        vec![
-            "[0:3]volume=0.0dB,aformat=channel_layouts=mono[mix_0];[mix_0]amix=inputs=1:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
-        ]
+        body,
+        format!(
+            "{inputs}amix=inputs={}:duration=longest:normalize=0",
+            tracks.len()
+        )
+    );
+    let mix_label = label.strip_suffix(']').expect("closing mix label");
+    assert!(!mix_label.is_empty() && !labels.contains(&mix_label));
+    let (body, label) = stages[tracks.len() + 1]
+        .rsplit_once('[')
+        .expect("final output label");
+    assert_eq!(body, format!("[{mix_label}]{final_filter}"));
+    let output_label = label.strip_suffix(']').expect("closing output label");
+    assert!(
+        !output_label.is_empty() && output_label != mix_label && !labels.contains(&output_label)
+    );
+    let mapped = format!("[{output_label}]");
+    assert_eq!(
+        option_values(args, "-map")
+            .iter()
+            .filter(|&&value| value == mapped)
+            .count(),
+        1
     );
 }
 
 #[test]
-fn two_selected_streams_build_two_input_amix_filter() {
-    let temp = TestDirectory::new();
-    let request = valid_request(&temp);
-    let media = media(request.input.clone());
-    let args = invocation_args(&request, &media);
-
-    assert_eq!(
-        option_values(&args, "-filter_complex"),
-        vec![
-            "[0:1]volume=0.0dB,aformat=channel_layouts=stereo[mix_0];[0:7]volume=0.0dB,aformat=channel_layouts=stereo[mix_1];[mix_0][mix_1]amix=inputs=2:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
-        ]
-    );
-}
-
-#[test]
-fn mono_and_stereo_selection_produces_stereo_independent_of_track_order() {
+fn mixing_preserves_stream_identity_gain_and_channel_policy() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
-    let media = media(request.input.clone());
-
-    request.selected_tracks = vec![default_track(3), default_track(1)];
-    let mono_first =
-        option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
-
-    request.selected_tracks = vec![default_track(1), default_track(3)];
-    let stereo_first =
-        option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
-
-    for filter in [mono_first, stereo_first] {
-        assert_eq!(filter.matches("aformat=channel_layouts=stereo").count(), 2);
-        assert!(!filter.contains("aformat=channel_layouts=mono"));
+    let mut media = media(request.input.clone());
+    for (index, channels, layout) in [(9, 1, "mono"), (11, 2, "stereo")] {
+        media.audio_streams.push(AudioStream {
+            stream_index: index,
+            codec: Some("aac".into()),
+            channels: Some(channels),
+            channel_layout: Some(layout.into()),
+            title: None,
+            language: None,
+        });
+    }
+    // Exercise one to four sparse streams, both track orders, two mono tracks,
+    // and unchanged gain when the number of selected streams changes.
+    type SelectionCase = (&'static [(u32, i16, &'static str)], &'static str);
+    let cases: &[SelectionCase] = &[
+        (&[(3, 0, "0.0dB")], "mono"),
+        (&[(1, -60, "-6.0dB")], "stereo"),
+        (&[(1, 0, "0.0dB"), (7, 0, "0.0dB")], "stereo"),
+        (&[(3, 0, "0.0dB"), (1, 0, "0.0dB")], "stereo"),
+        (&[(1, 0, "0.0dB"), (3, 0, "0.0dB")], "stereo"),
+        (&[(3, 0, "0.0dB"), (9, 0, "0.0dB")], "mono"),
+        (
+            &[(7, 120, "12.0dB"), (1, -60, "-6.0dB"), (3, 0, "0.0dB")],
+            "stereo",
+        ),
+        (
+            &[
+                (1, 0, "0.0dB"),
+                (3, 0, "0.0dB"),
+                (7, 0, "0.0dB"),
+                (11, 0, "0.0dB"),
+            ],
+            "stereo",
+        ),
+    ];
+    for (selection, layout) in cases {
+        request.selected_tracks = selection
+            .iter()
+            .map(|&(index, gain, _)| track(index, gain))
+            .collect();
+        let expected: Vec<_> = selection
+            .iter()
+            .map(|&(index, _, gain)| (index, gain))
+            .collect();
+        assert_mix_graph(
+            &invocation_args(&request, &media),
+            &expected,
+            layout,
+            "alimiter=limit=0.95:level=0:latency=1",
+        );
     }
 }
 
 #[test]
-fn multiple_mono_tracks_produce_an_explicit_mono_mix() {
-    let temp = TestDirectory::new();
-    let mut request = valid_request(&temp);
-    request.selected_tracks = vec![default_track(3), default_track(9)];
-    let mut media = media(request.input.clone());
-    media.audio_streams.push(AudioStream {
-        stream_index: 9,
-        codec: Some("pcm_s16le".to_owned()),
-        channels: Some(1),
-        channel_layout: Some("mono".to_owned()),
-        title: Some("Commentary".to_owned()),
-        language: None,
-    });
-
-    let filter = option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
-
-    assert_eq!(filter.matches("aformat=channel_layouts=mono").count(), 2);
-    assert!(!filter.contains("aformat=channel_layouts=stereo"));
-}
-
-#[test]
-fn four_selected_streams_build_four_input_amix_filter() {
-    let temp = TestDirectory::new();
-    let mut request = valid_request(&temp);
-    request.selected_tracks = vec![
-        default_track(1),
-        default_track(3),
-        default_track(7),
-        default_track(11),
-    ];
-    let mut media = media(request.input.clone());
-    media.audio_streams.push(AudioStream {
-        stream_index: 11,
-        codec: Some("aac".to_owned()),
-        channels: Some(2),
-        channel_layout: Some("stereo".to_owned()),
-        title: Some("Game".to_owned()),
-        language: None,
-    });
-    let args = invocation_args(&request, &media);
-
-    assert_eq!(
-        option_values(&args, "-filter_complex"),
-        vec![
-            "[0:1]volume=0.0dB,aformat=channel_layouts=stereo[mix_0];[0:3]volume=0.0dB,aformat=channel_layouts=stereo[mix_1];[0:7]volume=0.0dB,aformat=channel_layouts=stereo[mix_2];[0:11]volume=0.0dB,aformat=channel_layouts=stereo[mix_3];[mix_0][mix_1][mix_2][mix_3]amix=inputs=4:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
-        ]
-    );
-}
-
-#[test]
-fn filter_uses_non_contiguous_absolute_stream_indexes_in_selection_order() {
-    let temp = TestDirectory::new();
-    let mut request = valid_request(&temp);
-    request.selected_tracks = vec![default_track(7), default_track(1), default_track(3)];
-    let media = media(request.input.clone());
-    let args = invocation_args(&request, &media);
-
-    assert_eq!(
-        option_values(&args, "-filter_complex"),
-        vec![
-            "[0:7]volume=0.0dB,aformat=channel_layouts=stereo[mix_0];[0:1]volume=0.0dB,aformat=channel_layouts=stereo[mix_1];[0:3]volume=0.0dB,aformat=channel_layouts=stereo[mix_2];[mix_0][mix_1][mix_2]amix=inputs=3:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
-        ]
-    );
-}
-
-#[test]
-fn unequal_track_gains_precede_explicit_unnormalized_mix_and_peak_limiter() {
-    let temp = TestDirectory::new();
-    let mut request = valid_request(&temp);
-    request.selected_tracks = vec![track(1, -60), track(3, 0), track(7, 120)];
-    let media = media(request.input.clone());
-    let args = invocation_args(&request, &media);
-
-    assert_eq!(
-        option_values(&args, "-filter_complex"),
-        vec![
-            "[0:1]volume=-6.0dB,aformat=channel_layouts=stereo[mix_0];[0:3]volume=0.0dB,aformat=channel_layouts=stereo[mix_1];[0:7]volume=12.0dB,aformat=channel_layouts=stereo[mix_2];[mix_0][mix_1][mix_2]amix=inputs=3:duration=longest:normalize=0[pre_limit];[pre_limit]alimiter=limit=0.95:level=0:latency=1[mixed]"
-        ]
-    );
-}
-
-#[test]
-fn selected_track_count_does_not_change_another_tracks_gain() {
-    let temp = TestDirectory::new();
-    let mut request = valid_request(&temp);
-    let media = media(request.input.clone());
-
-    request.selected_tracks = vec![track(1, -60)];
-    let one_track =
-        option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
-
-    request.selected_tracks = vec![track(1, -60), track(3, 25), track(7, 0)];
-    let three_tracks =
-        option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
-
-    assert_eq!(one_track.matches("[0:1]volume=-6.0dB").count(), 1);
-    assert_eq!(three_tracks.matches("[0:1]volume=-6.0dB").count(), 1);
-}
-
-#[test]
-fn protected_mix_contains_exactly_one_limiter_after_amix() {
-    let temp = TestDirectory::new();
-    let request = valid_request(&temp);
-    let media = media(request.input.clone());
-    let args = invocation_args(&request, &media);
-    let filter = option_values(&args, "-filter_complex")[0];
-    let amix_position = filter.find("amix=").expect("amix stage");
-    let limiter_position = filter.find("alimiter=").expect("limiter stage");
-
-    assert_eq!(
-        filter.matches("volume=").count(),
-        request.selected_tracks.len()
-    );
-    assert_eq!(filter.matches("amix=").count(), 1);
-    assert_eq!(filter.matches("normalize=0").count(), 1);
-    assert_eq!(filter.matches("alimiter=").count(), 1);
-    assert!(amix_position < limiter_position);
-    assert!(filter.ends_with("alimiter=limit=0.95:level=0:latency=1[mixed]"));
-}
-
-#[test]
-fn disabled_normalization_omits_loudnorm_and_keeps_the_protected_mix_path() {
-    let temp = TestDirectory::new();
-    let request = valid_request(&temp);
-    let media = media(request.input.clone());
-    let args = invocation_args(&request, &media);
-    let filter = option_values(&args, "-filter_complex")[0];
-
-    assert_eq!(request.normalization, LoudnessNormalization::Off);
-    assert!(!filter.contains("loudnorm="));
-    assert_eq!(filter.matches("normalize=0").count(), 1);
-    assert_eq!(filter.matches("alimiter=").count(), 1);
-    assert!(filter.ends_with("alimiter=limit=0.95:level=0:latency=1[mixed]"));
-}
-
-#[test]
-fn enabled_normalization_uses_default_targets_without_the_generic_limiter() {
-    let temp = TestDirectory::new();
-    let mut request = valid_request(&temp);
-    request.normalization = LoudnessNormalization::Enabled(LoudnessTargets::default());
-    let media = media(request.input.clone());
-    let args = invocation_args(&request, &media);
-    let filter = option_values(&args, "-filter_complex")[0];
-    let amix_position = filter.find("amix=").expect("amix stage");
-    let loudnorm_position = filter.find("loudnorm=").expect("loudnorm stage");
-
-    assert_eq!(filter.matches("loudnorm=").count(), 1);
-    assert_eq!(filter.matches("alimiter=").count(), 0);
-    assert!(amix_position < loudnorm_position);
-    assert!(filter.contains(
-        "amix=inputs=2:duration=longest:normalize=0[pre_norm];[pre_norm]loudnorm=I=-16.0:TP=-1.5:LRA=11.0:linear=false[mixed]"
-    ));
-    assert_eq!(option_values(&args, "-map"), vec!["0:0", "[mixed]"]);
-}
-
-#[test]
-fn enabled_normalization_emits_custom_integer_backed_targets() {
-    let temp = TestDirectory::new();
-    let mut request = valid_request(&temp);
-    request.normalization = LoudnessNormalization::Enabled(loudness_targets(-235, -7, 185));
-    let media = media(request.input.clone());
-    let args = invocation_args(&request, &media);
-    let filter = option_values(&args, "-filter_complex")[0];
-
-    assert!(filter.ends_with("loudnorm=I=-23.5:TP=-0.7:LRA=18.5:linear=false[mixed]"));
-    assert_eq!(filter.matches("loudnorm=").count(), 1);
-}
-
-#[test]
-fn toggling_normalization_preserves_gain_and_mix_but_selects_one_final_stage() {
+fn normalization_changes_only_the_final_filter_and_uses_selected_targets() {
     let temp = TestDirectory::new();
     let mut request = valid_request(&temp);
     request.selected_tracks = vec![track(1, -60), track(3, 25)];
     let media = media(request.input.clone());
-    let off = option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
-
-    request.normalization = LoudnessNormalization::Enabled(LoudnessTargets::default());
-    let on = option_values(&invocation_args(&request, &media), "-filter_complex")[0].to_owned();
-
-    for shared_stage in [
-        "[0:1]volume=-6.0dB,aformat=channel_layouts=stereo[mix_0]",
-        "[0:3]volume=2.5dB,aformat=channel_layouts=stereo[mix_1]",
-        "[mix_0][mix_1]amix=inputs=2:duration=longest:normalize=0",
+    for (normalization, expected) in [
+        (
+            LoudnessNormalization::Off,
+            "alimiter=limit=0.95:level=0:latency=1",
+        ),
+        (
+            LoudnessNormalization::Enabled(LoudnessTargets::default()),
+            "loudnorm=I=-16.0:TP=-1.5:LRA=11.0:linear=false",
+        ),
+        (
+            LoudnessNormalization::Enabled(loudness_targets(-235, -7, 185)),
+            "loudnorm=I=-23.5:TP=-0.7:LRA=18.5:linear=false",
+        ),
     ] {
-        assert!(off.contains(shared_stage));
-        assert!(on.contains(shared_stage));
+        request.normalization = normalization;
+        assert_mix_graph(
+            &invocation_args(&request, &media),
+            &[(1, "-6.0dB"), (3, "2.5dB")],
+            "stereo",
+            expected,
+        );
     }
-    assert!(!off.contains("loudnorm="));
-    assert_eq!(off.matches("alimiter=").count(), 1);
-    assert_eq!(on.matches("loudnorm=").count(), 1);
-    assert!(!on.contains("alimiter="));
-    assert!(on.contains(":linear=false[mixed]"));
 }
 
 #[test]
@@ -698,7 +582,9 @@ fn mp4_maps_only_primary_video_and_mixed_audio() {
     });
     let args = invocation_args(&request, &media);
 
-    assert_eq!(option_values(&args, "-map"), vec!["0:5", "[mixed]"]);
+    let filter = option_values(&args, "-filter_complex")[0];
+    let mixed = &filter[filter.rfind('[').expect("mixed output label")..];
+    assert_eq!(option_values(&args, "-map"), vec!["0:5", mixed]);
     assert_eq!(option_values(&args, "-c:v"), vec!["copy"]);
     assert_eq!(option_values(&args, "-map_metadata"), vec!["0"]);
     assert_eq!(option_values(&args, "-map_chapters"), vec!["0"]);
@@ -713,30 +599,16 @@ fn mkv_defers_optional_attachments_until_after_mixed_audio() {
     let media = media(request.input.clone());
     let args = invocation_args(&request, &media);
 
+    let filter = option_values(&args, "-filter_complex")[0];
+    let mixed = &filter[filter.rfind('[').expect("mixed output label")..];
     assert_eq!(
         option_values(&args, "-map"),
-        vec!["0", "-0:a", "-0:t?", "[mixed]", "0:t?"]
+        vec!["0", "-0:a", "-0:t?", mixed, "0:t?"]
     );
     assert_eq!(option_values(&args, "-c"), vec!["copy"]);
     assert_eq!(option_values(&args, "-c:v"), vec!["copy"]);
     assert_eq!(option_values(&args, "-map_metadata"), vec!["0"]);
     assert_eq!(option_values(&args, "-map_chapters"), vec!["0"]);
-}
-
-#[test]
-fn mkv_attachment_mapping_remains_safe_when_source_has_no_attachments() {
-    let temp = TestDirectory::new();
-    let mut request = valid_request(&temp);
-    request.container = OutputContainer::Mkv;
-    request.output = temp.path().join("mixed.mkv");
-    let media = media(request.input.clone());
-    let args = invocation_args(&request, &media);
-    let maps = option_values(&args, "-map");
-
-    assert!(maps.contains(&"-0:t?"));
-    assert!(maps.contains(&"0:t?"));
-    assert!(!maps.contains(&"-0:t"));
-    assert!(!maps.contains(&"0:t"));
 }
 
 #[test]
@@ -780,22 +652,6 @@ fn command_enables_machine_readable_progress_on_stdout() {
 }
 
 #[test]
-fn original_audio_streams_are_never_mapped_as_output_audio() {
-    let temp = TestDirectory::new();
-    let request = valid_request(&temp);
-    let media = media(request.input.clone());
-    let mp4_args = invocation_args(&request, &media);
-
-    assert_eq!(option_values(&mp4_args, "-map"), vec!["0:0", "[mixed]"]);
-
-    let mut mkv_request = request.clone();
-    mkv_request.container = OutputContainer::Mkv;
-    mkv_request.output = temp.path().join("mixed.mkv");
-    let mkv_args = invocation_args(&mkv_request, &media);
-    assert!(option_values(&mkv_args, "-map").contains(&"-0:a"));
-}
-
-#[test]
 fn input_and_output_paths_with_spaces_remain_individual_arguments() {
     let temp = TestDirectory::new();
     let request = AudioMixRequest {
@@ -831,21 +687,6 @@ fn input_and_output_paths_with_spaces_remain_individual_arguments() {
             .count(),
         1
     );
-}
-
-#[test]
-fn video_is_stream_copied_for_both_containers() {
-    let temp = TestDirectory::new();
-    let mut request = valid_request(&temp);
-    let media = media(request.input.clone());
-
-    let mp4_args = invocation_args(&request, &media);
-    assert_eq!(option_values(&mp4_args, "-c:v"), vec!["copy"]);
-
-    request.container = OutputContainer::Mkv;
-    request.output = temp.path().join("mixed.mkv");
-    let mkv_args = invocation_args(&request, &media);
-    assert_eq!(option_values(&mkv_args, "-c:v"), vec!["copy"]);
 }
 
 #[test]

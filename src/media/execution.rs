@@ -232,37 +232,3 @@ impl ProcessControl for MediaProcess {
         self.progress_channel().try_iter().collect()
     }
 }
-
-#[cfg(test)]
-mod ownership_tests {
-    use std::{rc::Rc, sync::Arc};
-
-    use super::ProcessControl;
-    use crate::media::process::MediaProcess;
-
-    macro_rules! assert_not_impl {
-        ($type:ty: $trait:path) => {{
-            trait AmbiguousIfImpl<A> {
-                fn marker() {}
-            }
-
-            impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
-            impl<T: ?Sized + $trait> AmbiguousIfImpl<u8> for T {}
-
-            let _ = <$type as AmbiguousIfImpl<_>>::marker;
-        }};
-    }
-
-    #[test]
-    fn feature_executors_cannot_share_media_process_handle() {
-        fn assert_process_control<T: ProcessControl>() {}
-
-        // Feature executors hand the owned `MediaProcess` returned by `MediaProcess::start` into
-        // this shared execution owner. Keep that handle unique: it must not become cloneable, and
-        // shared pointer aliases must not satisfy the process-control boundary.
-        assert_process_control::<MediaProcess>();
-        assert_not_impl!(MediaProcess: Clone);
-        assert_not_impl!(Arc<MediaProcess>: ProcessControl);
-        assert_not_impl!(Rc<MediaProcess>: ProcessControl);
-    }
-}

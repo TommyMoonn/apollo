@@ -523,7 +523,7 @@ mod tests {
 
     use super::{
         MediaOutput, MediaOutputDisposition, MediaOutputError, STAGING_DIRECTORY_PREFIX,
-        preflight_output_destination, staging_directory_candidate, validate_output_path,
+        preflight_output_destination, validate_output_path,
     };
     use crate::media::process::{MediaProcessFailure, MediaProcessState};
 
@@ -670,14 +670,8 @@ mod tests {
     }
 
     #[test]
-    fn temporary_path_is_adjacent_deterministic_and_preserves_output_name() {
+    fn temporary_paths_are_unique_adjacent_and_preserve_output_name() {
         let directory = TestDirectory::new("temporary-path");
-        let candidate = staging_directory_candidate(directory.path(), 42, 7);
-        assert_eq!(
-            candidate.file_name().unwrap(),
-            ".apollo-output-42-0000000000000007"
-        );
-
         let input = directory.path().join("input.mkv");
         let output = directory.path().join("movie final.mp4");
         fs::write(&input, b"input").unwrap();
@@ -691,6 +685,8 @@ mod tests {
         );
         assert!(!prepared.temporary_path().exists());
         assert!(!prepared.final_path().exists());
+        let second = MediaOutput::prepare(&input, &output).unwrap();
+        assert_ne!(prepared.temporary_path(), second.temporary_path());
     }
 
     #[test]
