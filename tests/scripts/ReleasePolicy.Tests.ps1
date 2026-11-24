@@ -174,6 +174,58 @@ fixture-dep = { path = "dep" }
     Assert-Check (-not (Test-Path -LiteralPath $mediaDestination)) 'Corrupt cache published a payload.'
     Write-Host 'PASS corrupt media cache cannot publish a payload'
 
+    # Exercise the smoke policy with disposable files, not a real installation or registry.
+    . (Join-Path $repo 'tests/scripts/WindowsRelease.Smoke.ps1')
+    $smokeRoot = Join-Path $fixture 'smoke-policy'
+    [void][IO.Directory]::CreateDirectory($smokeRoot)
+    $fakeInstaller = Join-Path $smokeRoot 'Apollo-Setup-x64.exe'
+    $fakeSums = Join-Path $smokeRoot 'SHA256SUMS.txt'
+    [IO.File]::WriteAllText($fakeInstaller, 'installer fixture')
+    $sum = (Get-ReleaseFileRecord $fakeInstaller).sha256
+    [IO.File]::WriteAllText($fakeSums, "$sum  Apollo-Setup-x64.exe`n")
+    $assets = @(@{ name = 'Apollo-Setup-x64.exe'; state = 'uploaded'; size = (Get-Item $fakeInstaller).Length },
+        @{ name = 'SHA256SUMS.txt'; state = 'uploaded'; size = (Get-Item $fakeSums).Length })
+    $releases = @(@{ tag_name = 'v0.6.0'; draft = $false; prerelease = $false; assets = $assets },
+        @{ tag_name = 'v0.7.0'; draft = $false; prerelease = $false; assets = $assets },
+        @{ tag_name = 'v0.8.0'; draft = $true; prerelease = $false; assets = $assets })
+    $selected = Get-SmokePredecessor $releases '0.7.0'
+    Assert-Check ($selected.tag_name -ceq 'v0.7.0') 'Current published version must exercise reinstall.'
+    Assert-Check ((Get-SmokePredecessor $releases '0.7.0' -UpgradeOnly).tag_name -ceq 'v0.6.0') 'Upgrade must select an older published version.'
+    Assert-Check ((Get-SmokePredecessor $releases '0.8.0' -UpgradeOnly).tag_name -ceq 'v0.7.0') 'Draft must not be a predecessor.'
+    Assert-Rejected { Get-SmokePredecessor $releases '0.6.0' -UpgradeOnly } 'missing predecessor'
+    $null = Assert-SmokePredecessorChecksum $smokeRoot $selected
+    [IO.File]::WriteAllText($fakeInstaller, 'installer fixturE')
+    Assert-Rejected { Assert-SmokePredecessorChecksum $smokeRoot $selected } 'corrupt predecessor'
+    $releases[1].assets = @()
+    Assert-Rejected { Get-SmokePredecessor $releases '0.7.0' } 'missing checksum on selected release must not silently fall back'
+
+    $payloadRoot = Join-Path $smokeRoot 'payload'
+    [void][IO.Directory]::CreateDirectory($payloadRoot)
+    $payloadPath = Join-Path $payloadRoot 'Apollo.exe'
+    [IO.File]::WriteAllText($payloadPath, 'payload fixture')
+    $payload = [ordered]@{ 'Apollo.exe' = Get-ReleaseFileRecord $payloadPath }
+    Assert-SmokePayload $payloadRoot $payload
+    $sentinels = New-SmokeSentinels $payloadRoot
+    Assert-SmokePayload $payloadRoot $payload -ExtraFiles @($sentinels.Keys)
+    Assert-SmokeSentinels $payloadRoot $sentinels
+    [IO.File]::WriteAllText((Join-Path $payloadRoot 'keep.txt'), 'changed user content')
+    Assert-Rejected { Assert-SmokeSentinels $payloadRoot $sentinels } 'modified user sentinel'
+    [IO.File]::WriteAllText($payloadPath, 'wrong payload')
+    Assert-Rejected { Assert-SmokePayload $payloadRoot $payload -ExtraFiles @($sentinels.Keys) } 'wrong installed bytes'
+    Assert-Rejected { Assert-SmokeCleanState @() @() $payloadRoot } 'existing installation directory'
+    Assert-Check (Test-Path -LiteralPath $payloadPath) 'Clean-state rejection removed pre-existing files.'
+    if ($IsWindows) {
+        $hostExecutable = (Get-Process -Id $PID).Path
+        Invoke-SmokeProcess $hostExecutable '-NoProfile -NonInteractive -Command "exit 0"' -Scratch $smokeRoot
+        Assert-Rejected { Invoke-SmokeProcess $hostExecutable '-NoProfile -NonInteractive -Command "exit 17"' -Scratch $smokeRoot } 'failed installer process'
+        $timedOut = $false
+        try {
+            Invoke-SmokeProcess $hostExecutable '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 60"' -Scratch $smokeRoot -TimeoutMilliseconds 500
+        } catch [TimeoutException] { $timedOut = $true }
+        Assert-Check $timedOut 'Blocked child did not trigger the bounded timeout.'
+    }
+    Write-Host 'PASS predecessor policy, checksum, payload, sentinel and clean-state rejection; Windows process checks when available'
+
     $builtExecutable = Join-Path $repo 'target/x86_64-pc-windows-msvc/release/apollo.exe'
     if (-not $IsWindows -or -not (Test-Path -LiteralPath $builtExecutable -PathType Leaf)) {
         Write-Host 'SKIP artifact fixtures: run just build-release on Windows first, then rerun this check.'

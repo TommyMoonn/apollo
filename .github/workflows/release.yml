@@ -12,10 +12,6 @@ concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
-env:
-  WINDOWS_TARGET: x86_64-pc-windows-msvc
-  NSIS_VERSION: "3.11"
-
 jobs:
   verify-release:
     name: Verify release commit
@@ -52,11 +48,12 @@ jobs:
               --workflow ci.yml \
               --commit "$GITHUB_SHA" \
               --event push \
+              --branch main \
               --limit 20 \
-              --json databaseId,headSha)
+              --json databaseId,headSha,headBranch,event)
 
             run_id=$(jq -r --arg sha "$GITHUB_SHA" \
-              '[.[] | select(.headSha == $sha)] | sort_by(.databaseId) | last | .databaseId // empty' \
+              '[.[] | select(.headSha == $sha and .headBranch == "main" and .event == "push")] | sort_by(.databaseId) | last | .databaseId // empty' \
               <<<"$runs_json")
 
             if [[ -n "$run_id" ]]; then
@@ -75,147 +72,23 @@ jobs:
 
           echo "Reusing CI run $run_id for tagged commit $GITHUB_SHA."
           gh run watch "$run_id" --exit-status
+          jobs=$(gh api "repos/$GH_REPO/actions/runs/$run_id/jobs?per_page=100")
+          jq -e '[.jobs[] | select(.name == "CI Gate" and .conclusion == "success")] | length == 1' <<<"$jobs" >/dev/null
 
   build:
-    name: Build Windows release assets
+    name: Build and verify Windows release assets
     needs: verify-release
-    runs-on: windows-latest
-    timeout-minutes: 60
     permissions:
       contents: read
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-
-      - name: Validate release metadata
-        shell: pwsh
-        run: >-
-          pwsh -NoProfile -File .\scripts\check-release.ps1
-          --tag "$env:GITHUB_REF_NAME"
-          --require-changelog
-
-      - name: Install pinned Rust toolchain
-        shell: pwsh
-        run: |
-          $match = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"\s*$'
-          if ($match.Count -ne 1) {
-            throw "Expected exactly one Rust toolchain channel in rust-toolchain.toml."
-          }
-
-          $channel = $match.Matches[0].Groups[1].Value
-          rustup toolchain install $channel --profile minimal --target $env:WINDOWS_TARGET
-
-      - name: Restore Cargo cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ env.WINDOWS_TARGET }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-${{ env.WINDOWS_TARGET }}-
-
-      - name: Cache pinned media archive
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: .scratch/media-tools-cache
-          key: media-tools-${{ runner.os }}-${{ hashFiles('distribution/media-tools.json') }}
-
-      - name: Install pinned NSIS compiler
-        shell: pwsh
-        run: |
-          choco install nsis --version $env:NSIS_VERSION --yes --no-progress
-
-          $makensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
-          if (-not (Test-Path -LiteralPath $makensis -PathType Leaf)) {
-            throw "Pinned NSIS compiler was not found after installation: $makensis"
-          }
-
-          $actualVersion = (& $makensis /VERSION).Trim()
-          if ($actualVersion -ne "v$env:NSIS_VERSION") {
-            throw "Expected NSIS v$env:NSIS_VERSION, found '$actualVersion'."
-          }
-
-          "MAKENSIS_PATH=$makensis" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Build Windows GUI release
-        shell: pwsh
-        run: |
-          . ./scripts/WindowsRelease.Common.ps1
-          . ./scripts/check-release.ps1
-          Assert-ReleaseCandidateCheckout -ProjectRoot $PWD.Path -ExpectedSha $env:GITHUB_SHA -IncludeUntracked
-          $version = (Invoke-ReleaseValidation -ProjectRoot $PWD.Path).Version
-          cargo build --locked --release --target $env:WINDOWS_TARGET
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Assert-ReleaseCandidateCheckout -ProjectRoot $PWD.Path -ExpectedSha $env:GITHUB_SHA -IncludeUntracked
-          "APOLLO_CANDIDATE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Stage Windows release assets
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -File .\scripts\stage-windows-release.ps1 `
-            --executable ".\target\$env:WINDOWS_TARGET\release\apollo.exe" `
-            --makensis "$env:MAKENSIS_PATH" `
-            --media-cache ".scratch/media-tools-cache" `
-            --expected-sha "$env:GITHUB_SHA" `
-            --expected-version "$env:APOLLO_CANDIDATE_VERSION"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Verify installed and portable payloads without PATH
-        shell: pwsh
-        run: |
-          $artifacts = @(cargo test --locked --test bundled_media_tools --no-run --message-format=json |
-            ForEach-Object { $_ | ConvertFrom-Json } |
-            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'bundled_media_tools' -and $_.executable })
-          if ($LASTEXITCODE -ne 0 -or $artifacts.Count -ne 1) { throw 'Discovery harness build failed.' }
-          pwsh -NoProfile -File .\tests\scripts\WindowsRelease.Smoke.ps1 `
-            -ReleaseDirectory artifacts/windows -DiscoveryHarness $artifacts[0].executable
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Upload Windows release assets
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: Apollo-windows-x64
-          path: |
-            artifacts/windows/Apollo-Setup-x64.exe
-            artifacts/windows/Apollo-windows-x64.zip
-            artifacts/windows/SHA256SUMS.txt
-            artifacts/windows/release-provenance.json
-          if-no-files-found: error
-          retention-days: 3
-
-  verify-artifacts:
-    name: Independently verify Windows release assets
-    needs: build
-    runs-on: windows-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - name: Check out validated release source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Download Windows release assets
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: Apollo-windows-x64
-          path: artifacts/verified
-      - name: Verify downloaded artifacts
-        shell: pwsh
-        run: |
-          . ./scripts/check-release.ps1
-          $release = Invoke-ReleaseValidation -ProjectRoot $PWD.Path -Tag $env:GITHUB_REF_NAME -RequireChangelog
-          ./scripts/verify-windows-release.ps1 --artifacts-dir artifacts/verified --expected-sha $env:GITHUB_SHA --expected-version $release.Version
+    uses: ./.github/workflows/windows-package.yml
+    with:
+      sha: ${{ github.sha }}
+      validate-source: false
+      release-candidate: true
 
   draft-release:
     name: Create or refresh draft release
-    needs: verify-artifacts
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -231,7 +104,7 @@ jobs:
       - name: Download Windows release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: Apollo-windows-x64
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: release-assets
 
       - name: Verify staged checksums

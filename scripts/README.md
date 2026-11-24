@@ -180,6 +180,18 @@ Install NSIS 3.11 so `makensis.exe` is available on `PATH`, or pass its path exp
 
 The installer is per-user, installs under `%LOCALAPPDATA%\Programs\Apollo`, and creates an Apollo Start Menu shortcut and Installed Apps entry, but no desktop shortcut. Uninstall removes its owned media tools and license files without removing unrelated user files. The installer, uninstaller, installed executable, Start Menu shortcut, and Installed Apps entry use the repository-owned Apollo icon.
 
+### Run native acceptance
+
+```powershell
+just smoke-installer --local --expected-version 0.7.0
+just smoke-installer --expected-sha <sha> --expected-version X.Y.Z --artifacts-dir <path>
+just test-media --media-dir .scratch/dev-media
+```
+
+`smoke-windows-installer.ps1` delegates to `tests/scripts/WindowsRelease.Smoke.ps1`. It verifies staged artifacts before exercising clean install, portable processing, uninstall and a checksum-verified published predecessor. `--upgrade-only` requires an older version instead of a same-version reinstall. `--discovery-harness <path>` reuses a matching prebuilt harness, and `--require-nvenc` adds real GPU success checks. Use a clean Windows x64 user or VM and GitHub CLI access to published Apollo releases. The original application binary and pinned media cache are not required.
+
+`just test-media` uses the same harness against an explicitly selected pair (default `.scratch/dev-media`), without installation. It accepts `--media-dir`, `--discovery-harness` and `--require-nvenc`. Scratch output is isolated under `.scratch/release-smoke-*`; see [Testing](../docs/TESTING.md#windows-artifact-acceptance) for cleanup and failure behavior. Neither recipe is part of `just verify`.
+
 ## Optional tooling smoke check
 
 Run `just test-scripts` (or `pwsh -NoProfile -File tests/scripts/run.ps1`) to check PowerShell syntax, workspace export and review, changed-file transfer and rollback, unsafe ZIP rejection, and cleanup protection in disposable repositories. It reports a failure when a check fails but is not part of `just verify`, CI or release packaging.

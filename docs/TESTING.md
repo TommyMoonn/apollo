@@ -90,19 +90,26 @@ For Upscale changes, exercise preset and custom sizing, CPU and both NVENC codec
 
 ## Windows artifact acceptance
 
-Run against the exact artifacts being reviewed, with the checkout and built `Apollo.exe` matching their revision. The script checks artifact sums, compares every payload byte to the build and a freshly verified offline archive extraction, and verifies installed metadata. It refuses to touch an existing Apollo registration or shortcut, so use a clean Windows user or VM if Apollo is already installed.
+Use a clean Windows x64 user or VM, PowerShell 7, the pinned Rust toolchain, and an authenticated GitHub CLI with read access to Apollo's public releases. Run from the checkout matching the staged artifacts. Neither the original application build nor the cached FFmpeg archive is needed.
 
 ```powershell
-$harness = @(cargo test --locked --test bundled_media_tools --no-run --message-format=json |
-    ForEach-Object { $_ | ConvertFrom-Json } |
-    Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'bundled_media_tools' -and $_.executable })
-if ($LASTEXITCODE -ne 0 -or $harness.Count -ne 1) { throw 'Acceptance harness build failed.' }
-pwsh -NoProfile -File .\tests\scripts\WindowsRelease.Smoke.ps1 `
-    -ReleaseDirectory artifacts/windows -DiscoveryHarness $harness[0].executable
-if ($LASTEXITCODE -ne 0) { throw 'CPU release acceptance failed.' }
+just smoke-installer --local --expected-version 0.7.0
 ```
 
-`-MediaCache <path>` selects a prepopulated cache, defaulting to `.scratch/media-tools-cache`. This check is always offline. The script installs into a unique scratch directory, then uninstalls and verifies owned-file removal, registration cleanup and unrelated-file preservation. It clears PATH only in child processes, not in the developer's shell.
+For a downloaded CI artifact, use its recorded version and SHA with `just smoke-installer --artifacts-dir <path> --expected-sha <sha> --expected-version X.Y.Z`. The command independently verifies the artifact set before installation and builds the existing discovery harness once. Use `--discovery-harness <path>` to reuse a harness already built from the matching checkout. Pass `--upgrade-only` to require a strictly older published release.
+
+The smoke run refuses existing Apollo registration, shortcuts, the default installation directory or a running Apollo process. It uses a unique `.scratch/release-smoke-*` directory, verifies installed file digests against the portable payload, and runs the same CPU and unavailable-NVIDIA cases against each distribution. It checks installed version, registration, shortcut targets, uninstall ownership and preservation of unrelated files. PATH is cleared only for child processes.
+
+After clean installation acceptance, the script downloads the official prior published installer and its checksum from GitHub. It installs that version in another isolated directory, creates unrelated files, runs the candidate without an installation-directory override, and checks the resulting version, location, payload, registration, previously enabled desktop shortcut and retained file contents before uninstalling. For a manual build of the currently published version, the test is a same-version reinstall. If no checksum-verified predecessor is available, upgrade acceptance fails with an explicit blocked reason; it does not substitute an unrelated installer. Scratch files are removed after the run; if ownership of unexpected registration cannot be established, cleanup refuses to delete it and retains the scratch directory for investigation.
+
+For media-only acceptance without an installation or release artifact, stage the pinned pair and run:
+
+```powershell
+just test-media
+just test-media --media-dir 'C:/Media Tools' --require-nvenc
+```
+
+The default pair location is `.scratch/dev-media`. The command copies the selected pair into disposable scratch space and uses the same production-executor harness. It does not modify the original media-tool directory, download a predecessor or touch installer registration. Generated fixtures are removed after the check. Both commands are outside `just verify`.
 
 For both portable and installed payloads, the harness uses Apollo's production discovery, probe, feature executors and output publication with a one-second 320x180/two-audio-track source:
 
@@ -122,13 +129,11 @@ This failure fixture uses the unmodified pinned binary. It proves no-device init
 
 The [build acceptance record](../distribution/media-tools-acceptance.md) identifies the tested baseline: driver 566.14 on an RTX 3060 Laptop GPU, with `ffnvcodec n12.2.72.0-1-g9934f17` defining NVENC API 12.2. This is not the oldest supported driver measurement and does not certify other GPUs. Encoder inventory and `ffmpeg -version` alone cannot establish this baseline.
 
-On that baseline, rerun the same artifact check with mandatory GPU success:
+On that baseline, rerun the same artifact check with mandatory GPU success, substituting the actual version and artifact identity:
 
 ```powershell
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
-pwsh -NoProfile -File .\tests\scripts\WindowsRelease.Smoke.ps1 `
-    -ReleaseDirectory artifacts/windows -DiscoveryHarness $harness[0].executable -RequireNvenc
-if ($LASTEXITCODE -ne 0) { throw 'NVIDIA release acceptance failed.' }
+just smoke-installer --local --expected-version 0.7.0 --require-nvenc
 ```
 
 This adds both successful real NVENC probes, explicit H.264/H.265 Upscale at CQ 16, and Auto choosing NVENC for each codec. Every output is probed for codec/dimensions, and process failure is fatal. Confirm there is no required-NVENC-API-newer-than-driver failure. If a deliberately incompatible-driver machine is available, also record its explicit NVENC diagnostic and Auto CPU result; do not alter a user's driver merely to obtain that evidence.

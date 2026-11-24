@@ -6,232 +6,44 @@ on:
 permissions:
   contents: read
 
-env:
-  WINDOWS_TARGET: x86_64-pc-windows-msvc
-  NSIS_VERSION: "3.11"
-
 jobs:
-  formatting:
-    name: Rust formatting
-    runs-on: windows-latest
-
+  source-validation:
+    name: Find trusted CI for selected revision
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      validate-source: ${{ steps.lookup.outputs.validate-source }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-
-      - name: Install pinned Rust toolchain
-        shell: pwsh
+      - name: Reuse exact successful main-push CI when available
+        id: lookup
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          $match = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"\s*$'
-          if ($match.Count -ne 1) {
-            throw "Expected exactly one Rust toolchain channel in rust-toolchain.toml."
-          }
+          set -euo pipefail
+          runs=$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main&status=success&per_page=100")
+          ids=$(jq -r --arg sha "$GITHUB_SHA" '[.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and .event == "push" and .conclusion == "success") | .id] | .[]' <<<"$runs")
+          for id in $ids; do
+            jobs=$(gh api "repos/$GH_REPO/actions/runs/$id/jobs?per_page=100")
+            if jq -e '[.jobs[] | select(.name == "CI Gate" and .conclusion == "success")] | length == 1' <<<"$jobs" >/dev/null; then
+              echo "Reusing successful CI Gate in run $id for $GITHUB_SHA."
+              echo 'validate-source=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo 'No trusted CI Gate for selected revision; run source checks in packaging.'
+          echo 'validate-source=true' >> "$GITHUB_OUTPUT"
 
-          $channel = $match.Matches[0].Groups[1].Value
-          rustup toolchain install $channel --profile minimal --component rustfmt
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-  clippy:
-    name: Rust Clippy
-    runs-on: windows-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-
-      - name: Install pinned Rust toolchain
-        shell: pwsh
-        run: |
-          $match = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"\s*$'
-          if ($match.Count -ne 1) {
-            throw "Expected exactly one Rust toolchain channel in rust-toolchain.toml."
-          }
-
-          $channel = $match.Matches[0].Groups[1].Value
-          rustup toolchain install $channel --profile minimal --component clippy
-
-      - name: Restore Cargo cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-clippy-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            cargo-clippy-${{ runner.os }}-
-
-      - name: Lint
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
-
-  rust-tests:
-    name: Rust tests
-    runs-on: windows-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-
-      - name: Install pinned Rust toolchain
-        shell: pwsh
-        run: |
-          $match = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"\s*$'
-          if ($match.Count -ne 1) {
-            throw "Expected exactly one Rust toolchain channel in rust-toolchain.toml."
-          }
-
-          $channel = $match.Matches[0].Groups[1].Value
-          rustup toolchain install $channel --profile minimal
-
-      - name: Restore Cargo cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-tests-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            cargo-tests-${{ runner.os }}-
-
-      - name: Test Rust
-        run: cargo test --locked --all-targets
-
-  build:
-    needs:
-      - formatting
-      - clippy
-      - rust-tests
-    runs-on: windows-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-
-      - name: Install pinned Rust toolchain
-        shell: pwsh
-        run: |
-          $match = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"\s*$'
-          if ($match.Count -ne 1) {
-            throw "Expected exactly one Rust toolchain channel in rust-toolchain.toml."
-          }
-
-          $channel = $match.Matches[0].Groups[1].Value
-          rustup toolchain install $channel --profile minimal --target $env:WINDOWS_TARGET
-
-      - name: Restore Cargo cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ env.WINDOWS_TARGET }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-${{ env.WINDOWS_TARGET }}-
-
-      - name: Validate release metadata
-        shell: pwsh
-        run: pwsh -NoProfile -File .\scripts\check-release.ps1
-
-      - name: Cache pinned media archive
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: .scratch/media-tools-cache
-          key: media-tools-${{ runner.os }}-${{ hashFiles('distribution/media-tools.json') }}
-
-      - name: Install pinned NSIS compiler
-        shell: pwsh
-        run: |
-          choco install nsis --version $env:NSIS_VERSION --yes --no-progress
-
-          $makensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
-          if (-not (Test-Path -LiteralPath $makensis -PathType Leaf)) {
-            throw "Pinned NSIS compiler was not found after installation: $makensis"
-          }
-
-          $actualVersion = (& $makensis /VERSION).Trim()
-          if ($actualVersion -ne "v$env:NSIS_VERSION") {
-            throw "Expected NSIS v$env:NSIS_VERSION, found '$actualVersion'."
-          }
-
-          "MAKENSIS_PATH=$makensis" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Build Windows GUI release
-        shell: pwsh
-        run: |
-          . ./scripts/WindowsRelease.Common.ps1
-          . ./scripts/check-release.ps1
-          Assert-ReleaseCandidateCheckout -ProjectRoot $PWD.Path -ExpectedSha $env:GITHUB_SHA -IncludeUntracked
-          $version = (Invoke-ReleaseValidation -ProjectRoot $PWD.Path).Version
-          cargo build --locked --release --target $env:WINDOWS_TARGET
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Assert-ReleaseCandidateCheckout -ProjectRoot $PWD.Path -ExpectedSha $env:GITHUB_SHA -IncludeUntracked
-          "APOLLO_CANDIDATE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Stage Windows release assets
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -File .\scripts\stage-windows-release.ps1 `
-            --executable ".\target\$env:WINDOWS_TARGET\release\apollo.exe" `
-            --makensis "$env:MAKENSIS_PATH" `
-            --media-cache ".scratch/media-tools-cache" `
-            --expected-sha "$env:GITHUB_SHA" `
-            --expected-version "$env:APOLLO_CANDIDATE_VERSION"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Verify installed and portable payloads without PATH
-        shell: pwsh
-        run: |
-          $artifacts = @(cargo test --locked --test bundled_media_tools --no-run --message-format=json |
-            ForEach-Object { $_ | ConvertFrom-Json } |
-            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'bundled_media_tools' -and $_.executable })
-          if ($LASTEXITCODE -ne 0 -or $artifacts.Count -ne 1) { throw 'Discovery harness build failed.' }
-          pwsh -NoProfile -File .\tests\scripts\WindowsRelease.Smoke.ps1 `
-            -ReleaseDirectory artifacts/windows -DiscoveryHarness $artifacts[0].executable
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Upload Windows release assets
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: Apollo-windows-x64
-          path: |
-            artifacts/windows/Apollo-Setup-x64.exe
-            artifacts/windows/Apollo-windows-x64.zip
-            artifacts/windows/SHA256SUMS.txt
-            artifacts/windows/release-provenance.json
-          if-no-files-found: error
-          retention-days: 3
-
-  verify-artifacts:
-    name: Independently verify Windows artifacts
-    needs: build
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - name: Check out build source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Download staged artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: Apollo-windows-x64
-          path: artifacts/verified
-      - name: Verify downloaded artifacts
-        shell: pwsh
-        run: |
-          . ./scripts/check-release.ps1
-          $version = (Invoke-ReleaseValidation -ProjectRoot $PWD.Path).Version
-          ./scripts/verify-windows-release.ps1 --artifacts-dir artifacts/verified --expected-sha $env:GITHUB_SHA --expected-version $version
+  package:
+    needs: source-validation
+    permissions:
+      contents: read
+    uses: ./.github/workflows/windows-package.yml
+    with:
+      sha: ${{ github.sha }}
+      validate-source: ${{ needs.source-validation.outputs.validate-source != 'false' }}
+      release-candidate: false

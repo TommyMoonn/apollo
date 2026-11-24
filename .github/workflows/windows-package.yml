@@ -1,0 +1,199 @@
+name: Windows packaging
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: Exact source commit to build
+        required: true
+        type: string
+      validate-source:
+        description: Run ordinary source checks if no trusted CI result exists
+        required: true
+        type: boolean
+      release-candidate:
+        description: Require candidate release metadata and a cross-version predecessor
+        required: true
+        type: boolean
+    outputs:
+      artifact-id:
+        value: ${{ jobs.verify.outputs.artifact-id }}
+      sha:
+        value: ${{ jobs.package.outputs.sha }}
+      version:
+        value: ${{ jobs.package.outputs.version }}
+      run-id:
+        value: ${{ jobs.verify.outputs.run-id }}
+      run-attempt:
+        value: ${{ jobs.verify.outputs.run-attempt }}
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build and accept Windows packages
+    runs-on: windows-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    env:
+      WINDOWS_TARGET: x86_64-pc-windows-msvc
+      NSIS_VERSION: '3.11'
+      EXPECTED_SHA: ${{ inputs.sha }}
+      RELEASE_CANDIDATE: ${{ inputs.release-candidate }}
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      version: ${{ steps.identity.outputs.version }}
+      sha: ${{ steps.identity.outputs.sha }}
+      run-id: ${{ steps.identity.outputs.run-id }}
+      run-attempt: ${{ steps.identity.outputs.run-attempt }}
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Validate source identity and metadata
+        id: identity
+        shell: pwsh
+        run: |
+          . ./scripts/WindowsRelease.Common.ps1
+          . ./scripts/check-release.ps1
+          Assert-ReleaseCandidateCheckout -ProjectRoot $PWD.Path -ExpectedSha $env:EXPECTED_SHA -IncludeUntracked
+          $release = Invoke-ReleaseValidation -ProjectRoot $PWD.Path
+          if ($env:RELEASE_CANDIDATE -eq 'true') {
+            $release = Invoke-ReleaseValidation -ProjectRoot $PWD.Path -Tag "v$($release.Version)" -RequireChangelog
+          }
+          "version=$($release.Version)" >> $env:GITHUB_OUTPUT
+          "sha=$env:EXPECTED_SHA" >> $env:GITHUB_OUTPUT
+          "run-id=$env:GITHUB_RUN_ID" >> $env:GITHUB_OUTPUT
+          "run-attempt=$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
+      - name: Install pinned Rust and verify host
+        shell: pwsh
+        env:
+          VALIDATE_SOURCE: ${{ inputs.validate-source }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          . ./scripts/WindowsRelease.Common.ps1
+          $channel = Get-ReleaseRustPin $PWD.Path
+          if ($env:RUNNER_ARCH -ne 'X64') { throw 'Expected Windows x64 runner.' }
+          $toolchain = "$channel-$env:WINDOWS_TARGET"
+          $arguments = @('toolchain', 'install', $toolchain, '--profile', 'minimal', '--target', $env:WINDOWS_TARGET)
+          if ($env:VALIDATE_SOURCE -eq 'true') { $arguments += @('--component','rustfmt','--component','clippy') }
+          rustup @arguments
+          $env:RUSTUP_TOOLCHAIN = $toolchain
+          "RUSTUP_TOOLCHAIN=$toolchain" >> $env:GITHUB_ENV
+          $version = rustc --version --verbose
+          $version
+          if ($version -notcontains "release: $channel" -or $version -notcontains "host: $env:WINDOWS_TARGET") { throw 'Rust toolchain identity mismatch.' }
+          cargo --version
+          Write-Host "Runner: $env:RUNNER_OS $env:RUNNER_ARCH ($env:ImageVersion)"
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
+        with:
+          workspaces: . -> target
+          cache-bin: 'false'
+      - name: Validate source when required
+        if: inputs.validate-source
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo fmt --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked --all-targets
+          cargo build --locked
+      - name: Cache pinned media archive
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .scratch/media-tools-cache
+          key: media-tools-${{ runner.os }}-${{ hashFiles('distribution/media-tools.json') }}
+      - name: Install pinned NSIS compiler
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          choco install nsis --version $env:NSIS_VERSION --allow-downgrade --yes --no-progress
+          $makensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
+          if (-not (Test-Path -LiteralPath $makensis -PathType Leaf)) { throw 'NSIS compiler not found.' }
+          $actual = (& $makensis /VERSION).Trim()
+          if ($actual -cne "v$env:NSIS_VERSION") { throw "Unexpected NSIS version: $actual" }
+          "MAKENSIS_PATH=$makensis" >> $env:GITHUB_ENV
+      - name: Build Windows release once
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+      - name: Stage Windows artifacts
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          ./scripts/stage-windows-release.ps1 --executable "target/$env:WINDOWS_TARGET/release/apollo.exe" --makensis $env:MAKENSIS_PATH --media-cache .scratch/media-tools-cache --expected-sha $env:EXPECTED_SHA --expected-version $env:VERSION
+      - name: Run native installed and portable acceptance
+        shell: pwsh
+        timeout-minutes: 25
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Path test-results/release-smoke -Force | Out-Null
+          Start-Transcript -LiteralPath test-results/release-smoke/acceptance.log
+          try {
+            $options = @('--expected-sha', $env:EXPECTED_SHA, '--expected-version', $env:VERSION)
+            if ($env:RELEASE_CANDIDATE -eq 'true') { $options += '--upgrade-only' }
+            ./scripts/smoke-windows-installer.ps1 @options
+          } finally { Stop-Transcript }
+      - name: Upload acceptance evidence
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/release-smoke/acceptance.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload verified staging set
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Apollo-${{ steps.identity.outputs.version }}-windows-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/windows/Apollo-Setup-x64.exe
+            artifacts/windows/Apollo-windows-x64.zip
+            artifacts/windows/SHA256SUMS.txt
+            artifacts/windows/release-provenance.json
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    name: Independently verify downloaded Windows artifacts
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.verified.outputs.artifact-id }}
+      run-id: ${{ needs.package.outputs.run-id }}
+      run-attempt: ${{ needs.package.outputs.run-attempt }}
+    steps:
+      - name: Check out the matching revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.package.outputs.sha }}
+          persist-credentials: false
+      - name: Download immutable build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.package.outputs.artifact-id }}
+          path: artifacts/verified
+      - name: Verify artifact identity and integrity
+        id: verified
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ needs.package.outputs.sha }}
+          VERSION: ${{ needs.package.outputs.version }}
+          ARTIFACT_ID: ${{ needs.package.outputs.artifact-id }}
+          BUILD_RUN_ID: ${{ needs.package.outputs.run-id }}
+          BUILD_RUN_ATTEMPT: ${{ needs.package.outputs.run-attempt }}
+        run: |
+          if ($env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or $env:BUILD_RUN_ID -cne $env:GITHUB_RUN_ID) { throw 'Missing or unexpected build artifact identity.' }
+          ./scripts/verify-windows-release.ps1 --artifacts-dir artifacts/verified --expected-sha $env:EXPECTED_SHA --expected-version $env:VERSION
+          "artifact-id=$env:ARTIFACT_ID" >> $env:GITHUB_OUTPUT
+          "Verified artifact $env:ARTIFACT_ID, version $env:VERSION, SHA $env:EXPECTED_SHA (run $env:BUILD_RUN_ID attempt $env:BUILD_RUN_ATTEMPT)" >> $env:GITHUB_STEP_SUMMARY

@@ -171,3 +171,21 @@ verify-release *flags:
 release-stage:
     cargo build --locked --release --target x86_64-pc-windows-msvc
     pwsh -NoProfile -File .\scripts\stage-windows-release.ps1
+
+# Run installed and portable acceptance against verified artifacts in an isolated user.
+[group("release")]
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+smoke-installer *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/smoke-windows-installer.ps1 @args
+
+# Run the real media harness against a staged pair (no installation).
+[group("verification")]
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+test-media *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/smoke-windows-installer.ps1 --media-only @args

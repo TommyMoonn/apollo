@@ -16,15 +16,18 @@ The version update is transactional: if Cargo fails or modifies the lockfile bey
 
 ## Build and inspect packages
 
-Run the `Windows Installer Build` workflow manually for a nonpublishing build, or use the local Windows x64 development environment with NSIS 3.11:
+Run the `Windows Installer Build` workflow manually for a nonpublishing build of the selected branch or tag revision. It reuses successful main-push `CI Gate` evidence for that exact SHA when available; otherwise it runs the ordinary source checks once. Manual and tagged release builds call the same `windows-package.yml` workflow, which builds the Windows release once, stages and accepts it, uploads the four fixed files, and independently verifies the downloaded artifact by ID. The workflow summary identifies the version, SHA, artifact ID, run ID and attempt. Acceptance logs are uploaded separately; neither the logs nor provenance are published as release assets.
+
+For a local build, use the local Windows x64 development environment with NSIS 3.11:
 
 ```powershell
 just build-release
 just stage-release
 just verify-release --local --expected-version 0.7.0
+just smoke-installer --local --expected-version 0.7.0
 ```
 
-The commands build the locked release executable, stage the artifacts and verify them without another build. Substitute the current Cargo version in the verification command. The three public files in `artifacts/windows/` are:
+The commands build the locked release executable, stage and independently verify the artifacts, and run native acceptance without rebuilding the application. The smoke command requires a clean Windows user or VM and an official published installer with its checksum. Manual builds at the current published version test a same-version reinstall; tagged releases require an older version. See [Testing](TESTING.md#windows-artifact-acceptance) for isolation and GPU options. Substitute the current Cargo version in the verification command. The three public files in `artifacts/windows/` are:
 
 - `Apollo-Setup-x64.exe`
 - `Apollo-windows-x64.zip`
