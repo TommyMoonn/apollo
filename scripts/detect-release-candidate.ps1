@@ -73,11 +73,11 @@ function Get-CandidateRemoteTag([string]$ProjectRoot, [string]$Tag) {
     return $null
 }
 
-# The only GitHub command seam. All callers use reads (including the GraphQL query).
+# Shared GitHub API transport. Detection uses only reads (including the GraphQL query).
 function Invoke-CandidateGitHub([string[]]$Arguments) {
     $PSNativeCommandUseErrorActionPreference = $false
     $output = & gh api --hostname github.com @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "GitHub release lookup failed (exit $LASTEXITCODE): $($output -join "`n")" }
+    if ($LASTEXITCODE -ne 0) { throw "GitHub API request failed (exit $LASTEXITCODE): $($output -join "`n")" }
     return ($output -join "`n")
 }
 
@@ -99,7 +99,7 @@ function Assert-RemoteReleaseRecord($Release) {
     }
 }
 
-function Get-CandidateRemoteRelease([string]$Repository, [string]$Tag, [string]$Commit, [AllowNull()][string]$TagTarget) {
+function Get-CandidateRemoteRelease([string]$Repository, [string]$Tag, [string]$Commit, [AllowNull()][string]$TagTarget, [ref]$ReleaseRecords) {
     $owner, $name = $Repository.Split('/')
     # Exact pending-tag lookup also resolves drafts whose REST tag is untagged-*.
     $query = 'query($owner: String!, $name: String!, $tag: String!) { repository(owner: $owner, name: $name) { nameWithOwner release(tagName: $tag) { databaseId isDraft } } }'
@@ -122,6 +122,7 @@ function Get-CandidateRemoteRelease([string]$Repository, [string]$Tag, [string]$
     # exposes duplicate or disconnected draft identities. Never adopt by title.
     $pages = Read-CandidateGitHubJson @('--method', 'GET', '--paginate', '--slurp', "repos/$Repository/releases?per_page=100")
     if ($pages -isnot [array] -or $pages.Count -eq 0) { throw 'Invalid GitHub release list.' }
+    $allReleases = [Collections.Generic.List[object]]::new()
     $seen = [Collections.Generic.HashSet[long]]::new()
     $matchingReleases = [Collections.Generic.List[object]]::new()
     foreach ($page in $pages) {
@@ -129,6 +130,7 @@ function Get-CandidateRemoteRelease([string]$Repository, [string]$Tag, [string]$
         foreach ($release in $page) {
             Assert-RemoteReleaseRecord $release
             if (-not $seen.Add($release['id'])) { throw 'Duplicate GitHub release ID.' }
+            $allReleases.Add($release)
             if ($release['tag_name'] -ceq $Tag -or
                 ($release['draft'] -and $release['name'] -cin @("Apollo $Tag", $Tag)) -or
                 ($null -ne $exact -and $release['id'] -eq $exact['databaseId'])) {
@@ -136,6 +138,7 @@ function Get-CandidateRemoteRelease([string]$Repository, [string]$Tag, [string]$
             }
         }
     }
+    if ($null -ne $ReleaseRecords) { $ReleaseRecords.Value = $allReleases.ToArray() }
     if ($null -eq $exact) {
         if ($matchingReleases.Count -ne 0) { throw "Release $Tag has inconsistent or ambiguous identity." }
         return $null
@@ -155,7 +158,7 @@ function Get-CandidateRemoteRelease([string]$Repository, [string]$Tag, [string]$
     return $match
 }
 
-function Find-ReleaseCandidate([string]$ProjectRoot, [string]$Commit, [string]$Repository) {
+function Get-LocalReleaseCandidate([string]$ProjectRoot, [string]$Commit, [string]$Repository) {
     $root = Resolve-RepositoryRoot $ProjectRoot
     Assert-CandidateCheckout $root $Commit $Repository
     Assert-CandidateTrackedFiles $root $Commit @('Cargo.toml', 'Cargo.lock') -CheckWorktree
@@ -174,10 +177,18 @@ function Find-ReleaseCandidate([string]$ProjectRoot, [string]$Commit, [string]$R
     $tag = "v$current"
     Assert-CandidateTrackedFiles $root $Commit @('CHANGELOG.md', "release-notes/$tag.md") -CheckWorktree
     $null = Invoke-ReleaseValidation -ProjectRoot $root -Tag $tag -RequireChangelog
+    return [ordered]@{ candidate = $true; version = $current; sha = $Commit; reason = '' }
+}
+
+function Find-ReleaseCandidate([string]$ProjectRoot, [string]$Commit, [string]$Repository) {
+    $root = Resolve-RepositoryRoot $ProjectRoot
+    $result = Get-LocalReleaseCandidate $root $Commit $Repository
+    if (-not $result.candidate) { return $result }
+    $tag = "v$($result.version)"
     $target = Get-CandidateRemoteTag $root $tag
     if ($null -ne $target -and $target -cne $Commit) { throw "Remote tag $tag points to $target, not $Commit." }
     $null = Get-CandidateRemoteRelease $Repository $tag $Commit $target
-    return [ordered]@{ candidate = $true; version = $current; sha = $Commit; reason = '' }
+    return $result
 }
 
 function Invoke-DetectReleaseCandidateCli {

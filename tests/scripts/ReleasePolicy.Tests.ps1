@@ -19,7 +19,7 @@ function Assert-Rejected([scriptblock]$Action, [string]$Case) {
 
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('apollo-release-policy-' + [guid]::NewGuid().ToString('N'))
 $environment = @{}
-foreach ($name in @('GITHUB_REF', 'GITHUB_REF_TYPE', 'GITHUB_REF_NAME', 'GITHUB_REPOSITORY', 'CARGO_NET_OFFLINE')) {
+foreach ($name in @('GITHUB_REF', 'GITHUB_REF_TYPE', 'GITHUB_REF_NAME', 'GITHUB_REPOSITORY', 'GH_TOKEN', 'CARGO_NET_OFFLINE')) {
     $environment[$name] = [Environment]::GetEnvironmentVariable($name)
 }
 try {
@@ -27,6 +27,8 @@ try {
         [Environment]::SetEnvironmentVariable($name, $null)
     }
     $env:CARGO_NET_OFFLINE = 'true'
+    # Fixtures must never inherit a real publication credential.
+    $env:GH_TOKEN = 'apollo-fixture-not-a-token'
     $current = Invoke-ReleaseValidation -ProjectRoot $repo
     $null = Invoke-ReleaseValidation -ProjectRoot $repo -Tag "v$($current.Version)" -RequireChangelog
     Write-Host 'PASS current repository metadata and canonical note'
@@ -128,10 +130,11 @@ fixture-dep = { path = "dep" }
     # Use real Git commits and local tag objects. Substitute only the remote
     # transport: ls-remote reads the fixture itself, and gh returns fixture JSON.
     & {
-        . (Join-Path $repo 'scripts/detect-release-candidate.ps1')
+        . (Join-Path $repo 'scripts/publish-release.ps1')
+        . (Join-Path $repo 'scripts/stage-windows-release.ps1')
         $history = Join-Path $fixture 'candidate-history'
         $null = New-Item -ItemType Directory -Path $history, (Join-Path $history 'release-notes') -Force
-        $identity = 'TommyMoonn/apollo'
+        $identity = 'apollo-release-fixture/apollo'
         $state = @{ calls = 0; exact = $null; records = @(); fail = $false; malformed = $false; listFailure = $false; invalidList = $false; gitFailure = $false }
         function GitFixture([string[]]$Arguments) {
             (Invoke-RepositoryGit -ProjectRoot $history -Arguments $Arguments).StdOut.Trim()
@@ -179,6 +182,11 @@ fixture-dep = { path = "dep" }
         $null = GitFixture @('config', 'tag.gpgsign', 'false')
         $null = GitFixture @('config', 'core.hooksPath', (Join-Path $fixture 'no-hooks'))
         $null = GitFixture @('remote', 'add', 'origin', "https://github.com/$identity.git")
+        foreach ($name in @('LICENSE','THIRD_PARTY_NOTICES.md','rust-toolchain.toml','distribution/media-tools.json')) {
+            $destination = Join-Path $history $name
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination))
+            Copy-Item -LiteralPath (Join-Path $repo $name) -Destination $destination
+        }
         Write-FixtureVersion '0.9.0'
         $rootCommit = Commit-Fixture 'root'
         Assert-Rejected { Find-ReleaseCandidate $history $rootCommit $identity } 'root commit'
@@ -266,6 +274,244 @@ fixture-dep = { path = "dep" }
         Assert-Rejected $detect 'failed Git tag lookup'
         $state.gitFailure = $false
         Assert-Check ((& $detect).candidate) 'Confirmed missing tag and release were rejected.'
+        # Exercise the actual publisher with a real checkout, ZIP, checksums and provenance.
+        # Replace only GitHub transport and native PE inspection for the synthetic executable.
+        & {
+            $version = '0.10.0'
+            $tag = "v$version"
+            $body = Read-CandidateGit $history @('show', "${sha}:release-notes/$tag.md")
+            $artifacts = Join-Path $fixture 'publisher-artifacts'
+            $payloadDirectory = Join-Path $fixture 'publisher-payload'
+            $remoteDirectory = Join-Path $fixture 'publisher-remote'
+            foreach ($dir in @($artifacts, $payloadDirectory, $remoteDirectory)) { [void][IO.Directory]::CreateDirectory($dir) }
+            $mediaPath = Join-Path $history 'distribution/media-tools.json'
+            $manifest = Read-MediaToolsManifest $mediaPath
+            $sources = [ordered]@{}
+            foreach ($name in (Get-WindowsPayloadPaths $manifest)) {
+                $path = Join-Path $payloadDirectory $name
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))
+                switch -CaseSensitive ($name) {
+                    'LICENSE' { Copy-Item -LiteralPath (Join-Path $history $name) -Destination $path }
+                    'THIRD_PARTY_NOTICES.md' { Copy-Item -LiteralPath (Join-Path $history $name) -Destination $path }
+                    'licenses/ffmpeg/media-tools.json' { Copy-Item -LiteralPath $mediaPath -Destination $path }
+                    default { [IO.File]::WriteAllText($path, "synthetic payload: $name") }
+                }
+                $sources[$name] = $path
+            }
+            function Assert-ApolloResourceVersion([string]$Path, [string]$Version) {
+                Assert-Check ($Version -ceq '0.10.0' -and [IO.File]::ReadAllText($Path) -ceq 'synthetic payload: Apollo.exe') 'Wrong synthetic executable supplied to resource inspection.'
+            }
+            New-WindowsReleaseZip -ZipPath (Join-Path $artifacts 'Apollo-windows-x64.zip') -PayloadSources $sources
+            [IO.File]::WriteAllText((Join-Path $artifacts 'Apollo-Setup-x64.exe'), 'synthetic installer')
+            $payloadRecords = [ordered]@{}
+            foreach ($name in $sources.Keys) { $payloadRecords[$name] = Get-ReleaseFileRecord $sources[$name] }
+            $assetRecords = [ordered]@{}
+            foreach ($name in @('Apollo-Setup-x64.exe','Apollo-windows-x64.zip')) { $assetRecords[$name] = Get-ReleaseFileRecord (Join-Path $artifacts $name) }
+            $sumPath = Join-Path $artifacts 'SHA256SUMS.txt'
+            $sums = (($assetRecords.Keys | ForEach-Object { "$($assetRecords[$_].sha256)  $_" }) -join "`n") + "`n"
+            [IO.File]::WriteAllText($sumPath, $sums)
+            $assetRecords['SHA256SUMS.txt'] = Get-ReleaseFileRecord $sumPath
+            $provenancePath = Join-Path $artifacts 'release-provenance.json'
+            $provenance = [ordered]@{
+                schemaVersion = 1; candidateSha = $sha; version = $version
+                target = 'x86_64-pc-windows-msvc'; rustVersion = Get-ReleaseRustPin $history; nsisVersion = '3.11'
+                mediaArchive = [ordered]@{ filename = $manifest.archive.filename; url = $manifest.archive.url; sha256 = $manifest.archive.sha256; buildIdentity = $manifest.buildIdentity }
+                assets = $assetRecords; payload = $payloadRecords
+            }
+            $json = ConvertTo-Json -InputObject $provenance -Depth 8
+            [IO.File]::WriteAllText($provenancePath, $json)
+            $remote = @{ release = $null; other = @(); mode = ''; writes = [Collections.Generic.List[string]]::new(); nextAsset = 100; downloads = 0 }
+            function Reset-PublisherFixture {
+                if ((GitFixture @('tag','--list',$tag)) -ceq $tag) { $null = GitFixture @('tag','-d',$tag) }
+                $remote.release = $null; $remote.other = @(); $remote.mode = ''
+                $remote.writes.Clear(); $remote.downloads = 0
+            }
+            function New-PublisherDraft {
+                return @{ id = 42; draft = $true; prerelease = $false; tag_name = 'untagged-aabb'; name = "Apollo $tag"; body = $body; target_commitish = $sha; assets = @() }
+            }
+            function Add-RemoteFixtureAsset([string]$Path) {
+                $name = [IO.Path]::GetFileName($Path)
+                if (@($remote.release.assets | Where-Object { $_.name -ceq $name }).Count) { throw 'Fixture refuses replacement.' }
+                $id = $remote.nextAsset
+                $remote.nextAsset++
+                $destination = Join-Path $remoteDirectory "$id.bin"
+                Copy-Item -LiteralPath $Path -Destination $destination
+                $record = Get-ReleaseFileRecord $destination
+                $remote.release.assets += @{ id = $id; name = $name; size = $record.size; digest = "sha256:$($record.sha256)"; state = 'uploaded' }
+            }
+            function Invoke-CandidateGitHub([string[]]$Arguments) {
+                if ($remote.mode -ceq 'api-error') { throw 'Fixture API unavailable.' }
+                if ($Arguments[0] -ceq 'graphql') {
+                    $exact = if ($null -ne $remote.release) { @{ databaseId = $remote.release.id; isDraft = $remote.release.draft } } else { $null }
+                    return (ConvertTo-Json -InputObject @{ data = @{ repository = @{ nameWithOwner = $identity; release = $exact } } } -Depth 8 -Compress)
+                }
+                if ($Arguments -ccontains '--slurp' -and $Arguments -ccontains "repos/$identity/releases?per_page=100") {
+                    if ($remote.mode -ceq 'bad-list') { return '{}' }
+                    $records = @($remote.other)
+                    if ($null -ne $remote.release) { $records += $remote.release }
+                    return (ConvertTo-Json -InputObject (,@($records)) -Depth 12 -Compress)
+                }
+                # All mutation payloads come from the actual script's temporary JSON input.
+                if ($Arguments.Count -ne 5 -or $Arguments[1] -cne '--method' -or $Arguments[3] -cne '--input') { throw 'Unexpected GitHub request in publication fixture.' }
+                $request = Get-Content -Raw -LiteralPath $Arguments[4] | ConvertFrom-Json -AsHashtable
+                switch -CaseSensitive ("$($Arguments[2]) $($Arguments[0])") {
+                    "POST repos/$identity/git/refs" {
+                        Assert-Check ($request.ref -ceq "refs/tags/$tag" -and $request.sha -ceq $sha) 'Incorrect tag mutation.'
+                        $remote.writes.Add('tag')
+                        if ($remote.mode -ceq 'tag-before') { throw 'Tag request failed before creation.' }
+                        $null = GitFixture @('tag',$tag,$sha)
+                        if ($remote.mode -ceq 'tag-after') { throw 'Tag response lost.' }
+                    }
+                    "POST repos/$identity/releases" {
+                        Assert-Check ($request.tag_name -ceq $tag -and $request.target_commitish -ceq $sha -and $request.draft -eq $true -and $request.body -ceq $body -and $request.name -ceq "Apollo $tag") 'Incorrect draft mutation.'
+                        Assert-Check ($null -eq $remote.release) 'Duplicate draft creation.'
+                        $remote.writes.Add('draft')
+                        $remote.release = New-PublisherDraft
+                        if ($remote.mode -ceq 'draft-after') { throw 'Draft response lost.' }
+                        return (ConvertTo-Json -InputObject $remote.release -Depth 8 -Compress)
+                    }
+                    "PATCH repos/$identity/releases/42" {
+                        Assert-Check ($remote.release.draft -and $request.draft -eq $false -and $request.tag_name -ceq $tag -and $remote.release.assets.Count -eq 3) 'Unsafe publication mutation.'
+                        $remote.writes.Add('publish')
+                        $remote.release.draft = $false; $remote.release.tag_name = $tag
+                        if ($remote.mode -ceq 'publish-after') { throw 'Publication response lost.' }
+                        return (ConvertTo-Json -InputObject $remote.release -Depth 8 -Compress)
+                    }
+                    default { throw 'Unexpected/destructive mutation in publication fixture.' }
+                }
+                return '{}'
+            }
+            function Send-PublicationAsset([string]$Repository, [long]$ReleaseId, [string]$Path) {
+                Assert-Check ($Repository -ceq $identity -and $ReleaseId -eq 42 -and $remote.release.draft) 'Wrong upload destination.'
+                $remote.writes.Add("upload:$([IO.Path]::GetFileName($Path))")
+                if ($remote.mode -ceq 'upload-before') { throw 'Upload failed before creation.' }
+                Add-RemoteFixtureAsset $Path
+                if ($remote.mode -ceq 'upload-after') { throw 'Upload response lost.' }
+                if ($remote.mode -ceq 'bad-upload') { $remote.release.assets[-1].digest = 'sha256:wrong' }
+                if ($remote.mode -ceq 'moved-tag') {
+                    # Simulate an external writer; the publisher must not repair the tag.
+                    $null = GitFixture @('tag','-f',$tag,$ordinary)
+                }
+            }
+            function Get-PublicationAssetDigest([string]$Repository, [long]$AssetId) {
+                Assert-Check ($Repository -ceq $identity) 'Wrong download repository.'
+                $remote.downloads++
+                return Get-ReleaseFileRecord (Join-Path $remoteDirectory "$AssetId.bin")
+            }
+            $publish = { Invoke-ReleasePublication $history $sha $version $identity $artifacts }
+            function Assert-PublisherNoWrites([scriptblock]$Action, [string]$Case) {
+                $before = $remote.writes.Count
+                Assert-Rejected $Action $Case
+                Assert-Check ($remote.writes.Count -eq $before) "$Case attempted a remote write."
+            }
+            function Assert-PublisherComplete {
+                Assert-Check ($null -ne $remote.release -and -not $remote.release.draft -and $remote.release.assets.Count -eq 3 -and (GitFixture @('rev-list','-n','1',$tag)) -ceq $sha) 'Expected a complete published release at the candidate commit.'
+            }
+
+            Reset-PublisherFixture
+            Assert-PublisherNoWrites { Invoke-ReleasePublication $history $ordinary $version $identity $artifacts } 'wrong SHA'
+            Assert-PublisherNoWrites { Invoke-ReleasePublication $history $sha '0.10.1' $identity $artifacts } 'wrong version'
+            $null = GitFixture @('checkout','--detach',$ordinary)
+            Assert-PublisherNoWrites { Invoke-ReleasePublication $history $ordinary '0.9.0' $identity $artifacts } 'unchanged version'
+            $null = GitFixture @('checkout','main')
+            [IO.File]::WriteAllText($sumPath, 'bad checksum')
+            Assert-PublisherNoWrites $publish 'invalid checksums'
+            [IO.File]::WriteAllText($sumPath, $sums)
+            [IO.File]::WriteAllText($provenancePath, $json.Replace($sha,$ordinary))
+            Assert-PublisherNoWrites $publish 'wrong provenance SHA'
+            [IO.File]::WriteAllText($provenancePath, $json)
+            $null = GitFixture @('tag',$tag,$ordinary)
+            Assert-PublisherNoWrites $publish 'conflicting tag'
+            Reset-PublisherFixture
+            foreach ($mode in @('api-error','bad-list')) {
+                $remote.mode = $mode
+                Assert-PublisherNoWrites $publish $mode
+            }
+            Reset-PublisherFixture
+            $remote.other = @(@{ id = 77; draft = $false; prerelease = $false; tag_name = 'v0.11.0'; name = 'Apollo v0.11.0'; target_commitish = $ordinary })
+            Assert-PublisherNoWrites $publish 'higher stable version already published'
+
+            foreach ($mode in @('', 'tag-after', 'draft-after')) {
+                Reset-PublisherFixture
+                $remote.mode = $mode
+                & $publish
+                Assert-PublisherComplete
+                Assert-Check ($remote.writes.Count -eq 6) 'Expected only tag, draft, three assets and publication.'
+                $remote.writes.Clear()
+                & $publish
+                Assert-Check ($remote.writes.Count -eq 0) 'Matching published replay performed writes.'
+            }
+            # Even if a newer release exists, a byte-identical published replay is a no-op.
+            $remote.other = @(@{ id = 77; draft = $false; prerelease = $false; tag_name = 'v0.11.0'; name = 'Apollo v0.11.0'; target_commitish = $ordinary })
+            & $publish
+            Assert-Check ($remote.writes.Count -eq 0) 'Older matching published replay wrote remote state.'
+            $remote.release.body += 'untracked change'
+            Assert-PublisherNoWrites $publish 'conflicting published body'
+            $remote.release.body = $body
+            $remote.release.assets[0].digest = 'sha256:wrong'
+            Assert-PublisherNoWrites $publish 'conflicting published asset'
+
+            Reset-PublisherFixture
+            $remote.mode = 'tag-before'
+            Assert-Rejected $publish 'interrupted tag creation before write'
+            Assert-Check ($null -eq $remote.release -and $remote.writes.Count -eq 1) 'Failed tag creation continued to draft creation.'
+            $remote.mode = ''
+            & $publish
+            Assert-PublisherComplete
+
+            foreach ($mode in @('upload-before','upload-after','publish-after')) {
+                Reset-PublisherFixture
+                $remote.mode = $mode
+                Assert-Rejected $publish $mode
+                Assert-Check ($null -ne $remote.release) 'Interrupted operation discarded the release.'
+                $priorAssets = @($remote.release.assets | ForEach-Object { $_.id })
+                $remote.mode = ''; $remote.writes.Clear()
+                & $publish
+                Assert-PublisherComplete
+                foreach ($id in $priorAssets) { Assert-Check ($id -in @($remote.release.assets | ForEach-Object { $_.id })) 'Retry replaced an existing asset.' }
+                if ($mode -ceq 'publish-after') { Assert-Check ($remote.writes.Count -eq 0) 'Lost publication response caused further writes.' }
+            }
+
+            Reset-PublisherFixture
+            $remote.mode = 'moved-tag'
+            Assert-Rejected $publish 'tag moved after upload'
+            Assert-Check ($remote.release.draft -and (GitFixture @('rev-list','-n','1',$tag)) -ceq $ordinary -and $remote.writes -cnotcontains 'publish') 'Publisher repaired a conflicting tag or published after the tag moved.'
+            $remote.mode = ''
+            Assert-PublisherNoWrites $publish 'stale tag on retry'
+
+            Reset-PublisherFixture
+            $remote.mode = 'bad-upload'
+            Assert-Rejected $publish 'uploaded digest failed verification'
+            Assert-Check ($remote.release.draft -and $remote.release.assets.Count -eq 1 -and $remote.writes -cnotcontains 'publish') 'Failed verification published a draft.'
+            $remote.mode = ''
+            Assert-PublisherNoWrites $publish 'conflicting partial upload'
+
+            Reset-PublisherFixture
+            $null = GitFixture @('tag','-a',$tag,'-m','fixture tag',$sha)
+            $remote.release = New-PublisherDraft
+            Add-RemoteFixtureAsset (Join-Path $artifacts 'Apollo-Setup-x64.exe')
+            $remote.release.assets[0].digest = $null
+            $remote.release.assets += @{ id = 999; name = 'unexpected.bin'; size = 1; state = 'uploaded'; digest = 'sha256:wrong' }
+            Assert-PublisherNoWrites $publish 'extra draft asset'
+            $remote.release.assets = @($remote.release.assets[0])
+            $remote.release.assets[0].state = 'starter'
+            Assert-PublisherNoWrites $publish 'incomplete starter asset'
+            $remote.release.assets[0].state = 'uploaded'
+            $remote.release.name = 'Wrong title'
+            Assert-PublisherNoWrites $publish 'conflicting draft title'
+            $remote.release.name = "Apollo $tag"
+            $remote.other = @(@{ id = 88; draft = $true; prerelease = $false; tag_name = 'untagged-bbcc'; name = "Apollo $tag"; target_commitish = $sha })
+            Assert-PublisherNoWrites $publish 'ambiguous draft identity'
+            $remote.other = @()
+            & $publish
+            Assert-PublisherComplete
+            Assert-Check ($remote.downloads -gt 0 -and $remote.writes.Count -eq 3 -and $remote.writes -cnotcontains 'upload:Apollo-Setup-x64.exe') 'Existing digest-less asset was not verified and reused.'
+            [IO.File]::WriteAllText((Join-Path $remoteDirectory "$($remote.release.assets[0].id).bin"), 'corrupt downloaded asset')
+            Assert-PublisherNoWrites $publish 'downloaded asset bytes do not match'
+            Reset-PublisherFixture
+            Write-Host 'PASS publisher state transitions, interrupted operations, asset reconciliation and no-write conflicts'
+        }
+
         Write-FixtureVersion '0.9.0'
         $down = Commit-Fixture 'downgrade'
         Assert-Rejected { Find-ReleaseCandidate $history $down $identity } 'downgrade'

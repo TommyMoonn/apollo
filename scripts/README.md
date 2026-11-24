@@ -128,6 +128,10 @@ just detect-release-candidate SHA TommyMoonn/apollo
 
 The direct equivalent is `pwsh -NoProfile -File scripts/detect-release-candidate.ps1 SHA TommyMoonn/apollo`; replace `SHA` with the full lowercase checkout SHA. Use `--project <path>` for an alternate clean checkout with complete history. The script also accepts `--commit` and `--repo` instead of positional arguments. It checks stable first-parent version transitions, candidate metadata and exact remote tag/release identity; an increase requires authenticated `gh` access with release visibility. GitHub may hide drafts from restricted credentials, so publication must recheck identity with its authorized credential. JSON and optional `GITHUB_OUTPUT` fields report `candidate`, `version`, `sha` and `reason`. Failed checks exit nonzero without emitting a candidate. It neither creates tags/releases nor checks CI authorization. See [Releasing](../docs/RELEASING.md#detect-release-candidates-read-only).
 
+### Publish a verified candidate (workflow-only)
+
+`publish-release.ps1` is reserved for the forthcoming authorized publication job. It accepts `--commit`, `--version`, `--repo`, `--artifacts-dir` and optional `--project`. It requires GitHub Actions repository context, `GH_TOKEN`, a clean checkout with full history and the original independently verified Windows artifacts. It verifies local candidate metadata and artifact integrity again, resolves the exact remote tag and draft, reconciles assets by digest, and publishes only a complete matching release. A published replay performs no writes. There is no Just recipe or local publishing procedure; use [Publication recovery](../docs/RELEASING.md#publication-recovery-forthcoming-automatic-workflow) for conflict and retry policy. The current tag-based workflow remains active until cutover.
+
 ### Set the release version
 
 ```powershell

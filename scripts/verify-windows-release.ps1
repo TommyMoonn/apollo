@@ -40,7 +40,7 @@ function Assert-ReleaseRecord($Record, $Actual, [string]$Name) {
 }
 
 function Assert-WindowsReleaseArtifacts {
-    param([string]$ProjectRoot, [string]$ArtifactsDirectory, [string]$ExpectedVersion, [string]$ExpectedSha, [switch]$Local)
+    param([string]$ProjectRoot, [string]$ArtifactsDirectory, [string]$ExpectedVersion, [string]$ExpectedSha, [switch]$Local, [switch]$PassThru)
     Assert-StableReleaseVersion $ExpectedVersion
     $release = Invoke-ReleaseValidation -ProjectRoot $ProjectRoot
     if ($release.Version -cne $ExpectedVersion) { throw 'Expected release version does not match the checkout.' }
@@ -133,6 +133,7 @@ function Assert-WindowsReleaseArtifacts {
     } finally { Remove-Item -LiteralPath $scratch -Recurse -Force }
     Write-CliSuccess 'Windows release artifacts verified'
     if ($Local) { Write-CliWarning 'Local artifact set; no candidate identity or publication eligibility asserted.' }
+    if ($PassThru) { return $provenance }
 }
 
 function Invoke-VerifyWindowsReleaseCli {

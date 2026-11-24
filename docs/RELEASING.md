@@ -60,3 +60,13 @@ The following procedure remains active until the automatic release workflow repl
 3. Complete the manual hardware acceptance in [Testing](TESTING.md), using the actual staged artifacts. Resolve any failed acceptance before publication. Publish the draft only after the required checks and review succeed.
 
 The current workflow does not yet provide automatic candidate detection or retry-safe asset reconciliation. Do not overwrite conflicting published artifacts or move a release tag to recover from a failed build. Investigate the failed run and coordinate recovery with the owner.
+
+## Publication recovery (forthcoming automatic workflow)
+
+The publisher is implemented but is not connected to the active tag workflow yet. F03.6 will supply the exact green main revision, independently verified artifact set and authorized GitHub Actions token. The publication entry point is reserved for that job; there is no local publication recipe.
+
+Publication revalidates the candidate and the original artifact bytes before writing. It creates a missing tag at the candidate SHA, resolves the matching draft by its exact tag and release ID, and uploads only missing assets. Existing assets must match the expected names, sizes and SHA-256 digests. If GitHub does not supply a digest, the publisher downloads and hashes the asset. It requires the exact tracked note and `Apollo vX.Y.Z` title, verifies the complete draft before publication, and verifies the published release again afterward. The publisher rejects a new candidate if a higher stable version has already been published. A matching already-published release is a no-op, even if a newer version exists.
+
+After an interrupted run, preserve the original candidate SHA and verified artifact set. Resume through the authorized workflow using those same bytes; rebuilding can produce different digests. A matching existing tag, draft or uploaded asset is reused. A lost publication response can be resolved by replaying the candidate and verifying the already-published release.
+
+Stop and request owner review if the tag, release identity, title, body or asset bytes conflict, if a remote lookup is inconclusive, or if the original verified artifacts are unavailable. A failed upload can leave an empty `starter` asset; the publisher treats it as a conflict rather than deleting or replacing it. Review the failure and the recorded digests before any separately authorized repair. Never move a tag or overwrite a published release to recover a run. The publisher does not delete remote state or edit conflicting drafts. The future workflow must serialize publication across versions; its concurrency group does not prevent external owner changes, so repository tag protections still matter.
