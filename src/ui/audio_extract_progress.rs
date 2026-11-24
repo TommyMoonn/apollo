@@ -236,25 +236,17 @@ mod tests {
 
     use super::{
         AudioExtractLifecycleUiState, CANCELLED_CLEANUP, CANCELLED_COPY, CANCELLED_TITLE,
-        COMPLETE_TITLE, FAILED_TITLE, RUNNING_TITLE, failure_error, show_cancelled, show_completed,
-        show_running,
+        failure_error, show_cancelled, show_completed, show_running,
     };
-
-    #[test]
-    fn lifecycle_copy_matches_audio_extract_surfaces() {
-        assert_eq!(RUNNING_TITLE, "Extracting audio");
-        assert_eq!(COMPLETE_TITLE, "Audio extraction complete");
-        assert_eq!(FAILED_TITLE, "Audio extraction failed");
-        assert_eq!(CANCELLED_TITLE, "Audio extraction cancelled");
-    }
 
     #[test]
     fn running_completed_and_cancelled_views_render_expected_content() {
         let request = request(AudioExtractFormat::Aac);
         let executor = AudioExtractExecutor::new();
-        let running = render(|ui| {
+        let mut running = render(|ui| {
             let _ = show_running(ui, &request, None, &executor);
         });
+        running.textures_delta.clear();
         for text in [
             "Extracting audio",
             "recording.mkv → recording-audio.m4a",
@@ -263,13 +255,13 @@ mod tests {
         ] {
             assert!(contains(&running, text), "missing {text:?}");
         }
-        running.drop_without_applying_deltas();
 
         let mut executor = AudioExtractExecutor::new();
         let mut state = AudioExtractLifecycleUiState::default();
-        let completed = render(|ui| {
+        let mut completed = render(|ui| {
             let _ = show_completed(ui, &request, &request.output, &mut executor, &mut state);
         });
+        completed.textures_delta.clear();
         for text in [
             "Audio extraction complete",
             "recording-audio.m4a",
@@ -280,15 +272,14 @@ mod tests {
         ] {
             assert!(contains(&completed, text), "missing {text:?}");
         }
-        completed.drop_without_applying_deltas();
 
-        let cancelled = render(|ui| {
+        let mut cancelled = render(|ui| {
             let _ = show_cancelled(ui, &mut executor, &mut state);
         });
+        cancelled.textures_delta.clear();
         for text in [CANCELLED_TITLE, CANCELLED_COPY, CANCELLED_CLEANUP, "Done"] {
             assert!(contains(&cancelled, text), "missing {text:?}");
         }
-        cancelled.drop_without_applying_deltas();
     }
 
     #[test]

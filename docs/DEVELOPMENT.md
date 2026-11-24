@@ -46,7 +46,7 @@ Run `just` or `just --list` from the repository root to discover available recip
 | `just check` | Check compilation without producing a binary. |
 | `just fmt` / `just fmt-check` | Apply or check Rust formatting. |
 
-See [Testing](TESTING.md) for focused tests, `just verify`, optional tooling checks and native Windows acceptance.
+See [Testing](TESTING.md) for focused tests, `just verify`, optional tooling checks and native Windows acceptance. When changing tests, remove redundant or implementation-coupled cases, preserve meaningful failure coverage and use controlled completion instead of fixed timing assumptions.
 
 ## Workspace commands
 

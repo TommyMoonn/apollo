@@ -371,64 +371,14 @@ fn monochrome_widgets() -> Widgets {
 
 #[cfg(test)]
 mod tests {
-    use egui::{Color32, Style};
+    use egui::Color32;
 
     use super::{
-        BACKGROUND, BORDER_STRONG, COMPACT_CONTROL_HEIGHT, CONTAINER_RADIUS, CONTROL_RADIUS,
-        ControlTone, DANGER_INTERACTIVE, DETAILS_SEPARATOR_GAP, DETAILS_TOP_GAP,
-        DIAGNOSTIC_TOP_GAP, DISABLED, FOCUS, FOCUS_OFFSET, FOCUS_STROKE_WIDTH, FOOTER_ACTION_GAP,
-        FOREGROUND, HOVER, InteractionState, MODE_BUTTON_HORIZONTAL_PADDING, MotionDurations,
-        PRESSED, PRIMARY_CONTROL_HEIGHT, PRIMARY_HOVER, PRIMARY_PRESSED, PROGRESS, PROGRESS_RADIUS,
-        READY_TRAILING_INSET, RESULT_FOOTER_GAP, RUNNING_FOOTER_GAP, SECONDARY, SECONDARY_FAINT,
-        SELECTABLE_ROW_CONTENT_GAP, SELECTABLE_ROW_HORIZONTAL_PADDING,
-        SELECTABLE_ROW_INDICATOR_COLUMN, SELECTABLE_ROW_MIN_HEIGHT, SELECTION,
-        SELECTION_INDICATOR_SIZE, SEPARATOR, SEPARATOR_WIDTH, SPACING, STATUS_COPY_GAP,
-        TOGGLE_SWITCH_HEIGHT, TOGGLE_SWITCH_KNOB_SIZE, TOGGLE_SWITCH_WIDTH,
-        TRACK_GAIN_CONTROL_WIDTH, ThemeRole, apply_to_style, control_colors, monochrome_visuals,
-        motion_durations, operation_mode_colors, selectable_colors, set_motion_durations,
+        BACKGROUND, BORDER_STRONG, ControlTone, DANGER_INTERACTIVE, DISABLED, FOCUS, FOREGROUND,
+        HOVER, InteractionState, MotionDurations, PRESSED, PROGRESS, SELECTION, ThemeRole,
+        control_colors, monochrome_visuals, motion_durations, operation_mode_colors,
+        selectable_colors, set_motion_durations,
     };
-
-    #[test]
-    fn project_color_spec_is_encoded_exactly() {
-        assert_eq!(BACKGROUND, Color32::from_rgb(0x00, 0x00, 0x00));
-        assert_eq!(FOREGROUND, Color32::from_rgb(0xFF, 0xFF, 0xFF));
-        assert_eq!(SECONDARY.to_srgba_unmultiplied(), [255, 255, 255, 168]);
-        assert_eq!(
-            SECONDARY_FAINT.to_srgba_unmultiplied(),
-            [255, 255, 255, 122]
-        );
-        assert_eq!(SEPARATOR.to_srgba_unmultiplied(), [255, 255, 255, 46]);
-        assert_eq!(BORDER_STRONG.to_srgba_unmultiplied(), [255, 255, 255, 77]);
-        assert_eq!(HOVER.to_srgba_unmultiplied(), [255, 255, 255, 14]);
-        assert_eq!(PRESSED.to_srgba_unmultiplied(), [255, 255, 255, 28]);
-        assert_eq!(DISABLED.to_srgba_unmultiplied(), [255, 255, 255, 87]);
-        assert_eq!(DANGER_INTERACTIVE, Color32::from_rgb(0x7E, 0x30, 0x30));
-        assert_eq!(PRIMARY_HOVER.to_srgba_unmultiplied(), [255, 255, 255, 224]);
-        assert_eq!(
-            PRIMARY_PRESSED.to_srgba_unmultiplied(),
-            [255, 255, 255, 194]
-        );
-    }
-
-    #[test]
-    fn theme_roles_are_limited_to_the_project_spec() {
-        assert_eq!(
-            ThemeRole::ALL,
-            [
-                ThemeRole::Background,
-                ThemeRole::Foreground,
-                ThemeRole::Secondary,
-                ThemeRole::Separator,
-                ThemeRole::Hover,
-                ThemeRole::Pressed,
-                ThemeRole::Disabled,
-                ThemeRole::Selection,
-                ThemeRole::Focus,
-                ThemeRole::Progress,
-                ThemeRole::DangerInteractive,
-            ]
-        );
-    }
 
     #[test]
     fn progress_selection_and_focus_are_monochrome() {
@@ -513,15 +463,6 @@ mod tests {
     }
 
     #[test]
-    fn restrained_motion_timings_are_centralized_in_the_requested_ranges() {
-        let durations = MotionDurations::STANDARD;
-
-        assert!((0.10..=0.14).contains(&durations.surface_enter));
-        assert!((0.10..=0.12).contains(&durations.conditional_detail));
-        assert!((0.07..=0.10).contains(&durations.button_hover));
-    }
-
-    #[test]
     fn motion_policy_can_be_disabled_centrally() {
         let context = egui::Context::default();
         set_motion_durations(&context, MotionDurations::DISABLED);
@@ -552,66 +493,6 @@ mod tests {
         assert_ne!(selected_disabled, unselected_disabled);
         assert_eq!(unselected_hover.border, BORDER_STRONG);
         assert_ne!(selected.background, FOREGROUND);
-    }
-
-    #[test]
-    fn shared_geometry_uses_four_px_radius_and_progress_stays_square() {
-        let visuals = monochrome_visuals();
-
-        assert_eq!(
-            visuals.ime_composition.active_underline_stroke.width,
-            FOCUS_STROKE_WIDTH
-        );
-        assert_eq!(visuals.text_cursor.stroke.width, FOCUS_STROKE_WIDTH);
-
-        for widget in [
-            visuals.widgets.noninteractive,
-            visuals.widgets.inactive,
-            visuals.widgets.hovered,
-            visuals.widgets.active,
-            visuals.widgets.open,
-        ] {
-            assert_eq!(widget.corner_radius.average(), f32::from(CONTROL_RADIUS));
-        }
-        assert_eq!(
-            visuals.window_corner_radius.average(),
-            f32::from(CONTAINER_RADIUS)
-        );
-        assert_eq!(
-            visuals.menu_corner_radius.average(),
-            f32::from(CONTAINER_RADIUS)
-        );
-        assert_eq!(CONTROL_RADIUS, CONTAINER_RADIUS);
-        assert!(f32::from(CONTROL_RADIUS) < COMPACT_CONTROL_HEIGHT * 0.5);
-
-        for scale in [1.0_f32, 1.25, 1.5] {
-            let physical_radius = f32::from(CONTROL_RADIUS) * scale;
-            assert_eq!(physical_radius.fract(), 0.0);
-        }
-
-        assert_eq!(std::hint::black_box(PROGRESS_RADIUS), 0);
-        assert_eq!(std::hint::black_box(SEPARATOR_WIDTH), 1.0);
-        assert_eq!(std::hint::black_box(FOCUS_STROKE_WIDTH), 2.0);
-        assert_eq!(std::hint::black_box(FOCUS_OFFSET), 2.0);
-        assert_eq!(std::hint::black_box(PRIMARY_CONTROL_HEIGHT), 31.0);
-        assert_eq!(std::hint::black_box(COMPACT_CONTROL_HEIGHT), 30.0);
-        assert_eq!(std::hint::black_box(SELECTABLE_ROW_MIN_HEIGHT), 34.0);
-        assert_eq!(std::hint::black_box(SELECTION_INDICATOR_SIZE), 12.0);
-        assert_eq!(std::hint::black_box(SELECTABLE_ROW_HORIZONTAL_PADDING), 5.0);
-        assert_eq!(std::hint::black_box(SELECTABLE_ROW_INDICATOR_COLUMN), 18.0);
-        assert_eq!(std::hint::black_box(SELECTABLE_ROW_CONTENT_GAP), 8.0);
-        assert_eq!(std::hint::black_box(TRACK_GAIN_CONTROL_WIDTH), 86.0);
-        assert_eq!(std::hint::black_box(READY_TRAILING_INSET), 5.0);
-        assert_eq!(std::hint::black_box(TOGGLE_SWITCH_WIDTH), 34.0);
-        assert_eq!(std::hint::black_box(TOGGLE_SWITCH_HEIGHT), 18.0);
-        assert_eq!(std::hint::black_box(TOGGLE_SWITCH_KNOB_SIZE), 12.0);
-        assert_eq!(std::hint::black_box(STATUS_COPY_GAP), 6.0);
-        assert_eq!(std::hint::black_box(FOOTER_ACTION_GAP), 8.0);
-        assert_eq!(std::hint::black_box(RUNNING_FOOTER_GAP), 44.0);
-        assert_eq!(std::hint::black_box(RESULT_FOOTER_GAP), 42.0);
-        assert_eq!(std::hint::black_box(DIAGNOSTIC_TOP_GAP), 14.0);
-        assert_eq!(std::hint::black_box(DETAILS_TOP_GAP), 10.0);
-        assert_eq!(std::hint::black_box(DETAILS_SEPARATOR_GAP), 9.0);
     }
 
     #[test]
@@ -655,22 +536,6 @@ mod tests {
         assert!(colors.into_iter().all(is_black_or_white_alpha));
         assert_eq!(visuals.window_shadow, egui::Shadow::NONE);
         assert_eq!(visuals.popup_shadow, egui::Shadow::NONE);
-    }
-
-    #[test]
-    fn style_uses_central_spacing_and_control_metrics() {
-        let mut style = Style::default();
-        apply_to_style(&mut style);
-
-        assert_eq!(
-            style.spacing.item_spacing,
-            egui::Vec2::splat(SPACING.related)
-        );
-        assert_eq!(style.spacing.button_padding.x, SPACING.related);
-        assert_eq!(style.spacing.button_padding.y, SPACING.compact);
-        assert_eq!(style.spacing.interact_size.y, PRIMARY_CONTROL_HEIGHT);
-        assert_eq!(SPACING.focal, 18.0);
-        assert_eq!(MODE_BUTTON_HORIZONTAL_PADDING, 13.0);
     }
 
     fn is_black_or_white_alpha(color: Color32) -> bool {

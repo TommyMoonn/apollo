@@ -48,6 +48,8 @@ Add a name filter to narrow a test run further. Use existing fixtures where poss
 
 For concurrency tests, hold work at a controlled boundary and release it explicitly. Check completion, identity and ordering, not the time a worker takes to run. For command construction, assert external command semantics and connected filter stages rather than incidental labels or whole-string snapshots. Remove tests that duplicate coverage without protecting a distinct behavior.
 
+For application and UI tests, drive lifecycle events with explicit timestamps or completion signals. Check interaction, selection, focus, clipping, non-overlap and reachability at narrow and normal widths; avoid exact paint snapshots, copied theme constants and incidental pixel geometry. Retain renderer-specific regressions until their replacement proves the same behavior.
+
 For filesystem and processing changes, verify that cancellation, output collisions, failed processes and stale results preserve existing files and cannot publish an incomplete result. For queue changes, cover job transitions, destination reservations and atomic batch insertion at their owning layer.
 
 ## Real media tests

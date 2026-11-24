@@ -83,7 +83,7 @@ Guard actions that mutate files or start background work against repeated activa
 
 ## Test behavior that can break
 
-For bug fixes, reproduce failures in a focused test when practical. Reuse existing cases and fixtures before adding tests. Test at the lowest layer that proves the behavior. Avoid duplicate assertions, tests of implementation details and exact error wording unless the wording is part of the contract. Use explicit events or conditions with bounded waits instead of fixed sleeps.
+For bug fixes, reproduce failures in a focused test when practical. Reuse existing cases and fixtures before adding tests. Test at the lowest layer that proves the behavior. Avoid duplicate assertions, tests of implementation details and exact error wording unless the wording is part of the contract. Use explicit events or conditions with bounded waits instead of fixed sleeps. For timed behavior, supply controlled timestamps rather than checking elapsed wall-clock time. Remove brittle or redundant cases during each test review; replace useful coverage before retiring it. UI tests should protect interaction, readable and reachable controls, non-overlap and stable layout, not exact paint shapes, incidental pixel values or copied design constants.
 
 Use temporary directories, disposable media and controlled process fixtures for tests. Cover output collisions, failed or cancelled processing, cleanup, stale results and queue state transitions where relevant.
 

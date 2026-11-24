@@ -124,14 +124,42 @@ mod tests {
             MediaOutputContainer::Mp4,
         );
         let context = egui::Context::default();
-        let mut details_open = false;
-        let output = context.run_ui(Default::default(), |ui| {
-            show_inline(ui, &error, &mut details_open);
-        });
-        let debug = format!("{:?}", output.shapes);
-
-        assert!(!debug.contains("RAW-STDERR-MARKER"));
-        output.drop_without_applying_deltas();
+        fonts::install(&context);
+        theme::install(&context);
+        fn contains_text(shape: &egui::Shape, needle: &str) -> bool {
+            match shape {
+                egui::Shape::Text(text) => text.galley.job.text.contains(needle),
+                egui::Shape::Vec(shapes) => shapes.iter().any(|shape| contains_text(shape, needle)),
+                _ => false,
+            }
+        }
+        for expanded in [false, true] {
+            let mut details_open = expanded;
+            let mut output = context.run_ui(Default::default(), |ui| {
+                show_inline(ui, &error, &mut details_open);
+            });
+            output.textures_delta.clear();
+            assert!(
+                output
+                    .shapes
+                    .iter()
+                    .any(|shape| contains_text(&shape.shape, "details"))
+            );
+            assert!(
+                output
+                    .shapes
+                    .iter()
+                    .any(|shape| contains_text(&shape.shape, error.message()))
+            );
+            assert_eq!(
+                output
+                    .shapes
+                    .iter()
+                    .any(|shape| contains_text(&shape.shape, "RAW-STDERR-MARKER")),
+                expanded
+            );
+            output.drop_without_applying_deltas();
+        }
     }
 
     #[test]
@@ -144,7 +172,7 @@ mod tests {
         for (width, details_open) in [(344.0, false), (520.0, false), (344.0, true)] {
             let mut measured = 0.0;
             let mut rendered = 0.0;
-            let output = context.run_ui(Default::default(), |ui| {
+            let mut output = context.run_ui(Default::default(), |ui| {
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(width, 500.0), egui::Sense::hover());
                 let mut child = ui.new_child(
@@ -160,12 +188,12 @@ mod tests {
                 show_inline(&mut child, &error, &mut rendered_details_open);
                 rendered = child.cursor().top() - start_y;
             });
+            output.textures_delta.clear();
 
             assert!(
                 (measured - rendered).abs() <= 0.5,
                 "width={width}, details_open={details_open}, measured={measured}, rendered={rendered}"
             );
-            output.drop_without_applying_deltas();
         }
     }
 
@@ -178,13 +206,13 @@ mod tests {
         let mut narrow = 0.0;
         let mut wide = 0.0;
 
-        let output = context.run_ui(Default::default(), |ui| {
+        let mut output = context.run_ui(Default::default(), |ui| {
             narrow = inline_height(ui, &error, false, 344.0);
             wide = inline_height(ui, &error, false, 520.0);
         });
+        output.textures_delta.clear();
 
         assert!(narrow > wide);
-        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -194,12 +222,12 @@ mod tests {
         theme::install(&context);
         let mut short = 0.0;
         let mut long = 0.0;
-        let output = context.run_ui(Default::default(), |ui| {
+        let mut output = context.run_ui(Default::default(), |ui| {
             short = media_lifecycle::diagnostic_height(ui, "one diagnostic line", 400.0);
             long = media_lifecycle::diagnostic_height(ui, &"diagnostic line ".repeat(200), 200.0);
         });
+        output.textures_delta.clear();
         assert!(short > 0.0 && short < crate::ui::layout::DIAGNOSTIC_MAX_HEIGHT);
         assert_eq!(long, crate::ui::layout::DIAGNOSTIC_MAX_HEIGHT);
-        output.drop_without_applying_deltas();
     }
 }

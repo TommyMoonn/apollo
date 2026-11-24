@@ -55,23 +55,64 @@ impl MediaProgressRepaintOwner {
     }
 }
 
-fn run_repaint_worker(request_repaint: impl Fn(), receiver: Receiver<RepaintEvent>) {
-    let mut active_operation = None;
-    let mut last_progress_repaint: Option<Instant> = None;
-    let mut progress_pending = false;
+#[derive(Default)]
+struct RepaintSchedule {
+    active_operation: Option<u64>,
+    last_progress_repaint: Option<Instant>,
+    progress_pending: bool,
+}
 
-    loop {
-        let event = if progress_pending {
-            let elapsed = last_progress_repaint
-                .map(|last| last.elapsed())
+impl RepaintSchedule {
+    fn remaining(&self, now: Instant) -> Option<Duration> {
+        self.progress_pending.then(|| {
+            let elapsed = self
+                .last_progress_repaint
+                .map(|last| now.saturating_duration_since(last))
                 .unwrap_or(MIN_PROGRESS_REPAINT_INTERVAL);
-            let remaining = MIN_PROGRESS_REPAINT_INTERVAL.saturating_sub(elapsed);
+            MIN_PROGRESS_REPAINT_INTERVAL.saturating_sub(elapsed)
+        })
+    }
+
+    fn on_event(&mut self, event: RepaintEvent, now: Instant) -> bool {
+        match event {
+            RepaintEvent::Begin(id) => {
+                *self = Self {
+                    active_operation: Some(id),
+                    ..Self::default()
+                };
+                false
+            }
+            RepaintEvent::Progress(id) if self.active_operation == Some(id) => {
+                let due = self.last_progress_repaint.is_none_or(|last| {
+                    now.saturating_duration_since(last) >= MIN_PROGRESS_REPAINT_INTERVAL
+                });
+                self.progress_pending = !due;
+                due
+            }
+            RepaintEvent::Terminal(id) if self.active_operation == Some(id) => {
+                self.active_operation = None;
+                self.progress_pending = false;
+                true
+            }
+            RepaintEvent::Progress(_) | RepaintEvent::Terminal(_) => false,
+        }
+    }
+
+    fn repainted(&mut self, now: Instant) {
+        self.last_progress_repaint = Some(now);
+        self.progress_pending = false;
+    }
+}
+
+fn run_repaint_worker(request_repaint: impl Fn(), receiver: Receiver<RepaintEvent>) {
+    let mut schedule = RepaintSchedule::default();
+    loop {
+        let event = if let Some(remaining) = schedule.remaining(Instant::now()) {
             match receiver.recv_timeout(remaining) {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
                     request_repaint();
-                    last_progress_repaint = Some(Instant::now());
-                    progress_pending = false;
+                    schedule.repainted(Instant::now());
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -82,135 +123,79 @@ fn run_repaint_worker(request_repaint: impl Fn(), receiver: Receiver<RepaintEven
                 Err(_) => return,
             }
         };
-
-        match event {
-            RepaintEvent::Begin(operation_id) => {
-                active_operation = Some(operation_id);
-                last_progress_repaint = None;
-                progress_pending = false;
-            }
-            RepaintEvent::Progress(operation_id) if active_operation == Some(operation_id) => {
-                let repaint_due = last_progress_repaint
-                    .is_none_or(|last| last.elapsed() >= MIN_PROGRESS_REPAINT_INTERVAL);
-                if repaint_due {
-                    request_repaint();
-                    last_progress_repaint = Some(Instant::now());
-                    progress_pending = false;
-                } else {
-                    progress_pending = true;
-                }
-            }
-            RepaintEvent::Terminal(operation_id) if active_operation == Some(operation_id) => {
-                active_operation = None;
-                progress_pending = false;
-                request_repaint();
-            }
-            RepaintEvent::Progress(_) | RepaintEvent::Terminal(_) => {}
+        if schedule.on_event(event, Instant::now()) {
+            request_repaint();
+            schedule.repainted(Instant::now());
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Duration};
+    use super::*;
 
-    use apollo::media::process::MediaProcessEvent;
+    #[test]
+    fn burst_progress_is_coalesced_and_isolated_progress_stays_immediate() {
+        let mut schedule = RepaintSchedule::default();
+        let now = Instant::now();
+        let interval = MIN_PROGRESS_REPAINT_INTERVAL;
+        assert!(!schedule.on_event(RepaintEvent::Begin(1), now));
+        assert!(schedule.on_event(RepaintEvent::Progress(1), now));
+        schedule.repainted(now);
+        assert_eq!(schedule.remaining(now), None);
+        for _ in 0..20 {
+            assert!(!schedule.on_event(RepaintEvent::Progress(1), now + interval / 2));
+        }
+        assert_eq!(schedule.remaining(now + interval / 2), Some(interval / 2));
+        assert_eq!(schedule.remaining(now + interval), Some(Duration::ZERO));
+        schedule.repainted(now + interval);
+        assert_eq!(schedule.remaining(now + interval), None);
+        assert!(schedule.on_event(RepaintEvent::Progress(1), now + interval * 2));
+    }
 
-    use super::{MIN_PROGRESS_REPAINT_INTERVAL, MediaProgressRepaintOwner};
+    #[test]
+    fn terminal_event_cancels_pending_progress_and_rejects_later_events() {
+        let mut schedule = RepaintSchedule::default();
+        let now = Instant::now();
+        schedule.on_event(RepaintEvent::Begin(1), now);
+        assert!(schedule.on_event(RepaintEvent::Progress(1), now));
+        schedule.repainted(now);
+        assert!(!schedule.on_event(RepaintEvent::Progress(1), now));
+        assert!(schedule.remaining(now).is_some());
+        assert!(schedule.on_event(RepaintEvent::Terminal(1), now));
+        assert_eq!(schedule.remaining(now), None);
+        assert!(!schedule.on_event(RepaintEvent::Progress(1), now));
+        assert!(!schedule.on_event(RepaintEvent::Terminal(1), now));
+    }
 
-    const TEST_TIMEOUT: Duration = Duration::from_secs(1);
+    #[test]
+    fn new_operation_retires_pending_progress_and_ignores_stale_events() {
+        let mut schedule = RepaintSchedule::default();
+        let now = Instant::now();
+        schedule.on_event(RepaintEvent::Begin(1), now);
+        assert!(schedule.on_event(RepaintEvent::Progress(1), now));
+        schedule.repainted(now);
+        assert!(!schedule.on_event(RepaintEvent::Progress(1), now));
+        schedule.on_event(RepaintEvent::Begin(2), now);
+        assert_eq!(schedule.remaining(now), None);
+        assert!(!schedule.on_event(RepaintEvent::Progress(1), now));
+        assert!(!schedule.on_event(RepaintEvent::Terminal(1), now));
+        assert!(schedule.on_event(RepaintEvent::Progress(2), now));
+    }
 
-    fn owner() -> (MediaProgressRepaintOwner, mpsc::Receiver<()>) {
+    #[test]
+    fn worker_delivers_initial_coalesced_and_terminal_repaints() {
         let (sender, receiver) = mpsc::channel();
-        let owner = MediaProgressRepaintOwner::new_with_repaint(move || {
+        let mut owner = MediaProgressRepaintOwner::new_with_repaint(move || {
             let _ = sender.send(());
         });
-        (owner, receiver)
-    }
-
-    #[test]
-    fn burst_progress_is_coalesced_and_terminal_repaints_immediately() {
-        let (mut owner, repaints) = owner();
         let wake = owner.begin();
-
+        let timeout = Duration::from_secs(10);
         wake.notify(MediaProcessEvent::Progress);
-        repaints.recv_timeout(TEST_TIMEOUT).unwrap();
-        for _ in 0..20 {
-            wake.notify(MediaProcessEvent::Progress);
-        }
-        assert!(
-            repaints
-                .recv_timeout(MIN_PROGRESS_REPAINT_INTERVAL / 2)
-                .is_err()
-        );
-        repaints.recv_timeout(TEST_TIMEOUT).unwrap();
-        assert!(repaints.try_recv().is_err());
-
+        receiver.recv_timeout(timeout).unwrap();
+        wake.notify(MediaProcessEvent::Progress);
+        receiver.recv_timeout(timeout).unwrap();
         wake.notify(MediaProcessEvent::Terminal);
-        repaints.recv_timeout(TEST_TIMEOUT).unwrap();
-        assert!(
-            repaints
-                .recv_timeout(MIN_PROGRESS_REPAINT_INTERVAL * 2)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn isolated_progress_stays_at_its_natural_event_rate() {
-        let (mut owner, repaints) = owner();
-        let wake = owner.begin();
-
-        wake.notify(MediaProcessEvent::Progress);
-        repaints.recv_timeout(TEST_TIMEOUT).unwrap();
-        assert!(
-            repaints
-                .recv_timeout(MIN_PROGRESS_REPAINT_INTERVAL * 2)
-                .is_err()
-        );
-
-        wake.notify(MediaProcessEvent::Progress);
-        repaints.recv_timeout(TEST_TIMEOUT).unwrap();
-        assert!(
-            repaints
-                .recv_timeout(MIN_PROGRESS_REPAINT_INTERVAL * 2)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn terminal_event_cancels_a_pending_progress_repaint() {
-        let (mut owner, repaints) = owner();
-        let wake = owner.begin();
-
-        wake.notify(MediaProcessEvent::Progress);
-        repaints.recv_timeout(TEST_TIMEOUT).unwrap();
-        wake.notify(MediaProcessEvent::Progress);
-        wake.notify(MediaProcessEvent::Terminal);
-        repaints.recv_timeout(TEST_TIMEOUT).unwrap();
-        assert!(
-            repaints
-                .recv_timeout(MIN_PROGRESS_REPAINT_INTERVAL * 2)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn newer_operation_ignores_stale_progress_and_terminal_events() {
-        let (mut owner, repaints) = owner();
-        let stale = owner.begin();
-        let current = owner.begin();
-
-        stale.notify(MediaProcessEvent::Progress);
-        stale.notify(MediaProcessEvent::Terminal);
-        assert!(
-            repaints
-                .recv_timeout(MIN_PROGRESS_REPAINT_INTERVAL * 2)
-                .is_err()
-        );
-
-        current.notify(MediaProcessEvent::Progress);
-        repaints.recv_timeout(TEST_TIMEOUT).unwrap();
-        current.notify(MediaProcessEvent::Terminal);
-        repaints.recv_timeout(TEST_TIMEOUT).unwrap();
+        receiver.recv_timeout(timeout).unwrap();
     }
 }

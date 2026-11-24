@@ -378,25 +378,18 @@ mod tests {
 
     use super::{
         CANCELLED_CLEANUP, CANCELLED_COPY, CANCELLED_TITLE, COMPLETE_TITLE, FAILED_TITLE,
-        FrameCaptureLifecycleUiState, FrameCaptureThumbnailState, RUNNING_TITLE, show_cancelled,
-        show_completed, show_running,
+        FrameCaptureLifecycleUiState, FrameCaptureThumbnailState, show_cancelled, show_completed,
+        show_running,
     };
-
-    #[test]
-    fn lifecycle_copy_matches_frame_capture_surfaces() {
-        assert_eq!(RUNNING_TITLE, "Capturing frame");
-        assert_eq!(COMPLETE_TITLE, "Frame capture complete");
-        assert_eq!(FAILED_TITLE, "Frame capture failed");
-        assert_eq!(CANCELLED_TITLE, "Frame capture cancelled");
-    }
 
     #[test]
     fn running_completed_and_cancelled_views_render_expected_content() {
         let request = request();
         let executor = FrameCaptureExecutor::new();
-        let running = render(|ui| {
+        let mut running = render(|ui| {
             let _ = show_running(ui, &request, None, &executor);
         });
+        running.textures_delta.clear();
         for text in [
             "Capturing frame",
             "recording.mkv → recording-frame.png",
@@ -405,13 +398,13 @@ mod tests {
         ] {
             assert!(contains(&running, text), "missing {text:?}");
         }
-        running.drop_without_applying_deltas();
 
         let mut executor = FrameCaptureExecutor::new();
         let mut state = FrameCaptureLifecycleUiState::default();
-        let completed = render(|ui| {
+        let mut completed = render(|ui| {
             let _ = show_completed(ui, &request, &request.output, &mut executor, &mut state);
         });
+        completed.textures_delta.clear();
         for text in [
             "Frame capture complete",
             "recording-frame.png",
@@ -422,15 +415,14 @@ mod tests {
         ] {
             assert!(contains(&completed, text), "missing {text:?}");
         }
-        completed.drop_without_applying_deltas();
 
-        let cancelled = render(|ui| {
+        let mut cancelled = render(|ui| {
             let _ = show_cancelled(ui, &mut executor, &mut state);
         });
+        cancelled.textures_delta.clear();
         for text in [CANCELLED_TITLE, CANCELLED_COPY, CANCELLED_CLEANUP, "Done"] {
             assert!(contains(&cancelled, text), "missing {text:?}");
         }
-        cancelled.drop_without_applying_deltas();
     }
 
     #[test]
@@ -482,13 +474,13 @@ mod tests {
             state.settle_thumbnail(thumbnail.request_id(), Err("unsupported image".to_owned()))
         );
 
-        let completed = render(|ui| {
+        let mut completed = render(|ui| {
             let _ = show_completed(ui, &request, &request.output, &mut executor, &mut state);
         });
+        completed.textures_delta.clear();
         assert!(contains(&completed, COMPLETE_TITLE));
         assert!(contains(&completed, "Preview unavailable"));
         assert!(!contains(&completed, FAILED_TITLE));
-        completed.drop_without_applying_deltas();
     }
 
     #[test]
@@ -501,22 +493,24 @@ mod tests {
         let thumbnail = state.begin_thumbnail(&request.output).unwrap();
         assert!(state.settle_thumbnail(thumbnail.request_id(), Ok(preview([4, 2]))));
 
-        let first = render_with_context(&context, |ui| {
+        let mut first = render_with_context(&context, |ui| {
             let _ = show_completed(ui, &request, &request.output, &mut executor, &mut state);
         });
+        let uploaded = !first.textures_delta.set.is_empty();
+        first.textures_delta.clear();
         let texture_id = state.thumbnail_texture.as_ref().unwrap().handle.id();
-        assert!(!first.textures_delta.set.is_empty());
-        first.drop_without_applying_deltas();
+        assert!(uploaded);
 
-        let second = render_with_context(&context, |ui| {
+        let mut second = render_with_context(&context, |ui| {
             let _ = show_completed(ui, &request, &request.output, &mut executor, &mut state);
         });
+        let uploaded_again = !second.textures_delta.set.is_empty();
+        second.textures_delta.clear();
         assert_eq!(
             state.thumbnail_texture.as_ref().unwrap().handle.id(),
             texture_id
         );
-        assert!(second.textures_delta.set.is_empty());
-        second.drop_without_applying_deltas();
+        assert!(!uploaded_again);
     }
 
     fn preview(size: [usize; 2]) -> FrameCaptureThumbnail {

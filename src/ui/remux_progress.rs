@@ -241,28 +241,17 @@ mod tests {
     };
 
     use super::{
-        CANCELLED_CLEANUP, CANCELLED_COPY, CANCELLED_TITLE, COMPLETE_TITLE, FAILED_TITLE,
-        RUNNING_TITLE, RemuxLifecycleUiState, failure_error, show_cancelled, show_completed,
-        show_running,
+        RemuxLifecycleUiState, failure_error, show_cancelled, show_completed, show_running,
     };
-
-    #[test]
-    fn lifecycle_copy_matches_remux_surfaces() {
-        assert_eq!(RUNNING_TITLE, "Remuxing media");
-        assert_eq!(COMPLETE_TITLE, "Remux complete");
-        assert_eq!(FAILED_TITLE, "Remux failed");
-        assert_eq!(CANCELLED_TITLE, "Remux cancelled");
-        assert_eq!(CANCELLED_COPY, "No final output was published.");
-        assert_eq!(CANCELLED_CLEANUP, "temporary output cleaned");
-    }
 
     #[test]
     fn running_view_renders_progress_paths_and_cancel() {
         let request = request(MediaContainer::Matroska);
         let executor = RemuxExecutor::new();
-        let output = render_test_ui_with_fonts(|ui| {
+        let mut output = render_test_ui_with_fonts(|ui| {
             let _ = show_running(ui, &request, None, &executor);
         });
+        output.textures_delta.clear();
         for text in [
             "Remuxing media",
             "recording.mov → recording-remuxed.mkv",
@@ -271,7 +260,6 @@ mod tests {
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
-        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -280,9 +268,10 @@ mod tests {
         let mut executor = RemuxExecutor::new();
         let mut state = RemuxLifecycleUiState::default();
         let output_path = request.output.clone();
-        let output = render_test_ui_with_fonts(|ui| {
+        let mut output = render_test_ui_with_fonts(|ui| {
             let _ = show_completed(ui, &request, &output_path, &mut executor, &mut state);
         });
+        output.textures_delta.clear();
         for text in [
             "Remux complete",
             "recording-remuxed.mkv",
@@ -293,7 +282,6 @@ mod tests {
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
-        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -317,9 +305,10 @@ mod tests {
     fn cancelled_view_keeps_nonpublication_and_cleanup_copy() {
         let mut executor = RemuxExecutor::new();
         let mut state = RemuxLifecycleUiState::default();
-        let output = render_test_ui_with_fonts(|ui| {
+        let mut output = render_test_ui_with_fonts(|ui| {
             let _ = show_cancelled(ui, &mut executor, &mut state);
         });
+        output.textures_delta.clear();
         for text in [
             "Remux cancelled",
             "No final output was published.",
@@ -328,7 +317,6 @@ mod tests {
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
-        output.drop_without_applying_deltas();
     }
 
     fn request(container: MediaContainer) -> RemuxRequest {

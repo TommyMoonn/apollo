@@ -1173,7 +1173,11 @@ impl ApolloApp {
                     session.selection =
                         FrameCaptureSelectionState::from_request(&session.media, request);
                     let position = session.selection.valid_position(&session.media);
-                    self.update_frame_capture_position(position, PositionSettle::Debounced);
+                    self.update_frame_capture_position(
+                        position,
+                        PositionSettle::Debounced,
+                        Instant::now(),
+                    );
                 }
             }
         }
@@ -1481,7 +1485,11 @@ impl ApolloApp {
                         apollo::frame_capture::preview::PreviewState::Idle
                     )
                 }) {
-                    self.update_frame_capture_position(position, PositionSettle::Debounced);
+                    self.update_frame_capture_position(
+                        position,
+                        PositionSettle::Debounced,
+                        Instant::now(),
+                    );
                 }
             }
         }
@@ -1566,7 +1574,11 @@ impl ApolloApp {
             })
             .flatten();
         if scheduled.is_some() {
-            self.update_frame_capture_position(scheduled, PositionSettle::Debounced);
+            self.update_frame_capture_position(
+                scheduled,
+                PositionSettle::Debounced,
+                Instant::now(),
+            );
         }
     }
 
@@ -1574,6 +1586,7 @@ impl ApolloApp {
         &mut self,
         position: Option<FramePosition>,
         settle: PositionSettle,
+        now: Instant,
     ) {
         self.frame_index_query.cancel();
         let Some((_, editor)) = self.active_frame_capture_editor_mut() else {
@@ -1585,7 +1598,7 @@ impl ApolloApp {
         editor.pending_step = None;
         editor.frame_navigator.invalidate();
         editor.frame_index_due = None;
-        let ready_at = self.schedule_frame_capture_preview(position, settle);
+        let ready_at = self.schedule_frame_capture_preview(position, settle, now);
         if let (Some(position), Some(ready_at), Some((_, editor))) =
             (position, ready_at, self.active_frame_capture_editor_mut())
             && editor.source_identity.is_some()
@@ -1598,6 +1611,7 @@ impl ApolloApp {
         &mut self,
         position: Option<FramePosition>,
         settle: PositionSettle,
+        now: Instant,
     ) -> Option<Instant> {
         self.cancel_frame_preview_work();
         let (media, editor) = self.active_frame_capture_editor_mut()?;
@@ -1606,7 +1620,6 @@ impl ApolloApp {
             editor.preview.invalidate();
             return None;
         };
-        let now = Instant::now();
         let delay = match settle {
             PositionSettle::Debounced => PREVIEW_DEBOUNCE,
             PositionSettle::Immediate => std::time::Duration::ZERO,
@@ -1780,6 +1793,7 @@ impl ApolloApp {
                 self.schedule_frame_capture_preview(
                     Some(position.into()),
                     PositionSettle::Immediate,
+                    Instant::now(),
                 );
             }
             FrameNavigation::NeedsNeighborhood(anchor) => {
@@ -2637,7 +2651,7 @@ impl ApolloApp {
                     .batch_edit
                     .as_ref()
                     .and_then(|edit| edit.frame_capture.valid_position(&edit.media));
-                self.update_frame_capture_position(position, settle);
+                self.update_frame_capture_position(position, settle, Instant::now());
             }
             QueueEditAction::FrameStepRequested(direction) => {
                 self.request_frame_step(direction);
@@ -2713,7 +2727,7 @@ impl ApolloApp {
                     .queue_edit
                     .as_ref()
                     .and_then(|edit| edit.frame_capture.valid_position(&edit.media));
-                self.update_frame_capture_position(position, settle);
+                self.update_frame_capture_position(position, settle, Instant::now());
             }
             QueueEditAction::FrameStepRequested(direction) => {
                 self.request_frame_step(direction);
@@ -3946,7 +3960,7 @@ impl ApolloApp {
                     .frame_capture
                     .as_ref()
                     .and_then(|session| session.selection.valid_position(&session.media));
-                self.update_frame_capture_position(position, settle);
+                self.update_frame_capture_position(position, settle, Instant::now());
             }
             FrameCaptureSelectionAction::StepRequested(direction) => {
                 self.request_frame_step(direction);
@@ -5000,7 +5014,7 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         sync::{
-            Arc, Barrier,
+            Arc,
             atomic::{AtomicUsize, Ordering},
             mpsc,
         },
@@ -5095,10 +5109,8 @@ mod tests {
             context.clone(),
             || Ok(MediaTools::new("missing-ffmpeg", "missing-ffprobe")),
             move |_| {
-                started_tx
-                    .send(std::thread::current().name().map(str::to_owned))
-                    .unwrap();
-                release_rx.recv().unwrap();
+                started_tx.send(std::thread::current().id()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
                 VideoEncoderCapabilities {
                     h264_nvenc: VideoEncoderCapability::Available,
                     h265_nvenc: VideoEncoderCapability::RuntimeUnavailable {
@@ -5107,12 +5119,9 @@ mod tests {
                 }
             },
         ));
-        assert_eq!(
-            started_rx
-                .recv_timeout(Duration::from_secs(2))
-                .unwrap()
-                .as_deref(),
-            Some("apollo-media-tools")
+        assert_ne!(
+            started_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            std::thread::current().id()
         );
         app.poll_media_tools_discovery();
         assert!(app.ready_media_tools().is_some());
@@ -5192,7 +5201,7 @@ mod tests {
         while wake_rx.try_recv().is_ok() {}
         release_tx.send(()).unwrap();
         wake_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(10))
             .expect("capability completion wakes egui");
         app.poll_media_tools_discovery();
         assert!(app.media_tools_discovery.is_none());
@@ -5458,7 +5467,9 @@ mod tests {
 
         assert!(
             app.start_media_tools_discovery_with(egui::Context::default(), move || {
-                release_receiver.recv().unwrap();
+                release_receiver
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
                 Err(MediaToolsError::MissingBoth)
             },)
         );
@@ -5476,18 +5487,16 @@ mod tests {
 
         assert!(
             app.start_media_tools_discovery_with(egui::Context::default(), move || {
-                thread_sender
-                    .send(std::thread::current().name().map(str::to_owned))
-                    .unwrap();
+                thread_sender.send(std::thread::current().id()).unwrap();
                 Err(MediaToolsError::MissingBoth)
             },)
         );
 
-        assert_eq!(
+        assert_ne!(
             thread_receiver
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(Duration::from_secs(10))
                 .unwrap(),
-            Some("apollo-media-tools".to_owned())
+            std::thread::current().id()
         );
     }
 
@@ -5511,7 +5520,7 @@ mod tests {
             move || Ok(expected)
         }));
         repaint_receiver
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(10))
             .expect("discovery completion should request repaint");
         app.poll_media_tools_discovery();
 
@@ -5534,7 +5543,7 @@ mod tests {
             Err(MediaToolsError::MissingFfprobe)
         }));
         repaint_receiver
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(10))
             .expect("failed discovery completion should request repaint");
         app.poll_media_tools_discovery();
 
@@ -5552,7 +5561,9 @@ mod tests {
 
         assert!(
             app.start_media_tools_discovery_with(egui::Context::default(), move || {
-                release_receiver.recv().unwrap();
+                release_receiver
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
                 Err(MediaToolsError::MissingBoth)
             },)
         );
@@ -5729,21 +5740,15 @@ mod tests {
     }
 
     #[test]
-    fn fresh_application_state_starts_without_a_source() {
-        let state = AppState::default();
-
-        assert_no_source(&state);
-        assert!(state.audio_mix.is_none());
-        assert!(state.upscale.is_none());
-        assert!(state.remux.is_none());
-        assert!(state.audio_extract.is_none());
-    }
-
-    #[test]
     fn initialization_has_no_source_without_starting_an_executor() {
         let app = app();
 
         assert_no_source(&app.state);
+        assert!(app.state.audio_mix.is_none());
+        assert!(app.state.upscale.is_none());
+        assert!(app.state.remux.is_none());
+        assert!(app.state.audio_extract.is_none());
+        assert!(app.state.frame_capture.is_none());
         assert!(!app.audio_mix_executor.is_running());
         assert!(!app.upscale_executor.is_running());
         assert!(!app.remux_executor.is_running());
@@ -5866,7 +5871,7 @@ mod tests {
         );
 
         repaint_receiver
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(10))
             .expect("inspection completion should request repaint");
         app.poll_media_inspection();
 
@@ -5887,11 +5892,8 @@ mod tests {
             .expect("new source should require inspection");
         let context = egui::Context::default();
         let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
-        let repaint_barrier = Arc::new(Barrier::new(2));
-        let worker_barrier = Arc::clone(&repaint_barrier);
         context.set_request_repaint_callback(move |_| {
             let _ = repaint_sender.try_send(());
-            worker_barrier.wait();
         });
         app.media_inspection = Some(
             MediaInspection::spawn_with(request, context, || {
@@ -5901,10 +5903,9 @@ mod tests {
         );
 
         repaint_receiver
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(10))
             .expect("failed inspection worker should request repaint");
         app.poll_media_inspection();
-        repaint_barrier.wait();
 
         assert!(app.media_inspection.is_none());
         assert_eq!(
@@ -5919,22 +5920,20 @@ mod tests {
         let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
         let load =
             FrameCaptureThumbnailLoad::spawn_with(7, 11, egui::Context::default(), move || {
-                thread_sender
-                    .send(std::thread::current().name().map(str::to_owned))
-                    .unwrap();
+                thread_sender.send(std::thread::current().id()).unwrap();
                 Ok(thumbnail())
             })
             .expect("thumbnail worker should start");
 
-        assert_eq!(
+        assert_ne!(
             thread_receiver
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(Duration::from_secs(10))
                 .unwrap(),
-            Some("apollo-frame-thumbnail".to_owned())
+            std::thread::current().id()
         );
         assert!(
             load.receiver
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(Duration::from_secs(10))
                 .unwrap()
                 .is_ok()
         );
@@ -5952,23 +5951,21 @@ mod tests {
         };
         let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
         let decode = FramePreviewDecode::spawn_with(request, egui::Context::default(), move || {
-            thread_sender
-                .send(std::thread::current().name().map(str::to_owned))
-                .unwrap();
+            thread_sender.send(std::thread::current().id()).unwrap();
             Ok(PreviewImage::from_rgba([2, 1], vec![255; 8]).unwrap())
         })
         .expect("preview decode worker should start");
 
-        assert_eq!(
+        assert_ne!(
             thread_receiver
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(Duration::from_secs(10))
                 .unwrap(),
-            Some("apollo-frame-preview-decode".to_owned())
+            std::thread::current().id()
         );
         assert!(
             decode
                 .receiver
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(Duration::from_secs(10))
                 .unwrap()
                 .is_ok()
         );
@@ -6036,7 +6033,7 @@ mod tests {
         ));
         app.sync_frame_preview_texture();
 
-        app.update_frame_capture_position(None, PositionSettle::Debounced);
+        app.update_frame_capture_position(None, PositionSettle::Debounced, Instant::now());
 
         let session = app.state.frame_capture.as_ref().unwrap();
         assert!(matches!(session.preview.state(), PreviewState::Idle));
@@ -6103,30 +6100,31 @@ mod tests {
             br#"{"frames":[{"best_effort_timestamp":0},{"best_effort_timestamp":100}],"streams":[{"time_base":"1/1000"}]}"#,
         );
 
-        app.update_frame_capture_position(Some(position), PositionSettle::Debounced);
+        let now = Instant::now();
+        app.update_frame_capture_position(Some(position), PositionSettle::Debounced, now);
         let session = app.state.frame_capture.as_ref().unwrap();
         let debounced_ready_at = match session.preview.state() {
             PreviewState::Debouncing { ready_at, .. } => *ready_at,
             state => panic!("expected debouncing preview, got {state:?}"),
         };
-        assert!(debounced_ready_at > Instant::now());
+        assert_eq!(debounced_ready_at, now + PREVIEW_DEBOUNCE);
+        assert_eq!(
+            session.frame_index_due,
+            Some((position, debounced_ready_at))
+        );
         assert!(matches!(
             session.frame_navigator.state(),
             FrameIndexState::Idle
         ));
 
-        app.update_frame_capture_position(Some(position), PositionSettle::Immediate);
+        app.update_frame_capture_position(Some(position), PositionSettle::Immediate, now);
         let session = app.state.frame_capture.as_ref().unwrap();
         let immediate_ready_at = match session.preview.state() {
             PreviewState::Debouncing { ready_at, .. } => *ready_at,
             state => panic!("expected immediately due preview, got {state:?}"),
         };
-        assert!(immediate_ready_at <= Instant::now());
-        assert!(
-            session
-                .frame_index_due
-                .is_some_and(|(_, ready_at)| ready_at <= Instant::now())
-        );
+        assert_eq!(immediate_ready_at, now);
+        assert_eq!(session.frame_index_due, Some((position, now)));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -8039,10 +8037,15 @@ mod tests {
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
         let (release_sender, release_receiver) = mpsc::channel();
         let mut release_receiver = Some(release_receiver);
-        app.file_dialog = FileDialogOwner::new_for_test(egui::Context::default(), move || {
+        let context = egui::Context::default();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        context.set_request_repaint_callback(move |_| {
+            let _ = wake_tx.send(());
+        });
+        app.file_dialog = FileDialogOwner::new_for_test(context, move || {
             Ok(move |_: &FileDialogRequest| {
                 if let Some(receiver) = release_receiver.take() {
-                    receiver.recv().unwrap();
+                    receiver.recv_timeout(Duration::from_secs(10)).unwrap();
                 }
                 Ok(None)
             })
@@ -8064,14 +8067,15 @@ mod tests {
         );
 
         release_sender.send(()).unwrap();
-        for _ in 0..100 {
-            if app.file_dialog.poll().is_some() {
-                fs::remove_dir_all(directory).unwrap();
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        panic!("test dialog worker did not complete");
+        wake_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("dialog completion must wake the UI");
+        assert_eq!(
+            app.file_dialog.poll().unwrap().outcome,
+            DialogOutcome::Cancelled
+        );
+        assert!(!app.file_dialog.is_pending());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -9085,7 +9089,12 @@ mod tests {
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
         app.select_tool(Tool::Remux);
         let job_id = app.enqueue_current_operation(Tool::Remux).unwrap().unwrap();
-        app.media_tools = MediaToolsState::Ready(MediaTools::new("cmd.exe", "missing-ffprobe"));
+        // The test harness rejects FFmpeg arguments without touching media. The queue
+        // stays active until its owner polls the terminal process event.
+        app.media_tools = MediaToolsState::Ready(MediaTools::new(
+            std::env::current_exe().unwrap(),
+            "missing-ffprobe",
+        ));
 
         assert!(app.start_media_queue());
         assert_ne!(app.media_queue.run_state(), QueueRunState::Stopped);
@@ -9380,7 +9389,7 @@ mod tests {
         let wake = queue_execution_wake(first, sender, MediaProcessWake::default());
 
         wake.notify(MediaProcessEvent::Progress);
-        let event = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        let event = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
 
         assert_eq!(
             event,

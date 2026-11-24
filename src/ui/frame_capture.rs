@@ -795,9 +795,8 @@ mod tests {
 
     use super::{
         FrameCaptureLivePreview, FrameCapturePositionSurface, FrameCapturePresentation,
-        FrameCaptureSelectionState, FrameCopyStatus, FrameNavigationAvailability,
-        LivePreviewStatus, PositionSettle, copy_button_label, format_detail, format_duration,
-        ready_feedback, scrubber_maximum, scrubber_settle,
+        FrameCaptureSelectionState, FrameNavigationAvailability, LivePreviewStatus, PositionSettle,
+        format_duration, ready_feedback, scrubber_maximum, scrubber_settle,
     };
 
     fn media(duration: Option<Duration>) -> MediaFile {
@@ -941,7 +940,7 @@ mod tests {
         state.set_timestamp_text(&media, "not a timestamp".into());
         let presentation = FrameCapturePresentation::new(&media);
 
-        let output = context.run_ui(Default::default(), |ui| {
+        let mut output = context.run_ui(Default::default(), |ui| {
             let _ = super::show(
                 ui,
                 &media,
@@ -952,10 +951,10 @@ mod tests {
                 true,
             );
         });
+        output.textures_delta.clear();
         assert!(output.shapes.iter().any(|shape| {
             shape_contains(&shape.shape, "Enter a timestamp using HH:MM:SS.mmm.")
         }));
-        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -999,7 +998,7 @@ mod tests {
         let presentation = FrameCapturePresentation::new(&media);
         let mut state = FrameCaptureSelectionState::new(&media);
 
-        let output = context.run_ui(Default::default(), |ui| {
+        let mut output = context.run_ui(Default::default(), |ui| {
             let _ = super::show(
                 ui,
                 &media,
@@ -1010,6 +1009,7 @@ mod tests {
                 true,
             );
         });
+        output.textures_delta.clear();
 
         assert!(
             output
@@ -1023,7 +1023,6 @@ mod tests {
                 .iter()
                 .any(|shape| shape_contains(&shape.shape, "lossless"))
         );
-        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -1039,7 +1038,7 @@ mod tests {
             texture: None,
         };
 
-        let output = context.run_ui(Default::default(), |ui| {
+        let mut output = context.run_ui(Default::default(), |ui| {
             let _ = super::show(
                 ui,
                 &media,
@@ -1058,6 +1057,7 @@ mod tests {
                 true,
             );
         });
+        output.textures_delta.clear();
 
         assert!(
             output
@@ -1065,21 +1065,6 @@ mod tests {
                 .iter()
                 .any(|shape| { shape_contains(&shape.shape, super::PREVIEW_UPDATING_TEXT) })
         );
-        output.drop_without_applying_deltas();
-    }
-
-    #[test]
-    fn copy_frame_status_uses_restrained_action_copy() {
-        assert_eq!(copy_button_label(FrameCopyStatus::Idle), super::COPY_LABEL);
-        assert_eq!(
-            copy_button_label(FrameCopyStatus::Copying),
-            super::COPYING_LABEL
-        );
-        assert_eq!(
-            copy_button_label(FrameCopyStatus::Copied),
-            super::COPY_LABEL
-        );
-        assert_eq!(super::COPIED_LABEL, "Copied frame");
     }
 
     #[test]
@@ -1136,7 +1121,7 @@ mod tests {
             texture: None,
         };
 
-        let output = context.run_ui(Default::default(), |ui| {
+        let mut output = context.run_ui(Default::default(), |ui| {
             let _ = super::show(
                 ui,
                 &media,
@@ -1155,6 +1140,7 @@ mod tests {
                 true,
             );
         });
+        output.textures_delta.clear();
 
         assert!(
             output
@@ -1168,7 +1154,6 @@ mod tests {
                 .iter()
                 .any(|shape| { shape_contains(&shape.shape, "Duration 00:00:10.250") })
         );
-        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -1190,7 +1175,7 @@ mod tests {
             Some(retained),
         );
 
-        let output = context.run_ui(Default::default(), |ui| {
+        let mut output = context.run_ui(Default::default(), |ui| {
             let _ = super::show(
                 ui,
                 &media,
@@ -1209,6 +1194,7 @@ mod tests {
                 true,
             );
         });
+        output.textures_delta.clear();
 
         assert!(
             output
@@ -1216,7 +1202,6 @@ mod tests {
                 .iter()
                 .any(|shape| { shape_contains(&shape.shape, "Last preview: 00:00:01.250") })
         );
-        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -1250,7 +1235,7 @@ mod tests {
             texture: None,
         };
 
-        let output = context.run_ui(Default::default(), |ui| {
+        let mut output = context.run_ui(Default::default(), |ui| {
             let _ = super::show(
                 ui,
                 &media,
@@ -1269,6 +1254,7 @@ mod tests {
                 true,
             );
         });
+        output.textures_delta.clear();
 
         assert!(
             output
@@ -1278,17 +1264,14 @@ mod tests {
         );
         assert!(state.can_capture(&media));
         assert_eq!(state.request(&media).unwrap(), request_before);
-        output.drop_without_applying_deltas();
     }
 
     #[test]
-    fn duration_and_format_copy_match_fixed_policies() {
+    fn duration_format_preserves_millisecond_precision() {
         assert_eq!(
             format_duration(Duration::from_millis(3_723_004)),
             "01:02:03.004"
         );
-        assert_eq!(format_detail(FrameCaptureFormat::Png), "lossless");
-        assert_eq!(format_detail(FrameCaptureFormat::Jpeg), "high quality");
     }
 
     #[test]

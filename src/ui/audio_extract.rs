@@ -455,9 +455,7 @@ mod tests {
         media::model::{AudioStream, MediaFile, MediaStream, StreamKind},
     };
 
-    use super::{
-        AudioExtractSelectionState, NO_AUDIO_FEEDBACK, format_detail, format_label, ready_feedback,
-    };
+    use super::{AudioExtractSelectionState, NO_AUDIO_FEEDBACK, ready_feedback};
 
     fn media() -> MediaFile {
         MediaFile {
@@ -567,22 +565,6 @@ mod tests {
             PathBuf::from("captures/chosen commentary.flac")
         );
         assert!(state.output_is_customized());
-    }
-
-    #[test]
-    fn format_labels_and_details_match_the_command_policy() {
-        assert_eq!(
-            format_label(AudioExtractFormat::Original),
-            "Original (copy)"
-        );
-        assert_eq!(
-            format_detail(AudioExtractFormat::Original),
-            "no re-encode · MKA"
-        );
-        assert_eq!(format_label(AudioExtractFormat::Aac), "AAC");
-        assert_eq!(format_detail(AudioExtractFormat::Aac), "256 kbps · M4A");
-        assert_eq!(format_label(AudioExtractFormat::Flac), "FLAC");
-        assert_eq!(format_detail(AudioExtractFormat::Flac), "lossless · FLAC");
     }
 
     #[test]

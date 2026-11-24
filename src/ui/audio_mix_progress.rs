@@ -271,7 +271,7 @@ mod tests {
 
     use crate::{
         audio_mix::{
-            execution::{AudioMixExecutionFailure, AudioMixExecutionState, AudioMixExecutor},
+            execution::AudioMixExecutionFailure,
             model::{AudioMixRequest, LoudnessNormalization, OutputContainer, SelectedAudioTrack},
         },
         media::{
@@ -282,19 +282,10 @@ mod tests {
     };
 
     use super::{
-        AudioMixLifecycleUiState, CANCELLED_TITLE, COMPLETE_TITLE, FAILED_TITLE, RUNNING_TITLE,
-        failure_content, failure_error, mixed_audio_summary, progress_presentation,
-        source_to_output, video_copy_summary,
+        AudioMixLifecycleUiState, failure_content, failure_error, mixed_audio_summary,
+        progress_presentation, source_to_output, video_copy_summary,
     };
     use crate::ui::media_lifecycle::{format_duration, format_integer};
-
-    #[test]
-    fn lifecycle_copy_covers_running_and_terminal_states() {
-        assert_eq!(RUNNING_TITLE, "Mixing audio");
-        assert_eq!(COMPLETE_TITLE, "Audio mix complete");
-        assert_eq!(FAILED_TITLE, "Audio mix failed");
-        assert_eq!(CANCELLED_TITLE, "Audio mix cancelled");
-    }
 
     #[test]
     fn bounded_progress_display_clamps_fraction_and_formats_metadata() {
@@ -361,7 +352,6 @@ mod tests {
                 )
                 .inner;
             assert!(available.y > crate::ui::layout::FOCUS_CONTENT_MIN_HEIGHT);
-            assert_eq!(crate::ui::layout::DIAGNOSTIC_MAX_HEIGHT, 80.0);
             assert!(response.is_scrollable());
             assert!(response.inner.back.rect.bottom() > parent_rect.bottom());
         });
@@ -567,13 +557,6 @@ mod tests {
         state.reset();
 
         assert!(!state.details_open());
-    }
-
-    #[test]
-    fn executor_idle_state_is_the_reusable_selection_boundary() {
-        let executor = AudioMixExecutor::new();
-
-        assert_eq!(executor.state(), &AudioMixExecutionState::Idle);
     }
 
     fn request() -> AudioMixRequest {

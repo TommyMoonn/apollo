@@ -490,9 +490,9 @@ mod tests {
 
     #[test]
     fn queued_item_identity_keeps_duplicate_source_operations_separately_addressable() {
-        let source = PathBuf::from(r"C:\media\recording.mkv");
-        let first_output = PathBuf::from(r"C:\exports\recording-4k.mp4");
-        let second_output = PathBuf::from(r"C:\exports\recording-8k.mp4");
+        let source = PathBuf::from("media/recording.mkv");
+        let first_output = PathBuf::from("exports/recording-4k.mp4");
+        let second_output = PathBuf::from("exports/recording-8k.mp4");
         let first = EditableQueuedJob {
             id: crate::queue::JobId::new(41),
             source: &source,
@@ -559,7 +559,7 @@ mod tests {
         let context = egui::Context::default();
         fonts::install(&context);
         theme::install(&context);
-        let output = context.run_ui(Default::default(), |ui| {
+        let mut output = context.run_ui(Default::default(), |ui| {
             assert_eq!(
                 show(
                     ui,
@@ -575,8 +575,7 @@ mod tests {
                 WorkspaceAction::None
             );
         });
-        let debug = format!("{:?}", output.shapes);
-
+        output.textures_delta.clear();
         for label in [
             "recording.mkv",
             "Queue (3)",
@@ -588,7 +587,10 @@ mod tests {
             "Audio Extract",
             "Frame Capture",
         ] {
-            assert!(debug.contains(label), "missing {label:?}");
+            assert!(
+                output_text_rect(&output, label).is_positive(),
+                "missing {label:?}"
+            );
         }
         output.drop_without_applying_deltas();
     }
@@ -631,8 +633,12 @@ mod tests {
             );
         });
 
-        let debug = format!("{:?}", output.shapes);
-        assert!(!debug.contains("1920×1080"));
+        assert!(
+            output
+                .shapes
+                .iter()
+                .all(|shape| shape_text_rect(&shape.shape, "1920×1080 · 02:31").is_none())
+        );
         let first = output_text_rect(&output, "Audio Mix");
         let last = output_text_rect(&output, "Frame Capture");
         output.textures_delta.clear();

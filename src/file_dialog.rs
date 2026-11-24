@@ -7,11 +7,17 @@ use std::{
 };
 
 use egui::Context;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use raw_window_handle::HasWindowHandle;
+#[cfg(target_os = "windows")]
+use raw_window_handle::RawWindowHandle;
 
+#[cfg(target_os = "windows")]
 const MEDIA_FILTER_NAME: &str = "Video files";
+#[cfg(target_os = "windows")]
 const MEDIA_FILTER_PATTERN: &str = "*.mp4;*.mkv;*.mov;*.avi;*.webm;*.m4v";
+#[cfg(target_os = "windows")]
 const ALL_FILES_FILTER_NAME: &str = "All files";
+#[cfg(target_os = "windows")]
 const ALL_FILES_FILTER_PATTERN: &str = "*.*";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +68,7 @@ pub(crate) enum OutputFormat {
 }
 
 impl OutputFormat {
+    #[cfg(any(target_os = "windows", test))]
     pub(crate) const fn extension(self) -> &'static str {
         match self {
             Self::Mp4 => "mp4",
@@ -74,6 +81,7 @@ impl OutputFormat {
         }
     }
 
+    #[cfg(target_os = "windows")]
     const fn filter_name(self) -> &'static str {
         match self {
             Self::Mp4 => "MP4 video (*.mp4)",
@@ -86,6 +94,7 @@ impl OutputFormat {
         }
     }
 
+    #[cfg(any(target_os = "windows", test))]
     const fn filter_pattern(self) -> &'static str {
         match self {
             Self::Mp4 => "*.mp4",
@@ -360,9 +369,10 @@ fn native_dialog_runner(owner: WindowOwner) -> Result<NativeDialogBackend, Strin
 }
 
 #[cfg(not(target_os = "windows"))]
-fn native_dialog_runner(
-    _owner: WindowOwner,
-) -> Result<fn(&FileDialogRequest) -> Result<Option<PathBuf>, String>, String> {
+type UnsupportedDialogRunner = fn(&FileDialogRequest) -> Result<Option<PathBuf>, String>;
+
+#[cfg(not(target_os = "windows"))]
+fn native_dialog_runner(_owner: WindowOwner) -> Result<UnsupportedDialogRunner, String> {
     Err("Native file dialogs are currently available on Windows.".to_owned())
 }
 
@@ -596,17 +606,7 @@ mod native_windows {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::VecDeque,
-        path::PathBuf,
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicUsize, Ordering},
-            mpsc,
-        },
-        thread::ThreadId,
-        time::Duration,
-    };
+    use std::{collections::VecDeque, path::PathBuf, sync::mpsc, time::Duration};
 
     use super::{
         DialogBackend, DialogOutcome, DialogTarget, FileDialogOwner, FileDialogRequest,
@@ -625,6 +625,17 @@ mod tests {
         }
     }
 
+    const COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
+
+    fn dialog_context() -> (egui::Context, mpsc::Receiver<()>) {
+        let context = egui::Context::default();
+        let (sender, receiver) = mpsc::channel();
+        context.set_request_repaint_callback(move |_| {
+            let _ = sender.send(());
+        });
+        (context, receiver)
+    }
+
     fn open_request() -> FileDialogRequest {
         FileDialogRequest::OpenSource {
             initial_directory: Some(PathBuf::from(r"C:\media")),
@@ -635,7 +646,8 @@ mod tests {
     fn open_request_routes_selected_path_through_owner() {
         let expected = PathBuf::from(r"C:\media\clip.mp4");
         let selected = expected.clone();
-        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), move || {
+        let (context, wake) = dialog_context();
+        let mut owner = FileDialogOwner::new_for_test(context, move || {
             Ok(move |request: &FileDialogRequest| {
                 assert_eq!(request, &open_request());
                 Ok(Some(selected.clone()))
@@ -643,7 +655,7 @@ mod tests {
         });
         owner.request(open_request()).unwrap();
 
-        let completion = wait_for_completion(&mut owner);
+        let completion = wait_for_completion(&mut owner, &wake);
         assert_eq!(completion.target, DialogTarget::MediaInput);
         assert_eq!(completion.outcome, DialogOutcome::Selected(expected));
     }
@@ -655,9 +667,9 @@ mod tests {
             PathBuf::from(r"C:\media\second.mkv"),
         ];
         let expected = paths.clone();
-        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), move || {
-            Ok(MultiSelectBackend(paths))
-        });
+        let (context, wake) = dialog_context();
+        let mut owner =
+            FileDialogOwner::new_for_test(context, move || Ok(MultiSelectBackend(paths)));
         owner
             .request(FileDialogRequest::OpenSources {
                 initial_directory: Some(PathBuf::from(r"C:\media")),
@@ -665,20 +677,20 @@ mod tests {
             })
             .unwrap();
 
-        let completion = wait_for_completion(&mut owner);
+        let completion = wait_for_completion(&mut owner, &wake);
         assert_eq!(completion.target, DialogTarget::BatchInput);
         assert_eq!(completion.outcome, DialogOutcome::SelectedMany(expected));
     }
 
     #[test]
     fn cancellation_is_not_a_failure() {
-        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), || {
-            Ok(|_: &FileDialogRequest| Ok(None))
-        });
+        let (context, wake) = dialog_context();
+        let mut owner =
+            FileDialogOwner::new_for_test(context, || Ok(|_: &FileDialogRequest| Ok(None)));
         owner.request(open_request()).unwrap();
 
         assert_eq!(
-            wait_for_completion(&mut owner).outcome,
+            wait_for_completion(&mut owner, &wake).outcome,
             DialogOutcome::Cancelled
         );
     }
@@ -694,14 +706,14 @@ mod tests {
             },
         };
         let expected = request.clone();
-        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), move || {
+        let (context, wake) = dialog_context();
+        let mut owner = FileDialogOwner::new_for_test(context, move || {
             Ok(move |actual: &FileDialogRequest| {
                 assert_eq!(actual, &expected);
                 let FileDialogRequest::SaveOutput { options, .. } = actual else {
                     unreachable!();
                 };
                 assert_eq!(options.format.extension(), "mkv");
-                assert_eq!(options.format.filter_name(), "Matroska video (*.mkv)");
                 assert_eq!(options.format.filter_pattern(), "*.mkv");
                 Ok(None)
             })
@@ -709,32 +721,30 @@ mod tests {
         owner.request(request).unwrap();
 
         assert_eq!(
-            wait_for_completion(&mut owner).outcome,
+            wait_for_completion(&mut owner, &wake).outcome,
             DialogOutcome::Cancelled
         );
     }
 
     #[test]
     fn audio_extract_formats_own_save_extensions_and_filters() {
-        for (format, extension, name, pattern) in [
-            (OutputFormat::Mka, "mka", "Matroska audio (*.mka)", "*.mka"),
-            (OutputFormat::M4a, "m4a", "MPEG-4 audio (*.m4a)", "*.m4a"),
-            (OutputFormat::Flac, "flac", "FLAC audio (*.flac)", "*.flac"),
+        for (format, extension, pattern) in [
+            (OutputFormat::Mka, "mka", "*.mka"),
+            (OutputFormat::M4a, "m4a", "*.m4a"),
+            (OutputFormat::Flac, "flac", "*.flac"),
         ] {
             assert_eq!(format.extension(), extension);
-            assert_eq!(format.filter_name(), name);
             assert_eq!(format.filter_pattern(), pattern);
         }
     }
 
     #[test]
     fn frame_capture_formats_own_save_extensions_and_filters() {
-        for (format, extension, name, pattern) in [
-            (OutputFormat::Png, "png", "PNG image (*.png)", "*.png"),
-            (OutputFormat::Jpeg, "jpg", "JPEG image (*.jpg)", "*.jpg"),
+        for (format, extension, pattern) in [
+            (OutputFormat::Png, "png", "*.png"),
+            (OutputFormat::Jpeg, "jpg", "*.jpg"),
         ] {
             assert_eq!(format.extension(), extension);
-            assert_eq!(format.filter_name(), name);
             assert_eq!(format.filter_pattern(), pattern);
         }
     }
@@ -743,10 +753,11 @@ mod tests {
     fn owner_rejects_a_second_pending_request() {
         let (release_sender, release_receiver) = mpsc::channel();
         let mut release_receiver = Some(release_receiver);
-        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), move || {
+        let (context, wake) = dialog_context();
+        let mut owner = FileDialogOwner::new_for_test(context, move || {
             Ok(move |_: &FileDialogRequest| {
                 if let Some(receiver) = release_receiver.take() {
-                    receiver.recv().unwrap();
+                    receiver.recv_timeout(COMPLETION_TIMEOUT).unwrap();
                 }
                 Ok(None)
             })
@@ -759,85 +770,75 @@ mod tests {
             Err(FileDialogStartError::AlreadyPending)
         );
         release_sender.send(()).unwrap();
-        let _ = wait_for_completion(&mut owner);
+        let completion = wait_for_completion(&mut owner, &wake);
+        assert_eq!(completion.outcome, DialogOutcome::Cancelled);
+        assert!(owner.request(open_request()).is_ok());
     }
 
     #[test]
     fn backend_failure_remains_distinct_from_cancellation() {
-        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), || {
+        let (context, wake) = dialog_context();
+        let mut owner = FileDialogOwner::new_for_test(context, || {
             Ok(|_: &FileDialogRequest| Err("native dialog diagnostic".to_owned()))
         });
         owner.request(open_request()).unwrap();
 
         assert_eq!(
-            wait_for_completion(&mut owner).outcome,
+            wait_for_completion(&mut owner, &wake).outcome,
             DialogOutcome::Failed("native dialog diagnostic".to_owned())
         );
     }
 
     #[test]
-    fn repeated_requests_reuse_one_initialized_service_thread() {
-        let initialization_count = Arc::new(AtomicUsize::new(0));
-        let thread_ids = Arc::new(Mutex::new(Vec::<ThreadId>::new()));
-        let results = VecDeque::from([
-            Some(PathBuf::from(r"C:\media\first.mp4")),
-            Some(PathBuf::from(r"C:\output\second.mkv")),
-        ]);
-        let mut results = results;
-        let initialized = Arc::clone(&initialization_count);
-        let observed_threads = Arc::clone(&thread_ids);
-        let mut owner = FileDialogOwner::new_for_test(egui::Context::default(), move || {
-            initialized.fetch_add(1, Ordering::SeqCst);
-            Ok(move |_: &FileDialogRequest| {
-                observed_threads
-                    .lock()
-                    .unwrap()
-                    .push(std::thread::current().id());
-                Ok(results.pop_front().unwrap())
-            })
+    fn dialog_service_reuses_initialized_backend_for_multiple_requests() {
+        let paths = [
+            PathBuf::from("media/first.mp4"),
+            PathBuf::from("output/second.mkv"),
+        ];
+        let mut results = VecDeque::from(paths.clone());
+        let (requests, request_rx) = mpsc::sync_channel(1);
+        let (completion_tx, completions) = mpsc::sync_channel(1);
+        let (initializations, initialized) = mpsc::channel();
+        let (threads, observed) = mpsc::channel();
+        std::thread::spawn(move || {
+            super::run_dialog_service(
+                request_rx,
+                completion_tx,
+                egui::Context::default(),
+                move || {
+                    initializations.send(()).unwrap();
+                    Ok(move |_: &FileDialogRequest| {
+                        threads.send(std::thread::current().id()).unwrap();
+                        Ok(results.pop_front())
+                    })
+                },
+            );
         });
-
-        owner.request(open_request()).unwrap();
-        assert!(matches!(
-            wait_for_completion(&mut owner).outcome,
-            DialogOutcome::Selected(_)
-        ));
-        owner.request(open_request()).unwrap();
-        assert!(matches!(
-            wait_for_completion(&mut owner).outcome,
-            DialogOutcome::Selected(_)
-        ));
-
-        let thread_ids = thread_ids.lock().unwrap();
-        assert_eq!(initialization_count.load(Ordering::SeqCst), 1);
-        assert_eq!(thread_ids.len(), 2);
-        assert_eq!(thread_ids[0], thread_ids[1]);
-    }
-
-    #[test]
-    fn completion_requests_egui_repaint() {
-        let context = egui::Context::default();
-        let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
-        context.set_request_repaint_callback(move |_| {
-            let _ = repaint_sender.try_send(());
-        });
-        let mut owner =
-            FileDialogOwner::new_for_test(context, || Ok(|_: &FileDialogRequest| Ok(None)));
-
-        owner.request(open_request()).unwrap();
-        let _ = wait_for_completion(&mut owner);
-        repaint_receiver
-            .recv_timeout(Duration::from_secs(1))
-            .expect("dialog completion should wake egui");
-    }
-
-    fn wait_for_completion(owner: &mut FileDialogOwner) -> super::FileDialogCompletion {
-        for _ in 0..100 {
-            if let Some(completion) = owner.poll() {
-                return completion;
-            }
-            std::thread::sleep(Duration::from_millis(5));
+        initialized.recv_timeout(COMPLETION_TIMEOUT).unwrap();
+        let mut worker_thread = None;
+        for path in paths {
+            requests.send(open_request()).unwrap();
+            let completion = completions.recv_timeout(COMPLETION_TIMEOUT).unwrap();
+            assert_eq!(completion.target, DialogTarget::MediaInput);
+            assert_eq!(completion.outcome, DialogOutcome::Selected(path));
+            let thread = observed.recv_timeout(COMPLETION_TIMEOUT).unwrap();
+            assert_ne!(thread, std::thread::current().id());
+            assert_eq!(*worker_thread.get_or_insert(thread), thread);
         }
-        panic!("file dialog worker did not complete");
+        assert!(initialized.try_recv().is_err());
+    }
+
+    fn wait_for_completion(
+        owner: &mut FileDialogOwner,
+        wake: &mpsc::Receiver<()>,
+    ) -> super::FileDialogCompletion {
+        wake.recv_timeout(COMPLETION_TIMEOUT)
+            .expect("dialog completion must wake the UI");
+        let completion = owner
+            .poll()
+            .expect("dialog result must be published before repaint");
+        assert!(!owner.is_pending());
+        assert!(owner.poll().is_none());
+        completion
     }
 }

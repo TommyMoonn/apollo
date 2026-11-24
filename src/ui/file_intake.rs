@@ -170,20 +170,7 @@ mod tests {
         },
     };
 
-    use super::{
-        DROP_HINT, INSPECTING_LABEL, OPEN_LABEL, WORDMARK, intake_region_heights, queue_label,
-        show_with_layout_plan,
-    };
-
-    #[test]
-    fn intake_copy_matches_quiet_focus_surface() {
-        assert_eq!(WORDMARK, "apollo");
-        assert_eq!(OPEN_LABEL, "Open files");
-        assert_eq!(DROP_HINT, "or drop videos anywhere");
-        assert_eq!(INSPECTING_LABEL, "Inspecting media…");
-        assert_eq!(queue_label(0), "Queue (0)");
-        assert_eq!(queue_label(12), "Queue (12)");
-    }
+    use super::{intake_region_heights, show_with_layout_plan};
 
     #[test]
     fn wrapped_error_changes_real_intake_layout_with_width() {

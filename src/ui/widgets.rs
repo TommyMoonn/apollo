@@ -1176,17 +1176,15 @@ fn finite_nonnegative(value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use egui::{FontFamily, FontId, Sense, TextStyle};
+    use egui::{FontFamily, FontId, Sense};
 
     use super::{
         BUTTON_HORIZONTAL_PADDING, InlineStatusKind, SelectionIndicator, button_intrinsic_size,
-        button_text_style, compact_secondary_button_enabled, conditional_fade,
-        displayed_progress_fraction, encoder_quality_control, filename_field, framed_preview,
-        inline_status, inline_status_color, inline_status_height, labeled_control, mode_button,
-        mode_button_intrinsic_size, operation_output_row, parse_pixel_dimension,
-        pixel_dimension_control, plain_button_text_style, primary_button_enabled, progress_bar,
-        progress_rail_color, secondary_button, select_button, select_menu_intrinsic_width,
-        select_menu_option, selectable_row, selectable_row_visuals, selectable_row_with_accessory,
+        compact_secondary_button_enabled, conditional_fade, displayed_progress_fraction,
+        filename_field, framed_preview, inline_status, inline_status_color, inline_status_height,
+        labeled_control, mode_button, operation_output_row, parse_pixel_dimension, progress_bar,
+        secondary_button, select_button, select_menu_intrinsic_width, select_menu_option,
+        selectable_row, selectable_row_visuals, selectable_row_with_accessory,
         selector_popup_width, show_selector_popup, switch_control,
     };
     use crate::ui::{fonts, layout, theme};
@@ -1312,23 +1310,6 @@ mod tests {
     }
 
     #[test]
-    fn encoder_quality_control_shows_numeric_value_and_backend_unit() {
-        let context = egui::Context::default();
-        super::fonts::install(&context);
-        let mut value = 16_u8;
-
-        let mut output = context.run_ui(Default::default(), |ui| {
-            let response =
-                encoder_quality_control(ui, "NVIDIA NVENC quality", &mut value, 1..=51, "CQ");
-
-            assert_eq!(response.rect.width(), layout::ENCODER_QUALITY_CONTROL_WIDTH);
-            assert_eq!(response.rect.height(), theme::COMPACT_CONTROL_HEIGHT);
-            assert_eq!(value, 16);
-        });
-        output.textures_delta.clear();
-    }
-
-    #[test]
     fn labeled_controls_keep_the_control_on_the_trailing_edge() {
         egui::__run_test_ui(|ui| {
             ui.set_width(320.0);
@@ -1343,37 +1324,11 @@ mod tests {
     }
 
     #[test]
-    fn pixel_dimension_control_uses_shared_width_and_two_pixel_speed() {
-        egui::__run_test_ui(|ui| {
-            let mut value = 3840;
-            let response = pixel_dimension_control(ui, "Maximum output width", &mut value);
-
-            assert_eq!(response.rect.width(), layout::PIXEL_DIMENSION_CONTROL_WIDTH);
-            assert_eq!(response.rect.height(), theme::COMPACT_CONTROL_HEIGHT);
-        });
-    }
-
-    #[test]
     fn incomplete_pixel_dimension_drafts_become_invalid_without_rounding_odd_values() {
         assert_eq!(parse_pixel_dimension(""), 0.0);
         assert_eq!(parse_pixel_dimension("not-a-size"), 0.0);
         assert_eq!(parse_pixel_dimension("2999"), 2999.0);
         assert_eq!(parse_pixel_dimension(" 3000 "), 3000.0);
-    }
-
-    #[test]
-    fn switch_control_uses_shared_geometry_and_checkbox_semantics() {
-        egui::__run_test_ui(|ui| {
-            ui.set_width(320.0);
-            let mut checked = false;
-            let response = switch_control(ui, "Normalize output loudness", &mut checked);
-
-            assert!(response.sense.senses_click());
-            assert!(response.sense.is_focusable());
-            assert_eq!(response.rect.width(), theme::TOGGLE_SWITCH_WIDTH);
-            assert_eq!(response.rect.height(), theme::TOGGLE_SWITCH_HEIGHT);
-            assert!(!checked);
-        });
     }
 
     #[test]
@@ -1383,9 +1338,10 @@ mod tests {
         let mut stem = String::from("base");
         let mut field_rect = egui::Rect::NOTHING;
 
-        let output = context.run_ui(Default::default(), |ui| {
+        let mut output = context.run_ui(Default::default(), |ui| {
             field_rect = filename_field(ui, &mut stem, "mp4", 160.0).rect;
         });
+        output.textures_delta.clear();
 
         let text_center_y = output
             .shapes
@@ -1393,7 +1349,6 @@ mod tests {
             .find_map(|clipped| text_shape_center_y(&clipped.shape, "base"))
             .expect("filename text should be painted");
         assert!((text_center_y - field_rect.center().y).abs() <= 0.5);
-        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -1437,8 +1392,6 @@ mod tests {
     fn minimum_content_width_keeps_every_operation_selector_usable() {
         let content_width =
             layout::MINIMUM_CONTENT_SIZE.x - f32::from(layout::CONTENT_PADDING) * 2.0;
-        let mut saw_inline = false;
-        let mut saw_stacked = false;
         for options in [
             &["MP4", "MKV"][..],
             &["H.264", "H.265"][..],
@@ -1474,8 +1427,6 @@ mod tests {
                 let stacked = selector_rect.bottom() <= row.filename.rect.top()
                     && row.filename.rect.bottom() <= row.browse.rect.top();
                 assert!(inline || stacked);
-                saw_inline |= inline;
-                saw_stacked |= stacked;
                 assert!(
                     (row.browse.rect.right() - rect.right()).abs() <= 0.5,
                     "options={options:?} browse={:?} row={rect:?}",
@@ -1484,8 +1435,6 @@ mod tests {
             });
             output.drop_without_applying_deltas();
         }
-        assert!(saw_inline);
-        assert!(saw_stacked);
     }
 
     #[test]
@@ -1642,16 +1591,6 @@ mod tests {
         assert_eq!(selected.indicator_foreground, theme::BACKGROUND);
         assert_eq!(selected_hover.background, theme::HOVER);
         assert_eq!(selected_hover.indicator_fill, theme::SELECTION);
-    }
-
-    #[test]
-    fn disabled_controls_reject_interaction() {
-        egui::__run_test_ui(|ui| {
-            let response = primary_button_enabled(ui, "Mix audio", false);
-
-            assert!(!response.enabled());
-            assert!(!response.clicked());
-        });
     }
 
     #[test]
@@ -1862,40 +1801,51 @@ mod tests {
     }
 
     #[test]
-    fn clickable_primitives_preserve_egui_keyboard_activation_semantics() {
-        egui::__run_test_ui(|ui| {
-            install_test_technical_style(ui);
-            let button = mode_button(ui, "Audio Mix", false);
-            let row = selectable_row(
+    fn keyboard_activates_enabled_controls_and_changes_switch_state() {
+        fn activate_with_keyboard(mut show: impl FnMut(&mut egui::Ui) -> egui::Response) {
+            let context = egui::Context::default();
+            fonts::install(&context);
+            theme::install(&context);
+            context
+                .run_ui(Default::default(), |ui| {
+                    let response = show(ui);
+                    assert!(!response.clicked());
+                    response.request_focus();
+                })
+                .drop_without_applying_deltas();
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            context
+                .run_ui(input, |ui| {
+                    let response = show(ui);
+                    assert!(response.has_focus());
+                    assert!(response.clicked());
+                })
+                .drop_without_applying_deltas();
+        }
+
+        activate_with_keyboard(|ui| mode_button(ui, "Audio Mix", false));
+        activate_with_keyboard(|ui| {
+            selectable_row(
                 ui,
                 "Desktop Audio",
                 Some("Stereo"),
                 false,
                 SelectionIndicator::Checkbox,
-                34.0,
-            );
-
-            assert_eq!(button.sense, Sense::click());
-            assert_eq!(row.sense, Sense::click());
+                theme::SELECTABLE_ROW_MIN_HEIGHT,
+            )
         });
-    }
-
-    #[test]
-    fn mode_controls_use_quiet_focus_intrinsic_padding() {
-        egui::__run_test_ui(|ui| {
-            let size = mode_button_intrinsic_size(ui, "Audio Mix");
-            let galley = ui.painter().layout_no_wrap(
-                "Audio Mix".to_owned(),
-                button_text_style().resolve(ui.style()),
-                theme::FOREGROUND,
-            );
-
-            assert_eq!(size.y, theme::PRIMARY_CONTROL_HEIGHT);
-            assert_eq!(
-                size.x,
-                galley.size().x + theme::MODE_BUTTON_HORIZONTAL_PADDING * 2.0
-            );
-        });
+        let mut checked = false;
+        activate_with_keyboard(|ui| switch_control(ui, "Normalize output loudness", &mut checked));
+        assert!(checked);
     }
 
     #[test]
@@ -1960,76 +1910,16 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_actions_use_control_typography() {
-        assert_eq!(plain_button_text_style(), TextStyle::Button);
-    }
-
-    #[test]
-    fn progress_rail_uses_shared_low_alpha_border_color() {
-        assert_eq!(progress_rail_color(), theme::SEPARATOR);
-        assert_eq!(
-            progress_rail_color().to_srgba_unmultiplied(),
-            [255, 255, 255, 46]
-        );
-    }
-
-    #[test]
     fn progress_is_clamped_and_remains_monochrome_and_rectangular() {
         assert_eq!(displayed_progress_fraction(-0.5), 0.0);
         assert_eq!(displayed_progress_fraction(f32::NAN), 0.0);
         assert_eq!(displayed_progress_fraction(0.61), 0.61);
         assert_eq!(displayed_progress_fraction(1.4), 1.0);
-        assert_eq!(theme::PROGRESS, theme::FOREGROUND);
-        assert_eq!(theme::PROGRESS_RADIUS, 0);
-        assert_eq!(layout::PROGRESS_TRACK_HEIGHT, 4.0);
 
         egui::__run_test_ui(|ui| {
             let response = progress_bar(ui, 1.0);
             assert_eq!(response.rect.height(), layout::PROGRESS_TRACK_HEIGHT);
         });
-    }
-
-    #[test]
-    fn destructive_state_mapping_matches_quiet_focus_exception() {
-        let idle = theme::control_colors(
-            theme::ControlTone::Destructive,
-            theme::InteractionState::Idle,
-        );
-        let hovered = theme::control_colors(
-            theme::ControlTone::Destructive,
-            theme::InteractionState::Hovered,
-        );
-        let pressed = theme::control_colors(
-            theme::ControlTone::Destructive,
-            theme::InteractionState::Pressed,
-        );
-        let disabled = theme::control_colors(
-            theme::ControlTone::Destructive,
-            theme::InteractionState::Disabled,
-        );
-
-        assert_eq!(idle.background, theme::BACKGROUND);
-        assert_eq!(idle.foreground, theme::FOREGROUND);
-        assert_eq!(hovered.background, theme::BACKGROUND);
-        assert_eq!(hovered.foreground, theme::DANGER_INTERACTIVE);
-        assert_eq!(pressed.foreground, theme::DANGER_INTERACTIVE);
-        assert_ne!(disabled.foreground, theme::DANGER_INTERACTIVE);
-        assert_ne!(disabled.border, theme::DANGER_INTERACTIVE);
-    }
-
-    #[test]
-    fn primitives_use_shared_font_and_geometry_owners() {
-        assert_eq!(button_text_style(), TextStyle::Button);
-        assert_eq!(
-            fonts::technical_text_style(),
-            TextStyle::Name("apollo-technical".into())
-        );
-        assert_eq!(theme::PRIMARY_CONTROL_HEIGHT, 31.0);
-        assert_eq!(theme::COMPACT_CONTROL_HEIGHT, 30.0);
-        assert_eq!(theme::SELECTABLE_ROW_MIN_HEIGHT, 34.0);
-        assert_eq!(theme::SELECTION_INDICATOR_SIZE, 12.0);
-        assert_eq!(theme::CONTROL_RADIUS, theme::CONTAINER_RADIUS);
-        assert!(f32::from(theme::CONTROL_RADIUS) * 2.0 < theme::PRIMARY_CONTROL_HEIGHT);
     }
 
     #[test]

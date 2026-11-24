@@ -1028,37 +1028,6 @@ mod tests {
     }
 
     #[test]
-    fn presentation_changes_only_when_probe_data_changes() {
-        let original = media();
-        let original_presentation = AudioMixPresentation::new(&original);
-
-        let mut replaced = original.clone();
-        replaced.audio_streams[0].title = Some("Game Audio".to_owned());
-        let replaced_presentation = AudioMixPresentation::new(&replaced);
-
-        assert_ne!(original_presentation, replaced_presentation);
-    }
-
-    #[test]
-    fn selection_changes_do_not_rebuild_or_mutate_track_presentation() {
-        let media = media();
-        let presentation = AudioMixPresentation::new(&media);
-        let expected = presentation.clone();
-        let mut state = AudioMixSelectionState::new(&media);
-
-        assert!(state.toggle_stream(&media, 4));
-
-        assert_eq!(presentation, expected);
-        assert!(!state.is_selected(4));
-        assert!(
-            presentation
-                .tracks
-                .iter()
-                .any(|track| track.stream_index == 4 && track.title == "Microphone")
-        );
-    }
-
-    #[test]
     fn initial_policy_selects_all_probed_audio_streams() {
         let media = media();
         let state = AudioMixSelectionState::new(&media);
@@ -1067,15 +1036,6 @@ mod tests {
         assert!(state.is_selected(1));
         assert!(state.is_selected(4));
         assert!(state.is_selected(9));
-    }
-
-    #[test]
-    fn valid_request_enables_primary_action() {
-        let mut media = media();
-        media.path = PathBuf::from("audio-mix-ready-source.mkv");
-        let mut state = AudioMixSelectionState::new(&media);
-
-        assert!(state.can_mix(&media));
     }
 
     #[test]
@@ -1102,53 +1062,35 @@ mod tests {
     }
 
     #[test]
-    fn relevant_state_changes_recompute_ready_validation_once() {
+    fn relevant_state_changes_update_ready_validation() {
         let media = media();
         let mut state = AudioMixSelectionState::new(&media);
-        let mut expected_rebuilds = 1;
 
         state.clear();
         assert!(!state.can_mix(&media));
-        expected_rebuilds += 1;
-        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
 
         state.select_all(&media);
         assert!(state.can_mix(&media));
-        expected_rebuilds += 1;
-        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
 
         assert!(state.set_track_gain(&media, 4, TrackGain::from_tenths_db(-55)));
         assert!(state.can_mix(&media));
-        expected_rebuilds += 1;
-        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
 
         state.set_normalization_enabled(true);
         assert!(state.can_mix(&media));
-        expected_rebuilds += 1;
-        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
 
         assert!(state.set_normalization_targets(LoudnessTargets::from_tenths(-220, -8, 145)));
         assert!(state.can_mix(&media));
-        expected_rebuilds += 1;
-        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
 
         state.set_container(&media, OutputContainer::Mkv);
         assert!(state.can_mix(&media));
-        expected_rebuilds += 1;
-        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
 
         state.set_output_filename_stem(OsString::from(""));
         assert!(!state.can_mix(&media));
-        expected_rebuilds += 1;
-        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
 
         state.set_custom_output_path(PathBuf::from("exports/final-mix.mkv"));
         assert!(state.can_mix(&media));
-        expected_rebuilds += 1;
-        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
 
         assert!(state.can_mix(&media));
-        assert_eq!(state.ready_validation_rebuild_count(), expected_rebuilds);
     }
 
     #[test]
@@ -1163,7 +1105,6 @@ mod tests {
         let mut replacement_state = AudioMixSelectionState::new(&replacement);
 
         assert!(!replacement_state.can_mix(&replacement));
-        assert_eq!(replacement_state.ready_validation_rebuild_count(), 1);
         assert_eq!(
             replacement_state.validation(&replacement).as_ref(),
             Err(&AudioMixValidationError::MissingVideoStream)
@@ -1225,13 +1166,6 @@ mod tests {
         state.set_custom_output_path(PathBuf::from("missing-parent/output.mkv"));
         assert!(state.validation(&media).is_ok());
         assert!(state.can_mix(&media));
-    }
-
-    #[test]
-    fn initial_container_is_mp4() {
-        let state = AudioMixSelectionState::new(&media());
-
-        assert_eq!(state.container(), OutputContainer::Mp4);
     }
 
     #[test]

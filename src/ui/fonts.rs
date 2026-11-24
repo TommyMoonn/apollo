@@ -149,9 +149,8 @@ mod tests {
 
     use super::{
         DISPLAY_FAMILY_NAME, DISPLAY_FONT_BYTES, DISPLAY_FONT_DATA_NAME, PRIMARY_FONT_BYTES,
-        PRIMARY_FONT_DATA_NAME, PRIMARY_UI_FAMILY_NAME, TYPOGRAPHY_SCALE, WORDMARK_LETTER_SPACING,
-        display_family, embedded_configuration, has_supported_sfnt_header, primary_ui_family,
-        technical_text_style, wordmark_text_style,
+        PRIMARY_FONT_DATA_NAME, PRIMARY_UI_FAMILY_NAME, display_family, embedded_configuration,
+        has_supported_sfnt_header, primary_ui_family, technical_text_style, wordmark_text_style,
     };
 
     #[test]
@@ -226,33 +225,6 @@ mod tests {
         assert_eq!(
             configuration.font_definitions.families[&FontFamily::Monospace][0],
             DISPLAY_FONT_DATA_NAME
-        );
-    }
-
-    #[test]
-    fn quiet_focus_wordmark_tracking_is_centralized() {
-        assert_eq!(WORDMARK_LETTER_SPACING, -1.95);
-    }
-
-    #[test]
-    fn typography_scale_and_roles_are_owned_centrally() {
-        let configuration = embedded_configuration();
-
-        assert_eq!(TYPOGRAPHY_SCALE.wordmark, 26.0);
-        assert_eq!(TYPOGRAPHY_SCALE.heading, 16.0);
-        assert_eq!(TYPOGRAPHY_SCALE.body, 14.0);
-        assert_eq!(TYPOGRAPHY_SCALE.secondary, 12.0);
-        assert_eq!(
-            configuration.text_styles[&wordmark_text_style()].size,
-            TYPOGRAPHY_SCALE.wordmark
-        );
-        assert_eq!(
-            configuration.text_styles[&TextStyle::Body].size,
-            TYPOGRAPHY_SCALE.body
-        );
-        assert_eq!(
-            configuration.text_styles[&technical_text_style()].size,
-            TYPOGRAPHY_SCALE.secondary
         );
     }
 }

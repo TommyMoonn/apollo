@@ -273,23 +273,10 @@ mod tests {
     };
 
     use super::{
-        CANCELLED_CLEANUP, CANCELLED_COPY, CANCELLED_TITLE, COMPLETE_TITLE, FAILED_TITLE,
         UpscaleLifecycleUiState, completion_dimensions, failure_content, failure_error,
-        reset_terminal, running_title, show_cancelled, show_completed, show_running,
+        reset_terminal, show_cancelled, show_completed, show_running,
     };
     use crate::{media::error::MediaErrorKind, ui::media_lifecycle::progress_presentation};
-
-    #[test]
-    fn lifecycle_copy_matches_quiet_focus_upscale_surfaces() {
-        let request = request();
-
-        assert_eq!(running_title(&request), "Upscaling to 4K");
-        assert_eq!(COMPLETE_TITLE, "Upscale complete");
-        assert_eq!(FAILED_TITLE, "Upscale failed");
-        assert_eq!(CANCELLED_TITLE, "Upscale cancelled");
-        assert_eq!(CANCELLED_COPY, "No final output was published.");
-        assert_eq!(CANCELLED_CLEANUP, "temporary output cleaned");
-    }
 
     #[test]
     fn running_view_renders_target_progress_and_source_to_output() {
@@ -302,9 +289,10 @@ mod tests {
         };
         let executor = UpscaleExecutor::new();
 
-        let output = render_test_ui_with_fonts(|ui| {
+        let mut output = render_test_ui_with_fonts(|ui| {
             let _ = show_running(ui, &request, Some(&progress), &executor);
         });
+        output.textures_delta.clear();
 
         for text in [
             "Upscaling to 4K",
@@ -317,7 +305,6 @@ mod tests {
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
-        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -371,7 +358,7 @@ mod tests {
         let mut state = UpscaleLifecycleUiState::default();
         let output_path = PathBuf::from("C:/media/recording-4k.mp4");
 
-        let output = render_test_ui_with_fonts(|ui| {
+        let mut output = render_test_ui_with_fonts(|ui| {
             let _ = show_completed(
                 ui,
                 &media,
@@ -381,6 +368,7 @@ mod tests {
                 &mut state,
             );
         });
+        output.textures_delta.clear();
 
         for text in [
             "Upscale complete",
@@ -392,7 +380,6 @@ mod tests {
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
-        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -429,9 +416,10 @@ mod tests {
         let mut executor = UpscaleExecutor::new();
         let mut state = UpscaleLifecycleUiState::default();
 
-        let output = render_test_ui_with_fonts(|ui| {
+        let mut output = render_test_ui_with_fonts(|ui| {
             let _ = show_cancelled(ui, &mut executor, &mut state);
         });
+        output.textures_delta.clear();
 
         for text in [
             "Upscale cancelled",
@@ -441,7 +429,6 @@ mod tests {
         ] {
             assert!(output_contains_text(&output, text), "missing {text:?}");
         }
-        output.drop_without_applying_deltas();
     }
 
     #[test]

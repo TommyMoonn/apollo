@@ -1015,62 +1015,16 @@ mod tests {
 
     use super::{
         ACTION_BAR_VERTICAL_PADDING, ActionLayout, BATCH_IDENTITY_MIN_WIDTH, BATCH_ROW_HEIGHT,
-        BATCH_STATE_WIDTH, BatchRowLayout, CONTENT_PADDING, DIAGNOSTIC_MAX_HEIGHT,
-        ENCODER_QUALITY_CONTROL_WIDTH, ENCODER_QUALITY_STEP, FIELD_PAIR_MIN_COLUMN_WIDTH,
-        FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT, FieldPairLayout, IntakeLayout,
-        LIVE_PREVIEW_MAX_HEIGHT, LIVE_PREVIEW_MAX_WIDTH, MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE,
-        OUTPUT_FILENAME_MIN_INLINE_WIDTH, OutputRowLayout, PATH_TEXT_OVERFLOW,
-        PIXEL_DIMENSION_CONTROL_WIDTH, PIXEL_DIMENSION_STEP, PROGRESS_TRACK_HEIGHT,
-        QUEUE_IDENTITY_MIN_WIDTH, QUEUE_OPERATION_WIDTH, QUEUE_ROW_HEIGHT, QUEUE_STATE_WIDTH,
-        QueueRowLayout, REFERENCE_CONTENT_SIZE, REFERENCE_WINDOW_SIZE, TRACK_TEXT_MIN_INLINE_WIDTH,
-        TextOverflowPolicy, TrackRowLayout, WINDOW_CHROME_HEIGHT, WORKSPACE_METADATA_MIN_WIDTH,
-        action_group_size, action_layout, batch_row_plan, bounded_content_width,
-        centered_action_group, field_pair_layout, focus_content, intake_content,
-        intake_layout_plan, live_preview_size, operation_surface, output_row_plan, queue_row_plan,
-        surface_fade, track_row_plan, workspace_header_shows_metadata,
+        BatchRowLayout, CONTENT_PADDING, FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT,
+        FieldPairLayout, IntakeLayout, LIVE_PREVIEW_MAX_HEIGHT, LIVE_PREVIEW_MAX_WIDTH,
+        MAX_CONTENT_WIDTH, MINIMUM_CONTENT_SIZE, OutputRowLayout, QUEUE_IDENTITY_MIN_WIDTH,
+        QueueRowLayout, REFERENCE_CONTENT_SIZE, TrackRowLayout, action_layout, batch_row_plan,
+        bounded_content_width, centered_action_group, field_pair_layout, focus_content,
+        intake_content, intake_layout_plan, live_preview_size, operation_surface, output_row_plan,
+        queue_row_plan, surface_fade, track_row_plan, workspace_header_shows_metadata,
         workspace_switcher_fits_one_line,
     };
     use crate::ui::theme;
-
-    #[test]
-    fn quiet_focus_reference_geometry_is_centralized() {
-        assert_eq!(REFERENCE_WINDOW_SIZE, Vec2::new(730.0, 520.0));
-        assert_eq!(WINDOW_CHROME_HEIGHT, 31.0);
-        assert_eq!(REFERENCE_CONTENT_SIZE, Vec2::new(730.0, 489.0));
-        assert_eq!(MINIMUM_CONTENT_SIZE, Vec2::new(400.0, 260.0));
-        assert_eq!(CONTENT_PADDING, 28);
-        assert_eq!(ACTION_BAR_VERTICAL_PADDING, 10);
-        assert_eq!(MAX_CONTENT_WIDTH, 674.0);
-        assert_eq!(FIELD_PAIR_MIN_COLUMN_WIDTH, 180.0);
-        assert_eq!(PIXEL_DIMENSION_CONTROL_WIDTH, 96.0);
-        assert_eq!(PIXEL_DIMENSION_STEP, 2.0);
-        assert_eq!(ENCODER_QUALITY_CONTROL_WIDTH, 96.0);
-        assert_eq!(QUEUE_IDENTITY_MIN_WIDTH, 180.0);
-        assert_eq!(QUEUE_OPERATION_WIDTH, 104.0);
-        assert_eq!(QUEUE_STATE_WIDTH, 78.0);
-        assert_eq!(QUEUE_ROW_HEIGHT, 44.0);
-        assert_eq!(BATCH_IDENTITY_MIN_WIDTH, 180.0);
-        assert_eq!(BATCH_STATE_WIDTH, 150.0);
-        assert_eq!(BATCH_ROW_HEIGHT, 44.0);
-        assert_eq!(ENCODER_QUALITY_STEP, 1.0);
-        assert_eq!(OUTPUT_FILENAME_MIN_INLINE_WIDTH, 180.0);
-        assert_eq!(WORKSPACE_METADATA_MIN_WIDTH, 220.0);
-        assert_eq!(FOCUS_CONTENT_MAX_WIDTH, 470.0);
-        assert_eq!(LIVE_PREVIEW_MAX_WIDTH, 720.0);
-        assert_eq!(LIVE_PREVIEW_MAX_HEIGHT, 360.0);
-        assert_eq!(FOCUS_CONTENT_MIN_HEIGHT, 230.0);
-        assert_eq!(DIAGNOSTIC_MAX_HEIGHT, 80.0);
-        assert_eq!(theme::PRIMARY_CONTROL_HEIGHT, 31.0);
-        assert_eq!(theme::COMPACT_CONTROL_HEIGHT, 30.0);
-        assert_eq!(theme::UPSCALE_TARGET_ROW_MIN_HEIGHT, 37.0);
-        assert_eq!(theme::SPACING.compact, 7.0);
-        assert_eq!(theme::SPACING.related, 11.0);
-        assert_eq!(theme::SPACING.section, 24.0);
-        assert_eq!(theme::SPACING.spacious, 40.0);
-        assert_eq!(theme::SOURCE_HEADER_GAP, 14.0);
-        assert_eq!(theme::INLINE_ACTION_GAP, 10.0);
-        assert_eq!(PROGRESS_TRACK_HEIGHT, 4.0);
-    }
 
     #[test]
     fn live_preview_preserves_aspect_and_respects_narrow_and_wide_bounds() {
@@ -1108,8 +1062,6 @@ mod tests {
         let action_width = 72.0;
         let wide = queue_row_plan(620.0, action_width);
         assert_eq!(wide.layout, QueueRowLayout::Inline);
-        assert_eq!(wide.operation_width, QUEUE_OPERATION_WIDTH);
-        assert_eq!(wide.state_width, QUEUE_STATE_WIDTH);
         assert_eq!(wide.action_width, action_width);
         assert!(wide.identity_width >= QUEUE_IDENTITY_MIN_WIDTH);
 
@@ -1127,14 +1079,22 @@ mod tests {
         let action_width = 128.0;
         let wide = batch_row_plan(620.0, action_width);
         assert_eq!(wide.layout, BatchRowLayout::Inline);
-        assert_eq!(wide.state_width, BATCH_STATE_WIDTH);
         assert_eq!(wide.action_width, action_width);
         assert!(wide.identity_width >= BATCH_IDENTITY_MIN_WIDTH);
 
         let row = Rect::from_min_size(pos2(8.0, 12.0), Vec2::new(620.0, BATCH_ROW_HEIGHT));
         let columns = wide.columns(row);
-        assert_eq!(columns.identity.left(), row.left());
-        assert!((columns.actions.right() - row.right()).abs() <= 0.5);
+        let cells = [columns.identity, columns.state, columns.actions];
+        assert!(
+            cells
+                .iter()
+                .all(|cell| cell.is_positive() && row.contains_rect(*cell))
+        );
+        assert!(
+            cells
+                .windows(2)
+                .all(|pair| pair[0].right() <= pair[1].left())
+        );
 
         assert_eq!(
             batch_row_plan(420.0, action_width).layout,
@@ -1143,29 +1103,25 @@ mod tests {
     }
 
     #[test]
-    fn inline_queue_plan_resolves_one_exact_shared_column_geometry() {
-        let plan = queue_row_plan(620.0, 144.0);
+    fn inline_queue_columns_stay_ordered_and_inside_row() {
+        let row = Rect::from_min_size(
+            pos2(17.0, 23.0),
+            Vec2::new(620.0, queue_row_plan(620.0, 144.0).row_height),
+        );
+        let plan = queue_row_plan(row.width(), 144.0);
         assert_eq!(plan.layout, QueueRowLayout::Inline);
-        let row = Rect::from_min_size(pos2(17.0, 23.0), Vec2::new(620.0, plan.row_height));
         let columns = plan.columns(row);
-
-        assert_eq!(columns.identity.left(), row.left());
-        assert_eq!(columns.identity.width(), plan.identity_width);
-        assert_eq!(columns.operation.width(), QUEUE_OPERATION_WIDTH);
-        assert_eq!(columns.state.width(), QUEUE_STATE_WIDTH);
-        assert_eq!(columns.actions.unwrap().width(), plan.action_width);
-        assert_eq!(columns.actions.unwrap().right(), row.right());
-        assert_eq!(
-            columns.operation.left() - columns.identity.right(),
-            theme::SPACING.related
+        let actions = columns.actions.unwrap();
+        let cells = [columns.identity, columns.operation, columns.state, actions];
+        assert!(
+            cells
+                .iter()
+                .all(|cell| cell.is_positive() && row.contains_rect(*cell))
         );
-        assert_eq!(
-            columns.state.left() - columns.operation.right(),
-            theme::SPACING.related
-        );
-        assert_eq!(
-            columns.actions.unwrap().left() - columns.state.right(),
-            theme::SPACING.related
+        assert!(
+            cells
+                .windows(2)
+                .all(|pair| pair[0].right() <= pair[1].left())
         );
     }
 
@@ -1429,22 +1385,7 @@ mod tests {
     fn narrow_task_width_stacks_field_pair() {
         let narrow_width = MINIMUM_CONTENT_SIZE.x - f32::from(CONTENT_PADDING) * 2.0;
 
-        assert_eq!(narrow_width, 344.0);
         assert_eq!(field_pair_layout(narrow_width), FieldPairLayout::Stacked);
-    }
-
-    #[test]
-    fn horizontal_action_group_uses_intrinsic_width_gap_and_height() {
-        let action_sizes = [Vec2::new(80.0, 31.0), Vec2::new(70.0, 31.0)];
-
-        assert_eq!(
-            action_group_size(
-                &action_sizes,
-                ActionLayout::Horizontal,
-                theme::SPACING.compact,
-            ),
-            Vec2::new(157.0, 31.0)
-        );
     }
 
     #[test]
@@ -1761,7 +1702,6 @@ mod tests {
 
         assert_eq!(plan.layout, TrackRowLayout::Inline);
         assert_eq!(plan.row_height, theme::SELECTABLE_ROW_MIN_HEIGHT);
-        assert_eq!(TRACK_TEXT_MIN_INLINE_WIDTH, 240.0);
     }
 
     #[test]
@@ -1769,7 +1709,6 @@ mod tests {
         let narrow_width = MINIMUM_CONTENT_SIZE.x - f32::from(CONTENT_PADDING) * 2.0;
         let plan = track_row_plan(narrow_width, theme::TRACK_GAIN_CONTROL_WIDTH);
 
-        assert_eq!(narrow_width, 344.0);
         assert_eq!(plan.layout, TrackRowLayout::Stacked);
         assert_eq!(
             plan.row_height,
@@ -1992,10 +1931,5 @@ mod tests {
 
             assert_eq!(response.viewport_size.x, FOCUS_CONTENT_MAX_WIDTH);
         });
-    }
-
-    #[test]
-    fn filename_overflow_policy_is_single_line_ellipsis() {
-        assert_eq!(PATH_TEXT_OVERFLOW, TextOverflowPolicy::Ellipsis);
     }
 }
