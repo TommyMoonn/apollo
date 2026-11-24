@@ -39,6 +39,11 @@ lint:
 test:
     cargo test --locked --all-targets
 
+# Generate optional Rust coverage diagnostics.
+[group("verification")]
+coverage:
+    pwsh -NoProfile -File scripts/coverage-rust.ps1
+
 # Optional local smoke check of repository tooling.
 [group("verification")]
 test-scripts:

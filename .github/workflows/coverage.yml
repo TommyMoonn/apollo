@@ -1,0 +1,62 @@
+name: Coverage diagnostics
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**/*.rs'
+      - 'tests/fixtures/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - 'assets/apollo.rc'
+      - 'assets/apollo.ico'
+      - 'assets/apollo-logo.png'
+      - 'assets/fonts/**'
+      - 'scripts/coverage-rust.ps1'
+      - 'scripts/Cli.Common.ps1'
+      - 'scripts/Repository.Common.ps1'
+      - 'justfile'
+      - '.github/workflows/coverage.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '0 7 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rust-coverage:
+    name: Rust coverage
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install pinned coverage prerequisites
+        shell: pwsh
+        run: ./scripts/coverage-rust.ps1 --install
+
+      - name: Generate Rust coverage
+        shell: pwsh
+        run: ./scripts/coverage-rust.ps1
+
+      - name: Upload Rust coverage reports
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rust-coverage
+          path: .scratch/coverage/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7

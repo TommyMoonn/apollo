@@ -58,6 +58,23 @@ The `CI Gate` check succeeds only when all four jobs succeed. It records their r
 
 For branch protection or rulesets, require the GitHub Actions check named `CI Gate`. First observe a hosted run of the updated workflow, add the new required check and confirm it is enforced on a pull request. Only then remove the superseded individual required checks. Repository settings are owner-managed. The tagged release workflow continues to require successful push-triggered CI for the exact tagged commit.
 
+## Rust coverage diagnostics
+
+Coverage is optional and runs separately from `CI Gate`, `just verify` and release acceptance. On Windows x64, install the prerequisites explicitly from the repository root:
+
+```powershell
+pwsh -NoProfile -File scripts/coverage-rust.ps1 --install
+just coverage
+```
+
+The installer uses the exact Rust version from `rust-toolchain.toml`, its matching `llvm-tools-preview` component and `cargo-llvm-cov` 0.9.0 with locked dependencies. A normal coverage run checks the prerequisites without installing or upgrading anything.
+
+The command runs the same non-ignored Rust tests as `just test`, targeting `x86_64-pc-windows-msvc` with the checked-in Cargo lockfile. It prints a coverage summary and writes an HTML report and `summary.txt` in a new `.scratch/coverage/<run-id>/` directory. Open the printed `html/index.html` path in a browser. Instrumented binaries and profile data stay under `target/llvm-cov-target/`; `just clean` removes them with ordinary build output. Remove old coverage reports from `.scratch/coverage/` when no longer needed. Neither location belongs in source exports or change packages.
+
+Coverage shows which code was exercised, not whether its behavior was tested well. Use unexercised paths to identify meaningful missing regressions. Ignored real-media tests and platform-inapplicable code are outside the measured run. There is no percentage threshold.
+
+The separate `Coverage diagnostics` workflow runs on relevant pull request changes, weekly on Monday at 07:00 UTC and by manual dispatch. It uses the same script and uploads available reports for seven days. Instrumentation or test failures fail that workflow, not the required CI gate.
+
 ## Workspace commands
 
 ```powershell

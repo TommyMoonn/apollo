@@ -98,6 +98,17 @@ Local plans, `.agent-work/`, legacy `.dev/`, offline archives and staged release
 
 Adapted from Archeion commit `4b711fc2` (GPL-3.0-only): Rust output is the only target, with Apollo's shared repository checks, link-safe size traversal and shared CLI reporting.
 
+### Generate Rust coverage
+
+```powershell
+pwsh -NoProfile -File scripts/coverage-rust.ps1 --install
+just coverage
+```
+
+`--install` explicitly installs the pinned coverage prerequisites. The normal command runs `scripts/coverage-rust.ps1` without installation, validates the selected toolchain and `cargo-llvm-cov` version, and instruments the ordinary locked Windows x64 Rust tests once. The HTML and terminal summary use the same collected data. Ignored external-media tests stay opt-in.
+
+Reports are written to `.scratch/coverage/<run-id>/` and the HTML index path is printed. Instrumented build and profile data remain in `target/llvm-cov-target/`. See [Rust coverage diagnostics](../docs/DEVELOPMENT.md#rust-coverage-diagnostics) for prerequisites, report interpretation and CI behavior. Coverage is diagnostic only and has no required percentage or release gate.
+
 ### Validate release metadata
 
 ```powershell
