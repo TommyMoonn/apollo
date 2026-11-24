@@ -20,7 +20,7 @@ Run commands from the repository root with the pinned Rust toolchain. See [Devel
 | `just verify` | Run formatting, lint, tests, build and metadata validation in order; stop at the first failure. |
 | `just test-scripts` | Optional local PowerShell tooling smoke check. |
 
-CI runs Rust formatting, Clippy and tests on Windows. Windows build and release workflows also validate the actual artifacts. The optional tooling smoke runner is independent of CI, `just verify` and release packaging. The local gate does not build an installer or run GPU acceptance.
+CI runs Rust formatting, strict Clippy, locked tests, a locked application build and read-only metadata validation on Windows. The aggregate `CI Gate` requires all four validation jobs to succeed; see [Continuous integration](DEVELOPMENT.md#continuous-integration) for the job and branch-protection contract. Windows build and release workflows separately validate the actual artifacts. The optional tooling smoke runner is independent of CI, `just verify` and release packaging. The local gate does not build an installer or run GPU acceptance.
 
 ## Test locations
 

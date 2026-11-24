@@ -87,7 +87,7 @@ For bug fixes, reproduce failures in a focused test when practical. Reuse existi
 
 Use temporary directories, disposable media and controlled process fixtures for tests. Cover output collisions, failed or cancelled processing, cleanup, stale results and queue state transitions where relevant.
 
-Prefer focused Cargo tests, such as `cargo test --locked --test remux` or `cargo test --locked --lib <filter>`. Run `just fmt-check`, `just lint` and `just check` as appropriate to the change. Run `just verify` before release preparation or when a full verification pass is requested.
+Prefer focused Cargo tests, such as `cargo test --locked --test remux` or `cargo test --locked --lib <filter>`. Run `just fmt-check`, `just lint` and `just check` as appropriate to the change. Run `just verify` before release preparation or when a full verification pass is requested. The `CI Gate` check requires formatting, strict Clippy, Rust tests, an application build and release metadata validation on Windows for every PR and main push.
 
 `just test-scripts` is an optional local smoke check for repository tooling. Keep it small and independent of application verification, CI and release packaging. Release metadata validation, artifact integrity checks and installed/portable acceptance remain part of the release process.
 

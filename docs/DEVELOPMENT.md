@@ -48,6 +48,16 @@ Run `just` or `just --list` from the repository root to discover available recip
 
 See [Testing](TESTING.md) for focused tests, `just verify`, optional tooling checks and native Windows acceptance. When changing tests, remove redundant or implementation-coupled cases, preserve meaningful failure coverage and use controlled completion instead of fixed timing assumptions.
 
+## Continuous integration
+
+The `CI` workflow runs the same complete validation for every pull request and every push to `main`. Four independent Windows jobs check formatting, strict Clippy, locked Rust tests followed by a real application build, and read-only release metadata. Lint and test/build use separate Cargo-aware caches keyed by job, Rust compiler and dependency inputs. The test and build steps share a job and Cargo target directory. Formatting and metadata validation do not restore a compilation cache.
+
+The `CI Gate` check succeeds only when all four jobs succeed. It records their results in the run summary, including failed, cancelled or skipped jobs. Superseded pull request runs may be cancelled; each main-push run is kept separate so release validation can find the exact commit's CI result.
+
+`just verify` runs the same checks locally, stopping at the first failure. The optional `just test-scripts` smoke check, coverage diagnostics and release artifact acceptance are outside the required gate.
+
+For branch protection or rulesets, require the GitHub Actions check named `CI Gate`. First observe a hosted run of the updated workflow, add the new required check and confirm it is enforced on a pull request. Only then remove the superseded individual required checks. Repository settings are owner-managed. The tagged release workflow continues to require successful push-triggered CI for the exact tagged commit.
+
 ## Workspace commands
 
 ```powershell
