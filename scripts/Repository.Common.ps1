@@ -199,12 +199,14 @@ function Get-GitNulValues {
 function Get-GitTrackedChanges {
     param(
         [Parameter(Mandatory)]
-        [string]$ProjectRoot
+        [string]$ProjectRoot,
+
+        [string]$BaseCommit = 'HEAD'
     )
 
     $result = Invoke-RepositoryGit -ProjectRoot $ProjectRoot -Arguments @(
         'diff',
-        'HEAD',
+        $BaseCommit,
         '--name-status',
         '-z',
         '--find-renames',
@@ -284,4 +286,173 @@ function Get-ChatGptImportBase {
     }
 
     return Join-Path $localAppData 'ChatGPTImports'
+}
+
+# Transfer paths use a portable subset of Windows filenames. Never normalize an
+# ambiguous spelling into a different target, or follow a link outside the tree.
+function Assert-TransferUnlinked {
+    param([string]$Path)
+    for ($current = $Path; $current; $current = [IO.Path]::GetDirectoryName($current)) {
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Symbolic links and reparse points are not supported: $current"
+        }
+        if ($current -ne $Path -and $null -ne $item -and -not $item.PSIsContainer) {
+            throw "Parent path is not a directory: $current"
+        }
+    }
+}
+
+function Assert-TransferRoot {
+    param([string]$Path)
+    if (Test-RepositoryFileSystemRoot -Path $Path) { throw 'Transfer cannot target a filesystem root.' }
+    Assert-TransferUnlinked -Path $Path
+}
+
+function Test-TransferMetadata {
+    param([string]$Path)
+    return $Path.Replace('\', '/') -match '(?i)(^|/)(?:\.chatgpt-delete-manifest\.txt|\.[^/]+-change-package\.json|EXPORT_MANIFEST\.json|\.apollo-import-backup\.json)(/|$)'
+}
+
+function Test-TransferExcluded {
+    param([string]$Path)
+    $path = $Path.Replace('\', '/')
+    return ($path -match '^(?:\.plans|\.planning|\.project|\.agent-work|\.agents/skills|\.dev|\.scratch|target|artifacts|test-results|coverage)(?:/|$)' -or
+        $path -match '(?:^|/)(?:\.env(?:\.[^/]*)?|[^/]+\.(?:pem|key|pfx|p12|zip|log|tmp)|\.DS_Store|Thumbs\.db|Desktop\.ini)(?:/|$)')
+}
+
+function ConvertTo-TransferPath {
+    param([string]$Path)
+    $normalized = $Path.Replace('\', '/')
+    if ($normalized -match '(^/|^[A-Za-z]:)') { throw "Absolute paths are not allowed: $Path" }
+    if ($normalized -match '(^|/)\.\.(/|$)') { throw "Parent-directory traversal is not allowed: $Path" }
+    foreach ($part in $normalized.Split('/')) {
+        if (-not $part -or $part -eq '.' -or $part -ne $part.Trim() -or $part.EndsWith('.') -or $part -match '[\x00-\x1f<>:"|?*]' -or
+            $part -match '^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)') { throw "Unsafe path spelling: $Path" }
+        if ($part -ieq '.git') { throw "Refusing to access .git content: $Path" }
+    }
+    return $normalized
+}
+
+function Assert-TransferPathSpelling {
+    param([string]$Root, [string]$Path)
+    if ($IsWindows) {
+        # Short-name aliases must not bypass protected paths or collision checks.
+        for ($current = $Path; -not $current.Equals($Root, (Get-RepositoryPathComparison)); $current = [IO.Path]::GetDirectoryName($current)) {
+            if (Test-Path -LiteralPath $current) {
+                $parent = [IO.Path]::GetDirectoryName($current)
+                $name = [IO.Path]::GetFileName($current)
+                if (-not @(Get-ChildItem -LiteralPath $parent -Filter $name -Force | Where-Object { $_.Name -ieq $name }).Count) { throw "Unsafe filesystem alias: $current" }
+            }
+        }
+    }
+}
+
+function Resolve-TransferPath {
+    param([string]$Root, [string]$Path)
+    $normalized = ConvertTo-TransferPath -Path $Path
+    if (Test-TransferMetadata -Path $normalized) { throw "Reserved transfer metadata path: $Path" }
+    if (Test-TransferExcluded -Path $normalized) { throw "Protected local or generated path: $Path" }
+    $full = Resolve-RepositoryRelativePath -ProjectRoot $Root -RelativePath $normalized -Operation 'transfer'
+    Assert-TransferUnlinked -Path $full
+    Assert-TransferPathSpelling -Root $Root -Path $full
+    return $full
+}
+
+function Assert-TransferDisjoint {
+    param([AllowEmptyCollection()][string[]]$Paths)
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $spelling = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($path in $Paths) {
+        if (-not $seen.Add($path)) { throw "Duplicate or conflicting target path: $path" }
+        for ($current = $path; $current; $current = $current -replace '/[^/]+$','') {
+            if ($spelling.ContainsKey($current) -and $spelling[$current] -cne $current) { throw "Case-colliding target path: $path" }
+            $spelling[$current] = $current
+            if (-not $current.Contains('/')) { break }
+        }
+    }
+    foreach ($path in $Paths) {
+        $parent = $path
+        while ($parent.Contains('/')) {
+            $parent = $parent -replace '/[^/]+$',''
+            if ($seen.Contains($parent)) { throw "Overlapping target paths: $parent and $path" }
+        }
+    }
+}
+
+function Get-ApolloImportBase {
+    return Join-Path (Split-Path (Get-ChatGptImportBase) -Parent) 'Apollo/ChatGPTImports'
+}
+
+function Get-TransferTree {
+    param([string]$Path)
+    Assert-TransferUnlinked -Path $Path
+    $tree = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    if (-not (Test-Path -LiteralPath $Path)) { return ,$tree }
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($Path)
+    while ($pending.Count) {
+        $current = $pending.Pop()
+        Assert-TransferUnlinked -Path $current
+        $relative = [IO.Path]::GetRelativePath($Path, $current).Replace('\', '/')
+        if ($relative -ne '.') {
+            [void](ConvertTo-TransferPath -Path $relative)
+            if (Test-TransferMetadata -Path $relative) { throw "Protected metadata inside directory operation: $current" }
+        }
+        if (Test-Path -LiteralPath $current -PathType Container) {
+            $tree.Add($relative, 'directory')
+            foreach ($child in (Get-ChildItem -LiteralPath $current -Force)) { $pending.Push($child.FullName) }
+        } else {
+            $tree.Add($relative, ('file:' + (Get-FileHash -LiteralPath $current -Algorithm SHA256).Hash))
+        }
+    }
+    return ,$tree
+}
+
+function Test-TransferTreeSubset {
+    param($Actual, $Expected)
+    foreach ($key in $Actual.Keys) {
+        if (-not $Expected.ContainsKey($key) -or $Actual[$key] -cne $Expected[$key]) { return $false }
+    }
+    return $true
+}
+
+function Get-TransferFileState {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return 'absent' }
+    if (Test-Path -LiteralPath $Path -PathType Container) { return 'directory' }
+    return 'file:' + (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+function Copy-TransferFile {
+    param([string]$Source, [string]$Target)
+    # Publish a complete file or leave the previous target untouched on copy failure.
+    $temp = Join-Path (Split-Path $Target -Parent) ('.apollo-transfer-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [IO.File]::Copy($Source, $temp)
+        [IO.File]::Move($temp, $Target, $true)
+    } finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
+    }
+}
+
+function Write-TransferJson {
+    param([string]$Path, $Value)
+    $temp = "$Path.tmp"
+    try {
+        [IO.File]::WriteAllText($temp, ($Value | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($temp, $Path, $false)
+    } finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
+    }
+}
+
+function Get-TransferTreeDigest {
+    param($Tree)
+    $keys = [string[]]@($Tree.Keys)
+    [Array]::Sort($keys, [StringComparer]::Ordinal)
+    $lines = @(foreach ($key in $keys) { "$key`n$($Tree[$key])" })
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($lines -join "`n")))).Replace('-', '') }
+    finally { $sha.Dispose() }
 }

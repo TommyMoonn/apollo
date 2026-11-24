@@ -238,14 +238,6 @@ clean-generated.ps1
 zip-project.ps1
 ```
 
-Compatibility entry points remain logic-free wrappers:
-
-```text
-apply-chatgpt-zip.ps1
-package-changed-files.ps1
-restore-chatgpt-import.ps1
-```
-
 Public command conventions:
 
 - PowerShell 7
@@ -264,39 +256,32 @@ Review first:
 just review --files
 ```
 
-Then package the current tracked changes and intended non-ignored untracked files:
+Package the reviewed working-tree delta:
 
 ```powershell
-.\scripts\package-changes.ps1 --name <task-or-phase>
+just package phase-f01.2
+just package phase-f01.2 --tracked-only
 ```
 
-Use `--tracked-only` when untracked files must be excluded. Packages preserve project-relative paths. Tracked deletions and rename sources are represented by `.chatgpt-delete-manifest.txt` only when required.
+The exporter includes staged and unstaged changes against HEAD and, by default, eligible untracked files. It writes `apollo-<task-or-phase>-changed-files.zip` beside the project, with provenance and deletion metadata. It excludes local-only, sensitive and generated paths. Use `--output` to choose another archive and `--force` to replace a previous archive safely.
 
-Default package naming is:
-
-```text
-apollo-<task-or-phase>-changed-files.zip
-```
-
-Apply a package explicitly:
+Preview and apply a changed-files package:
 
 ```powershell
-.\scripts\apply-changes.ps1 --zip <path>
+just apply --zip 'C:/Downloads/apollo-task-changed-files.zip' --dry-run
+just apply --zip 'C:/Downloads/apollo-task-changed-files.zip'
 ```
 
-Or omit `--zip` to select the newest `<project-slug>*.zip` from Downloads. Legacy automatic discovery can select snapshots as well as changed-files packages, including browser duplicate names such as ` (1)` and ` (2)`. Prefer an explicit changed-files ZIP until import selection is hardened. Use `--pattern` to narrow discovery when needed. The importer rejects absolute/traversal paths and `.git`, refuses tracked dirty state by default, skips identical files, supports dry run, requires explicit opt-in for directory deletion, and backs up overwritten/deleted paths by default under:
+Omitting `--zip` selects the newest Apollo changed-files package (including browser-renamed copies), not a snapshot or release archive. The importer checks provenance, archive entries, targets and deletion operations before writing. It skips identical files and protects tracked dirty changes unless explicitly allowed. Backups include original content and a journal of new paths, stored under `%LOCALAPPDATA%/Apollo/ChatGPTImports/<project-slug>/` by default.
 
-```text
-%LOCALAPPDATA%\ChatGPTImports\<project-slug>\<timestamp>\
-```
-
-Restore the newest backup with:
+Preview or restore the latest backup:
 
 ```powershell
-.\scripts\restore-changes.ps1
+just restore --dry-run
+just restore
 ```
 
-A backup records overwritten and deleted paths. It does not record files that were newly created by the import, so restoration does not automatically remove those new files.
+Restore refuses conflicting later edits before mutation, reinstates overwritten/deleted paths and removes unchanged import-created files and empty recorded directories. Legacy backups can restore only saved content and cannot detect later edits. See [script documentation](../scripts/README.md#package-changed-files) for full options and recovery limitations.
 
 ### Repository and workspace ZIP workflow
 
@@ -308,7 +293,7 @@ just zip workspace --output 'C:/Exports/apollo workspace.zip'
 
 Use `repo` to share committed source and `workspace` to include current edits and eligible local context. Defaults are `apollo-repo(yyMMddHHmm).zip` and `apollo-workspace(yyMMddHHmm).zip` beside the project. Both contain a root-level `EXPORT_MANIFEST.json` recording provenance. Existing archives are never overwritten. The workspace export applies [the `.zipignore` rules](../scripts/README.md#repository-and-workspace-exports); repo export uses Git archive and refuses committed local records.
 
-Use `--project` and `--output` to override the project root and destination. To run directly, use `pwsh -NoProfile -File scripts/zip-project.ps1 --mode workspace`. Snapshots are for inspection or workspace transfer; select changed-files packages explicitly when importing until F01.2 replaces automatic import selection.
+Use `--project` and `--output` to override the project root and destination. To run directly, use `pwsh -NoProfile -File scripts/zip-project.ps1 --mode workspace`. Snapshots are for inspection or workspace transfer; extract them separately rather than applying them as changed-files packages.
 
 ### Generated-output cleanup
 

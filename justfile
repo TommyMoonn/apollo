@@ -47,23 +47,47 @@ review *flags:
 review-files:
     pwsh -NoProfile -File scripts/review-changes.ps1 --files
 
-package name:
-    pwsh -NoProfile -File scripts/package-changes.ps1 --name {{name}}
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+package name="changes" *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/package-changes.ps1 --name @args
 
-package-tracked name:
-    pwsh -NoProfile -File scripts/package-changes.ps1 --name {{name}} --tracked-only
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+package-tracked name *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/package-changes.ps1 --tracked-only --name @args
 
-apply *args:
-    pwsh -NoProfile -File scripts/apply-changes.ps1 {{args}}
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+apply *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/apply-changes.ps1 @args
 
-apply-file zip:
-    pwsh -NoProfile -File scripts/apply-changes.ps1 --zip "{{zip}}"
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+apply-file zip *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/apply-changes.ps1 --zip @args
 
-restore:
-    pwsh -NoProfile -File scripts/restore-changes.ps1
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+restore *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/restore-changes.ps1 @args
 
-restore-from backup:
-    pwsh -NoProfile -File scripts/restore-changes.ps1 --backup "{{backup}}"
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+restore-from backup *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/restore-changes.ps1 --backup @args
 
 clean:
     pwsh -NoProfile -File scripts/clean-generated.ps1 --rust

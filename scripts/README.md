@@ -53,45 +53,36 @@ The direct equivalent is `pwsh -NoProfile -File scripts/review-changes.ps1 --fil
 ### Package changed files
 
 ```powershell
-.\scripts\package-changes.ps1 --name 0.1.0.5-10
+just package phase-f01.2
+just package phase-f01.2 --tracked-only --output 'C:/Exports/apollo patch.zip'
 ```
 
-Packages tracked changes plus non-ignored untracked files by default. Use `--tracked-only` to exclude untracked files. Tracked deletions and rename sources are represented in `.chatgpt-delete-manifest.txt` only when required.
+The package contains the working-tree delta against committed HEAD, including staged and unstaged changes and non-ignored untracked files. Use `--tracked-only` to exclude untracked files. Local records, owner-managed skills, generated output and sensitive paths are excluded. Review the whole delta before sharing; the exporter does not identify phase ownership.
 
-Compatibility entry point:
+Defaults: `apollo-<slug>-changed-files.zip` beside the project, with `changes` as the default slug. `--project` selects the source root, `--output` overrides the destination and `--force` permits replacement only after the new archive is complete. A clean delta produces no archive. Root `.apollo-change-package.json` records the source commit, tracked-only mode, counts and UTC creation time. Root `.chatgpt-delete-manifest.txt` lists deleted paths and rename sources when needed.
+
+### Apply changed files
 
 ```powershell
-.\scripts\package-changed-files.ps1
+just apply --zip 'C:/Downloads/apollo-task-changed-files.zip' --dry-run
+just apply --zip 'C:/Downloads/apollo-task-changed-files.zip'
 ```
 
-### Apply a project ZIP
+Without `--zip`, discovery selects the newest `apollo-*-changed-files.zip` in Downloads, including browser copies such as ` (1)`. `--downloads` and `--pattern` narrow the search. Snapshots are for extraction, not application. Explicit legacy changed-file ZIPs are supported, including wrapped layouts (`--strip-root` when needed) and deletion-only archives. The importer validates provenance and counts when available, warns if the source commit is missing, and never imports metadata. It validates all targets before mutation, refuses protected or linked paths, skips identical files, and refuses tracked dirty state unless `--allow-dirty` is set. `dir:` deletion entries require `--allow-directory-deletion`.
 
-```powershell
-.\scripts\apply-changes.ps1 --zip C:\path\to\apollo-task-changed-files.zip
-```
-
-Without `--zip`, the command searches Downloads for the newest `<project-slug>*.zip`. The legacy importer may also select snapshots (including `apollo-repo(...)`, `apollo-workspace(...)` and older names), so use an explicit changed-files ZIP rather than relying on automatic discovery. Changed-files packages such as `apollo-phase-0.1.0.56-changed-files.zip` can include browser duplicate names like ` (1)` and ` (2)`. Use `--pattern` to narrow discovery when needed. The importer rejects unsafe archive paths and `.git`, skips identical files, refuses tracked dirty state by default, supports dry runs, applies the deletion manifest, and backs up overwritten/deleted paths unless `--no-backup` is used.
-
-Compatibility entry point:
-
-```powershell
-.\scripts\apply-chatgpt-zip.ps1
-```
+The default backup includes replaced/deleted content and a journal of import-created paths. `--no-backup` explicitly disables recovery; dry runs never write targets or backups.
 
 ### Restore an import backup
 
 ```powershell
-.\scripts\restore-changes.ps1
-.\scripts\restore-changes.ps1 --backup C:\path\to\backup
+just restore --dry-run
+just restore
+just restore --backup 'C:/path/to/backup'
 ```
 
-Uses the newest project backup when `--backup` is omitted. Import backups contain overwritten and deleted paths only, so files newly created by an import are not automatically removed during restoration.
+New backups live under `%LOCALAPPDATA%/Apollo/ChatGPTImports/<project-slug>/<timestamp>-<id>` (with a local application data/temp fallback). Omit `--backup` to discover the newest matching backup. Restore preflights conflicts, reinstates originals, removes unchanged import-created files and removes only empty recorded directories. Unrelated content is preserved. The journal is written before each operation and retained after restore for recovery or retry. Empty directories without a confirmed creation receipt, or whose creation timestamp has changed on Windows, are preserved. A completed restore is not replayed. Resolve reported later-edit conflicts before retrying an incomplete restore. Legacy backups under `ChatGPTImports` remain supported with a warning: they cannot detect later edits or remove files created by the import.
 
-Compatibility entry point:
-
-```powershell
-.\scripts\restore-chatgpt-import.ps1
-```
+Direct commands: `scripts/package-changes.ps1`, `scripts/apply-changes.ps1` and `scripts/restore-changes.ps1` accept the same options and legacy flag aliases; run each with `--help` for details. Adapted from Archeion commit `4b711fc2` (GPL-3.0), with Apollo's repository inventory, stricter path/ZIP preflight, safe archive replacement and extended rollback journal.
 
 ### Clean generated output
 
