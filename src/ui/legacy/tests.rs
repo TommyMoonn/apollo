@@ -1,4 +1,5 @@
 mod navigation;
+mod source;
 
 use std::{
     ffi::{OsStr, OsString},
@@ -14,8 +15,8 @@ use std::{
 
 use super::state::{
     BatchDefaults, BatchEditTarget, BatchItem, BatchSetupState, BatchSourceState,
-    FrameCaptureThumbnailLoad, FrameCaptureToolState, FramePreviewDecode, MediaInspection,
-    QueueExecutionEvent, frame_navigation_availability,
+    FrameCaptureThumbnailLoad, FrameCaptureToolState, FramePreviewDecode, QueueExecutionEvent,
+    frame_navigation_availability,
 };
 use super::workflows::{
     ToolExecutionStates, audio_extract_output_dialog_request, audio_mix_output_dialog_request,
@@ -380,7 +381,7 @@ fn show_tool(app: &mut ApolloApp, ui: &mut egui::Ui, operation: Operation) {
 
 fn assert_no_source(state: &Application) {
     assert_eq!(state.navigation(), NavigationState::NoSource);
-    assert!(state.media_intake.current().is_none());
+    assert!(state.source.current().is_none());
 }
 
 fn assert_workspace(state: &Application, operation: Operation) {
@@ -390,7 +391,7 @@ fn assert_workspace(state: &Application, operation: Operation) {
             active_operation: operation,
         }
     );
-    assert!(state.media_intake.current().is_some());
+    assert!(state.source.current().is_some());
 }
 
 fn dropped_file(path: &Path) -> egui::DroppedFileHandle {
@@ -435,7 +436,7 @@ fn begin_pending_inspection(
         .begin_media_path(path)
         .expect("new test source should require inspection");
     let (sender, receiver) = mpsc::sync_channel(1);
-    app.media_inspection = Some(MediaInspection { request, receiver });
+    app.core.source.attach_inspection(request, receiver);
     sender
 }
 
@@ -544,93 +545,6 @@ fn terminal_execution_states() -> [AudioMixExecutionState; 3] {
         }),
         AudioMixExecutionState::Cancelled,
     ]
-}
-
-#[test]
-fn inspection_completion_enters_default_source_workspace() {
-    let (directory, path) = temp_file("inspection-mode-switch");
-    let mut app = app();
-    let sender = begin_pending_inspection(&mut app, &path);
-
-    sender.send(Ok(media(&path))).unwrap();
-    app.poll_media_inspection();
-
-    assert!(app.media_inspection.is_none());
-    assert_workspace(&app.core, Operation::AudioMix);
-    assert!(app.state.audio_mix.is_some());
-    assert_eq!(
-        app.state
-            .audio_mix
-            .as_ref()
-            .map(|session| &session.media.path),
-        Some(&path)
-    );
-    assert_eq!(
-        app.core.media_intake.current().map(|media| &media.path),
-        Some(&path)
-    );
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn inspection_completion_notifies_owner_without_polling() {
-    let (directory, path) = temp_file("inspection-repaint");
-    let mut app = app();
-    let request = app
-        .begin_media_path(&path)
-        .expect("new source should require inspection");
-    let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
-    let wake = move || {
-        let _ = repaint_sender.try_send(());
-    };
-    let media = media(&path);
-    app.media_inspection = Some(
-        MediaInspection::spawn_with(request, wake, move || Ok(media))
-            .expect("inspection worker should start"),
-    );
-
-    repaint_receiver
-        .recv_timeout(Duration::from_secs(10))
-        .expect("inspection completion should notify the owner");
-    app.poll_media_inspection();
-
-    assert!(app.media_inspection.is_none());
-    assert_eq!(
-        app.core.media_intake.current().map(|media| &media.path),
-        Some(&path)
-    );
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn inspection_worker_panic_notifies_owner_and_surfaces_probe_failure() {
-    let (directory, path) = temp_file("inspection-worker-panic");
-    let mut app = app();
-    let request = app
-        .begin_media_path(&path)
-        .expect("new source should require inspection");
-    let (repaint_sender, repaint_receiver) = mpsc::sync_channel(1);
-    let wake = move || {
-        let _ = repaint_sender.try_send(());
-    };
-    app.media_inspection = Some(
-        MediaInspection::spawn_with(request, wake, || {
-            panic!("simulated inspection worker failure")
-        })
-        .expect("inspection worker should start"),
-    );
-
-    repaint_receiver
-        .recv_timeout(Duration::from_secs(10))
-        .expect("failed inspection worker should notify the owner");
-    app.poll_media_inspection();
-
-    assert!(app.media_inspection.is_none());
-    assert_eq!(
-        app.core.intake_error.as_ref().map(MediaError::kind),
-        Some(MediaErrorKind::ProbeFailure)
-    );
-    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -1086,51 +1000,6 @@ fn thumbnail_completion_routes_to_its_originating_frame_capture_session() {
 }
 
 #[test]
-fn source_replacement_clears_thumbnail_and_rejects_stale_completion() {
-    let (first_directory, first_path) = temp_file("thumbnail-first-source");
-    let (second_directory, second_path) = temp_file("thumbnail-second-source");
-    let mut app = app();
-    app.load_media_path_with_probe(&first_path, |path| Ok(media(path)));
-    app.select_tool(Operation::FrameCapture);
-    let old_session = app.state.frame_capture.as_mut().unwrap();
-    let old_session_id = old_session.session_id;
-    let old_request = old_session
-        .lifecycle_ui
-        .begin_thumbnail(Path::new("old-capture.png"))
-        .unwrap();
-
-    app.load_media_path_with_probe(&second_path, |path| Ok(media(path)));
-    assert!(app.frame_capture_thumbnail_load.is_none());
-    let replacement = app.state.frame_capture.as_ref().unwrap();
-    assert_ne!(replacement.session_id, old_session_id);
-    assert!(matches!(
-        replacement.lifecycle_ui.thumbnail(),
-        FrameCaptureThumbnailState::Empty
-    ));
-
-    let (sender, receiver) = mpsc::sync_channel(1);
-    app.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
-        session_id: old_session_id,
-        request_id: old_request.request_id(),
-        receiver,
-    });
-    sender.send(Ok(thumbnail())).unwrap();
-    app.poll_frame_capture_thumbnail();
-    assert!(matches!(
-        app.state
-            .frame_capture
-            .as_ref()
-            .unwrap()
-            .lifecycle_ui
-            .thumbnail(),
-        FrameCaptureThumbnailState::Empty
-    ));
-
-    fs::remove_dir_all(first_directory).unwrap();
-    fs::remove_dir_all(second_directory).unwrap();
-}
-
-#[test]
 fn frame_preview_ownership_follows_source_and_operation_sessions() {
     use crate::frame_capture::preview::PreviewState;
 
@@ -1228,271 +1097,6 @@ fn missing_video_preview_request_schedules_no_delayed_repaint() {
         Err(mpsc::TryRecvError::Empty)
     ));
     fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn close_source_releases_thumbnail_worker_and_session_state() {
-    let (directory, path) = temp_file("thumbnail-close-source");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::FrameCapture);
-    let session = app.state.frame_capture.as_mut().unwrap();
-    let request = session
-        .lifecycle_ui
-        .begin_thumbnail(Path::new("capture.png"))
-        .unwrap();
-    let (_sender, receiver) = mpsc::sync_channel(1);
-    app.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
-        session_id: session.session_id,
-        request_id: request.request_id(),
-        receiver,
-    });
-
-    app.handle_source_action(SourceAction::CloseSource);
-
-    assert!(app.frame_capture_thumbnail_load.is_none());
-    assert!(app.state.frame_capture.is_none());
-    assert_no_source(&app.core);
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn stale_inspection_completion_cannot_replace_newer_source() {
-    let (directory, first) = temp_file("stale-inspection");
-    let second = directory.join("replacement.mkv");
-    fs::write(&second, b"replacement").unwrap();
-    let mut app = app();
-    let first_request = app
-        .begin_media_path(&first)
-        .expect("first source should require inspection");
-    let second_request = match app.core.media_intake.begin_load(&second).unwrap() {
-        MediaLoadStart::Probe(request) => request,
-        MediaLoadStart::Reused => panic!("replacement should require inspection"),
-    };
-
-    app.complete_media_probe(first_request, Ok(media(&first)));
-    assert!(app.core.media_intake.current().is_none());
-    app.complete_media_probe(second_request, Ok(media(&second)));
-
-    assert_eq!(
-        app.core.media_intake.current().map(|media| &media.path),
-        Some(&second)
-    );
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn failed_inspection_returns_to_intake_without_current_metadata() {
-    let (directory, path) = temp_file("inspection-failure");
-    let mut app = app();
-    let sender = begin_pending_inspection(&mut app, &path);
-
-    sender
-        .send(Err(MediaProbeError::FfprobeFailed {
-            code: Some(1),
-            diagnostic: "probe failed".to_owned(),
-        }))
-        .unwrap();
-    app.poll_media_inspection();
-
-    assert!(app.media_inspection.is_none());
-    assert_no_source(&app.core);
-    assert!(app.core.media_intake.current().is_none());
-    assert!(app.state.audio_mix.is_none());
-    assert!(app.state.upscale.is_none());
-    assert_eq!(
-        app.core.intake_error.as_ref().map(MediaError::kind),
-        Some(MediaErrorKind::ProbeFailure)
-    );
-
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-    let mut output = context.run_ui(Default::default(), |ui| {
-        app.show_navigation(ui);
-    });
-    output.textures_delta.clear();
-    assert!(output_contains_text(
-        &output,
-        "This file could not be inspected."
-    ));
-    assert!(output_contains_text(&output, "Open files"));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn accepted_source_presentation_is_reused_until_source_replacement() {
-    let (directory, first) = temp_file("source-presentation");
-    let second = directory.join("replacement.mkv");
-    fs::write(&second, b"replacement").unwrap();
-    let mut app = app();
-    app.load_media_path_with_probe(&first, |path| Ok(media(path)));
-    let original_presentation = app.state.source_presentation.as_ref().unwrap().clone();
-
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-    for operation in [
-        Operation::AudioMix,
-        Operation::Remux,
-        Operation::AudioExtract,
-        Operation::FrameCapture,
-    ] {
-        app.select_tool(operation);
-        let output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
-        output.drop_without_applying_deltas();
-        assert!(Arc::ptr_eq(
-            app.state.source_presentation.as_ref().unwrap(),
-            &original_presentation
-        ));
-    }
-
-    app.load_media_path_with_probe(&second, |path| Ok(media(path)));
-    assert!(!Arc::ptr_eq(
-        app.state.source_presentation.as_ref().unwrap(),
-        &original_presentation
-    ));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn change_file_cancel_preserves_complete_workspace() {
-    let (directory, path) = temp_file("change-cancel");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::FrameCapture);
-    app.state
-        .frame_capture
-        .as_mut()
-        .unwrap()
-        .selection
-        .set_format(FrameCaptureFormat::Jpeg);
-    let before = app.state.clone();
-
-    app.settle_file_dialog(FileDialogCompletion {
-        target: DialogTarget::MediaInput,
-        outcome: DialogOutcome::Cancelled,
-    });
-
-    assert_eq!(app.state, before);
-    assert!(app.core.intake_error.is_none());
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn change_file_keeps_workspace_until_replacement_probe_publishes() {
-    let (directory, first) = temp_file("change-transaction");
-    let second = directory.join("replacement.mkv");
-    fs::write(&second, b"replacement").unwrap();
-    let mut app = app();
-    app.load_media_path_with_probe(&first, |path| Ok(media(path)));
-    app.select_tool(Operation::Remux);
-    app.state
-        .remux
-        .as_mut()
-        .unwrap()
-        .selection
-        .set_container(MediaContainer::Mp4);
-    app.core.intake_error = Some(MediaError::probe_failure("previous replacement failed"));
-    let old_session = app.state.remux.clone().unwrap();
-
-    let request = app
-        .begin_media_path(&second)
-        .expect("replacement should require inspection");
-
-    assert_workspace(&app.core, Operation::Remux);
-    assert!(app.core.intake_error.is_none());
-    assert_eq!(app.state.remux.as_ref(), Some(&old_session));
-    assert_eq!(
-        app.core.media_intake.current().map(|media| &media.path),
-        Some(&first)
-    );
-
-    app.complete_media_probe(request, Ok(media(&second)));
-
-    assert_workspace(&app.core, Operation::Remux);
-    let replacement = app.state.remux.as_ref().unwrap();
-    assert_ne!(replacement.session_id, old_session.session_id);
-    assert_eq!(replacement.media.path, second);
-    assert_eq!(replacement.selection.container(), MediaContainer::Matroska);
-    assert!(app.core.intake_error.is_none());
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn open_valid_file_routes_audio_mix_to_ready_state() {
-    let (directory, path) = temp_file("open");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-
-    assert_workspace(&app.core, Operation::AudioMix);
-    assert_eq!(
-        app.state.audio_mix.as_ref().map(|s| &s.media.path),
-        Some(&path)
-    );
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn dropped_valid_file_enters_default_workspace() {
-    let (directory, path) = temp_file("drop");
-    let mut app = app();
-    assert!(file_intake_enabled(
-        app.core.audio_mix_executor.state(),
-        app.core.upscale_executor.state(),
-        app.core.remux_executor.state(),
-        app.core.audio_extract_executor.state(),
-        app.core.frame_capture_executor.state(),
-    ));
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-
-    assert_workspace(&app.core, Operation::AudioMix);
-    assert_eq!(
-        app.state.audio_mix.as_ref().map(|s| &s.media.path),
-        Some(&path)
-    );
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn one_file_drop_starts_normal_media_inspection() {
-    let (directory, path) = temp_file("single-drop");
-    let mut app = app();
-
-    handle_drop(&mut app, &[&path]);
-
-    assert_eq!(
-        app.media_inspection
-            .as_ref()
-            .map(|inspection| inspection.request.path()),
-        Some(path.as_path())
-    );
-    assert!(app.core.intake_error.is_none());
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn multiple_file_drop_enters_batch_setup_in_source_order() {
-    let (first_directory, first) = temp_file("multi-drop-first");
-    let (second_directory, second) = temp_file("multi-drop-second");
-    let mut app = app();
-
-    handle_drop(&mut app, &[&first, &second]);
-
-    assert!(app.media_inspection.is_none());
-    assert!(app.core.media_intake.current().is_none());
-    assert_eq!(app.core.navigation(), NavigationState::BatchSetup);
-    let batch = app.batch_setup.as_ref().unwrap();
-    assert_eq!(
-        batch
-            .items
-            .iter()
-            .map(|item| &item.path)
-            .collect::<Vec<_>>(),
-        vec![&first, &second]
-    );
-    fs::remove_dir_all(first_directory).unwrap();
-    fs::remove_dir_all(second_directory).unwrap();
 }
 
 #[test]
@@ -1849,47 +1453,8 @@ fn batch_frame_capture_defaults_stay_simple_while_item_override_owns_precision_s
         panic!("batch item must save a Frame Capture request");
     };
     assert_eq!(saved.position, selected);
-    assert!(app.media_inspection.is_none());
+    assert!(!app.core.source.is_inspecting());
     fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn directory_drop_uses_shared_intake_error_path() {
-    let directory = std::env::temp_dir().join(format!(
-        "apollo-phase49-directory-drop-{}-{}",
-        std::process::id(),
-        NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&directory).unwrap();
-    let mut app = app();
-
-    handle_drop(&mut app, &[&directory]);
-
-    assert!(app.media_inspection.is_none());
-    assert_eq!(
-        app.core.intake_error.as_ref().map(MediaError::kind),
-        Some(MediaErrorKind::SourceUnavailable)
-    );
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn missing_path_drop_uses_shared_intake_error_path() {
-    let directory = std::env::temp_dir().join(format!(
-        "apollo-phase49-missing-drop-{}-{}",
-        std::process::id(),
-        NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-    ));
-    let missing = directory.join("missing.mkv");
-    let mut app = app();
-
-    handle_drop(&mut app, &[&missing]);
-
-    assert!(app.media_inspection.is_none());
-    assert_eq!(
-        app.core.intake_error.as_ref().map(MediaError::kind),
-        Some(MediaErrorKind::SourceUnavailable)
-    );
 }
 
 #[test]
@@ -2900,43 +2465,6 @@ fn output_completion_cannot_mutate_selection_after_execution_starts() {
 }
 
 #[test]
-fn open_dialog_selected_path_starts_the_shared_intake_route() {
-    let (directory, path) = temp_file("dialog-open-route");
-    let mut app = app();
-
-    app.settle_file_dialog(FileDialogCompletion {
-        target: DialogTarget::MediaInput,
-        outcome: DialogOutcome::Selected(path.clone()),
-    });
-
-    let inspection = app
-        .media_inspection
-        .as_ref()
-        .expect("selected Open path should start media inspection");
-    assert_eq!(inspection.request.path(), path);
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn open_dialog_failure_surfaces_bounded_intake_feedback() {
-    let mut app = app();
-
-    app.settle_file_dialog(FileDialogCompletion {
-        target: DialogTarget::MediaInput,
-        outcome: DialogOutcome::Failed("native open diagnostic marker".to_owned()),
-    });
-
-    let error = app
-        .core
-        .intake_error
-        .as_ref()
-        .expect("open dialog failure should become intake state");
-    assert_eq!(error.kind(), MediaErrorKind::FilePickerUnavailable);
-    assert_eq!(error.diagnostic(), Some("native open diagnostic marker"));
-    assert!(!app.state.intake_error_details_open);
-}
-
-#[test]
 fn output_picker_failure_surfaces_bounded_user_feedback() {
     let (directory, path) = temp_file("browse-failure");
     let mut app = app();
@@ -3167,7 +2695,7 @@ fn duplicate_queued_destination_is_truthful_operation_local_feedback() {
     assert_eq!(app.core.media_queue.pending_count(), 1);
     assert!(!output_path.exists());
     assert_eq!(app.core.queue_confirmation, None);
-    assert!(app.core.intake_error.is_none());
+    assert!(app.core.source.error().is_none());
     assert!(matches!(
         app.core.operation_action_error,
         Some((Operation::AudioMix, ref error))
@@ -3215,7 +2743,7 @@ fn genuine_existing_output_keeps_filesystem_output_exists_feedback() {
     app.enqueue_from_ready_surface(Operation::AudioMix);
 
     assert!(app.core.media_queue.jobs().is_empty());
-    assert!(app.core.intake_error.is_none());
+    assert!(app.core.source.error().is_none());
     assert!(matches!(
         app.core.operation_action_error,
         Some((Operation::AudioMix, ref error))
@@ -3301,7 +2829,7 @@ fn batch_append_picker_failure_is_visible_and_never_leaks_to_intake() {
         outcome: DialogOutcome::Failed("native picker diagnostic".to_owned()),
     });
 
-    assert!(app.core.intake_error.is_none());
+    assert!(app.core.source.error().is_none());
     let batch = app.batch_setup.as_ref().unwrap();
     assert!(matches!(
         batch.append_error,
@@ -3320,7 +2848,7 @@ fn batch_append_picker_failure_is_visible_and_never_leaks_to_intake() {
     output.textures_delta.clear();
 
     assert!(app.finish_batch_setup());
-    assert!(app.core.intake_error.is_none());
+    assert!(app.core.source.error().is_none());
     let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
     assert!(!output_contains_text(
         &output,
@@ -3368,7 +2896,7 @@ fn batch_append_picker_cancellation_preserves_the_complete_batch_state() {
     });
 
     assert_eq!(app.batch_setup, before);
-    assert!(app.core.intake_error.is_none());
+    assert!(app.core.source.error().is_none());
     assert!(app.core.media_queue.jobs().is_empty());
     fs::remove_dir_all(directory).unwrap();
 }
@@ -3429,7 +2957,7 @@ fn queue_frame_capture_edit_reuses_precision_support_and_saves_exact_position() 
         PreviewState::Debouncing { request, .. }
             if request.source_identity == queued_identity
     ));
-    assert!(app.media_inspection.is_none());
+    assert!(!app.core.source.is_inspecting());
 
     let context = egui::Context::default();
     fonts::install(&context);
@@ -3517,7 +3045,7 @@ fn workspace_queue_frame_capture_switch_and_cancel_retire_support_work() {
         current_request,
         Ok(PreviewImage::from_rgba([2, 1], vec![255; 8]).unwrap())
     ));
-    assert!(app.media_inspection.is_none());
+    assert!(!app.core.source.is_inspecting());
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -3996,73 +3524,6 @@ fn each_operation_routes_only_non_idle_execution_to_lifecycle_ui() {
 }
 
 #[test]
-fn change_file_probe_failure_is_rendered_and_survives_operation_switching() {
-    let (directory, first) = temp_file("stale-first");
-    let second = directory.join("replacement.mkv");
-    fs::write(&second, b"replacement").unwrap();
-    let mut app = app();
-    app.load_media_path_with_probe(&first, |path| Ok(media(path)));
-    app.select_tool(Operation::VideoUpscale);
-    let before = app.state.clone();
-    app.load_media_path_with_probe(&second, |_| {
-        Err(crate::media::probe::MediaProbeError::FfprobeFailed {
-            code: Some(1),
-            diagnostic: "probe failed".to_owned(),
-        })
-    });
-
-    assert_workspace(&app.core, Operation::VideoUpscale);
-    assert_eq!(app.state.upscale, before.upscale);
-    assert_eq!(
-        app.core.media_intake.current().map(|media| &media.path),
-        Some(&first)
-    );
-    assert_eq!(
-        app.core.intake_error.as_ref().map(MediaError::kind),
-        Some(MediaErrorKind::ProbeFailure)
-    );
-
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-    let mut output = context.run_ui(Default::default(), |ui| {
-        app.show_navigation(ui);
-    });
-    output.textures_delta.clear();
-    assert!(output_contains_text(
-        &output,
-        "This file could not be inspected."
-    ));
-    assert!(output_contains_text(
-        &output,
-        "Check that the source is a readable media file and try again."
-    ));
-    assert!(output_contains_text(&output, "Upscale to"));
-    assert!(output_contains_text(&output, "Change file"));
-    assert!(output_contains_text(&output, "Audio Mix"));
-
-    app.select_tool(Operation::Remux);
-
-    assert_workspace(&app.core, Operation::Remux);
-    assert_eq!(app.state.upscale, before.upscale);
-    assert_eq!(
-        app.core.intake_error.as_ref().map(MediaError::kind),
-        Some(MediaErrorKind::ProbeFailure)
-    );
-    let mut output = context.run_ui(Default::default(), |ui| {
-        app.show_navigation(ui);
-    });
-    output.textures_delta.clear();
-    assert!(output_contains_text(
-        &output,
-        "This file could not be inspected."
-    ));
-    assert!(output_contains_text(&output, "Remux"));
-    assert!(output_contains_text(&output, "Change file"));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn audio_mix_state_survives_operation_switching() {
     let (directory, path) = temp_file("audio-back");
     let mut app = app();
@@ -4263,71 +3724,5 @@ fn frame_capture_state_survives_operation_switching() {
     assert_eq!(session.selection.format(), FrameCaptureFormat::Jpeg);
     assert_eq!(session.selection.output_path(), custom_output);
     assert!(session.selection.output_is_customized());
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn replacement_source_retires_preserved_ready_sessions() {
-    let (directory, first) = temp_file("replace-after-back");
-    let second = directory.join("replacement.mkv");
-    fs::write(&second, b"replacement").unwrap();
-    let mut app = app();
-    app.load_media_path_with_probe(&first, |path| Ok(media(path)));
-    app.select_tool(Operation::VideoUpscale);
-    app.select_tool(Operation::AudioMix);
-    assert!(app.state.audio_mix.is_some());
-    let old_audio_mix = app.state.audio_mix.as_mut().unwrap();
-    old_audio_mix.selection.set_normalization_enabled(true);
-    assert!(
-        old_audio_mix
-            .selection
-            .set_normalization_targets(LoudnessTargets::from_tenths(-220, -9, 135))
-    );
-    app.select_tool(Operation::VideoUpscale);
-    let old_output = directory.join("old-custom.mp4");
-    app.state
-        .upscale
-        .as_mut()
-        .expect("upscale session should exist")
-        .selection
-        .set_custom_output_path(old_output);
-    app.load_media_path_with_probe(&second, |path| Ok(media(path)));
-
-    assert!(app.state.audio_mix.is_none());
-    let session = app
-        .state
-        .upscale
-        .as_ref()
-        .expect("replacement should create a new Upscale session");
-    assert_workspace(&app.core, Operation::VideoUpscale);
-    assert_eq!(session.media.path, second);
-    assert!(!session.selection.output_is_customized());
-    assert_eq!(session.selection.target(), UpscaleTarget::Uhd4k);
-    assert_eq!(session.selection.custom_boundary(), None);
-    assert_eq!(session.selection.codec(), VideoCodec::H264);
-    assert_eq!(
-        app.core.media_intake.current().map(|media| &media.path),
-        Some(&second)
-    );
-
-    app.select_tool(Operation::AudioMix);
-    let audio_mix = app
-        .state
-        .audio_mix
-        .as_ref()
-        .expect("replacement should create a new Audio Mix session");
-    assert!(
-        audio_mix
-            .selection
-            .request(&audio_mix.media)
-            .selected_tracks
-            .iter()
-            .all(|track| track.gain == TrackGain::ZERO)
-    );
-    assert!(!audio_mix.selection.normalization_enabled());
-    assert_eq!(
-        audio_mix.selection.normalization_targets(),
-        LoudnessTargets::default()
-    );
     fs::remove_dir_all(directory).unwrap();
 }

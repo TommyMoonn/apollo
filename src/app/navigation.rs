@@ -79,7 +79,7 @@ impl Application {
 
     pub(crate) fn enter_workspace(&mut self, active_operation: Operation) {
         self.show_workspace(active_operation);
-        self.intake_error = None;
+        self.source.clear_error();
     }
 
     pub(crate) fn show_workspace(&mut self, active_operation: Operation) {
@@ -107,7 +107,7 @@ impl Application {
             | NavigationState::BatchEdit => QueueOrigin::NoSource,
         };
         self.show_queue(origin);
-        self.intake_error = None;
+        self.source.clear_error();
         self.queue_confirmation = None;
         self.operation_action_error = None;
     }
@@ -198,8 +198,7 @@ impl Application {
 
     pub(crate) fn close_source(&mut self) {
         self.show_no_source();
-        self.media_intake.close_source();
-        self.intake_error = None;
+        self.source.close();
         self.queue_confirmation = None;
         self.operation_action_error = None;
     }

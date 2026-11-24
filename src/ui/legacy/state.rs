@@ -22,11 +22,9 @@ use crate::frame_capture::thumbnail::{FrameCaptureThumbnail, decode_frame_captur
 use crate::media::batch::BatchInspectionOwner;
 use crate::media::container::MediaContainer;
 use crate::media::error::MediaError;
-use crate::media::intake::{MediaIntakeRequest, SourceIdentity};
+use crate::media::intake::SourceIdentity;
 use crate::media::model::MediaFile;
-use crate::media::probe::{MediaProbeError, probe_media};
 use crate::media::process::MediaProcessEvent;
-use crate::media::tools::MediaTools;
 use crate::queue::{JobId, QueuedJob, QueuedOperation};
 use crate::ui::audio_extract::AudioExtractSelectionState;
 use crate::ui::audio_extract_progress::AudioExtractLifecycleUiState;
@@ -334,12 +332,7 @@ pub(super) enum QueueEditAction {
 impl QueueEditState {
     pub(super) fn new(session_id: u64, job: &QueuedJob) -> Self {
         let media = job.media().clone();
-        let retained = job.retained_intake();
-        let source_identity = retained
-            .current_with_identity()
-            .expect("queued job retains its source identity and media snapshot")
-            .0
-            .clone();
+        let source_identity = job.source_identity().clone();
         let mut editor = OperationEditorState::new(
             session_id,
             Some(source_identity),
@@ -473,11 +466,6 @@ impl LegacyEditorState {
     }
 }
 
-pub(super) struct MediaInspection {
-    pub(super) request: MediaIntakeRequest,
-    pub(super) receiver: Receiver<Result<MediaFile, MediaProbeError>>,
-}
-
 pub(super) struct FrameCaptureThumbnailLoad {
     pub(super) session_id: u64,
     pub(super) request_id: u64,
@@ -565,40 +553,6 @@ impl FramePreviewDecode {
                 let _ = sender.send(result);
                 wake();
             })?;
-        Ok(Self { request, receiver })
-    }
-}
-
-impl MediaInspection {
-    pub(super) fn spawn(
-        tools: MediaTools,
-        request: MediaIntakeRequest,
-        wake: impl FnOnce() + Send + 'static,
-    ) -> io::Result<Self> {
-        let path = request.path().to_path_buf();
-        Self::spawn_with(request, wake, move || probe_media(&tools, &path))
-    }
-
-    pub(super) fn spawn_with<F>(
-        request: MediaIntakeRequest,
-        wake: impl FnOnce() + Send + 'static,
-        inspect: F,
-    ) -> io::Result<Self>
-    where
-        F: FnOnce() -> Result<MediaFile, MediaProbeError> + Send + 'static,
-    {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        thread::Builder::new()
-            .name("apollo-media-inspection".to_owned())
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inspect));
-                if let Ok(result) = result {
-                    let _ = sender.send(result);
-                }
-                drop(sender);
-                wake();
-            })?;
-
         Ok(Self { request, receiver })
     }
 }

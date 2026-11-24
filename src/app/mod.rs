@@ -3,13 +3,14 @@
 
 pub(crate) mod discovery;
 mod navigation;
+pub(crate) mod source;
 pub use navigation::{BatchOrigin, NavigationState, Operation, QueueEditOrigin, QueueOrigin};
 
 use crate::{
     audio_extract::execution::AudioExtractExecutor,
     audio_mix::execution::AudioMixExecutor,
     frame_capture::execution::FrameCaptureExecutor,
-    media::{error::MediaError, execution::MediaExecutionState, intake::MediaIntake},
+    media::{error::MediaError, execution::MediaExecutionState},
     queue::MediaQueue,
     remux::execution::RemuxExecutor,
     upscale::execution::UpscaleExecutor,
@@ -19,14 +20,13 @@ use crate::{
 pub struct Application {
     navigation: NavigationState,
     pub(crate) discovery: discovery::MediaToolsDiscovery,
-    pub(crate) media_intake: MediaIntake,
+    pub(crate) source: source::SourceSession,
     pub(crate) audio_mix_executor: AudioMixExecutor,
     pub(crate) upscale_executor: UpscaleExecutor,
     pub(crate) remux_executor: RemuxExecutor,
     pub(crate) audio_extract_executor: AudioExtractExecutor,
     pub(crate) frame_capture_executor: FrameCaptureExecutor,
     pub(crate) media_queue: MediaQueue,
-    pub(crate) intake_error: Option<MediaError>,
     pub(crate) queue_confirmation: Option<Operation>,
     pub(crate) operation_action_error: Option<(Operation, MediaError)>,
 }

@@ -3,11 +3,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
-use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
-use egui::{ColorImage, Context, TextureOptions};
+use egui::{ColorImage, TextureOptions};
 
 use crate::app::{NavigationState, Operation, ProcessExecutionArbitration, QueueEditOrigin};
 use crate::audio_extract::execution::{AudioExtractExecutionState, AudioExtractStartError};
@@ -30,37 +30,29 @@ use crate::frame_capture::preview::{
 use crate::media::batch::BatchInspectionOwner;
 use crate::media::container::MediaContainer;
 use crate::media::error::MediaError;
-use crate::media::intake::{MediaIntakeRequest, MediaLoadStart, MediaProbeDisposition};
 use crate::media::model::MediaFile;
-use crate::media::probe::MediaProbeError;
 use crate::media::process::{MediaProcessEvent, MediaProcessWake};
 use crate::media::tools::{MediaTools, VideoEncoderCapabilities};
 use crate::queue::{
-    JobId, QueueEnqueueError, QueueJobState, QueueRunState, QueuedJob, QueuedOperation,
-    WaitingJobMove,
+    JobId, QueueEnqueueError, QueueJobState, QueueRunState, QueuedOperation, WaitingJobMove,
 };
 use crate::remux::execution::{RemuxExecutionState, RemuxStartError};
+use crate::ui::QueueAction;
 use crate::ui::audio_extract::{AudioExtractSelectionAction, AudioExtractSelectionState};
-use crate::ui::audio_extract_progress::{
-    AudioExtractLifecycleAction, AudioExtractLifecycleUiState,
-};
+use crate::ui::audio_extract_progress::AudioExtractLifecycleAction;
 use crate::ui::audio_mix::{AudioMixSelectionAction, AudioMixSelectionState};
-use crate::ui::audio_mix_progress::{AudioMixLifecycleAction, AudioMixLifecycleUiState};
+use crate::ui::audio_mix_progress::AudioMixLifecycleAction;
 use crate::ui::batch::BatchReadiness;
-use crate::ui::file_intake::FileIntakeAction;
 use crate::ui::frame_capture::{
     FrameCaptureSelectionAction, FrameCaptureSelectionState, FrameCopyStatus, PositionSettle,
 };
 use crate::ui::frame_capture_progress::{
-    FrameCaptureLifecycleAction, FrameCaptureLifecycleUiState, FrameCaptureThumbnailRequest,
+    FrameCaptureLifecycleAction, FrameCaptureThumbnailRequest,
 };
 use crate::ui::remux::{RemuxSelectionAction, RemuxSelectionState};
-use crate::ui::remux_progress::{RemuxLifecycleAction, RemuxLifecycleUiState};
-use crate::ui::source_presentation::SourcePresentation;
+use crate::ui::remux_progress::RemuxLifecycleAction;
 use crate::ui::upscale::{UpscaleSelectionAction, UpscaleSelectionState};
-use crate::ui::upscale_progress::{UpscaleLifecycleAction, UpscaleLifecycleUiState};
-use crate::ui::workspace::WorkspaceAction;
-use crate::ui::{QueueAction, SourceAction};
+use crate::ui::upscale_progress::UpscaleLifecycleAction;
 use crate::upscale::execution::{UpscaleExecutionState, UpscaleStartError};
 use crate::upscale::model::VideoCodec;
 use crate::upscale::validation::validate_upscale_request;
@@ -69,8 +61,8 @@ use super::state::{
     AudioExtractToolState, AudioMixToolState, BatchDefaults, BatchEditState, BatchEditTarget,
     BatchInspectionSession, BatchItem, BatchSetupState, BatchSourceState, FrameCaptureEditorState,
     FrameCaptureThumbnailLoad, FrameCaptureToolState, FramePreviewDecode, FramePreviewTexture,
-    LegacyEditorState, MediaInspection, OperationEditorState, PendingFrameStep, QueueEditState,
-    QueueExecutionEvent, RemuxToolState, UpscaleToolState,
+    LegacyEditorState, OperationEditorState, PendingFrameStep, QueueEditState, QueueExecutionEvent,
+    RemuxToolState, UpscaleToolState,
 };
 use super::{ApolloApp, completion_wake};
 
@@ -90,7 +82,7 @@ impl ApolloApp {
                 None
             }
             NavigationState::SourceWorkspace { .. }
-                if self.core.media_intake.current().is_none()
+                if self.core.source.current().is_none()
                     || self.state.source_presentation.is_none() =>
             {
                 self.close_source();
@@ -98,11 +90,6 @@ impl ApolloApp {
             }
             route => Some(route),
         }
-    }
-
-    fn enter_workspace(&mut self, operation: Operation) {
-        self.core.enter_workspace(operation);
-        self.state.intake_error_details_open = false;
     }
 
     pub(super) fn enter_queue(&mut self) {
@@ -238,7 +225,7 @@ impl ApolloApp {
         else {
             return false;
         };
-        let session_id = self.take_session_id();
+        let session_id = self.core.source.allocate_session_id();
         self.queue_edit = Some(QueueEditState::new(session_id, &job));
         self.core.enter_queue_edit(origin);
         self.schedule_active_frame_capture_support();
@@ -298,27 +285,7 @@ impl ApolloApp {
         true
     }
 
-    fn restore_queued_job_workspace(&mut self, job: &QueuedJob) -> bool {
-        let operation = queued_operation_tool(job.operation());
-        self.core.media_intake = job.retained_intake();
-        self.state.source_presentation = Some(Arc::new(SourcePresentation::new(job.media())));
-        self.frame_capture_thumbnail_load = None;
-        self.cancel_frame_capture_support();
-        self.state.retire_tool_sessions();
-        if !self.activate_cached_source(operation) {
-            return false;
-        }
-        self.hydrate_cached_source_operation(job.operation());
-        self.enter_workspace(operation);
-        if operation == Operation::FrameCapture {
-            self.schedule_active_frame_capture_support();
-        }
-        self.core.queue_confirmation = None;
-        self.core.operation_action_error = None;
-        true
-    }
-
-    fn hydrate_cached_source_operation(&mut self, operation: &QueuedOperation) {
+    pub(super) fn hydrate_cached_source_operation(&mut self, operation: &QueuedOperation) {
         match operation {
             QueuedOperation::AudioMix(request) => {
                 if let Some(session) = self.state.audio_mix.as_mut() {
@@ -471,211 +438,6 @@ impl ApolloApp {
         }
     }
 
-    pub(super) fn file_intake_enabled(&self) -> bool {
-        self.media_inspection.is_none()
-            && !self.file_dialog.is_pending()
-            && self.core.executors_idle()
-            && !self.copy_frame_active()
-    }
-
-    pub(super) fn workspace_interaction_enabled(&self) -> bool {
-        self.media_inspection.is_none() && !self.copy_frame_active()
-    }
-
-    pub(super) fn handle_workspace_action(&mut self, action: WorkspaceAction) {
-        match action {
-            WorkspaceAction::Source(action) => self.handle_source_action(action),
-            WorkspaceAction::SelectOperation(operation) => self.select_tool(operation),
-            WorkspaceAction::EditQueuedJob(job_id) => {
-                self.begin_queue_edit(job_id, QueueEditOrigin::SourceWorkspace);
-            }
-            WorkspaceAction::OpenQueue => self.enter_queue(),
-            WorkspaceAction::None => {}
-        }
-    }
-
-    pub(super) fn handle_source_action(&mut self, action: SourceAction) {
-        if !self.file_intake_enabled() {
-            return;
-        }
-        self.core.queue_confirmation = None;
-        self.core.operation_action_error = None;
-        match action {
-            SourceAction::ChangeFile => self.start_file_dialog(FileDialogRequest::OpenSource {
-                initial_directory: None,
-            }),
-            SourceAction::CloseSource => self.close_source(),
-        }
-    }
-
-    pub(super) fn close_source(&mut self) {
-        self.frame_capture_thumbnail_load = None;
-        self.cancel_frame_capture_support();
-        self.core.close_source();
-        self.state.source_presentation = None;
-        self.state.retire_tool_sessions();
-        self.state.intake_error_details_open = false;
-    }
-
-    pub(super) fn select_tool(&mut self, tool: Operation) {
-        if !self.file_intake_enabled() {
-            return;
-        }
-        let Some(previous_tool) = self.core.active_operation() else {
-            return;
-        };
-        if previous_tool != tool {
-            self.core.queue_confirmation = None;
-            self.core.operation_action_error = None;
-            if previous_tool == Operation::FrameCapture
-                && let Some(session) = self.state.frame_capture.as_mut()
-            {
-                session.preview.invalidate();
-                session.preview_texture = None;
-                session.copy_status = FrameCopyStatus::Idle;
-            }
-            if previous_tool == Operation::FrameCapture {
-                self.cancel_frame_capture_support();
-            }
-        }
-        if self.activate_cached_source(tool) {
-            self.core.show_workspace(tool);
-            if tool == Operation::FrameCapture {
-                self.schedule_active_frame_capture_support();
-            }
-        }
-    }
-
-    fn activate_cached_source(&mut self, tool: Operation) -> bool {
-        let Some((source_identity, media)) = self
-            .core
-            .media_intake
-            .current_with_identity()
-            .map(|(identity, media)| (identity.clone(), media.clone()))
-        else {
-            self.core.show_no_source();
-            self.cancel_frame_capture_support();
-            self.state.retire_tool_sessions();
-            return false;
-        };
-        self.state
-            .source_presentation
-            .get_or_insert_with(|| Arc::new(SourcePresentation::new(&media)));
-
-        match tool {
-            Operation::AudioMix => {
-                if !self
-                    .state
-                    .audio_mix
-                    .as_ref()
-                    .is_some_and(|session| session.media == media)
-                {
-                    let session_id = self.take_session_id();
-                    self.state.audio_mix = Some(AudioMixToolState {
-                        session_id,
-                        selection: AudioMixSelectionState::new(&media),
-                        lifecycle_ui: AudioMixLifecycleUiState::default(),
-                        start_error: None,
-                        start_error_details_open: false,
-                        media,
-                    });
-                }
-            }
-            Operation::VideoUpscale => {
-                if !self
-                    .state
-                    .upscale
-                    .as_ref()
-                    .is_some_and(|session| session.media == media)
-                {
-                    let session_id = self.take_session_id();
-                    self.state.upscale = Some(UpscaleToolState {
-                        session_id,
-                        selection: UpscaleSelectionState::new(&media),
-                        lifecycle_ui: UpscaleLifecycleUiState::default(),
-                        start_error: None,
-                        start_error_details_open: false,
-                        media,
-                    });
-                }
-            }
-            Operation::Remux => {
-                if !self
-                    .state
-                    .remux
-                    .as_ref()
-                    .is_some_and(|session| session.media == media)
-                {
-                    let session_id = self.take_session_id();
-                    self.state.remux = Some(RemuxToolState {
-                        session_id,
-                        selection: RemuxSelectionState::new(&media),
-                        lifecycle_ui: RemuxLifecycleUiState::default(),
-                        start_error: None,
-                        start_error_details_open: false,
-                        media,
-                    });
-                }
-            }
-            Operation::AudioExtract => {
-                if !self
-                    .state
-                    .audio_extract
-                    .as_ref()
-                    .is_some_and(|session| session.media == media)
-                {
-                    let session_id = self.take_session_id();
-                    self.state.audio_extract = Some(AudioExtractToolState {
-                        session_id,
-                        selection: AudioExtractSelectionState::new(&media),
-                        lifecycle_ui: AudioExtractLifecycleUiState::default(),
-                        start_error: None,
-                        start_error_details_open: false,
-                        media,
-                    });
-                }
-            }
-            Operation::FrameCapture => {
-                if !self.state.frame_capture.as_ref().is_some_and(|session| {
-                    session.source_identity.as_ref() == Some(&source_identity)
-                }) {
-                    let session_id = self.take_session_id();
-                    self.state.frame_capture = Some(FrameCaptureToolState {
-                        session_id,
-                        editor: FrameCaptureEditorState::new(
-                            session_id,
-                            Some(source_identity),
-                            &media,
-                        ),
-                        lifecycle_ui: FrameCaptureLifecycleUiState::default(),
-                        start_error: None,
-                        start_error_details_open: false,
-                        copy_status: FrameCopyStatus::Idle,
-                        media,
-                    });
-                }
-                let position = self
-                    .state
-                    .frame_capture
-                    .as_ref()
-                    .and_then(|session| session.selection.valid_position(&session.media));
-                if self.state.frame_capture.as_ref().is_some_and(|session| {
-                    matches!(
-                        session.preview.state(),
-                        crate::frame_capture::preview::PreviewState::Idle
-                    )
-                }) {
-                    self.update_frame_capture_position(
-                        position,
-                        PositionSettle::Debounced,
-                        Instant::now(),
-                    );
-                }
-            }
-        }
-        true
-    }
-
     fn active_frame_capture_editor(&self) -> Option<(&MediaFile, &FrameCaptureEditorState)> {
         match self.core.navigation() {
             NavigationState::SourceWorkspace {
@@ -744,7 +506,7 @@ impl ApolloApp {
         }
     }
 
-    fn schedule_active_frame_capture_support(&mut self) {
+    pub(super) fn schedule_active_frame_capture_support(&mut self) {
         let scheduled = self
             .active_frame_capture_editor()
             .and_then(|(media, editor)| {
@@ -1108,7 +870,7 @@ impl ApolloApp {
         self.frame_preview_decode = None;
     }
 
-    fn cancel_frame_capture_support(&mut self) {
+    pub(super) fn cancel_frame_capture_support(&mut self) {
         self.cancel_frame_preview_work();
         self.frame_index_query.cancel();
         if let Some((_, editor)) = self.active_frame_capture_editor_mut() {
@@ -1259,15 +1021,6 @@ impl ApolloApp {
         }
     }
 
-    fn take_session_id(&mut self) -> u64 {
-        let session_id = self.next_session_id;
-        self.next_session_id = self
-            .next_session_id
-            .checked_add(1)
-            .expect("Apollo tool session identifier space is exhausted");
-        session_id
-    }
-
     pub(super) fn retry_media_tools(&mut self) {
         if !self.core.discovery.is_pending() {
             self.tools_error_details_open = false;
@@ -1277,39 +1030,7 @@ impl ApolloApp {
         }
     }
 
-    pub(super) fn handle_file_intake_action(&mut self, action: FileIntakeAction) {
-        match action {
-            FileIntakeAction::OpenFile => self.start_file_dialog(FileDialogRequest::OpenSources {
-                initial_directory: None,
-                target: DialogTarget::BatchInput,
-            }),
-            FileIntakeAction::OpenQueue => self.enter_queue(),
-            FileIntakeAction::None => {}
-        }
-    }
-
-    fn load_media_path(&mut self, path: &Path) {
-        let Some(tools) = self.ready_media_tools() else {
-            return;
-        };
-        let tools = tools.clone();
-        let Some(request) = self.begin_media_path(path) else {
-            return;
-        };
-        let request_for_failure = request.clone();
-
-        match MediaInspection::spawn(tools, request, completion_wake(&self.egui_context)) {
-            Ok(inspection) => self.media_inspection = Some(inspection),
-            Err(error) => {
-                self.core.media_intake.retire_probe(&request_for_failure);
-                self.core.intake_error = Some(MediaError::probe_failure(format!(
-                    "Media inspection worker could not start: {error}"
-                )));
-            }
-        }
-    }
-
-    fn start_batch_paths(&mut self, paths: Vec<PathBuf>) -> bool {
+    pub(super) fn start_batch_paths(&mut self, paths: Vec<PathBuf>) -> bool {
         if paths.is_empty() || !self.file_intake_enabled() {
             return false;
         }
@@ -1339,9 +1060,11 @@ impl ApolloApp {
             match BatchInspectionOwner::spawn(tools, paths, completion_wake(&self.egui_context)) {
                 Ok(inspection) => inspection,
                 Err(error) => {
-                    self.core.intake_error = Some(MediaError::probe_failure(format!(
-                        "Batch inspection workers could not start: {error}"
-                    )));
+                    self.core
+                        .source
+                        .set_error(MediaError::probe_failure(format!(
+                            "Batch inspection workers could not start: {error}"
+                        )));
                     return false;
                 }
             };
@@ -1513,7 +1236,7 @@ impl ApolloApp {
                 )
             }
         };
-        let session_id = self.take_session_id();
+        let session_id = self.core.source.allocate_session_id();
         let mut editor = OperationEditorState::new(session_id, source_identity, media, operation);
         if let Some(request) = request.as_ref() {
             editor.hydrate(request);
@@ -1645,60 +1368,6 @@ impl ApolloApp {
         }
     }
 
-    pub(super) fn begin_media_path(&mut self, path: &Path) -> Option<MediaIntakeRequest> {
-        if !self.file_intake_enabled() {
-            return None;
-        }
-
-        self.core.queue_confirmation = None;
-        self.core.operation_action_error = None;
-        self.core.intake_error = None;
-        self.state.intake_error_details_open = false;
-        match self.core.media_intake.begin_load(path) {
-            Ok(MediaLoadStart::Reused) => {
-                let operation = self.core.active_operation().unwrap_or(Operation::AudioMix);
-                if self.activate_cached_source(operation) {
-                    self.enter_workspace(operation);
-                }
-                None
-            }
-            Ok(MediaLoadStart::Probe(request)) => Some(request),
-            Err(error) => {
-                self.core.intake_error = Some(MediaError::from_intake_error(&error));
-                None
-            }
-        }
-    }
-
-    pub(super) fn poll_media_inspection(&mut self) {
-        let result = match self.media_inspection.as_ref() {
-            Some(inspection) => inspection.receiver.try_recv(),
-            None => return,
-        };
-
-        match result {
-            Ok(result) => {
-                let inspection = self
-                    .media_inspection
-                    .take()
-                    .expect("inspection exists while its result is settled");
-                self.complete_media_probe(inspection.request, result);
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                let inspection = self
-                    .media_inspection
-                    .take()
-                    .expect("inspection exists while its worker disconnect is settled");
-                self.core.media_intake.retire_probe(&inspection.request);
-                self.core.intake_error = Some(MediaError::probe_failure(
-                    "Media inspection worker stopped before returning a result.",
-                ));
-                self.state.intake_error_details_open = false;
-            }
-        }
-    }
-
     pub(super) fn poll_frame_capture_thumbnail(&mut self) {
         let result = match self.frame_capture_thumbnail_load.as_ref() {
             Some(load) => load.receiver.try_recv(),
@@ -1727,67 +1396,6 @@ impl ApolloApp {
         session
             .lifecycle_ui
             .settle_thumbnail(load.request_id, result);
-    }
-
-    pub(super) fn complete_media_probe(
-        &mut self,
-        request: MediaIntakeRequest,
-        result: Result<MediaFile, MediaProbeError>,
-    ) {
-        match self.core.media_intake.complete_probe(request, result) {
-            Ok(MediaProbeDisposition::Published) => {
-                let operation = self.core.active_operation().unwrap_or(Operation::AudioMix);
-                self.state.source_presentation = self
-                    .core
-                    .media_intake
-                    .current()
-                    .map(|media| Arc::new(SourcePresentation::new(media)));
-                self.frame_capture_thumbnail_load = None;
-                self.cancel_frame_capture_support();
-                self.state.retire_tool_sessions();
-                if self.activate_cached_source(operation) {
-                    self.enter_workspace(operation);
-                }
-            }
-            Ok(MediaProbeDisposition::Retired) => {}
-            Err(error) => {
-                self.core.intake_error = Some(MediaError::from_intake_error(&error));
-                self.state.intake_error_details_open = false;
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn load_media_path_with_probe<F>(&mut self, path: &Path, probe: F)
-    where
-        F: FnOnce(&Path) -> Result<MediaFile, MediaProbeError>,
-    {
-        let Some(request) = self.begin_media_path(path) else {
-            return;
-        };
-        let result = probe(request.path());
-        self.complete_media_probe(request, result);
-    }
-
-    pub(super) fn handle_window_file_drop(&mut self, context: &Context) {
-        if !self.file_intake_enabled() {
-            return;
-        }
-        let paths = context.input(|input| {
-            input
-                .raw
-                .dropped_files
-                .iter()
-                .map(|file| file.path().to_path_buf())
-                .collect::<Vec<_>>()
-        });
-        if !paths.is_empty() {
-            self.start_batch_paths(paths);
-        }
-    }
-
-    pub(super) fn drag_hovered(&self, context: &Context) -> bool {
-        self.file_intake_enabled() && context.input(|input| !input.raw.hovered_files.is_empty())
     }
 
     pub(super) fn handle_audio_mix_action(
@@ -2220,7 +1828,9 @@ impl ApolloApp {
                 DialogTarget::MediaInput | DialogTarget::BatchInput,
                 DialogOutcome::Failed(diagnostic),
             ) => {
-                self.core.intake_error = Some(MediaError::file_picker_unavailable(diagnostic));
+                self.core
+                    .source
+                    .set_error(MediaError::file_picker_unavailable(diagnostic));
                 self.state.intake_error_details_open = false;
             }
             (target, outcome) => {

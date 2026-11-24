@@ -27,11 +27,15 @@ The library exports the application core and UI modules through `src/lib.rs`. Th
 
 `src/app/navigation.rs` owns `Operation`, routes and return origins for queue and batch flows. Route transitions do not require an egui context. The adapter commits these transitions after the existing source, editor and queue actions succeed; it retains renderer-dependent drafts and worker coordination until those responsibilities are extracted. Queue return and batch submission preserve the original source operation. Queue history changes remain with `MediaQueue`.
 
-`src/ui/legacy/mod.rs` constructs the application, installs the existing font and theme definitions and coordinates background updates and shutdown. `render.rs` dispatches the active route and draws the shell. `workflows.rs` retains the feature actions, and `state.rs` retains editor and worker state that still depends on egui.
+`src/ui/legacy/mod.rs` constructs the application, installs the existing font and theme definitions and coordinates background updates and shutdown. `render.rs` dispatches the active route and draws the shell. `source.rs` handles source actions and presentation settlement. `workflows.rs` retains the other feature actions, and `state.rs` retains editor and worker state that still depends on egui.
 
 Each root update first polls media-tool discovery and queue events. While base tools are checking or unavailable, it renders that status and returns. Once ready, the update polls dialogs, source inspection, batch inspection, frame preview, frame index, clipboard and thumbnails in that order before handling drops and rendering the active route. Shutdown cancels clipboard work and the queue; owned resources retain their existing cleanup.
 
 ## Source intake and execution
+
+`src/app/source.rs` owns the accepted source session, its inspection worker and intake errors. `MediaIntake` remains the authority for source identity and probe acceptance. An unsuccessful replacement leaves the accepted session intact; successful replacement or restoration from a queued snapshot creates a new session identifier. Closing a source retires its pending inspection and accepted session without touching queued jobs. Source and independent editor identifiers share one allocation sequence to keep stale worker and dialog results from targeting a different editor.
+
+The legacy source adapter builds one immutable `SourcePresentation` after acceptance or queued-source restoration. All normal operation drafts share the accepted source identifier and retain their settings when switching operations. Independent queue and batch editors keep their own snapshots. Presentation and frame support are retired together when the accepted source changes or closes.
 
 1. `MediaIntake` identifies the source using its canonical path, size and modification time. It reuses a successful inspection only when the identity is reliably unchanged, and retires results from superseded requests.
 2. `src/media/probe.rs` invokes FFprobe, parses JSON and normalizes streams into the models in `src/media/model.rs`. `src/media/container.rs` owns shared MP4 and Matroska stream-copy compatibility.

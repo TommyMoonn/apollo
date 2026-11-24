@@ -45,7 +45,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 
 `Application` owns the route, media-tool discovery, source intake, queue and immediate executors. `ApolloApp` owns one core and coordinates the egui shell and background work. Keep route transitions in the core and renderer-dependent editor state in the adapter until its owner is extracted. Keep execution input validation in the operation request models and validators so presentation code does not introduce a separate execution path.
 
-`MediaIntake` manages source identity, retained probe results and pending intake requests. `BatchInspectionOwner` manages batch probing and limits it to two concurrent probes. Preserve request identity checks so results from an earlier request cannot replace the current source or batch state.
+`SourceSession` in `src/app/source.rs` owns source acceptance, worker settlement and session retirement. `MediaIntake` remains responsible for source identity, retained probe results and pending requests. Keep accepted source presentation and drafts intact until replacement succeeds. `BatchInspectionOwner` manages batch probing and limits it to two concurrent probes. Preserve request identity checks so results from an earlier request cannot replace the current source or batch state.
 
 `MediaQueue` owns queued jobs, `JobId` values, destination reservations, source revalidation and sequential execution. Only Waiting jobs can be edited or reordered, subject to the queue run state. Keep batch insertion atomic. Preserve the difference between cancelling the current job, stopping after it and cancelling the queue. Batch setup remains temporary until the queue accepts the requests.
 

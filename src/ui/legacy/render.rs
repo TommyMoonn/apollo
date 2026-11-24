@@ -158,7 +158,7 @@ impl ApolloApp {
             NavigationState::SourceWorkspace { active_operation } => active_operation,
         };
 
-        let Some(media) = self.core.media_intake.current() else {
+        let Some(media) = self.core.source.current() else {
             return;
         };
         let source_surface_key = egui::Id::new(media.path.as_path());
@@ -185,7 +185,7 @@ impl ApolloApp {
                     active_operation,
                     WorkspaceMode::Source {
                         pending_queue_count: self.core.media_queue.pending_count(),
-                        enabled: self.media_inspection.is_none() && self.core.executors_idle(),
+                        enabled: !self.core.source.is_inspecting() && self.core.executors_idle(),
                         editable_jobs: &editable_jobs,
                         queue_editing_allowed: self.core.media_queue.run_state()
                             == QueueRunState::Stopped,
@@ -202,7 +202,7 @@ impl ApolloApp {
         };
         let surface_key = egui::Id::new((active_operation.label(), source_surface_key));
         let ready_surface = self.operation_ready_surface(active_operation);
-        if ready_surface && let Some(error) = self.core.intake_error.as_ref() {
+        if ready_surface && let Some(error) = self.core.source.error() {
             layout::content_gutter(ui, |ui| {
                 media_error::show_inline(ui, error, &mut self.state.intake_error_details_open);
                 ui.add_space(theme::SPACING.related);
@@ -234,9 +234,9 @@ impl ApolloApp {
     fn show_file_intake(&mut self, ui: &mut Ui) {
         let action = file_intake::show(
             ui,
-            self.media_inspection.is_some(),
+            self.core.source.is_inspecting(),
             self.core.media_queue.pending_count(),
-            self.core.intake_error.as_ref(),
+            self.core.source.error(),
             &mut self.state.intake_error_details_open,
         );
         self.handle_file_intake_action(action);

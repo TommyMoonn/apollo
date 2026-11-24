@@ -36,7 +36,7 @@ Unit tests live alongside the Rust implementation. Integration tests live under 
 | `media_probe` | FFprobe fixture parsing and shared media models. |
 | `bundled_media_tools` | Media-tool discovery and installed/portable acceptance harness. |
 
-Queue state, intake identity, output publication, process lifecycle, UI state and settings also have unit tests. The application core has renderer-independent navigation and media-tool discovery tests. The legacy adapter tests cover editor return flows, root update behavior and pending encoder capability presentation. Choose the module or integration target that owns the behavior.
+Queue state, intake identity, output publication, process lifecycle, UI state and settings also have unit tests. The application core has renderer-independent navigation, media-tool discovery and source-session tests. Source inspection tests use completion notifications and existing FFprobe fixtures; the legacy adapter tests retain source replacement, picker cancellation, drag/drop and draft retention coverage. The legacy adapter tests cover editor return flows, root update behavior and pending encoder capability presentation. Choose the module or integration target that owns the behavior.
 
 ```powershell
 cargo test --locked --test remux

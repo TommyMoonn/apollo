@@ -1,6 +1,7 @@
 //! Legacy egui composition. The library core owns route and non-rendering state.
 
 mod render;
+mod source;
 mod state;
 mod workflows;
 
@@ -19,7 +20,7 @@ use crate::ui::{fonts, theme};
 
 use state::{
     BatchEditState, BatchInspectionSession, BatchSetupState, FrameCaptureThumbnailLoad,
-    FramePreviewDecode, LegacyEditorState, MediaInspection, QueueEditState, QueueExecutionEvent,
+    FramePreviewDecode, LegacyEditorState, QueueEditState, QueueExecutionEvent,
 };
 
 pub struct ApolloApp {
@@ -39,12 +40,10 @@ pub struct ApolloApp {
     copy_frame_worker: Option<CopyFrameWorker>,
     copy_frame_session_id: Option<u64>,
     progress_repaint: MediaProgressRepaintOwner,
-    media_inspection: Option<MediaInspection>,
     file_dialog: FileDialogOwner,
     clipboard_owner: Option<isize>,
     settings: AppSettings,
     egui_context: Context,
-    next_session_id: u64,
     tools_error_details_open: bool,
 }
 
@@ -100,12 +99,10 @@ impl ApolloApp {
             copy_frame_worker: None,
             copy_frame_session_id: None,
             progress_repaint: MediaProgressRepaintOwner::new(completion_wake(&egui_context)),
-            media_inspection: None,
             file_dialog,
             clipboard_owner,
             settings,
             egui_context,
-            next_session_id: 1,
             tools_error_details_open: false,
         }
     }

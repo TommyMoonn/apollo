@@ -171,11 +171,7 @@ impl MediaIntake {
         request: MediaIntakeRequest,
         result: Result<MediaFile, MediaProbeError>,
     ) -> Result<MediaProbeDisposition, MediaIntakeError> {
-        if !self
-            .pending_probe
-            .as_ref()
-            .is_some_and(|pending| pending.id == request.id)
-        {
+        if !self.is_pending(&request) {
             return Ok(MediaProbeDisposition::Retired);
         }
 
@@ -191,13 +187,24 @@ impl MediaIntake {
         Ok(MediaProbeDisposition::Published)
     }
 
-    pub fn retire_probe(&mut self, request: &MediaIntakeRequest) {
-        if self
-            .pending_probe
+    pub(crate) fn is_pending(&self, request: &MediaIntakeRequest) -> bool {
+        self.pending_probe
             .as_ref()
             .is_some_and(|pending| pending.id == request.id)
-        {
+    }
+
+    /// Restore a retained job snapshot without resetting the intake request sequence.
+    pub(crate) fn restore_retained(&mut self, identity: SourceIdentity, media: MediaFile) {
+        self.pending_probe = None;
+        self.current = Some(CachedMedia { identity, media });
+    }
+
+    pub fn retire_probe(&mut self, request: &MediaIntakeRequest) -> bool {
+        if self.is_pending(request) {
             self.pending_probe = None;
+            true
+        } else {
+            false
         }
     }
 

@@ -70,7 +70,7 @@ fn inspecting_state_is_sparse_and_blocks_source_replacement() {
     theme::install(&context);
 
     assert_eq!(app.core.navigation(), NavigationState::NoSource);
-    assert!(app.media_inspection.is_some());
+    assert!(app.core.source.is_inspecting());
     assert!(!app.file_intake_enabled());
 
     let mut output = context.run_ui(Default::default(), |ui| {
@@ -95,7 +95,7 @@ fn operation_selection_is_navigation_inside_a_loaded_workspace() {
 
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
     assert_workspace(&app.core, Operation::AudioMix);
-    let source_path = app.core.media_intake.current().unwrap().path.clone();
+    let source_path = app.core.source.current().unwrap().path.clone();
 
     for operation in [
         Operation::VideoUpscale,
@@ -106,7 +106,7 @@ fn operation_selection_is_navigation_inside_a_loaded_workspace() {
     ] {
         app.select_tool(operation);
         assert_workspace(&app.core, operation);
-        assert_eq!(app.core.media_intake.current().unwrap().path, source_path);
+        assert_eq!(app.core.source.current().unwrap().path, source_path);
     }
     fs::remove_dir_all(directory).unwrap();
 }
@@ -171,7 +171,14 @@ fn intake_queue_navigation_and_back_preserve_jobs() {
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
     app.enqueue_from_ready_surface(Operation::AudioMix);
     let job_id = app.core.media_queue.jobs()[0].id();
+    let replacement = directory.join("replacement.mkv");
+    fs::write(&replacement, b"replacement").unwrap();
+    let sender = begin_pending_inspection(&mut app, &replacement);
     app.close_source();
+    assert!(sender.send(Ok(media(&replacement))).is_err());
+    app.poll_media_inspection();
+    assert_no_source(&app.core);
+    assert!(app.state.source_presentation.is_none());
 
     app.handle_file_intake_action(FileIntakeAction::OpenQueue);
     assert_eq!(
@@ -207,7 +214,7 @@ fn workspace_queue_navigation_restores_the_same_source_and_operation() {
     assert!(app.handle_queue_action(QueueAction::Back));
 
     assert_workspace(&app.core, Operation::Remux);
-    assert_eq!(app.core.media_intake.current().unwrap().path, path);
+    assert_eq!(app.core.source.current().unwrap().path, path);
     assert_eq!(app.state.remux.as_ref().unwrap().session_id, session_id);
     fs::remove_dir_all(directory).unwrap();
 }
@@ -312,7 +319,7 @@ fn workspace_queue_edit_targets_exact_job_and_restores_retained_source_without_p
         .unwrap()
         .unwrap();
     app.load_media_path_with_probe(&second_path, |path| Ok(media(path)));
-    assert_eq!(app.core.media_intake.current().unwrap().path, second_path);
+    assert_eq!(app.core.source.current().unwrap().path, second_path);
 
     assert!(app.begin_queue_edit(first_job, QueueEditOrigin::SourceWorkspace));
     assert_eq!(app.queue_edit.as_ref().unwrap().job_id, first_job);
@@ -326,11 +333,11 @@ fn workspace_queue_edit_targets_exact_job_and_restores_retained_source_without_p
         ),
         first_request
     );
-    assert!(app.media_inspection.is_none());
+    assert!(!app.core.source.is_inspecting());
 
     assert!(app.finish_queue_edit());
     assert_workspace(&app.core, Operation::Remux);
-    assert_eq!(app.core.media_intake.current().unwrap().path, first_path);
+    assert_eq!(app.core.source.current().unwrap().path, first_path);
     assert_eq!(
         QueuedOperation::Remux(
             app.state
@@ -342,7 +349,7 @@ fn workspace_queue_edit_targets_exact_job_and_restores_retained_source_without_p
         ),
         first_request
     );
-    assert!(app.media_inspection.is_none());
+    assert!(!app.core.source.is_inspecting());
     assert_eq!(app.core.media_queue.jobs()[1].id(), second_job);
 
     fs::remove_dir_all(first_directory).unwrap();
@@ -370,7 +377,7 @@ fn workspace_queue_edit_save_returns_to_saved_operation_with_same_job_id() {
         app.core.media_queue.jobs()[0].operation(),
         QueuedOperation::FrameCapture(_)
     ));
-    assert!(app.media_inspection.is_none());
+    assert!(!app.core.source.is_inspecting());
 
     fs::remove_dir_all(directory).unwrap();
 }
@@ -463,10 +470,7 @@ fn switching_tools_reuses_successful_probe_without_probing_again() {
         app.state.upscale.as_ref().map(|s| &s.media.path),
         Some(&path)
     );
-    assert_eq!(
-        app.core.media_intake.current().map(|m| &m.path),
-        Some(&path)
-    );
+    assert_eq!(app.core.source.current().map(|m| &m.path), Some(&path));
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -482,7 +486,7 @@ fn switching_operations_does_not_revalidate_or_clear_the_source() {
     assert_workspace(&app.core, Operation::VideoUpscale);
     assert!(app.state.upscale.is_some());
     assert_eq!(
-        app.core.media_intake.current().map(|media| &media.path),
+        app.core.source.current().map(|media| &media.path),
         Some(&path)
     );
     fs::remove_dir_all(directory).unwrap();
@@ -617,13 +621,13 @@ fn root_update_defers_source_completion_until_tools_are_ready() {
     app.core.discovery = MediaToolsDiscovery::with_state(MediaToolsState::Checking);
     render(&mut app);
     assert_no_source(&app.core);
-    assert!(app.media_inspection.is_some());
+    assert!(app.core.source.is_inspecting());
 
     app.core.discovery =
         MediaToolsDiscovery::with_state(MediaToolsState::Unavailable(MediaToolsError::MissingBoth));
     render(&mut app);
     assert_no_source(&app.core);
-    assert!(app.media_inspection.is_some());
+    assert!(app.core.source.is_inspecting());
 
     app.core.discovery = MediaToolsDiscovery::with_state(MediaToolsState::Ready(MediaTools::new(
         "missing-ffmpeg",
@@ -631,7 +635,7 @@ fn root_update_defers_source_completion_until_tools_are_ready() {
     )));
     render(&mut app);
     assert_workspace(&app.core, Operation::AudioMix);
-    assert_eq!(app.core.media_intake.current().unwrap().path, path);
-    assert!(app.media_inspection.is_none());
+    assert_eq!(app.core.source.current().unwrap().path, path);
+    assert!(!app.core.source.is_inspecting());
     fs::remove_dir_all(directory).unwrap();
 }
