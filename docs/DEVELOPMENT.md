@@ -9,6 +9,7 @@ Required development tools:
 - Git
 - Rust toolchain pinned by `rust-toolchain.toml`
 - PowerShell 7 for repository scripts
+- Just 1.33 or later for development recipes
 - FFmpeg and FFprobe for media inspection, processing, and runtime smoke tests
 
 Rustup is the recommended way to install the pinned Rust toolchain. From the repository root, the toolchain file should select the required version automatically.
@@ -260,7 +261,7 @@ Public command conventions:
 Review first:
 
 ```powershell
-.\scripts\review-changes.ps1 --files
+just review --files
 ```
 
 Then package the current tracked changes and intended non-ignored untracked files:
@@ -283,7 +284,7 @@ Apply a package explicitly:
 .\scripts\apply-changes.ps1 --zip <path>
 ```
 
-Or omit `--zip` to select the newest `<project-slug>*.zip` from Downloads. Automatic discovery accepts both full project snapshots and changed-files packages, including browser duplicate names such as ` (1)` and ` (2)`. Use `--pattern` to narrow discovery when needed. The importer rejects absolute/traversal paths and `.git`, refuses tracked dirty state by default, skips identical files, supports dry run, requires explicit opt-in for directory deletion, and backs up overwritten/deleted paths by default under:
+Or omit `--zip` to select the newest `<project-slug>*.zip` from Downloads. Legacy automatic discovery can select snapshots as well as changed-files packages, including browser duplicate names such as ` (1)` and ` (2)`. Prefer an explicit changed-files ZIP until import selection is hardened. Use `--pattern` to narrow discovery when needed. The importer rejects absolute/traversal paths and `.git`, refuses tracked dirty state by default, skips identical files, supports dry run, requires explicit opt-in for directory deletion, and backs up overwritten/deleted paths by default under:
 
 ```text
 %LOCALAPPDATA%\ChatGPTImports\<project-slug>\<timestamp>\
@@ -297,21 +298,17 @@ Restore the newest backup with:
 
 A backup records overwritten and deleted paths. It does not record files that were newly created by the import, so restoration does not automatically remove those new files.
 
-### Full-project ZIP workflow
-
-Create a full-project snapshot with:
+### Repository and workspace ZIP workflow
 
 ```powershell
-.\scripts\zip-project.ps1
+just zip repo
+just zip workspace
+just zip workspace --output 'C:/Exports/apollo workspace.zip'
 ```
 
-The script derives the repository slug and creates a timestamped archive beside the project directory:
+Use `repo` to share committed source and `workspace` to include current edits and eligible local context. Defaults are `apollo-repo(yyMMddHHmm).zip` and `apollo-workspace(yyMMddHHmm).zip` beside the project. Both contain a root-level `EXPORT_MANIFEST.json` recording provenance. Existing archives are never overwritten. The workspace export applies [the `.zipignore` rules](../scripts/README.md#repository-and-workspace-exports); repo export uses Git archive and refuses committed local records.
 
-```text
-apollo(yyMMddHHmm).zip
-```
-
-`.zipignore` controls exclusions (see [pattern rules](../scripts/README.md#full-project-snapshot)). `.plans/` and `.project/` remain eligible for full-project snapshots even though Git ignores them.
+Use `--project` and `--output` to override the project root and destination. To run directly, use `pwsh -NoProfile -File scripts/zip-project.ps1 --mode workspace`. Snapshots are for inspection or workspace transfer; select changed-files packages explicitly when importing until F01.2 replaces automatic import selection.
 
 ### Generated-output cleanup
 
@@ -319,16 +316,10 @@ Preview or remove only recognized generated roots:
 
 ```powershell
 .\scripts\clean-generated.ps1 --rust --dry-run
-.\scripts\clean-generated.ps1 --chatgpt-bundles --dry-run
-.\scripts\clean-generated.ps1 --all
+.\scripts\clean-generated.ps1 --rust
 ```
 
-Initial targets are only:
-
-```text
-target/
-.dev/chatgpt/bundles/
-```
+Rust cleanup targets `target/`. Offline bundle maintenance is owner-managed. The legacy cleanup interface remains temporarily compatible until F01.3.
 
 The cleanup command refuses paths outside the repository, never touches `.git`, and protects tracked files unless `--force` is explicitly used.
 
@@ -338,7 +329,6 @@ The repository reserves these local roots:
 
 ```text
 .plans/      local implementation plans
-.planning/   legacy local plans (retained if present)
 .project/    local project records and reviews
 .scratch/    disposable working data
 .agent-work/ owner-managed offline tooling and local files
@@ -346,4 +336,4 @@ The repository reserves these local roots:
 
 They are intentionally ignored by Git and must never become build prerequisites. A clean clone must build and test without them.
 
-Tracked development tooling belongs under `scripts/`. Offline bundle preparation is owner-managed; `.agent-work/`, generated archives and the former `.dev/chatgpt/bundles/` location are excluded from snapshots.
+Tracked development tooling belongs under `scripts/`. Offline bundle preparation is owner-managed; `.agent-work/`, generated archives and retired local bundle directories are excluded from workspace snapshots. Legacy planning paths remain passively protected by Git ignore rules.

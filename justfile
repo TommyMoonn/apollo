@@ -29,11 +29,20 @@ gate:
     cargo clippy --locked --all-targets --all-features -- -D warnings
     cargo test --locked --all-targets
 
-zip:
-    pwsh -NoProfile -File scripts/zip-project.ps1
+# Forward each argument literally through a PowerShell script recipe.
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+zip mode *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/zip-project.ps1 --mode @args
 
-review:
-    pwsh -NoProfile -File scripts/review-changes.ps1
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+review *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/review-changes.ps1 @args
 
 review-files:
     pwsh -NoProfile -File scripts/review-changes.ps1 --files

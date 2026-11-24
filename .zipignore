@@ -1,10 +1,11 @@
 # Git metadata, generated output and local working data
+# ^ anchors an exclusion to the workspace root (also supported by bsdtar).
 .git
-/target/
-/artifacts/
-/.scratch/
-/.agent-work/
-/.dev/chatgpt/bundles/
+^target
+^artifacts
+^.scratch
+^.agent-work
+^.dev/chatgpt/bundles
 
 # Sensitive local configuration
 .env
@@ -21,3 +22,7 @@ Desktop.ini
 *.log
 *.tmp
 *.zip
+
+# Disposable verification output
+^test-results
+^coverage

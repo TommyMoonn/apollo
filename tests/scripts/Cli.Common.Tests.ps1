@@ -183,4 +183,45 @@ Invoke-TestCase 'accepts an attached value starting with a dash' {
     Assert-Equal '-file.zip' $cli['output'] 'Attached dash-prefixed values should be preserved.'
 }
 
+Invoke-TestCase 'parses repeated multi-value options using the reference contract' {
+    $cli = ConvertFrom-CliArguments -Arguments @('--items', 'first,second', '--items=third') -OptionSpecs @{ items = @{ Kind = 'MultiValue' } }
+    Assert-Equal @('first', 'second', 'third') @($cli['items']) 'Multi-value CLI parsing mismatch.'
+}
+
+Invoke-TestCase 'formats binary byte sizes and rejects negative sizes' {
+    Assert-Equal '0 B' (Format-CliByteSize -Bytes 0) 'Empty size mismatch.'
+    Assert-Equal '1.0 KiB' (Format-CliByteSize -Bytes 1024) 'KiB size mismatch.'
+    Assert-Equal '1.0 MiB' (Format-CliByteSize -Bytes 1MB) 'MiB size mismatch.'
+    Assert-Throws { Format-CliByteSize -Bytes -1 } '*cannot be negative*'
+}
+
+Invoke-TestCase 'NO_COLOR and CI disable transient output while permanent summaries remain visible' {
+    $previousNoColor = $env:NO_COLOR
+    $previousCI = $env:CI
+    try {
+        $env:NO_COLOR = '1'
+        Assert-False (Test-CliColorEnabled) 'NO_COLOR must disable color.'
+        Assert-False (Test-CliProgressEnabled) 'NO_COLOR must disable transient progress.'
+        $env:NO_COLOR = $null
+        $env:CI = 'true'
+        Assert-False (Test-CliColorEnabled) 'CI must disable color.'
+        Assert-False (Test-CliProgressEnabled) 'CI must disable transient progress.'
+        $output = @(& { Write-CliHeading -Text 'Export'; Write-CliStep -Message 'Packaging'; Write-CliSuccess -Message 'Complete'; Write-CliDetail -Label 'Files' -Value '3'; Write-CliWarning -Message 'Review' } 6>&1) -join "`n"
+        foreach ($message in @('Export', 'Packaging', 'Complete', 'Files', '3', 'Review')) {
+            Assert-Contains $output $message 'Permanent output should remain readable.'
+        }
+        Assert-False ($output.Contains([string][char]27)) 'Suppressed output must not contain ANSI escapes.'
+    } finally { $env:NO_COLOR = $previousNoColor; $env:CI = $previousCI }
+}
+
+Invoke-TestCase 'redirected PowerShell disables color and progress' {
+    $pwshPath = (Get-Process -Id $PID).Path
+    $commonPath = (Join-Path $projectRoot 'scripts/Cli.Common.ps1').Replace("'", "''")
+    $command = ". '$commonPath'; Test-CliColorEnabled; Test-CliProgressEnabled"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $output = (& $pwshPath -NoLogo -NoProfile -EncodedCommand $encoded | Out-String)
+    Assert-Equal 0 $LASTEXITCODE 'Redirected CLI child failed.'
+    Assert-Equal @('False', 'False') @($output.Trim() -split '\r?\n') 'Redirected host must suppress color and progress.'
+}
+
 Complete-TestRun

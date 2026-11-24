@@ -56,6 +56,10 @@ Apollo supports Windows x64. CPU H.264 and H.265 encoders are included. NVIDIA e
 
 See the [pinned media-tool manifest](distribution/media-tools.json), [compatibility notes](distribution/media-tools-acceptance.md), and [third-party notices](THIRD_PARTY_NOTICES.md#bundled-ffmpeg-and-ffprobe).
 
+## Development
+
+Use the pinned Rust toolchain, PowerShell 7 and Just. Run `just --list` to discover commands. Use `just review --files` to inspect changes, `just zip repo` to export committed source, or `just zip workspace` to export the filtered working tree. See the development guide for setup and verification.
+
 ## Project documentation
 
 - [Development guide](docs/DEVELOPMENT.md)

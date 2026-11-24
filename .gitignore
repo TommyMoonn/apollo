@@ -24,3 +24,7 @@ Thumbs.db
 *.pfx
 *.p12
 Desktop.ini
+
+# Disposable verification output
+/test-results/
+/coverage/

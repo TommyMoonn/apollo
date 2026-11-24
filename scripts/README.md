@@ -15,32 +15,40 @@ Public commands use:
 - `-h` and `--help`
 - duplicate and unknown option rejection through `Cli.Common.ps1`
 
-Do not add script-local argument parsers.
+Do not add script-local argument parsers. The shared CLI, export and review commands are adapted from [Archeion at `4b711fc2`](https://github.com/TommyMoonn/archeion/tree/4b711fc2af4c70e321edd8b9072527c08c13fbf2/scripts) under GPL-3.0-only. Apollo retains its stricter option validation and Git inventory, writes workspace files directly to the final temporary ZIP, and uses a no-overwrite publish step.
 
 For the end-to-end release operator workflow, see [`docs/RELEASES.md`](../docs/RELEASES.md).
 
 ## Commands
 
-### Full-project snapshot
+### Repository and workspace exports
 
 ```powershell
-.\scripts\zip-project.ps1
+just zip repo
+just zip workspace
+just zip workspace --output 'C:/Exports/apollo workspace.zip'
 ```
 
-Creates `<project-slug>(yyMMddHHmm).zip` beside the repository. The command is intentionally zero-config and requires `.zipignore`. It prunes excluded directories before enumeration, reports scanning and compression progress, and replaces an existing same-minute archive only after successful compression. Symbolic links and reparse points that are not excluded cause an error rather than silently exporting external content.
+The equivalent direct command is `pwsh -NoProfile -File scripts/zip-project.ps1 --mode repo` (or `--mode workspace`). `--mode` is required. Both commands accept `-p` / `--project` to select a different project root and `-o` / `--output` to select an external ZIP. Existing archives, non-ZIP destinations, and paths inside the project are refused.
 
-Patterns use `/` or `\` as separators. Blank lines and lines starting with `#` are ignored. A leading `/` or an internal separator anchors the pattern to the project root; a bare name matches at any depth. A trailing `/` matches directories only. `*` matches characters within a path segment, `?` matches one character, and `**` spans segments (including zero directories in `**/`). Negation is not supported; other characters are literal. Matching is case-insensitive on Windows. Excluded directories are not traversed.
+- `repo` exports a committed Git revision, excluding dirty, untracked and ignored work. It refuses committed local planning or project records. Default: `apollo-repo(yyMMddHHmm).zip`.
+- `workspace` exports current files using `.zipignore`, including eligible local records; no Git commit is required. Default: `apollo-workspace(yyMMddHHmm).zip`.
 
-`.plans/`, legacy `.planning/`, `.project/` and skills remain eligible for snapshots. Generated output, local agent tooling, common secret files and temporary archives are excluded. Review local context before sharing; these rules cannot identify every possible secret.
+Both archives are flat and include a single `EXPORT_MANIFEST.json` (schema version 1) with mode, source commit, Git-visible dirty state, source baseline, actual local-record inclusion and UTC creation time. A workspace without a repository at its root has null commit and dirty state. The manifest is reserved; a source collision is refused. Output is published only after the completed archive is verified.
+
+Workspace exclusions use Apollo's existing matcher, not Windows bsdtar. The shipped rules use bsdtar-compatible `^` root anchors and bare basename patterns for sensitive and temporary files. Root anchors match a file or directory at the workspace root, without excluding similarly named nested source paths. Apollo also supports its legacy pattern syntax: leading `/` or internal separators anchor patterns to the root, trailing `/` matches directories only, and unanchored bare names match at any depth. `*` and `?` stay within path segments, `**` spans segments (including zero directories in `**/`), and negation is unsupported. Windows matching is case-insensitive. Excluded directories are not traversed. Non-excluded links and reparse points are refused.
+
+Local `.plans/` (including legacy `.planning/`), `.project/` and skills remain eligible for workspace snapshots. Review these records before sharing. `.zipignore` does not apply to Git archive mode; local records and secrets should never be committed.
 
 ### Review the working tree
 
 ```powershell
-.\scripts\review-changes.ps1
-.\scripts\review-changes.ps1 --files
+just review
+just review --files
+just review --project 'C:/Projects/Apollo Copy' --files
 ```
 
-Summarizes tracked and non-ignored untracked changes against `HEAD`, including staged/unstaged state, renames, deletions, and Rust-repository categories. Index changes reversed in the worktree are marked `~` because there is no separate net export operation. Ignored untracked files are omitted; tracked local or generated paths are flagged for inspection before packaging.
+The direct equivalent is `pwsh -NoProfile -File scripts/review-changes.ps1 --files`. The default output includes branch, counts by status and area, staged/unstaged tracked change counts and review flags. A rename counts as one change; a path with both staged and unstaged edits counts in both. Untracked paths are counted separately. `--files` lists paths and their index/worktree states. Index changes reversed in the worktree are reported as index/worktree-only changes, not silently omitted. Warnings cover deletions, test coverage review (including inline Rust tests), generated/sensitive paths, Cargo dependencies, CI, files at least 1 MiB and staged/unstaged whitespace issues. Warnings are advisory; inspection failures return errors.
 
 ### Package changed files
 
@@ -62,7 +70,7 @@ Compatibility entry point:
 .\scripts\apply-changes.ps1 --zip C:\path\to\apollo-task-changed-files.zip
 ```
 
-Without `--zip`, the command searches Downloads for the newest `<project-slug>*.zip`. This accepts both full project snapshots such as `apollo(2608281142).zip` and changed-files packages such as `apollo-phase-0.1.0.56-changed-files.zip`, including browser duplicate names like ` (1)` and ` (2)`. Use `--pattern` to narrow discovery when needed. The importer rejects unsafe archive paths and `.git`, skips identical files, refuses tracked dirty state by default, supports dry runs, applies the deletion manifest, and backs up overwritten/deleted paths unless `--no-backup` is used.
+Without `--zip`, the command searches Downloads for the newest `<project-slug>*.zip`. The legacy importer may also select snapshots (including `apollo-repo(...)`, `apollo-workspace(...)` and older names), so use an explicit changed-files ZIP rather than relying on automatic discovery. Changed-files packages such as `apollo-phase-0.1.0.56-changed-files.zip` can include browser duplicate names like ` (1)` and ` (2)`. Use `--pattern` to narrow discovery when needed. The importer rejects unsafe archive paths and `.git`, skips identical files, refuses tracked dirty state by default, supports dry runs, applies the deletion manifest, and backs up overwritten/deleted paths unless `--no-backup` is used.
 
 Compatibility entry point:
 
@@ -89,11 +97,10 @@ Compatibility entry point:
 
 ```powershell
 .\scripts\clean-generated.ps1 --rust
-.\scripts\clean-generated.ps1 --chatgpt-bundles
-.\scripts\clean-generated.ps1 --all --dry-run
+.\scripts\clean-generated.ps1 --rust --dry-run
 ```
 
-The only initial cleanup targets are `target/` and `.dev/chatgpt/bundles/`. Tracked files are protected unless `--force` is explicitly supplied.
+Rust cleanup targets `target/`. Tracked files are protected unless `--force` is explicitly supplied. The retired bundle cleanup interface remains temporarily compatible pending F01.3; offline preparation and maintenance are owner-managed.
 
 ### Validate release metadata
 
