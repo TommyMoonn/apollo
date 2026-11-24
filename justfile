@@ -109,18 +109,21 @@ clean *flags:
 
 # Update release version metadata.
 [group("release")]
-set-version version:
-    pwsh -NoProfile -File .\scripts\set-version.ps1 {{version}}
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+set-version version *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/set-version.ps1 @args
 
-# Validate version metadata without modifying files.
+# Validate version metadata; optional --tag and --require-changelog.
 [group("release")]
-check-release:
-    pwsh -NoProfile -File scripts/check-release.ps1
-
-# Validate a release tag and changelog.
-[group("release")]
-check-release-tag tag:
-    pwsh -NoProfile -File .\scripts\check-release.ps1 --tag {{tag}} --release-changelog
+[positional-arguments]
+[script("pwsh", "-NoProfile", "-File")]
+[extension(".ps1")]
+check-release *flags:
+    $ErrorActionPreference = 'Stop'
+    & ./scripts/check-release.ps1 @args
 
 # Build the Windows release executable.
 [group("release")]
@@ -136,11 +139,6 @@ build-installer:
 [group("release")]
 stage-release:
     pwsh -NoProfile -File .\scripts\stage-windows-release.ps1
-
-# Validate metadata for a specified release version.
-[group("release")]
-release-check version:
-    pwsh -NoProfile -File .\scripts\check-release.ps1 --tag v{{version}} --release-changelog
 
 # Build and stage the Windows release.
 [group("release")]

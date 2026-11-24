@@ -1,18 +1,25 @@
 #requires -Version 7.0
 
+# Adapted from Archeion (GPL-3.0-only), commit 4b711fc2af4c70e321edd8b9072527c08c13fbf2.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot 'Cli.Common.ps1')
 . (Join-Path $PSScriptRoot 'Repository.Common.ps1')
 
-function Test-SemanticVersion {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Version
-    )
+function Assert-StableReleaseVersion {
+    param([Parameter(Mandatory)][string]$Version)
 
-    return $Version -cmatch '\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\z'
+    if ($Version -cnotmatch '\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z') {
+        throw "Version '$Version' must be a stable X.Y.Z version."
+    }
+    foreach ($part in $Version.Split('.')) {
+        # VERSIONINFO stores each numeric component in a 16-bit unsigned field.
+        [uint16]$number = 0
+        if (-not [uint16]::TryParse($part, [ref]$number)) {
+            throw "Version '$Version' exceeds the Windows resource component limit (65535)."
+        }
+    }
 }
 
 function Get-CargoManifestPackageInfo {
@@ -26,14 +33,15 @@ function Get-CargoManifestPackageInfo {
     }
 
     $content = [System.IO.File]::ReadAllText($ManifestPath)
-    $packageHeader = [regex]::Match($content, '(?m)^[ \t]*\[package\][ \t]*\r?$')
-    if (-not $packageHeader.Success) {
-        throw "Cargo.toml is missing a [package] section."
+    $packageHeaders = [regex]::Matches($content, '(?m)^[ \t]*\[package\][ \t]*(?:#[^\r\n]*)?\r?$')
+    if ($packageHeaders.Count -ne 1) {
+        throw 'Cargo.toml must contain exactly one [package] section.'
     }
+    $packageHeader = $packageHeaders[0]
 
     $searchStart = $packageHeader.Index + $packageHeader.Length
     $remaining = $content.Substring($searchStart)
-    $nextSection = [regex]::Match($remaining, '(?m)^[ \t]*\[[^\r\n]+\][ \t]*\r?$')
+    $nextSection = [regex]::Match($remaining, '(?m)^[ \t]*\[[^\r\n]+\][ \t]*(?:#[^\r\n]*)?\r?$')
     $sectionEnd = if ($nextSection.Success) {
         $searchStart + $nextSection.Index
     }
@@ -51,10 +59,10 @@ function Get-CargoManifestPackageInfo {
         '(?m)^[ \t]*version[ \t]*=[ \t]*"(?<value>[^"\r\n]+)"[ \t]*(?:#.*)?\r?$'
     )
 
-    if ($nameMatches.Count -ne 1) {
+    if ($nameMatches.Count -ne 1 -or [regex]::Matches($section, '(?m)^[ \t]*name[ \t]*=').Count -ne 1) {
         throw "Cargo.toml [package] must contain exactly one string name."
     }
-    if ($versionMatches.Count -ne 1) {
+    if ($versionMatches.Count -ne 1 -or [regex]::Matches($section, '(?m)^[ \t]*version[ \t]*=').Count -ne 1) {
         throw "Cargo.toml [package] must contain exactly one string version."
     }
 
@@ -67,7 +75,7 @@ function Get-CargoManifestPackageInfo {
     }
 }
 
-function Get-CargoLockRootPackageVersion {
+function Get-CargoLockRootPackageInfo {
     param(
         [Parameter(Mandatory)]
         [string]$LockPath,
@@ -85,15 +93,15 @@ function Get-CargoLockRootPackageVersion {
         $content,
         '(?ms)^[ \t]*\[\[package\]\][ \t]*\r?\n(?<body>.*?)(?=^[ \t]*\[\[package\]\]|\z)'
     )
-    $rootVersions = [System.Collections.Generic.List[string]]::new()
+    $rootPackages = [System.Collections.Generic.List[object]]::new()
 
     foreach ($block in $blocks) {
         $body = $block.Groups['body'].Value
-        $nameMatch = [regex]::Match(
+        $nameMatches = [regex]::Matches(
             $body,
             '(?m)^[ \t]*name[ \t]*=[ \t]*"(?<value>[^"\r\n]+)"[ \t]*\r?$'
         )
-        if (-not $nameMatch.Success -or $nameMatch.Groups['value'].Value -cne $PackageName) {
+        if (-not @($nameMatches | Where-Object { $_.Groups['value'].Value -ceq $PackageName }).Count) {
             continue
         }
 
@@ -102,22 +110,29 @@ function Get-CargoLockRootPackageVersion {
             continue
         }
 
-        $versionMatch = [regex]::Match(
+        if ($nameMatches.Count -ne 1 -or [regex]::Matches($body, '(?m)^[ \t]*name[ \t]*=').Count -ne 1) {
+            throw "Cargo.lock package '$PackageName' has duplicate names."
+        }
+        $versionMatches = [regex]::Matches(
             $body,
             '(?m)^[ \t]*version[ \t]*=[ \t]*"(?<value>[^"\r\n]+)"[ \t]*\r?$'
         )
-        if (-not $versionMatch.Success) {
-            throw "Cargo.lock root package '$PackageName' is missing a version."
+        if ($versionMatches.Count -ne 1 -or [regex]::Matches($body, '(?m)^[ \t]*version[ \t]*=').Count -ne 1) {
+            throw "Cargo.lock root package '$PackageName' must contain exactly one version."
         }
-
-        $rootVersions.Add($versionMatch.Groups['value'].Value)
+        $versionGroup = $versionMatches[0].Groups['value']
+        $rootPackages.Add([pscustomobject]@{
+            Version = $versionGroup.Value
+            VersionIndex = $block.Groups['body'].Index + $versionGroup.Index
+            VersionLength = $versionGroup.Length
+        })
     }
 
-    if ($rootVersions.Count -ne 1) {
+    if ($rootPackages.Count -ne 1) {
         throw "Cargo.lock must contain exactly one root package entry named '$PackageName'."
     }
 
-    return $rootVersions[0]
+    return $rootPackages[0]
 }
 
 function Get-EffectiveReleaseTag {
@@ -134,12 +149,15 @@ function Get-EffectiveReleaseTag {
 
     $workflowTag = $null
     if ($isTagRef) {
-        if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_REF_NAME)) {
-            $workflowTag = $env:GITHUB_REF_NAME
+        $refTag = if ($env:GITHUB_REF -and $env:GITHUB_REF.StartsWith($tagPrefix, [System.StringComparison]::Ordinal)) {
+            $env:GITHUB_REF.Substring($tagPrefix.Length)
         }
-        elseif (-not [string]::IsNullOrWhiteSpace($env:GITHUB_REF) -and
-            $env:GITHUB_REF.StartsWith($tagPrefix, [System.StringComparison]::Ordinal)) {
-            $workflowTag = $env:GITHUB_REF.Substring($tagPrefix.Length)
+        $workflowTag = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { $refTag }
+        if ([string]::IsNullOrWhiteSpace($workflowTag)) {
+            throw 'GitHub tag context is missing the tag name.'
+        }
+        if ($refTag -and $refTag -cne $workflowTag) {
+            throw 'GitHub tag name and ref disagree.'
         }
     }
 
@@ -157,52 +175,87 @@ function Get-EffectiveReleaseTag {
     return $workflowTag
 }
 
-function Assert-ReleaseChangelog {
+function Get-ReleaseChangelogDate {
     param(
-        [Parameter(Mandatory)]
-        [string]$ChangelogPath,
-
-        [Parameter(Mandatory)]
-        [string]$Version
+        [Parameter(Mandatory)][string]$ChangelogPath,
+        [Parameter(Mandatory)][string]$Version
     )
-
-    if (-not (Test-Path -LiteralPath $ChangelogPath -PathType Leaf)) {
-        throw "CHANGELOG.md does not exist: $ChangelogPath"
-    }
 
     $content = [System.IO.File]::ReadAllText($ChangelogPath)
     $escapedVersion = [regex]::Escape($Version)
-    $heading = [regex]::Match(
-        $content,
-        "(?m)^##[ \t]+\[$escapedVersion\][ \t]+-[ \t]+(?<date>[0-9]{4}-[0-9]{2}-[0-9]{2})[ \t]*\r?$"
-    )
-    if (-not $heading.Success) {
-        throw "CHANGELOG.md is missing a dated [$Version] release heading."
+    $headings = [regex]::Matches($content, "(?m)^##[ \t]+\[$escapedVersion\][^\r\n]*")
+    if ($headings.Count -ne 1) {
+        throw "CHANGELOG.md must contain exactly one [$Version] release heading."
     }
-
+    $heading = [regex]::Match($headings[0].Value, "\A##[ \t]+\[$escapedVersion\][ \t]+-[ \t]+(?<date>[0-9]{4}-[0-9]{2}-[0-9]{2})[ \t]*\z")
     [datetime]$releaseDate = [datetime]::MinValue
-    if (-not [datetime]::TryParseExact(
-        $heading.Groups['date'].Value,
-        'yyyy-MM-dd',
+    if (-not $heading.Success -or -not [datetime]::TryParseExact(
+        $heading.Groups['date'].Value, 'yyyy-MM-dd',
         [System.Globalization.CultureInfo]::InvariantCulture,
-        [System.Globalization.DateTimeStyles]::None,
-        [ref]$releaseDate
+        [System.Globalization.DateTimeStyles]::None, [ref]$releaseDate
     )) {
-        throw "CHANGELOG.md has an invalid release date for [$Version]."
+        throw "CHANGELOG.md requires a valid yyyy-MM-dd release date for [$Version]."
     }
 
-    $link = [regex]::Match(
-        $content,
-        "(?m)^\[$escapedVersion\]:[ \t]+(?<url>\S+)[ \t]*\r?$"
+    $links = [regex]::Matches($content, "(?m)^[ \t]*\[$escapedVersion\]:[^\r\n]*")
+    if ($links.Count -ne 1) {
+        throw "CHANGELOG.md must contain exactly one [$Version] comparison link."
+    }
+    $comparison = [regex]::Match($links[0].Value, "\A[ \t]*\[$escapedVersion\]:[ \t]+https://github\.com/TommyMoonn/apollo/compare/v(?<previous>[0-9]+\.[0-9]+\.[0-9]+)\.\.\.v$escapedVersion[ \t]*\z")
+    if (-not $comparison.Success) {
+        throw "CHANGELOG.md [$Version] comparison link must target exactly v$Version in Apollo."
+    }
+    Assert-StableReleaseVersion -Version $comparison.Groups['previous'].Value
+    return $heading.Groups['date'].Value
+}
+
+function Read-ReleaseNote {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$Version
     )
-    if (-not $link.Success) {
-        throw "CHANGELOG.md is missing the [$Version] comparison link."
-    }
 
-    $expectedTag = "v$Version"
-    if (-not $link.Groups['url'].Value.Contains($expectedTag, [System.StringComparison]::Ordinal)) {
-        throw "CHANGELOG.md [$Version] comparison link does not reference '$expectedTag'."
+    Assert-StableReleaseVersion -Version $Version
+    $date = Get-ReleaseChangelogDate -ChangelogPath (Join-Path $ProjectRoot 'CHANGELOG.md') -Version $Version
+    $path = Join-Path $ProjectRoot "release-notes/v$Version.md"
+    $body = [System.Text.UTF8Encoding]::new($false, $true).GetString([System.IO.File]::ReadAllBytes($path))
+    if ($body -match '\{\{[^}]+\}\}|\bv?X\.[XY]\.[XZ]\b') {
+        throw "Release note v$Version contains an unfilled placeholder."
     }
+    # The body is published verbatim; section extraction is only for validation.
+    $headings = [regex]::Matches($body, '(?m)^#{1,2}[ \t]+[^\r\n]*')
+    if ($headings.Count -ne 2 -or $headings[0].Value.TrimEnd() -cne '## Downloads' -or
+        $headings[1].Value.TrimEnd() -cne '## Changes' -or $headings[0].Index -ne 0) {
+        throw "Release note v$Version must contain Downloads followed by Changes, without an extra header."
+    }
+    $downloadsStart = $headings[0].Index + $headings[0].Length
+    $downloads = $body.Substring($downloadsStart, $headings[1].Index - $downloadsStart)
+    $lines = @($downloads -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $assetUrls = @('Apollo-Setup-x64.exe', 'Apollo-windows-x64.zip') | ForEach-Object {
+        "https://github.com/TommyMoonn/apollo/releases/download/v$Version/$_"
+    }
+    $expected = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($url in $assetUrls) { [void]$expected.Add($url) }
+    foreach ($line in $lines) {
+        $link = [regex]::Match($line, '\A[-*][ \t]+\[[^\]\r\n]+\]\((?<url>[^\s()]+)\)[ \t]*\z')
+        if (-not $link.Success -or -not $expected.Remove($link.Groups['url'].Value)) {
+            throw "Release note v$Version contains an invalid or duplicate download link."
+        }
+    }
+    if ($expected.Count -ne 0) {
+        throw "Release note v$Version must link to both version-specific Windows assets."
+    }
+    $changes = $body.Substring($headings[1].Index + $headings[1].Length)
+    if ($changes -cnotmatch '(?m)^[-*][ \t]+\S[^\r\n]*') {
+        throw "Release note v$Version must contain at least one user-facing change."
+    }
+    # Also reject conflicting Apollo release download URLs elsewhere in the body.
+    foreach ($match in [regex]::Matches($changes, 'https://github\.com/TommyMoonn/apollo/releases/download/[^\s)>]+')) {
+        if ($match.Value -cnotin $assetUrls) {
+            throw "Release note v$Version contains a mismatched download destination."
+        }
+    }
+    return [pscustomobject]@{ Version = $Version; Date = $Date; Path = $path; Body = $body }
 }
 
 function Invoke-ReleaseValidation {
@@ -213,7 +266,8 @@ function Invoke-ReleaseValidation {
         [AllowNull()]
         $Tag,
 
-        [switch]$ReleaseChangelog
+        [switch]$ReleaseChangelog,
+        [switch]$RequireChangelog
     )
 
     $resolvedRoot = Resolve-RepositoryRoot -Path $ProjectRoot
@@ -224,11 +278,9 @@ function Invoke-ReleaseValidation {
     if ($manifest.Name -cne 'apollo') {
         throw "Cargo.toml package name must be 'apollo', found '$($manifest.Name)'."
     }
-    if (-not (Test-SemanticVersion -Version $manifest.Version)) {
-        throw "Cargo.toml package version '$($manifest.Version)' is not a valid semantic version."
-    }
+    Assert-StableReleaseVersion -Version $manifest.Version
 
-    $lockVersion = Get-CargoLockRootPackageVersion -LockPath $lockPath -PackageName 'apollo'
+    $lockVersion = (Get-CargoLockRootPackageInfo -LockPath $lockPath -PackageName 'apollo').Version
     if ($lockVersion -cne $manifest.Version) {
         throw "Cargo.lock root package version '$lockVersion' does not match Cargo.toml version '$($manifest.Version)'."
     }
@@ -241,14 +293,24 @@ function Invoke-ReleaseValidation {
         }
     }
 
-    if ($ReleaseChangelog) {
-        Assert-ReleaseChangelog -ChangelogPath (Join-Path $resolvedRoot 'CHANGELOG.md') -Version $manifest.Version
+    $note = $null
+    if ($RequireChangelog -or $ReleaseChangelog) {
+        if ($RequireChangelog -and $null -eq $effectiveTag) {
+            throw '--require-changelog requires an explicit or inherited release tag.'
+        }
+        if ($RequireChangelog) {
+            $note = Read-ReleaseNote -ProjectRoot $resolvedRoot -Version $manifest.Version
+        }
+        else {
+            $null = Get-ReleaseChangelogDate -ChangelogPath (Join-Path $resolvedRoot 'CHANGELOG.md') -Version $manifest.Version
+        }
     }
 
     return [pscustomobject]@{
         PackageName = $manifest.Name
         Version = $manifest.Version
         Tag = $effectiveTag
+        Note = $note
     }
 }
 
@@ -263,6 +325,7 @@ function Invoke-CheckReleaseCli {
         project = @{ Aliases = @('-p', '-ProjectRoot'); Default = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
         tag = @{ Aliases = @('-t', '-Tag') }
         'release-changelog' = @{ Kind = 'Switch'; Aliases = @('-ReleaseChangelog') }
+        'require-changelog' = @{ Kind = 'Switch'; Aliases = @('-RequireChangelogEntry') }
     }
 
     if ($cli['help']) {
@@ -272,7 +335,8 @@ Usage: .\scripts\check-release.ps1 [options]
 Options:
   -p, --project <path>          Project root to validate.
   -t, --tag <tag>               Require an exact v<version> release tag.
-  --release-changelog           Require a dated release heading and matching link.
+  --require-changelog           Require an exact tag, changelog and canonical release note.
+  --release-changelog           Legacy: check only the dated heading and comparison link.
   -h, --help                    Show this help.
 
 When GITHUB_REF_TYPE=tag, GITHUB_REF_NAME is used as the tag if --tag is omitted.
@@ -284,10 +348,13 @@ When GITHUB_REF_TYPE=tag, GITHUB_REF_NAME is used as the tag if --tag is omitted
         ProjectRoot = [string]$cli['project']
         Tag = $cli['tag']
         ReleaseChangelog = [bool]$cli['release-changelog']
+        RequireChangelog = [bool]$cli['require-changelog']
     }
     $result = Invoke-ReleaseValidation @validationArgs
 
-    Write-Host "Release metadata valid for $($result.PackageName) $($result.Version)."
+    Write-CliHeading 'Release validation'
+    Write-CliSuccess "Release metadata valid for $($result.PackageName) $($result.Version)."
+    if ($result.Note) { Write-CliDetail -Label 'Release note' -Value $result.Note.Path }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {

@@ -61,6 +61,7 @@ See the [pinned media-tool manifest](distribution/media-tools.json), [compatibil
 - [Development guide](docs/DEVELOPMENT.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Testing](docs/TESTING.md)
+- [Releasing](docs/RELEASING.md)
 - [Project scripts](scripts/README.md)
 - [Changelog](CHANGELOG.md)
 

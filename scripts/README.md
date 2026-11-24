@@ -112,20 +112,25 @@ Reports are written to `.scratch/coverage/<run-id>/` and the HTML index path is 
 ### Validate release metadata
 
 ```powershell
-.\scripts\check-release.ps1
-.\scripts\check-release.ps1 --tag v0.5.0
-.\scripts\check-release.ps1 --tag v0.5.0 --release-changelog
+just check-release
+just check-release --tag v0.7.0 --require-changelog
 ```
 
-Checks the `Cargo.toml` package version against the root `apollo` entry in `Cargo.lock`. An explicit release tag must equal `v<version>`. In a GitHub tag workflow, `GITHUB_REF_NAME` is used when no tag is supplied. `--release-changelog` additionally requires a dated release heading and matching version link in `CHANGELOG.md`. Validation is read-only.
+The direct equivalent is `pwsh -NoProfile -File scripts/check-release.ps1`. It accepts `--project <path>` for an alternate project root. Validation is read-only: the Cargo manifest and root lock entry must agree on a stable `X.Y.Z` version with components from 0 to 65535. A supplied tag must exactly equal `v<version>` and agree with inherited GitHub tag context, if present. Normal checks do not require a release note or changelog entry.
+
+`--require-changelog` requires a supplied or inherited tag, one dated release heading and matching comparison URL in `CHANGELOG.md`, and the corresponding canonical `release-notes/vX.Y.Z.md`. The legacy `--release-changelog` flag still checks the changelog alone during the transition. Use the full candidate check for release preparation.
 
 ### Set the release version
 
 ```powershell
-.\scripts\set-version.ps1 0.5.0
+just set-version 0.8.0
 ```
 
-Updates the `[package].version` in `Cargo.toml`, lets Cargo refresh the root package entry in `Cargo.lock`, verifies the result with locked Cargo metadata, and runs the shared release validator. If any step fails, both version files are restored.
+The direct equivalent is `pwsh -NoProfile -File scripts/set-version.ps1 0.8.0`; use `--project <path>` for another project. Cargo owns the root lockfile update. The command checks that only the Apollo root version changed (allowing Cargo's line-ending normalization) and restores both files if any step fails. The example version is illustrative; the command does not write notes, tags or releases. See [Releasing](../docs/RELEASING.md) for the operator sequence.
+
+The focused release-policy fixture check can be run directly with `pwsh -NoProfile -File tests/scripts/ReleasePolicy.Tests.ps1`. It remains optional and separate from required CI, `just verify` and `just test-scripts`.
+
+Adapted from Archeion commit `4b711fc2` (GPL-3.0-only), retaining Cargo as Apollo's only maintained version source and validating Windows resources and Apollo's two-download note format without Node or a website.
 
 ### Stage pinned media tools
 

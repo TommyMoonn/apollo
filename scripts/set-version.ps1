@@ -15,7 +15,7 @@ if ($cli['help']) {
 Usage: .\scripts\set-version.ps1 <version> [options]
 
 Options:
-  -v, --version <version>       Semantic version to set. May also be positional.
+  -v, --version <version>       Stable X.Y.Z version to set. May also be positional.
   -p, --project <path>          Project root to update.
   -h, --help                    Show this help.
 '@
@@ -24,17 +24,21 @@ Options:
 
 $version = [string]$cli['version']
 if ([string]::IsNullOrWhiteSpace($version)) {
-    throw "A semantic version is required. Run with --help to see usage."
+    throw "A stable release version is required. Run with --help to see usage."
 }
-if (-not (Test-SemanticVersion -Version $version)) {
-    throw "Version '$version' is not a valid semantic version."
-}
+Assert-StableReleaseVersion -Version $version
 
 $projectRoot = Resolve-RepositoryRoot -Path ([string]$cli['project'])
 $manifestPath = Join-Path $projectRoot 'Cargo.toml'
 $lockPath = Join-Path $projectRoot 'Cargo.lock'
 if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
     throw "Cargo lockfile does not exist: $lockPath"
+}
+
+$current = Invoke-ReleaseValidation -ProjectRoot $projectRoot
+if ($current.Version -ceq $version) {
+    Write-CliSuccess "Apollo is already at $version."
+    return
 }
 
 $manifestBytes = [System.IO.File]::ReadAllBytes($manifestPath)
@@ -53,33 +57,59 @@ function Invoke-VersionCargo {
     }
 }
 
+$manifestText = [System.IO.File]::ReadAllText($manifestPath)
+$lockText = [System.IO.File]::ReadAllText($lockPath)
+$package = Get-CargoManifestPackageInfo -ManifestPath $manifestPath
+$lockPackage = Get-CargoLockRootPackageInfo -LockPath $lockPath -PackageName $package.Name
+$updatedManifest = $manifestText.Remove($package.VersionIndex, $package.VersionLength).Insert($package.VersionIndex, $version)
+$expectedLock = $lockText.Remove($lockPackage.VersionIndex, $lockPackage.VersionLength).Insert($lockPackage.VersionIndex, $version)
+$hasBom = $manifestBytes.Length -ge 3 -and $manifestBytes[0] -eq 0xEF -and $manifestBytes[1] -eq 0xBB -and $manifestBytes[2] -eq 0xBF
+
+Write-CliHeading "Updating Apollo to $version"
+Push-Location -LiteralPath $projectRoot
 try {
-    $manifestText = [System.IO.File]::ReadAllText($manifestPath)
-    $package = Get-CargoManifestPackageInfo -ManifestPath $manifestPath
-    $lockVersion = Get-CargoLockRootPackageVersion -LockPath $lockPath -PackageName $package.Name
-    $updatedManifest = $manifestText.Remove($package.VersionIndex, $package.VersionLength).Insert($package.VersionIndex, $version)
-    [System.IO.File]::WriteAllText($manifestPath, $updatedManifest, [System.Text.UTF8Encoding]::new($false))
+    Write-CliStep -Message 'Updating Cargo package version'
+    [System.IO.File]::WriteAllText($manifestPath, $updatedManifest, [System.Text.UTF8Encoding]::new($hasBom))
 
+    Write-CliStep -Message 'Refreshing the root lock entry through Cargo'
     Invoke-VersionCargo -CargoArguments @(
-        'update',
-        '--manifest-path', $manifestPath,
-        '-p', "$($package.Name)@$lockVersion",
-        '--precise', $version
+        'update', '--manifest-path', $manifestPath,
+        '-p', "$($package.Name)@$($lockPackage.Version)", '--precise', $version
     )
     Invoke-VersionCargo -CargoArguments @(
-        'metadata',
-        '--manifest-path', $manifestPath,
-        '--locked',
-        '--format-version', '1',
-        '--no-deps'
+        'metadata', '--manifest-path', $manifestPath, '--locked', '--format-version', '1', '--no-deps'
     )
 
+    # Cargo may normalize CRLF on a Windows checkout. No other lock change is allowed.
+    $actualLock = [System.IO.File]::ReadAllText($lockPath)
+    if (-not [string]::Equals($actualLock.Replace("`r`n", "`n"), $expectedLock.Replace("`r`n", "`n"), [System.StringComparison]::Ordinal)) {
+        throw 'Cargo changed lockfile content beyond the Apollo root version.'
+    }
+    if (-not [string]::Equals([System.IO.File]::ReadAllText($manifestPath), $updatedManifest, [System.StringComparison]::Ordinal)) {
+        throw 'Cargo changed the manifest unexpectedly.'
+    }
     $null = Invoke-ReleaseValidation -ProjectRoot $projectRoot
 }
 catch {
-    [System.IO.File]::WriteAllBytes($manifestPath, $manifestBytes)
-    [System.IO.File]::WriteAllBytes($lockPath, $lockBytes)
-    throw
+    $updateFailure = $_
+    $restoreFailures = [System.Collections.Generic.List[string]]::new()
+    foreach ($backup in @(@{ Path = $manifestPath; Bytes = $manifestBytes }, @{ Path = $lockPath; Bytes = $lockBytes })) {
+        try {
+            [System.IO.File]::WriteAllBytes($backup.Path, $backup.Bytes)
+        }
+        catch {
+            $restoreFailures.Add("$($backup.Path): $($_.Exception.Message)")
+        }
+    }
+    if ($restoreFailures.Count -gt 0) {
+        throw "Version update failed: $($updateFailure.Exception.Message). Backup restoration also failed: $($restoreFailures -join '; ')"
+    }
+    Write-CliWarning 'Version update failed. Original version files were restored.'
+    throw $updateFailure
+}
+finally {
+    Pop-Location
 }
 
-Write-Host "Updated Apollo release version to $version."
+Write-CliSuccess "Updated Apollo release version to $version."
+Write-CliDetail -Label 'Next' -Value 'Prepare the matching changelog and release note.'
