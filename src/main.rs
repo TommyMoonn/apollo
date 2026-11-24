@@ -1,11 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod app;
-mod file_dialog;
-mod progress_repaint;
-mod settings;
-use apollo::ui::layout;
-use app::ApolloApp;
+use apollo::ui::{layout, legacy::ApolloApp};
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {

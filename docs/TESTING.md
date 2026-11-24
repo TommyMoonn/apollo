@@ -36,12 +36,13 @@ Unit tests live alongside the Rust implementation. Integration tests live under 
 | `media_probe` | FFprobe fixture parsing and shared media models. |
 | `bundled_media_tools` | Media-tool discovery and installed/portable acceptance harness. |
 
-Queue state, intake identity, output publication, process lifecycle, UI state and settings also have inline tests. Choose the module or integration target that owns the behavior.
+Queue state, intake identity, output publication, process lifecycle, UI state and settings also have unit tests. The application core has renderer-independent navigation tests; the legacy adapter tests cover editor return flows and root update behavior. Choose the module or integration target that owns the behavior.
 
 ```powershell
 cargo test --locked --test remux
 cargo test --locked --lib queue::
-cargo test --locked --bin apollo app::tests::
+cargo test --locked --lib app::
+cargo test --locked --lib ui::legacy::tests::
 ```
 
 Add a name filter to narrow a test run further. Use existing fixtures where possible. Test observable outcomes and failure handling, not exact error text, incidental implementation details or duplicated assertions. Prefer explicit completion conditions with bounded waits over fixed sleeps. Use disposable media and temporary directories; never use the user's media library as a test fixture.

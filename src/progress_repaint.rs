@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use apollo::media::process::{MediaProcessEvent, MediaProcessWake};
+use crate::media::process::{MediaProcessEvent, MediaProcessWake};
 use egui::Context;
 
 const MIN_PROGRESS_REPAINT_INTERVAL: Duration = Duration::from_millis(34);

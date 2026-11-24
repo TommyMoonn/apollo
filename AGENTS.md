@@ -32,8 +32,8 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 
 ## Where code lives
 
-- `src/main.rs` starts the native app. `src/app.rs` owns application state, navigation, operation editors, background work and queue integration.
-- `src/ui/` contains operation screens, queue and batch views, shared controls, layout, typography and themes.
+- `src/main.rs` starts the native app. `src/app/` owns renderer-independent application state and route transitions.
+- `src/ui/` contains operation screens, queue and batch views, shared controls, layout, typography and themes. `src/ui/legacy/` hosts the egui application adapter, its editor state and feature coordination.
 - `src/media/` handles media intake, probing, tool discovery, stream models, child processes, output publication and progress parsing.
 - `src/queue/` handles queued requests, destination reservations, execution order and job state.
 - `src/audio_mix/`, `src/upscale/`, `src/remux/`, `src/audio_extract/` and `src/frame_capture/` contain operation requests, validation, command construction and execution. Frame Capture also handles frame indexing, previews and clipboard extraction.
@@ -43,7 +43,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 
 ## Keep ownership clear
 
-`ApolloApp` coordinates navigation and background work. `AppState` holds the active source and operation editor state. Keep execution input validation in the operation request models and validators so presentation code does not introduce a separate execution path.
+`Application` owns the route, source intake, queue and immediate executors. `ApolloApp` owns one core and coordinates the egui shell and background work. Keep route transitions in the core and renderer-dependent editor state in the adapter until its owner is extracted. Keep execution input validation in the operation request models and validators so presentation code does not introduce a separate execution path.
 
 `MediaIntake` manages source identity, retained probe results and pending intake requests. `BatchInspectionOwner` manages batch probing and limits it to two concurrent probes. Preserve request identity checks so results from an earlier request cannot replace the current source or batch state.
 

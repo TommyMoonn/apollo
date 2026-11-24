@@ -12,7 +12,8 @@ This guide describes the egui implementation in the current checkout.
 | Area | Responsibility |
 | --- | --- |
 | `src/main.rs` | Native entry point and window configuration. |
-| `src/app.rs` | `ApolloApp` and `AppState`: navigation, source and operation editors, background work and queue integration. |
+| `src/app/` | `Application`: renderer-independent route state, source intake, queue and immediate executors. |
+| `src/ui/legacy/` | `ApolloApp`: egui composition, ordered background updates, renderer-dependent editors and existing feature actions. |
 | `src/ui/` | Operation views, shared widgets, queue and batch views, layout, themes and typography. |
 | `src/media/` | Source inspection, media models, tool discovery, process lifecycle, progress and output publication. |
 | `src/queue/` | Queued requests, destination reservations, job identity and execution order. |
@@ -20,7 +21,15 @@ This guide describes the egui implementation in the current checkout.
 | `src/settings.rs` | Remembers source and output directories using eframe storage (`apollo.settings.v1`). |
 | `src/file_dialog.rs`, `src/progress_repaint.rs` | Native file selection and progress-driven repaint coordination. |
 
-The library modules are exported by `src/lib.rs`; the native binary owns the application shell, dialogs and settings. Keep operation policy in its domain module and use the shared media and queue owners. Views display state and collect input; repainting must not start probes or processing.
+The library exports the application core and UI modules through `src/lib.rs`. The native binary configures the window and constructs the egui adapter, which owns exactly one core. The core does not import UI or native adapters. Keep operation policy in its domain module and use the shared media and queue owners. Views display state and collect input; repainting must not start probes or processing.
+
+## Composition and navigation
+
+`src/app/navigation.rs` owns `Operation`, routes and return origins for queue and batch flows. Route transitions do not require an egui context. The adapter commits these transitions after the existing source, editor and queue actions succeed; it retains renderer-dependent drafts and worker coordination until those responsibilities are extracted. Queue return and batch submission preserve the original source operation. Queue history changes remain with `MediaQueue`.
+
+`src/ui/legacy/mod.rs` constructs the application, installs the existing font and theme definitions and coordinates background updates and shutdown. `render.rs` dispatches the active route and draws the shell. `workflows.rs` retains the feature actions, and `state.rs` retains editor and worker state that still depends on egui.
+
+Each root update first polls media-tool discovery and queue events. While base tools are checking or unavailable, it renders that status and returns. Once ready, the update polls dialogs, source inspection, batch inspection, frame preview, frame index, clipboard and thumbnails in that order before handling drops and rendering the active route. Shutdown cancels clipboard work and the queue; owned resources retain their existing cleanup.
 
 ## Source intake and execution
 

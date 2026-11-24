@@ -2,7 +2,7 @@ use std::{cell::Cell, path::Path};
 
 use egui::{Label, RichText, Sides, TextStyle, Ui};
 
-use crate::{media::model::MediaFile, queue::JobId};
+use crate::{app::Operation, media::model::MediaFile, queue::JobId};
 
 use super::{SourceAction, fonts, layout, media_lifecycle, queue_count_label, theme, widgets};
 
@@ -49,35 +49,6 @@ impl EditableQueuedJob<'_> {
             self.operation,
             self.output.display()
         )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Operation {
-    AudioMix,
-    VideoUpscale,
-    Remux,
-    AudioExtract,
-    FrameCapture,
-}
-
-impl Operation {
-    pub const ALL: [Self; 5] = [
-        Self::AudioMix,
-        Self::VideoUpscale,
-        Self::Remux,
-        Self::AudioExtract,
-        Self::FrameCapture,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::AudioMix => "Audio Mix",
-            Self::VideoUpscale => "Upscale",
-            Self::Remux => "Remux",
-            Self::AudioExtract => "Audio Extract",
-            Self::FrameCapture => "Frame Capture",
-        }
     }
 }
 

@@ -2,9 +2,9 @@ use std::{cell::Cell, path::Path};
 
 use egui::{Align, Layout, Rect, RichText, Sense, TextStyle, Ui, UiBuilder, vec2};
 
-use crate::media::error::MediaError;
+use crate::{app::Operation, media::error::MediaError};
 
-use super::{fonts, layout, media_error, media_lifecycle, theme, widgets, workspace::Operation};
+use super::{fonts, layout, media_error, media_lifecycle, theme, widgets};
 
 const TITLE: &str = "Batch setup";
 const DEFAULTS_LABEL: &str = "Configure defaults";
@@ -394,7 +394,10 @@ mod tests {
         ADD_FILES_LABEL, BatchFeedback, BatchItemEditAction, BatchItemView, BatchReadiness,
         DEFAULTS_LABEL, TITLE, show,
     };
-    use crate::ui::{fonts, theme, workspace::Operation};
+    use crate::{
+        app::Operation,
+        ui::{fonts, theme},
+    };
 
     fn output_text_baseline(output: &egui::FullOutput, text: &str) -> Option<f32> {
         for clipped in &output.shapes {
