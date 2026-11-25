@@ -3,10 +3,8 @@
 use super::{ApolloApp, completion_wake};
 use crate::app::NavigationState;
 use crate::audio_extract::execution::AudioExtractExecutionState;
-use crate::audio_mix::execution::AudioMixExecutionState;
 use crate::frame_capture::execution::FrameCaptureExecutionState;
 use crate::media::tools::MediaTools;
-use crate::remux::execution::RemuxExecutionState;
 use crate::upscale::execution::UpscaleExecutionState;
 
 impl ApolloApp {
@@ -50,16 +48,8 @@ impl ApolloApp {
     }
 }
 
-pub(super) fn shows_audio_mix_lifecycle(state: &AudioMixExecutionState) -> bool {
-    !matches!(state, AudioMixExecutionState::Idle)
-}
-
 pub(super) fn shows_upscale_lifecycle(state: &UpscaleExecutionState) -> bool {
     !matches!(state, UpscaleExecutionState::Idle)
-}
-
-pub(super) fn shows_remux_lifecycle(state: &RemuxExecutionState) -> bool {
-    !matches!(state, RemuxExecutionState::Idle)
 }
 
 pub(super) fn shows_audio_extract_lifecycle(state: &AudioExtractExecutionState) -> bool {

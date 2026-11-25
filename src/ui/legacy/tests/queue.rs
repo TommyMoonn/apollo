@@ -391,7 +391,7 @@ fn enqueue_rejects_stale_source_and_preserves_workspace_until_reopened() {
         b"source changed after inspection with different length",
     )
     .unwrap();
-    app.enqueue_from_ready_surface(Operation::Remux);
+    app.handle_remux_action(RemuxSelectionAction::QueueRequested);
     assert!(app.core.queue.scheduler().jobs().is_empty());
     assert!(app.core.queue_confirmation.is_none());
     assert_eq!(
@@ -402,7 +402,7 @@ fn enqueue_rejects_stale_source_and_preserves_workspace_until_reopened() {
     assert_eq!(app.state.remux.as_ref().unwrap().selection, selection);
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
     app.select_tool(Operation::Remux);
-    app.enqueue_from_ready_surface(Operation::Remux);
+    app.handle_remux_action(RemuxSelectionAction::QueueRequested);
     assert_eq!(app.core.queue.scheduler().jobs().len(), 1);
     assert_eq!(app.core.queue_confirmation, Some(Operation::Remux));
     assert!(app.core.operation_action_error.is_none());
@@ -411,4 +411,182 @@ fn enqueue_rejects_stale_source_and_preserves_workspace_until_reopened() {
         app.core.source.current_with_identity().unwrap().0
     );
     fs::remove_dir_all(directory).unwrap();
+}
+
+// Exercise the actual normal-form action dispatch for each migrated operation.
+fn dispatch_submission(app: &mut ApolloApp, operation: Operation, process_now: bool) {
+    match (operation, process_now) {
+        (Operation::AudioMix, true) => {
+            app.handle_audio_mix_action(AudioMixSelectionAction::MixRequested)
+        }
+        (Operation::AudioMix, false) => {
+            app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested)
+        }
+        (Operation::Remux, true) => app.handle_remux_action(RemuxSelectionAction::RemuxRequested),
+        (Operation::Remux, false) => app.handle_remux_action(RemuxSelectionAction::QueueRequested),
+        _ => unreachable!("test covers migrated forms"),
+    }
+}
+
+#[test]
+fn migrated_form_actions_admit_equivalent_requests_and_keep_terminal_history() {
+    for operation in [Operation::AudioMix, Operation::Remux] {
+        let (directory, path) = temp_file("migrated-form-submission");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(operation);
+        match operation {
+            Operation::AudioMix => {
+                let session = app.state.audio_mix.as_mut().unwrap();
+                session.selection.set_normalization_enabled(true);
+                session
+                    .selection
+                    .set_track_gain(&session.media, 1, TrackGain::from_tenths_db(-30));
+                session
+                    .selection
+                    .set_custom_output_path(directory.join("custom.mp4"));
+            }
+            Operation::Remux => app
+                .state
+                .remux
+                .as_mut()
+                .unwrap()
+                .selection
+                .set_custom_output_path(directory.join("custom.mkv")),
+            _ => unreachable!(),
+        }
+        assert!(app.core.process_now_allowed());
+        dispatch_submission(&mut app, operation, true);
+        assert_eq!(
+            app.core.navigation(),
+            NavigationState::Queue {
+                origin: QueueOrigin::SourceWorkspace {
+                    active_operation: operation
+                }
+            }
+        );
+        let queue = app.core.queue.scheduler();
+        assert_eq!(queue.jobs().len(), 1);
+        assert!(matches!(
+            queue.jobs()[0].state(),
+            QueueJobState::Failed(QueueJobFailure::ProcessStart(_))
+        ));
+        let first_request = queue.jobs()[0].operation().clone();
+        dispatch_submission(&mut app, operation, true); // stale form action from the Queue route
+        assert_eq!(app.core.queue.scheduler().jobs().len(), 1);
+        assert!(app.handle_queue_action(QueueAction::Back));
+        assert_workspace(&app.core, operation);
+        assert!(app.core.process_now_allowed());
+        dispatch_submission(&mut app, operation, false);
+        assert_workspace(&app.core, operation);
+        assert_eq!(app.core.queue_confirmation, Some(operation));
+        let queue = app.core.queue.scheduler();
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(queue.jobs().len(), 2);
+        assert_eq!(queue.jobs()[1].operation(), &first_request);
+        assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
+        assert!(!app.core.process_now_allowed());
+        dispatch_submission(&mut app, operation, true);
+        assert_workspace(&app.core, operation);
+        assert_eq!(app.core.queue.scheduler().jobs().len(), 2);
+        assert_eq!(app.core.queue_confirmation, Some(operation));
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
+        assert!(!output_contains_text(&output, "Process now"));
+        assert!(output_contains_text(&output, "Add to queue"));
+        output.textures_delta.clear();
+        assert!(app.handle_queue_action(QueueAction::CancelQueue));
+        assert!(app.core.process_now_allowed());
+        dispatch_submission(&mut app, operation, true);
+        let queue = app.core.queue.scheduler();
+        assert_eq!(queue.jobs().len(), 3);
+        assert_eq!(queue.jobs()[2].operation(), &first_request);
+        assert!(queue.jobs()[2].state().is_terminal());
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+fn migrated_form_admission_errors_preserve_draft_route_and_job_id() {
+    for operation in [Operation::AudioMix, Operation::Remux] {
+        let (directory, path) = temp_file("migrated-form-rejection");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(operation);
+        let extension = if operation == Operation::AudioMix {
+            "mp4"
+        } else {
+            "mkv"
+        };
+        let output = directory
+            .join("missing")
+            .join(format!("result.{extension}"));
+        match operation {
+            Operation::AudioMix => app
+                .state
+                .audio_mix
+                .as_mut()
+                .unwrap()
+                .selection
+                .set_custom_output_path(output.clone()),
+            Operation::Remux => app
+                .state
+                .remux
+                .as_mut()
+                .unwrap()
+                .selection
+                .set_custom_output_path(output.clone()),
+            _ => unreachable!(),
+        }
+        for process_now in [true, false] {
+            dispatch_submission(&mut app, operation, process_now);
+            assert_workspace(&app.core, operation);
+            assert!(app.core.queue.scheduler().jobs().is_empty());
+            assert!(app.core.queue_confirmation.is_none());
+            let (owner, error) = app.core.operation_action_error.as_ref().unwrap();
+            assert_eq!(*owner, operation);
+            assert_eq!(error.kind(), MediaErrorKind::OutputNotWritable);
+        }
+        // Fix the destination without changing the draft. A rejected admission did not consume an ID.
+        fs::create_dir(output.parent().unwrap()).unwrap();
+        dispatch_submission(&mut app, operation, false);
+        let jobs = app.core.queue.scheduler().jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id().get(), 1);
+        assert_eq!(jobs[0].operation().output(), output);
+        assert!(app.core.operation_action_error.is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+fn migrated_forms_append_to_running_queue_without_competing_launch() {
+    for operation in [Operation::AudioMix, Operation::Remux] {
+        let (directory, path) = temp_file("migrated-form-running");
+        let mut app = app();
+        app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+        app.select_tool(operation);
+        // The test executable rejects FFmpeg arguments. The owner remains active until polled,
+        // even if the child has already exited, so the assertions do not depend on child timing.
+        app.core.discovery = MediaToolsDiscovery::with_state(MediaToolsState::Ready(
+            MediaTools::new(std::env::current_exe().unwrap(), "missing-ffprobe"),
+        ));
+        dispatch_submission(&mut app, operation, true);
+        let first = app.core.queue.scheduler().active_job().unwrap();
+        assert!(app.handle_queue_action(QueueAction::Back));
+        dispatch_submission(&mut app, operation, true);
+        assert_eq!(app.core.queue.scheduler().jobs().len(), 1);
+        dispatch_submission(&mut app, operation, false);
+        let queue = app.core.queue.scheduler();
+        assert_eq!(queue.active_job(), Some(first));
+        assert_eq!(queue.run_state(), QueueRunState::Running);
+        assert_eq!(queue.jobs().len(), 2);
+        assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
+        assert_eq!(queue.jobs()[0].operation(), queue.jobs()[1].operation());
+        assert_workspace(&app.core, operation);
+        drop(app); // joins the active child before removing its temporary output
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

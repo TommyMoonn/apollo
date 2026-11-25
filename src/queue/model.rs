@@ -7,7 +7,7 @@ use crate::{
         validation::validate_audio_extract_request,
     },
     audio_mix::{
-        execution::{AudioMixStartError, prepare_audio_mix_operation},
+        execution::{AudioMixPreparationError, prepare_audio_mix_operation},
         model::AudioMixRequest,
         validation::validate_audio_mix_request,
     },
@@ -27,7 +27,7 @@ use crate::{
         tools::MediaTools,
     },
     remux::{
-        execution::{RemuxStartError, prepare_remux_operation},
+        execution::{RemuxPreparationError, prepare_remux_operation},
         model::RemuxRequest,
         validation::validate_remux_request,
     },
@@ -102,7 +102,7 @@ impl QueuedOperation {
         match self {
             Self::AudioMix(request) => {
                 validate_audio_mix_request(request, media).map_err(|error| {
-                    QueuePreparationError::AudioMix(AudioMixStartError::Validation(error))
+                    QueuePreparationError::AudioMix(AudioMixPreparationError::Validation(error))
                 })
             }
             Self::AudioExtract(request) => {
@@ -110,8 +110,9 @@ impl QueuedOperation {
                     QueuePreparationError::AudioExtract(AudioExtractStartError::Validation(error))
                 })
             }
-            Self::Remux(request) => validate_remux_request(request, media)
-                .map_err(|error| QueuePreparationError::Remux(RemuxStartError::Validation(error))),
+            Self::Remux(request) => validate_remux_request(request, media).map_err(|error| {
+                QueuePreparationError::Remux(RemuxPreparationError::Validation(error))
+            }),
             Self::Upscale(request) => validate_upscale_request(request, media).map_err(|error| {
                 QueuePreparationError::Upscale(UpscaleStartError::Validation(error))
             }),
@@ -146,9 +147,9 @@ impl QueuedOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueuePreparationError {
-    AudioMix(AudioMixStartError),
+    AudioMix(AudioMixPreparationError),
     Upscale(UpscaleStartError),
-    Remux(RemuxStartError),
+    Remux(RemuxPreparationError),
     AudioExtract(AudioExtractStartError),
     FrameCapture(FrameCaptureStartError),
 }

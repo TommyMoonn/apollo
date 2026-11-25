@@ -14,10 +14,8 @@ pub use navigation::{BatchOrigin, NavigationState, Operation, QueueEditOrigin, Q
 
 use crate::{
     audio_extract::execution::AudioExtractExecutor,
-    audio_mix::execution::AudioMixExecutor,
     frame_capture::execution::FrameCaptureExecutor,
     media::{error::MediaError, execution::MediaExecutionState},
-    remux::execution::RemuxExecutor,
     upscale::execution::UpscaleExecutor,
 };
 
@@ -29,9 +27,7 @@ pub struct Application {
     pub(crate) discovery: discovery::MediaToolsDiscovery,
     pub(crate) source: source::SourceSession,
     pub(crate) frame_work: frame_capture::FrameCaptureWork,
-    pub(crate) audio_mix_executor: AudioMixExecutor,
     pub(crate) upscale_executor: UpscaleExecutor,
-    pub(crate) remux_executor: RemuxExecutor,
     pub(crate) audio_extract_executor: AudioExtractExecutor,
     pub(crate) frame_capture_executor: FrameCaptureExecutor,
     pub(crate) queue: queue::QueueWorkflow,
@@ -52,18 +48,14 @@ impl Application {
     }
 
     pub(crate) fn media_operation_running(&self) -> bool {
-        self.audio_mix_executor.is_running()
-            || self.upscale_executor.is_running()
-            || self.remux_executor.is_running()
+        self.upscale_executor.is_running()
             || self.audio_extract_executor.is_running()
             || self.frame_capture_executor.is_running()
     }
 
     pub(crate) fn executors_idle(&self) -> bool {
         file_intake_enabled(
-            self.audio_mix_executor.state(),
             self.upscale_executor.state(),
-            self.remux_executor.state(),
             self.audio_extract_executor.state(),
             self.frame_capture_executor.state(),
         )
@@ -78,16 +70,12 @@ impl Application {
 }
 
 pub(crate) fn file_intake_enabled(
-    audio_state: &MediaExecutionState,
     upscale_state: &MediaExecutionState,
-    remux_state: &MediaExecutionState,
     audio_extract_state: &MediaExecutionState,
     frame_capture_state: &MediaExecutionState,
 ) -> bool {
     // Done/Back owns terminal settlement. Intake resumes only after every executor returns to Idle.
-    matches!(audio_state, MediaExecutionState::Idle)
-        && matches!(upscale_state, MediaExecutionState::Idle)
-        && matches!(remux_state, MediaExecutionState::Idle)
+    matches!(upscale_state, MediaExecutionState::Idle)
         && matches!(audio_extract_state, MediaExecutionState::Idle)
         && matches!(frame_capture_state, MediaExecutionState::Idle)
 }

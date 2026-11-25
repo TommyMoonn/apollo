@@ -276,9 +276,7 @@ fn dropped_valid_file_enters_default_workspace() {
     let (directory, path) = temp_file("drop");
     let mut app = app();
     assert!(file_intake_enabled(
-        app.core.audio_mix_executor.state(),
         app.core.upscale_executor.state(),
-        app.core.remux_executor.state(),
         app.core.audio_extract_executor.state(),
         app.core.frame_capture_executor.state(),
     ));

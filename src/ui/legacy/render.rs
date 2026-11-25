@@ -111,15 +111,13 @@ impl ApolloApp {
         }
     }
 
-    fn operation_ready_surface(&self, active_operation: Operation) -> bool {
+    pub(super) fn operation_ready_surface(&self, active_operation: Operation) -> bool {
         match active_operation {
-            Operation::AudioMix => operation_workspace_visible(
-                self.core.audio_mix_executor.state(),
-                self.state
-                    .audio_mix
-                    .as_ref()
-                    .is_some_and(|session| session.start_error.is_none()),
-            ),
+            Operation::AudioMix => self
+                .state
+                .audio_mix
+                .as_ref()
+                .is_some_and(|session| session.picker_error.is_none()),
             Operation::VideoUpscale => operation_workspace_visible(
                 self.core.upscale_executor.state(),
                 self.state
@@ -127,13 +125,11 @@ impl ApolloApp {
                     .as_ref()
                     .is_some_and(|session| session.start_error.is_none()),
             ),
-            Operation::Remux => operation_workspace_visible(
-                self.core.remux_executor.state(),
-                self.state
-                    .remux
-                    .as_ref()
-                    .is_some_and(|session| session.start_error.is_none()),
-            ),
+            Operation::Remux => self
+                .state
+                .remux
+                .as_ref()
+                .is_some_and(|session| session.picker_error.is_none()),
             Operation::AudioExtract => operation_workspace_visible(
                 self.core.audio_extract_executor.state(),
                 self.state

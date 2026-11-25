@@ -21,8 +21,7 @@ use std::{
 
 use super::state::FrameCaptureToolState;
 use super::workflows::{
-    shows_audio_extract_lifecycle, shows_audio_mix_lifecycle, shows_frame_capture_lifecycle,
-    shows_remux_lifecycle, shows_upscale_lifecycle,
+    shows_audio_extract_lifecycle, shows_frame_capture_lifecycle, shows_upscale_lifecycle,
 };
 use super::{ApolloApp, completion_wake};
 use crate::app::batch::{
@@ -46,10 +45,7 @@ use crate::app::{QueueOrigin, file_intake_enabled};
 use crate::file_dialog::FileDialogOwner;
 use crate::{
     audio_extract::{execution::AudioExtractExecutionState, model::AudioExtractFormat},
-    audio_mix::{
-        execution::AudioMixExecutionState,
-        model::{LoudnessNormalization, LoudnessTargets, OutputContainer, TrackGain},
-    },
+    audio_mix::model::{LoudnessNormalization, LoudnessTargets, OutputContainer, TrackGain},
     frame_capture::{
         execution::FrameCaptureExecutionState,
         model::{
@@ -61,7 +57,7 @@ use crate::{
     media::{
         container::MediaContainer,
         error::{MediaError, MediaErrorKind},
-        execution::MediaExecutionFailure,
+        execution::{MediaExecutionFailure, MediaExecutionState},
         intake::{MediaIntake, MediaLoadStart},
         model::{AudioStream, FrameRate, MediaFile, MediaStream, StreamKind, VideoStream},
         probe::MediaProbeError,
@@ -69,7 +65,6 @@ use crate::{
         tools::{MediaTools, MediaToolsError},
     },
     queue::{QueueJobFailure, QueueJobState, QueueRunState, QueuedOperation},
-    remux::execution::RemuxExecutionState,
     ui::{
         SourceAction, audio_extract::AudioExtractSelectionAction,
         audio_mix::AudioMixSelectionAction, file_intake::FileIntakeAction, fonts,
@@ -578,16 +573,16 @@ fn output_bottom_text_rect(output: &egui::FullOutput, text: &str) -> egui::Rect 
         .unwrap_or_else(|| panic!("missing rendered text {text:?}"))
 }
 
-fn terminal_execution_states() -> [AudioMixExecutionState; 3] {
+fn terminal_execution_states() -> [MediaExecutionState; 3] {
     [
-        AudioMixExecutionState::Completed {
+        MediaExecutionState::Completed {
             output: PathBuf::from("finished.mp4"),
         },
-        AudioMixExecutionState::Failed(MediaExecutionFailure::Process {
+        MediaExecutionState::Failed(MediaExecutionFailure::Process {
             reason: MediaProcessFailure::Exit(Some(1)),
             diagnostic: "encoding failed".to_owned(),
         }),
-        AudioMixExecutionState::Cancelled,
+        MediaExecutionState::Cancelled,
     ]
 }
 
@@ -700,7 +695,7 @@ fn opening_audio_mix_source_renders_ready_surface() {
     assert!(output_contains_text(&output, "MP4"));
     assert!(output_contains_text(&output, "Browse"));
     assert!(!output_contains_text(&output, "Integrated loudness"));
-    assert!(output_contains_text(&output, "Mix selected tracks"));
+    assert!(output_contains_text(&output, "Process now"));
     assert!(!output_contains_text(&output, "← Back"));
     assert!(output_contains_text(&output, "Change file"));
     let audio_tracks = output_text_rect(&output, "Audio tracks");
@@ -819,9 +814,9 @@ fn every_ready_operation_keeps_its_primary_action_bottom_owned_at_all_heights() 
         + theme::SEPARATOR_WIDTH;
 
     for (operation, label) in [
-        (Operation::AudioMix, "Mix selected tracks"),
+        (Operation::AudioMix, "Process now"),
         (Operation::VideoUpscale, "Upscale"),
-        (Operation::Remux, "Remux"),
+        (Operation::Remux, "Process now"),
         (Operation::AudioExtract, "Extract"),
         (Operation::FrameCapture, "Capture frame"),
     ] {
@@ -977,15 +972,13 @@ fn every_ready_enqueue_action_remains_in_the_workspace_without_launching() {
         let previous_count = app.core.queue.scheduler().jobs().len();
 
         match operation {
-            Operation::AudioMix => app
-                .handle_audio_mix_action(AudioMixSelectionAction::QueueRequested)
-                .unwrap(),
+            Operation::AudioMix => {
+                app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested)
+            }
             Operation::VideoUpscale => app
                 .handle_upscale_action(UpscaleSelectionAction::QueueRequested)
                 .unwrap(),
-            Operation::Remux => app
-                .handle_remux_action(RemuxSelectionAction::QueueRequested)
-                .unwrap(),
+            Operation::Remux => app.handle_remux_action(RemuxSelectionAction::QueueRequested),
             Operation::AudioExtract => app
                 .handle_audio_extract_action(AudioExtractSelectionAction::QueueRequested)
                 .unwrap(),
@@ -1023,8 +1016,7 @@ fn invalid_ready_request_cannot_be_enqueued_by_direct_intent() {
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
     app.state.audio_mix.as_mut().unwrap().selection.clear();
 
-    app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested)
-        .unwrap();
+    app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested);
 
     assert!(app.core.queue.scheduler().jobs().is_empty());
     assert_eq!(app.core.queue_confirmation, None);
@@ -1298,28 +1290,6 @@ fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_othe
 }
 
 #[test]
-fn remux_intent_reaches_executor() {
-    let (directory, path) = temp_file("remux-execute");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::Remux);
-
-    let error = app
-        .handle_remux_action(RemuxSelectionAction::RemuxRequested)
-        .expect_err("missing test FFmpeg should prove the execution path was attempted");
-
-    assert!(matches!(
-        error,
-        crate::remux::execution::RemuxStartError::Process(
-            crate::media::process::MediaProcessStartError::ProcessLaunchFailed(
-                std::io::ErrorKind::NotFound
-            )
-        )
-    ));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn audio_extract_intent_reaches_executor() {
     let (directory, path) = temp_file("audio-extract-execute");
     let mut app = app();
@@ -1343,36 +1313,34 @@ fn audio_extract_intent_reaches_executor() {
 #[test]
 fn each_operation_routes_only_non_idle_execution_to_lifecycle_ui() {
     let states = [
-        (AudioMixExecutionState::Idle, false),
+        (MediaExecutionState::Idle, false),
         (
-            AudioMixExecutionState::Running {
+            MediaExecutionState::Running {
                 output: PathBuf::from("output.mp4"),
             },
             true,
         ),
         (
-            AudioMixExecutionState::Completed {
+            MediaExecutionState::Completed {
                 output: PathBuf::from("recording.mp4"),
             },
             true,
         ),
         (
-            AudioMixExecutionState::Failed(MediaExecutionFailure::Process {
+            MediaExecutionState::Failed(MediaExecutionFailure::Process {
                 reason: MediaProcessFailure::Exit(Some(1)),
                 diagnostic: String::new(),
             }),
             true,
         ),
-        (AudioMixExecutionState::Cancelled, true),
+        (MediaExecutionState::Cancelled, true),
     ];
     for (state, visible) in states {
         for (name, route) in [
             (
-                "audio mix",
-                shows_audio_mix_lifecycle as fn(&AudioMixExecutionState) -> bool,
+                "upscale",
+                shows_upscale_lifecycle as fn(&MediaExecutionState) -> bool,
             ),
-            ("upscale", shows_upscale_lifecycle),
-            ("remux", shows_remux_lifecycle),
             ("audio extract", shows_audio_extract_lifecycle),
             ("frame capture", shows_frame_capture_lifecycle),
         ] {

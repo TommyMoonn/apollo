@@ -4,7 +4,7 @@ use crate::{
     app::{
         NavigationState, Operation, QueueAction, QueueEditOrigin,
         dialogs::{DialogTarget, FileDialogRequest},
-        queue::{QueueEditReturn, QueueEffect},
+        queue::{QueueEditReturn, QueueEffect, QueueSubmission},
     },
     native::open_folder,
     queue::{JobId, QueueEnqueueError, QueuedOperation},
@@ -143,13 +143,17 @@ impl ApolloApp {
     ) -> Result<Option<JobId>, QueueEnqueueError> {
         // Borrow each draft and its source directly; the queue owns the resulting immutable request.
         let queued = match operation {
-            Operation::AudioMix => self.state.audio_mix.as_ref().and_then(|session| {
-                session
-                    .selection
-                    .validated_request(&session.media)
-                    .ok()
-                    .map(|request| (&session.media, QueuedOperation::AudioMix(request)))
-            }),
+            Operation::AudioMix => {
+                let session = self
+                    .state
+                    .audio_mix
+                    .as_ref()
+                    .ok_or(QueueEnqueueError::SourceDoesNotMatchMedia)?;
+                Some((
+                    &session.media,
+                    QueuedOperation::AudioMix(session.selection.request(&session.media)),
+                ))
+            }
             Operation::VideoUpscale => {
                 let Some(capabilities) = self.core.discovery.upscale_capabilities() else {
                     return Ok(None);
@@ -162,13 +166,17 @@ impl ApolloApp {
                         .map(|request| (&session.media, QueuedOperation::Upscale(request)))
                 })
             }
-            Operation::Remux => self.state.remux.as_ref().and_then(|session| {
-                session
-                    .selection
-                    .validated_request(&session.media)
-                    .ok()
-                    .map(|request| (&session.media, QueuedOperation::Remux(request)))
-            }),
+            Operation::Remux => {
+                let session = self
+                    .state
+                    .remux
+                    .as_ref()
+                    .ok_or(QueueEnqueueError::SourceDoesNotMatchMedia)?;
+                Some((
+                    &session.media,
+                    QueuedOperation::Remux(session.selection.request(&session.media)),
+                ))
+            }
             Operation::AudioExtract => self.state.audio_extract.as_ref().and_then(|session| {
                 session
                     .selection
@@ -197,6 +205,30 @@ impl ApolloApp {
             .queue
             .enqueue(identity, accepted_media, request)
             .map(Some)
+    }
+
+    /// Both migrated form actions admit the same immutable request. Only Process now starts it.
+    pub(super) fn submit_queued_operation(
+        &mut self,
+        operation: Operation,
+        submission: QueueSubmission,
+    ) {
+        let process_now = submission == QueueSubmission::ProcessNow;
+        if self.core.active_operation() != Some(operation)
+            || !self.file_intake_enabled()
+            || !self.operation_ready_surface(operation)
+            || self.ready_media_tools().is_none()
+            || (process_now && !self.core.process_now_allowed())
+        {
+            return;
+        }
+        let result = self.enqueue_current_operation(operation);
+        let admitted = matches!(result, Ok(Some(_)));
+        self.core.record_queue_submission(operation, result);
+        if admitted && process_now {
+            self.enter_queue();
+            self.handle_queue_action(QueueAction::Start);
+        }
     }
 
     pub(super) fn enqueue_from_ready_surface(&mut self, operation: Operation) {

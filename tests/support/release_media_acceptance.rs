@@ -12,12 +12,9 @@ use apollo::{
         execution::AudioExtractExecutor,
         model::{AudioExtractFormat, AudioExtractRequest},
     },
-    audio_mix::{
-        execution::AudioMixExecutor,
-        model::{
-            AudioMixRequest, LoudnessNormalization, LoudnessTargets, OutputContainer,
-            SelectedAudioTrack, TrackGain,
-        },
+    audio_mix::model::{
+        AudioMixRequest, LoudnessNormalization, LoudnessTargets, OutputContainer,
+        SelectedAudioTrack, TrackGain,
     },
     frame_capture::{
         execution::FrameCaptureExecutor,
@@ -26,12 +23,14 @@ use apollo::{
     media::{
         container::MediaContainer,
         execution::MediaExecutionState,
+        intake::{MediaIntake, MediaLoadStart, SourceIdentity},
         model::MediaFile,
         probe::probe_media,
-        process::{MediaProcess, MediaProcessCommand, MediaProcessState},
+        process::{MediaProcess, MediaProcessCommand, MediaProcessState, MediaProcessWake},
         tools::{MediaTools, VideoEncoderCapabilities, VideoEncoderCapability},
     },
-    remux::{execution::RemuxExecutor, model::RemuxRequest},
+    queue::{MediaQueue, QueueJobState, QueuedOperation},
+    remux::model::RemuxRequest,
     upscale::{
         execution::UpscaleExecutor,
         model::{
@@ -49,8 +48,15 @@ pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &s
     fs::create_dir(directory).unwrap();
     let input = directory.join("source.mp4");
     generate_fixture(tools, &input);
-    let media = probe_media(tools, &input).unwrap();
-    assert_video(&media, "h264", 320, 180);
+    let mut intake = MediaIntake::default();
+    let MediaLoadStart::Probe(probe) = intake.begin_load(&input).unwrap() else {
+        panic!("fresh intake must probe the source");
+    };
+    intake
+        .complete_probe(probe, probe_media(tools, &input))
+        .unwrap();
+    let (identity, media) = intake.current_with_identity().unwrap();
+    assert_video(media, "h264", 320, 180);
     assert_eq!(media.audio_streams.len(), 2);
     assert!(
         media
@@ -62,13 +68,13 @@ pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &s
 
     match mode {
         "cpu" => {
-            audio_mix(tools, &media, directory);
-            remux(tools, &media, directory);
-            audio_extract(tools, &media, directory);
-            frame_capture(tools, &media, directory);
+            audio_mix(tools, identity, media, directory);
+            remux(tools, identity, media, directory);
+            audio_extract(tools, media, directory);
+            frame_capture(tools, media, directory);
             upscale(
                 tools,
-                &media,
+                media,
                 directory,
                 capabilities,
                 VideoEncoderSelection::Cpu,
@@ -79,14 +85,14 @@ pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &s
             assert_eq!(capabilities.h265_nvenc, VideoEncoderCapability::Available);
             upscale(
                 tools,
-                &media,
+                media,
                 directory,
                 capabilities,
                 VideoEncoderSelection::NvidiaNvenc,
             );
             upscale(
                 tools,
-                &media,
+                media,
                 directory,
                 capabilities,
                 VideoEncoderSelection::Auto,
@@ -103,7 +109,7 @@ pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &s
             }
             upscale(
                 tools,
-                &media,
+                media,
                 directory,
                 capabilities,
                 VideoEncoderSelection::Auto,
@@ -115,7 +121,7 @@ pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &s
 }
 
 fn generate_fixture(tools: &MediaTools, input: &Path) {
-    // Only source synthesis is test-owned. Every user operation below uses its production executor.
+    // Only source synthesis is test-owned. Every user operation below uses its production execution path.
     let process = MediaProcess::start(
         MediaProcessCommand::new(&tools.ffmpeg)
             .args([
@@ -192,6 +198,43 @@ fn settle(mut poll: impl FnMut() -> MediaExecutionState, output: &Path) {
     }
 }
 
+fn settle_queued(
+    tools: &MediaTools,
+    identity: &SourceIdentity,
+    media: &MediaFile,
+    operation: QueuedOperation,
+) {
+    let output = operation.output().to_path_buf();
+    let mut queue = MediaQueue::new();
+    let job_id = queue.enqueue(identity, media, operation).unwrap();
+    assert!(queue.start(tools, |_| MediaProcessWake::default()));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        queue.poll(Some(tools), |_| MediaProcessWake::default());
+        let job = &queue.jobs()[0];
+        assert_eq!(job.id(), job_id);
+        match job.state() {
+            QueueJobState::Waiting | QueueJobState::Running { .. } => {}
+            state => {
+                assert_eq!(
+                    state,
+                    &QueueJobState::Completed {
+                        output: output.clone()
+                    }
+                );
+                assert!(fs::metadata(&output).unwrap().len() > 0);
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "queued operation timed out: {}",
+            output.display()
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn assert_video(media: &MediaFile, codec: &str, width: u32, height: u32) {
     assert_eq!(media.video_streams.len(), 1);
     let video = &media.video_streams[0];
@@ -199,7 +242,7 @@ fn assert_video(media: &MediaFile, codec: &str, width: u32, height: u32) {
     assert_eq!((video.width, video.height), (Some(width), Some(height)));
 }
 
-fn audio_mix(tools: &MediaTools, media: &MediaFile, directory: &Path) {
+fn audio_mix(tools: &MediaTools, identity: &SourceIdentity, media: &MediaFile, directory: &Path) {
     for (label, normalization) in [
         ("plain", LoudnessNormalization::Off),
         (
@@ -220,9 +263,12 @@ fn audio_mix(tools: &MediaTools, media: &MediaFile, directory: &Path) {
             normalization,
             container: OutputContainer::Mp4,
         };
-        let mut executor = AudioMixExecutor::new();
-        executor.start(tools, media, &request).unwrap();
-        settle(|| executor.poll().clone(), &request.output);
+        settle_queued(
+            tools,
+            identity,
+            media,
+            QueuedOperation::AudioMix(request.clone()),
+        );
         let result = probe_media(tools, &request.output).unwrap();
         assert_video(&result, "h264", 320, 180);
         assert_eq!(result.audio_streams.len(), 1);
@@ -231,15 +277,18 @@ fn audio_mix(tools: &MediaTools, media: &MediaFile, directory: &Path) {
     }
 }
 
-fn remux(tools: &MediaTools, media: &MediaFile, directory: &Path) {
+fn remux(tools: &MediaTools, identity: &SourceIdentity, media: &MediaFile, directory: &Path) {
     let request = RemuxRequest {
         input: media.path.clone(),
         output: directory.join("remux.mkv"),
         container: MediaContainer::Matroska,
     };
-    let mut executor = RemuxExecutor::new();
-    executor.start(tools, media, &request).unwrap();
-    settle(|| executor.poll().clone(), &request.output);
+    settle_queued(
+        tools,
+        identity,
+        media,
+        QueuedOperation::Remux(request.clone()),
+    );
     let result = probe_media(tools, &request.output).unwrap();
     assert_video(&result, "h264", 320, 180);
     assert_eq!(result.audio_streams.len(), 2);

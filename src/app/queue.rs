@@ -36,6 +36,13 @@ pub enum QueueAction {
     None,
 }
 
+/// A normal form can append work or admit and start a job immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueueSubmission {
+    ProcessNow,
+    AddToQueue,
+}
+
 /// Native and presentation work stays in the adapter.
 pub(crate) enum QueueEffect {
     Handled(bool),
@@ -173,6 +180,14 @@ pub(crate) enum QueueEditReturn {
 }
 
 impl Application {
+    pub(crate) fn process_now_allowed(&self) -> bool {
+        self.queue.scheduler().pending_count() == 0
+            && !self.queue.scheduler().is_started()
+            && self.discovery.ready().is_some()
+            && self.executors_idle()
+            && self.execution_arbitration().queue_start_allowed()
+    }
+
     pub(crate) fn poll_media_queue(&mut self, wake: impl FnMut() -> MediaProcessWake) {
         self.queue.poll(self.discovery.ready(), wake);
     }

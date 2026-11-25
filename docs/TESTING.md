@@ -114,9 +114,9 @@ just test-media
 just test-media --media-dir 'C:/Media Tools' --require-nvenc
 ```
 
-The default pair location is `.scratch/dev-media`. The command copies the selected pair into disposable scratch space and uses the same production-executor harness. It does not modify the original media-tool directory, download a predecessor or touch installer registration. Generated fixtures are removed after the check. Both commands are outside `just verify`.
+The default pair location is `.scratch/dev-media`. The command copies the selected pair into disposable scratch space and uses the same production media acceptance harness. It does not modify the original media-tool directory, download a predecessor or touch installer registration. Generated fixtures are removed after the check. Both commands are outside `just verify`.
 
-For both portable and installed payloads, the harness uses Apollo's production discovery, probe, feature executors and output publication with a one-second 320x180/two-audio-track source:
+For both portable and installed payloads, the harness uses Apollo's production discovery, probe, queue execution for Audio Mix and Remux, remaining feature executors and output publication with a one-second 320x180/two-audio-track source:
 
 | Acceptance | Required result |
 | --- | --- |

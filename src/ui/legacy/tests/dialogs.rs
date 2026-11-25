@@ -431,52 +431,15 @@ fn output_completion_cannot_mutate_selection_after_execution_starts() {
     let (directory, path) = temp_file("dialog-after-execution");
     let mut app = app();
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    let audio_id = app.state.audio_mix.as_ref().unwrap().session_id;
-    let audio_output = app
-        .state
-        .audio_mix
-        .as_ref()
-        .unwrap()
-        .selection
-        .output_path();
-
-    settle_output_file_dialog(
-        &mut app.state,
-        ToolExecutionStates {
-            audio_mix: &AudioMixExecutionState::Running {
-                output: PathBuf::from("output.mp4"),
-            },
-            upscale: &UpscaleExecutionState::Idle,
-            remux: &RemuxExecutionState::Idle,
-            audio_extract: &AudioExtractExecutionState::Idle,
-            frame_capture: &FrameCaptureExecutionState::Idle,
-        },
-        DialogTarget::AudioMixOutput {
-            session_id: audio_id,
-        },
-        &DialogOutcome::Selected(directory.join("late-mix.mp4")),
-    );
-    assert_eq!(
-        app.state
-            .audio_mix
-            .as_ref()
-            .unwrap()
-            .selection
-            .output_path(),
-        audio_output
-    );
-
     app.select_tool(Operation::VideoUpscale);
     let upscale_id = app.state.upscale.as_ref().unwrap().session_id;
     let upscale_output = app.state.upscale.as_ref().unwrap().selection.output_path();
     settle_output_file_dialog(
         &mut app.state,
         ToolExecutionStates {
-            audio_mix: &AudioMixExecutionState::Idle,
             upscale: &UpscaleExecutionState::Running {
                 output: PathBuf::from("output.mp4"),
             },
-            remux: &RemuxExecutionState::Idle,
             audio_extract: &AudioExtractExecutionState::Idle,
             frame_capture: &FrameCaptureExecutionState::Idle,
         },
@@ -502,9 +465,7 @@ fn output_completion_cannot_mutate_selection_after_execution_starts() {
     settle_output_file_dialog(
         &mut app.state,
         ToolExecutionStates {
-            audio_mix: &AudioMixExecutionState::Idle,
             upscale: &UpscaleExecutionState::Idle,
-            remux: &RemuxExecutionState::Idle,
             audio_extract: &AudioExtractExecutionState::Running {
                 output: PathBuf::from("output.mp4"),
             },
@@ -537,9 +498,7 @@ fn output_completion_cannot_mutate_selection_after_execution_starts() {
     settle_output_file_dialog(
         &mut app.state,
         ToolExecutionStates {
-            audio_mix: &AudioMixExecutionState::Idle,
             upscale: &UpscaleExecutionState::Idle,
-            remux: &RemuxExecutionState::Idle,
             audio_extract: &AudioExtractExecutionState::Idle,
             frame_capture: &FrameCaptureExecutionState::Running {
                 output: PathBuf::from("output.mp4"),

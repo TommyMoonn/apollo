@@ -14,14 +14,12 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, layout, media_error, show_queue_confirmation, theme,
-    widgets,
+    OperationSurfaceMode, layout, media_error, show_queued_submission_actions, theme, widgets,
 };
 
 const OUTPUT_LABEL: &str = "Output";
 const CONTAINER_LABEL: &str = "Container";
 const BROWSE_LABEL: &str = "Browse";
-const REMUX_LABEL: &str = "Remux";
 const CONTAINER_OPTIONS: [&str; 2] = ["MP4", "MKV"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,25 +148,20 @@ pub fn show<'a>(
                 queue_confirmation,
                 ..
             } => {
-                if widgets::primary_button_enabled(
+                match show_queued_submission_actions(
                     ui,
-                    REMUX_LABEL,
-                    validation.is_ok() && start_allowed,
-                )
-                .clicked()
-                {
-                    action.set(RemuxSelectionAction::RemuxRequested);
+                    start_allowed,
+                    validation.is_ok(),
+                    queue_confirmation,
+                ) {
+                    Some(crate::app::queue::QueueSubmission::ProcessNow) => {
+                        action.set(RemuxSelectionAction::RemuxRequested)
+                    }
+                    Some(crate::app::queue::QueueSubmission::AddToQueue) => {
+                        action.set(RemuxSelectionAction::QueueRequested)
+                    }
+                    None => {}
                 }
-                if ui
-                    .add_enabled_ui(validation.is_ok(), |ui| {
-                        widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
-                    })
-                    .inner
-                    .clicked()
-                {
-                    action.set(RemuxSelectionAction::QueueRequested);
-                }
-                show_queue_confirmation(ui, queue_confirmation);
             }
             edit_mode => {
                 let (save_label, cancel_label) = edit_mode

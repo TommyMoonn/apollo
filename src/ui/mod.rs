@@ -1,7 +1,6 @@
 pub mod audio_extract;
 pub mod audio_extract_progress;
 pub mod audio_mix;
-pub mod audio_mix_progress;
 pub mod batch;
 pub mod file_intake;
 pub mod fonts;
@@ -14,7 +13,6 @@ pub mod media_error;
 mod media_lifecycle;
 pub mod queue;
 pub mod remux;
-pub mod remux_progress;
 pub mod source_presentation;
 pub mod theme;
 pub mod upscale;
@@ -24,6 +22,7 @@ pub mod workspace;
 
 use crate::media::error::MediaError;
 
+pub const PROCESS_NOW_LABEL: &str = "Process now";
 pub const ADD_TO_QUEUE_LABEL: &str = "Add to queue";
 pub const ADDED_TO_QUEUE_LABEL: &str = "Added to queue";
 pub const SAVE_QUEUE_CHANGES_LABEL: &str = "Save changes";
@@ -76,6 +75,32 @@ impl From<bool> for OperationSurfaceMode<'_> {
             action_error: None,
         }
     }
+}
+
+/// Normal queued forms share the same file-submission controls and action priority.
+pub(crate) fn show_queued_submission_actions(
+    ui: &mut egui::Ui,
+    process_now_allowed: bool,
+    request_valid: bool,
+    queue_confirmation: bool,
+) -> Option<crate::app::queue::QueueSubmission> {
+    use crate::app::queue::QueueSubmission;
+    let mut action = None;
+    if process_now_allowed
+        && widgets::primary_button_enabled(ui, PROCESS_NOW_LABEL, request_valid).clicked()
+    {
+        action = Some(QueueSubmission::ProcessNow);
+    }
+    let add = if process_now_allowed {
+        widgets::secondary_button_enabled(ui, ADD_TO_QUEUE_LABEL, request_valid)
+    } else {
+        widgets::primary_button_enabled(ui, ADD_TO_QUEUE_LABEL, request_valid)
+    };
+    if add.clicked() {
+        action = Some(QueueSubmission::AddToQueue);
+    }
+    show_queue_confirmation(ui, queue_confirmation);
+    action
 }
 
 pub(crate) fn show_queue_confirmation(ui: &mut egui::Ui, visible: bool) {

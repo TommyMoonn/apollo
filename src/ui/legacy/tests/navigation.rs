@@ -140,25 +140,25 @@ fn close_source_returns_to_true_empty_intake() {
 #[test]
 fn running_and_terminal_operation_states_hide_workspace_chrome() {
     let non_ready_states = [
-        AudioMixExecutionState::Running {
+        MediaExecutionState::Running {
             output: PathBuf::from("output.mp4"),
         },
-        AudioMixExecutionState::Completed {
+        MediaExecutionState::Completed {
             output: PathBuf::from("finished.mp4"),
         },
-        AudioMixExecutionState::Failed(MediaExecutionFailure::Process {
+        MediaExecutionState::Failed(MediaExecutionFailure::Process {
             reason: MediaProcessFailure::Exit(Some(1)),
             diagnostic: "failed".to_owned(),
         }),
-        AudioMixExecutionState::Cancelled,
+        MediaExecutionState::Cancelled,
     ];
 
     assert!(operation_workspace_visible(
-        &AudioMixExecutionState::Idle,
+        &MediaExecutionState::Idle,
         true
     ));
     assert!(!operation_workspace_visible(
-        &AudioMixExecutionState::Idle,
+        &MediaExecutionState::Idle,
         false
     ));
     for state in non_ready_states {
@@ -372,14 +372,8 @@ fn workspace_queue_edit_is_blocked_during_automatic_advancement() {
     assert_eq!(app.core.queue.scheduler().active_job(), Some(job_id));
     assert!(!app.begin_queue_edit(job_id, QueueEditOrigin::SourceWorkspace));
     assert!(app.core.queue_edit().is_none());
-    assert!(
-        app.handle_remux_action(RemuxSelectionAction::RemuxRequested)
-            .is_ok()
-    );
-    assert!(matches!(
-        app.core.remux_executor.state(),
-        RemuxExecutionState::Idle
-    ));
+    app.handle_remux_action(RemuxSelectionAction::RemuxRequested);
+    assert_eq!(app.core.queue.scheduler().pending_count(), 2);
     assert_workspace(&app.core, Operation::Remux);
     assert!(app.handle_queue_action(QueueAction::StopAfterCurrent));
     assert_eq!(
@@ -445,52 +439,28 @@ fn switching_operations_does_not_revalidate_or_clear_the_source() {
 #[test]
 fn file_drop_policy_disables_replacement_while_any_operation_runs() {
     assert!(file_intake_enabled(
-        &AudioMixExecutionState::Idle,
         &UpscaleExecutionState::Idle,
-        &RemuxExecutionState::Idle,
         &AudioExtractExecutionState::Idle,
         &FrameCaptureExecutionState::Idle,
     ));
+
     assert!(!file_intake_enabled(
-        &AudioMixExecutionState::Running {
-            output: PathBuf::from("output.mp4")
-        },
-        &UpscaleExecutionState::Idle,
-        &RemuxExecutionState::Idle,
-        &AudioExtractExecutionState::Idle,
-        &FrameCaptureExecutionState::Idle,
-    ));
-    assert!(!file_intake_enabled(
-        &AudioMixExecutionState::Idle,
         &UpscaleExecutionState::Running {
             output: PathBuf::from("output.mp4")
         },
-        &RemuxExecutionState::Idle,
         &AudioExtractExecutionState::Idle,
         &FrameCaptureExecutionState::Idle,
     ));
+
     assert!(!file_intake_enabled(
-        &AudioMixExecutionState::Idle,
         &UpscaleExecutionState::Idle,
-        &RemuxExecutionState::Running {
-            output: PathBuf::from("output.mp4")
-        },
-        &AudioExtractExecutionState::Idle,
-        &FrameCaptureExecutionState::Idle,
-    ));
-    assert!(!file_intake_enabled(
-        &AudioMixExecutionState::Idle,
-        &UpscaleExecutionState::Idle,
-        &RemuxExecutionState::Idle,
         &AudioExtractExecutionState::Running {
             output: PathBuf::from("output.mp4")
         },
         &FrameCaptureExecutionState::Idle,
     ));
     assert!(!file_intake_enabled(
-        &AudioMixExecutionState::Idle,
         &UpscaleExecutionState::Idle,
-        &RemuxExecutionState::Idle,
         &AudioExtractExecutionState::Idle,
         &FrameCaptureExecutionState::Running {
             output: PathBuf::from("output.mp4")
@@ -515,25 +485,10 @@ fn drag_hover_accepts_single_and_multiple_files_when_intake_is_available() {
 }
 
 #[test]
-fn audio_mix_terminal_states_reject_source_replacement() {
-    for state in terminal_execution_states() {
-        assert!(!file_intake_enabled(
-            &state,
-            &UpscaleExecutionState::Idle,
-            &RemuxExecutionState::Idle,
-            &AudioExtractExecutionState::Idle,
-            &FrameCaptureExecutionState::Idle,
-        ));
-    }
-}
-
-#[test]
 fn upscale_terminal_states_reject_source_replacement() {
     for state in terminal_execution_states() {
         assert!(!file_intake_enabled(
-            &AudioMixExecutionState::Idle,
             &state,
-            &RemuxExecutionState::Idle,
             &AudioExtractExecutionState::Idle,
             &FrameCaptureExecutionState::Idle,
         ));
@@ -542,21 +497,17 @@ fn upscale_terminal_states_reject_source_replacement() {
 
 #[test]
 fn terminal_reset_to_idle_reenables_file_intake() {
-    let completed = AudioMixExecutionState::Completed {
+    let completed = MediaExecutionState::Completed {
         output: PathBuf::from("finished.mp4"),
     };
     assert!(!file_intake_enabled(
         &completed,
-        &UpscaleExecutionState::Idle,
-        &RemuxExecutionState::Idle,
         &AudioExtractExecutionState::Idle,
         &FrameCaptureExecutionState::Idle,
     ));
 
     assert!(file_intake_enabled(
-        &AudioMixExecutionState::Idle,
         &UpscaleExecutionState::Idle,
-        &RemuxExecutionState::Idle,
         &AudioExtractExecutionState::Idle,
         &FrameCaptureExecutionState::Idle,
     ));

@@ -16,8 +16,8 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error, show_queue_confirmation,
-    theme, widgets,
+    OperationSurfaceMode, fonts, layout, media_error, show_queued_submission_actions, theme,
+    widgets,
 };
 
 const UNTITLED_AUDIO: &str = "Untitled audio";
@@ -34,7 +34,6 @@ const MAXIMUM_TRUE_PEAK_LABEL: &str = "Maximum true peak";
 const LOUDNESS_RANGE_LABEL: &str = "Loudness range";
 const RESET_NORMALIZATION_LABEL: &str = "Reset normalization targets";
 const BROWSE_LABEL: &str = "Browse";
-const MIX_LABEL: &str = "Mix selected tracks";
 const CONTAINER_OPTIONS: [&str; 2] = ["MP4", "MKV"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -156,21 +155,16 @@ pub fn show<'a>(
                 queue_confirmation,
                 ..
             } => {
-                if widgets::primary_button_enabled(ui, MIX_LABEL, can_mix && start_allowed)
-                    .clicked()
+                match show_queued_submission_actions(ui, start_allowed, can_mix, queue_confirmation)
                 {
-                    action.set(AudioMixSelectionAction::MixRequested);
+                    Some(crate::app::queue::QueueSubmission::ProcessNow) => {
+                        action.set(AudioMixSelectionAction::MixRequested)
+                    }
+                    Some(crate::app::queue::QueueSubmission::AddToQueue) => {
+                        action.set(AudioMixSelectionAction::QueueRequested)
+                    }
+                    None => {}
                 }
-                if ui
-                    .add_enabled_ui(can_mix, |ui| {
-                        widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
-                    })
-                    .inner
-                    .clicked()
-                {
-                    action.set(AudioMixSelectionAction::QueueRequested);
-                }
-                show_queue_confirmation(ui, queue_confirmation);
             }
             edit_mode => {
                 let (save_label, cancel_label) = edit_mode

@@ -994,7 +994,7 @@ mod tests {
         use crate::{
             media::output::MediaOutputError,
             queue::model::QueuePreparationError,
-            remux::{execution::RemuxStartError, validation::RemuxValidationError},
+            remux::{execution::RemuxPreparationError, validation::RemuxValidationError},
         };
 
         let directory = TestDirectory::new("launch-preflight");
@@ -1016,7 +1016,7 @@ mod tests {
                 remux(&source, directory.path().join("invalid.mp4"))
             ),
             Err(QueueEnqueueError::InvalidRequest(
-                QueuePreparationError::Remux(RemuxStartError::Validation(
+                QueuePreparationError::Remux(RemuxPreparationError::Validation(
                     RemuxValidationError::OutputExtensionMismatch { .. }
                 ))
             ))
@@ -1041,7 +1041,7 @@ mod tests {
         assert!(matches!(
             queue.jobs()[0].state(),
             QueueJobState::Failed(QueueJobFailure::Preparation(QueuePreparationError::Remux(
-                RemuxStartError::Output(MediaOutputError::OutputParentUnavailable {
+                RemuxPreparationError::Output(MediaOutputError::OutputParentUnavailable {
                     kind: std::io::ErrorKind::NotFound,
                     ..
                 })
@@ -1682,6 +1682,60 @@ mod tests {
         assert!(!staging.exists());
         assert_eq!(fs::read(output).unwrap(), b"existing");
         assert!(!directory.path().join("existing (1).mkv").exists());
+    }
+
+    #[test]
+    fn migrated_operations_share_publication_and_cancellation_settlement() {
+        use crate::{audio_mix::draft::AudioMixDraft, media::model::VideoStream};
+
+        let directory = TestDirectory::new("migrated-settlement");
+        let (identity, mut media) = media(&directory, "source.mkv");
+        media.video_streams.push(VideoStream {
+            stream_index: 0,
+            codec: Some("h264".to_owned()),
+            width: Some(320),
+            height: Some(180),
+            frame_rate: None,
+            format: Default::default(),
+        });
+        let mut audio = AudioMixDraft::new(&media);
+        audio.set_custom_output_path(directory.path().join("mix.mp4"));
+        for operation in [
+            QueuedOperation::AudioMix(audio.request(&media)),
+            remux(&media, directory.path().join("remux.mkv")),
+        ] {
+            let output = operation.output().to_path_buf();
+            let mut queue = MediaQueue::new();
+            queue.enqueue(&identity, &media, operation.clone()).unwrap();
+            queue.enqueue(&identity, &media, operation).unwrap();
+            let first = FakeProcessControl::running();
+            let second = FakeProcessControl::deferred_cancellation();
+            let mut processes = VecDeque::from([first.clone(), second.clone()]);
+            let mut launch = |_, _| Ok(processes.pop_front().expect("one launch per job"));
+            let tools = tools(&directory);
+            assert!(queue.start_with_launcher(&tools, &mut launch));
+            fs::write(queue.temporary_output_path().unwrap(), b"published").unwrap();
+            first.set_state(MediaProcessState::Completed);
+            queue.poll_with_launcher(Some(&tools), &mut launch);
+            assert_eq!(
+                queue.jobs()[0].state(),
+                &QueueJobState::Completed {
+                    output: output.clone()
+                }
+            );
+            let temporary = queue.temporary_output_path().unwrap().to_path_buf();
+            fs::write(&temporary, b"partial").unwrap();
+            assert!(queue.cancel_current());
+            queue.poll_with_launcher(Some(&tools), &mut launch);
+            assert!(temporary.exists());
+            assert!(queue.cancellation_pending());
+            second.set_state(MediaProcessState::Cancelled);
+            queue.poll_with_launcher(Some(&tools), &mut launch);
+            assert_eq!(queue.jobs()[1].state(), &QueueJobState::Cancelled);
+            assert_eq!(queue.run_state(), QueueRunState::Stopped);
+            assert!(!temporary.exists());
+            assert_eq!(fs::read(output).unwrap(), b"published");
+        }
     }
 
     #[test]

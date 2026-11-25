@@ -17,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Pre-execution Audio Mix state. Process lifecycle remains owned by `AudioMixExecutor`.
+/// Editable Audio Mix configuration; the queue owns admitted requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioMixDraft {
     selected_streams: BTreeSet<u32>,
