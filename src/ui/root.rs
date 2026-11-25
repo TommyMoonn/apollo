@@ -1,6 +1,13 @@
 //! GPUI application root and foreground worker settlement.
 
-use std::{borrow::Cow, cell::Cell, path::PathBuf, process::ExitCode, rc::Rc};
+use std::{
+    borrow::Cow,
+    cell::Cell,
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    process::ExitCode,
+    rc::Rc,
+};
 
 use gpui::{
     App, Bounds, Context, ExternalPaths, FocusHandle, Task, TextRenderingMode, TitlebarOptions,
@@ -10,6 +17,7 @@ use gpui::{
 
 use crate::app::{
     Application, NavigationState, Operation, QueueAction, background, discovery::MediaToolsState,
+    queue::QueueEffect,
 };
 use crate::progress_wake::MediaProgressWakeOwner;
 use crate::queue::JobId;
@@ -26,7 +34,9 @@ use super::{
     MINIMUM_CONTENT_DIMENSIONS, REFERENCE_CONTENT_DIMENSIONS,
     components::{self, ActionState, Button, ProgressState, Tone},
     design::{FONT_FAMILY, METRICS as M, Palette, TextRole, WORDMARK_FAMILY},
-    file_intake, queue, shell,
+    file_intake,
+    queue::{self, WaitingAction, WaitingControls},
+    shell,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -96,6 +106,8 @@ struct ApolloRoot {
     previous_focus: Option<FocusHandle>,
     queue_cancel_confirming: bool,
     queue_cancel_focus: FocusHandle,
+    queue_back_focus: FocusHandle,
+    waiting_focus: HashMap<(JobId, WaitingAction), FocusHandle>,
     open_focus: FocusHandle,
     picker_focus: Option<FocusHandle>,
     drag_origin: Option<DropContext>,
@@ -157,6 +169,8 @@ impl ApolloRoot {
             previous_focus: None,
             queue_cancel_confirming: false,
             queue_cancel_focus: cx.focus_handle().tab_stop(true).tab_index(0),
+            queue_back_focus: cx.focus_handle().tab_stop(true).tab_index(0),
+            waiting_focus: HashMap::new(),
             exit: ExitState::Open,
             wake,
             progress_wake,
@@ -254,6 +268,102 @@ impl ApolloRoot {
             crate::app::queue::QueueEffect::Handled(false)
         ) {
             self.core.queue_action_error.get_or_insert_with(|| "The action could not be completed. Check the current queue state and try again if available.".into());
+        }
+        cx.notify();
+    }
+
+    fn dispatch_waiting_action(
+        &mut self,
+        id: JobId,
+        action: WaitingAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_navigate() || self.core.queue_origin().is_none() {
+            return;
+        }
+        let Some(controls) = WaitingControls::for_job(self.core.queue.scheduler(), id) else {
+            self.core.queue_action_error = Some("This job is no longer waiting.".into());
+            window.focus(&self.queue_back_focus, cx);
+            cx.notify();
+            return;
+        };
+        if !controls.allows(action) {
+            self.core.queue_action_error = Some(
+                controls
+                    .edit_blocked
+                    .filter(|_| action == WaitingAction::Edit)
+                    .unwrap_or("The waiting order has changed. Choose an available move.")
+                    .into(),
+            );
+            self.focus_waiting_after(id, controls.index, action, window, cx);
+            cx.notify();
+            return;
+        }
+        let progress = &mut self.progress_wake;
+        match self
+            .core
+            .queue_action(action.command(id), || progress.begin())
+        {
+            QueueEffect::Handled(true) => {
+                self.focus_waiting_after(id, controls.index, action, window, cx)
+            }
+            QueueEffect::Edit(id, origin) => {
+                if let Some(edit) = self.core.prepare_queue_edit(id, origin) {
+                    self.core.activate_queue_edit(edit, origin);
+                    self.invalidate_drag();
+                    window.focus(&self.focus, cx);
+                } else {
+                    self.core.queue_action_error = Some("The job can no longer be edited.".into());
+                }
+            }
+            _ => {
+                self.core.queue_action_error.get_or_insert_with(|| {
+                    "The waiting job could not be changed. Check the queue and try again.".into()
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn focus_waiting_after(
+        &self,
+        id: JobId,
+        previous_index: usize,
+        action: WaitingAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target =
+            queue::waiting_focus_after(self.core.queue.scheduler(), id, previous_index, action);
+        let focus = target
+            .and_then(|target| self.waiting_focus.get(&target))
+            .unwrap_or(&self.queue_back_focus);
+        window.focus(focus, cx);
+    }
+
+    fn finish_queue_edit(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_navigate()
+            || !matches!(self.core.navigation(), NavigationState::QueueEdit { .. })
+        {
+            return;
+        }
+        let Some(edit) = self.core.queue_edit() else {
+            return;
+        };
+        let id = edit.job_id;
+        if save && (!queue::editor_migrated(edit.active_operation) || !self.core.save_queue_edit())
+        {
+            cx.notify();
+            return;
+        }
+        if self.core.finish_queue_edit().is_some() {
+            self.invalidate_drag();
+            if let Some(controls) = WaitingControls::for_job(self.core.queue.scheduler(), id) {
+                self.focus_waiting_after(id, controls.index, WaitingAction::Edit, window, cx);
+            } else {
+                window.focus(&self.queue_back_focus, cx);
+            }
         }
         cx.notify();
     }
@@ -384,6 +494,10 @@ impl ApolloRoot {
         match self.core.navigation() {
             NavigationState::Queue { .. } => self.core.return_from_queue(),
             NavigationState::Settings { .. } => self.core.return_from_settings(),
+            NavigationState::QueueEdit { .. } => {
+                self.finish_queue_edit(false, window, cx);
+                return;
+            }
             NavigationState::BatchSetup => {
                 self.core.finish_batch_setup();
             }
@@ -520,6 +634,22 @@ impl ApolloRoot {
                 }
             }
         } else if self.core.poll_background(|| progress.begin()) {
+            if self.can_navigate()
+                && self.core.queue_origin().is_some()
+                && let Some(focused) = window.focused(cx)
+                && let Some((&(id, action), _)) = self
+                    .waiting_focus
+                    .iter()
+                    .find(|(_, handle)| **handle == focused)
+            {
+                match WaitingControls::for_job(self.core.queue.scheduler(), id) {
+                    Some(controls) if !controls.allows(action) => {
+                        self.focus_waiting_after(id, controls.index, action, window, cx)
+                    }
+                    None => window.focus(&self.queue_back_focus, cx),
+                    _ => {}
+                }
+            }
             cx.notify();
         }
     }
@@ -852,6 +982,21 @@ impl Render for ApolloRoot {
                 )
             }
             NavigationState::Queue { .. } => {
+                let ids: HashSet<_> = self
+                    .core
+                    .queue
+                    .scheduler()
+                    .waiting_jobs()
+                    .map(|job| job.id())
+                    .collect();
+                self.waiting_focus.retain(|(id, _), _| ids.contains(id));
+                for id in ids {
+                    for action in WaitingAction::ALL {
+                        self.waiting_focus
+                            .entry((id, action))
+                            .or_insert_with(|| cx.focus_handle().tab_stop(true).tab_index(0));
+                    }
+                }
                 let mut add = Button::new("queue-add-files", "Add files", Tone::Standard);
                 if self.file_dialog.is_pending() || self.core.source.is_inspecting() {
                     add.state = ActionState::Busy;
@@ -938,10 +1083,16 @@ impl Render for ApolloRoot {
                 } else {
                     None
                 };
+                let back = back.render(palette, window);
+                let back = if self.can_navigate() {
+                    back.track_focus(&self.queue_back_focus)
+                } else {
+                    back
+                };
                 (
                     queue::header(
                         scheduler,
-                        back.render(palette, window),
+                        back,
                         add,
                         primary.render(palette, window),
                         controls,
@@ -954,6 +1105,17 @@ impl Render for ApolloRoot {
                         palette,
                         window,
                         animate,
+                        |id, action| {
+                            if !self.can_navigate() {
+                                return (ActionState::Disabled, None);
+                            }
+                            let state = ActionState::Enabled(Box::new(cx.listener(
+                                move |root, _, window, cx| {
+                                    root.dispatch_waiting_action(id, action, window, cx);
+                                },
+                            )));
+                            (state, self.waiting_focus.get(&(id, action)).cloned())
+                        },
                     ),
                     components::action_bar(palette, [cancel_queue]),
                 )
@@ -966,7 +1128,74 @@ impl Render for ApolloRoot {
                 ),
                 components::action_bar(palette, [back.render(palette, window)]),
             ),
-            NavigationState::QueueEdit { .. } | NavigationState::BatchEdit => (
+            NavigationState::QueueEdit { .. } => {
+                let mut cancel = Button::new(
+                    "cancel-queue-edit",
+                    super::CANCEL_QUEUE_EDIT_LABEL,
+                    Tone::Standard,
+                );
+                let mut save = Button::new(
+                    "save-queue-edit",
+                    super::SAVE_QUEUE_CHANGES_LABEL,
+                    Tone::Primary,
+                );
+                if self.can_navigate() {
+                    cancel.state =
+                        ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                            root.finish_queue_edit(false, window, cx)
+                        })));
+                }
+                let edit = self.core.queue_edit();
+                // U03–U05 replace this migration gap with the normal operation form in QueueEdit mode.
+                // No form is admitted before it supports that mode.
+                if self.can_navigate()
+                    && self.core.queue.scheduler().can_edit()
+                    && edit.is_some_and(|edit| queue::editor_migrated(edit.active_operation))
+                {
+                    save.state =
+                        ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                            root.finish_queue_edit(true, window, cx)
+                        })));
+                }
+                let header = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(M.related))
+                    .child(components::page_title("Edit settings"))
+                    .children(edit.map(|edit| {
+                        file_intake::summary(
+                            super::workspace::WorkspacePresentation::new(&edit.media),
+                            edit.media.path.to_string_lossy().into_owned(),
+                            div(),
+                            palette,
+                        )
+                        .child(components::heading(edit.active_operation.label()))
+                    }))
+                    .child(components::separator(palette));
+                let surface = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(M.related))
+                    .children(edit.and_then(|edit| edit.error.as_ref()).map(|error| {
+                        components::inline_message(
+                            error.diagnostic().unwrap_or(error.message()).to_owned(),
+                            palette,
+                        )
+                    }))
+                    .child(components::inline_message(
+                        "This operation editor is unavailable during the UI migration.",
+                        palette,
+                    ));
+                (
+                    header,
+                    surface,
+                    components::action_bar(
+                        palette,
+                        [cancel.render(palette, window), save.render(palette, window)],
+                    ),
+                )
+            }
+            NavigationState::BatchEdit => (
                 components::page_title("Editor"),
                 components::inline_message(
                     "This editor is unavailable during the UI migration.",
@@ -1080,7 +1309,9 @@ impl Render for ApolloRoot {
                 } else if event.keystroke.key == "escape"
                     && matches!(
                         root.core.navigation(),
-                        NavigationState::Queue { .. } | NavigationState::Settings { .. }
+                        NavigationState::Queue { .. }
+                            | NavigationState::Settings { .. }
+                            | NavigationState::QueueEdit { .. }
                     )
                     && root.can_navigate()
                 {

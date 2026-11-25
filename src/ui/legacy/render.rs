@@ -224,7 +224,12 @@ impl ApolloApp {
                 active_operation,
                 "Editing queued item",
                 enabled,
-                true,
+                matches!(
+                    self.core.navigation(),
+                    NavigationState::QueueEdit {
+                        origin: crate::app::QueueEditOrigin::SourceWorkspace
+                    }
+                ),
             )
         })
         .inner;

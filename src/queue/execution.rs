@@ -1695,6 +1695,121 @@ mod tests {
     }
 
     #[test]
+    fn waiting_controls_follow_order_while_running_stopping_and_settling() {
+        use crate::ui::queue::{WaitingAction as Action, WaitingControls, waiting_focus_after};
+        let directory = TestDirectory::new("waiting-controls");
+        let (identity, media) = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let enqueue = |queue: &mut MediaQueue, name: &str| {
+            queue
+                .enqueue(
+                    &identity,
+                    &media,
+                    remux(&media, directory.path().join(name)),
+                )
+                .unwrap()
+        };
+        let terminal = enqueue(&mut queue, "terminal.mkv");
+        assert!(queue.cancel_queue());
+        let active = enqueue(&mut queue, "active.mkv");
+        let first = enqueue(&mut queue, "first.mkv");
+        let second = enqueue(&mut queue, "second.mkv");
+        let third = enqueue(&mut queue, "third.mkv");
+        let process = FakeProcessControl::deferred_cancellation();
+        let handle = process.clone();
+        let mut launched = Vec::new();
+        let mut launcher = |id, _| {
+            launched.push(id);
+            Ok(if id == active {
+                process.clone()
+            } else {
+                FakeProcessControl::running()
+            })
+        };
+        let tools = tools(&directory);
+        let stopped = WaitingControls::for_job(&queue, first).unwrap();
+        assert!(!stopped.allows(Action::Edit));
+        assert!(stopped.edit_blocked.unwrap().contains("migrated"));
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
+        assert_eq!(queue.active_job(), Some(active));
+        assert!(WaitingControls::for_job(&queue, active).is_none());
+        assert!(WaitingControls::for_job(&queue, terminal).is_none());
+        let first_controls = WaitingControls::for_job(&queue, first).unwrap();
+        assert_eq!(
+            Action::ALL.map(|action| first_controls.allows(action)),
+            [false, true, false, true]
+        );
+        assert!(
+            first_controls
+                .edit_blocked
+                .unwrap()
+                .contains("Stop the queue")
+        );
+        let third_controls = WaitingControls::for_job(&queue, third).unwrap();
+        assert_eq!(
+            Action::ALL.map(|action| third_controls.allows(action)),
+            [true, false, false, true]
+        );
+        assert!(queue.move_waiting(third, WaitingJobMove::Earlier).unwrap());
+        assert_eq!(
+            waiting_focus_after(&queue, third, third_controls.index, Action::Earlier),
+            Some((third, Action::Earlier))
+        );
+        assert!(queue.move_waiting(third, WaitingJobMove::Earlier).unwrap());
+        assert_eq!(
+            waiting_focus_after(&queue, third, 1, Action::Earlier),
+            Some((third, Action::Later))
+        );
+        assert!(queue.remove_waiting(first));
+        assert_eq!(
+            waiting_focus_after(&queue, first, 1, Action::Remove),
+            Some((second, Action::Remove))
+        );
+        assert!(WaitingControls::for_job(&queue, first).is_none());
+        assert!(queue.move_waiting(first, WaitingJobMove::Later).is_err());
+        assert!(!queue.remove_waiting(active));
+        assert!(
+            queue
+                .move_waiting(terminal, WaitingJobMove::Earlier)
+                .is_err()
+        );
+        assert_eq!(queue.run_state(), QueueRunState::Running);
+        assert!(queue.stop_after_current());
+        assert!(queue.move_waiting(second, WaitingJobMove::Earlier).unwrap());
+        assert!(queue.remove_waiting(third));
+        assert_eq!(
+            waiting_focus_after(&queue, third, 1, Action::Remove),
+            Some((second, Action::Remove))
+        );
+        assert_eq!(queue.run_state(), QueueRunState::StoppingAfterCurrent);
+        assert!(queue.cancel_current());
+        assert!(
+            WaitingControls::for_job(&queue, second)
+                .unwrap()
+                .edit_blocked
+                .unwrap()
+                .contains("settle before editing")
+        );
+        handle.set_state(MediaProcessState::Cancelled);
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        let remaining = WaitingControls::for_job(&queue, second).unwrap();
+        assert_eq!(
+            Action::ALL.map(|action| remaining.allows(action)),
+            [false, false, false, true]
+        );
+        assert!(remaining.edit_blocked.unwrap().contains("migrated"));
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
+        assert_eq!(queue.active_job(), Some(second));
+        assert_eq!(launched, [active, second]);
+        assert_eq!(queue.jobs()[0].id(), terminal);
+        assert_eq!(queue.jobs()[0].state(), &QueueJobState::Cancelled);
+        assert_eq!(queue.jobs()[1].id(), active);
+        assert_eq!(queue.jobs()[1].state(), &QueueJobState::Cancelled);
+        assert_eq!(waiting_focus_after(&queue, second, 0, Action::Remove), None);
+    }
+
+    #[test]
     fn scheduler_controls_follow_owned_job_across_cancel_stop_and_restart() {
         use crate::{
             app::QueueAction,

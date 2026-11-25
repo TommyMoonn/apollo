@@ -405,7 +405,10 @@ impl Application {
         id: JobId,
         origin: QueueEditOrigin,
     ) -> Option<QueueEditState> {
-        if !self.queue.scheduler.can_edit() || !self.can_enter_queue_edit(origin) {
+        if self.is_closing()
+            || !self.queue.scheduler.can_edit()
+            || !self.can_enter_queue_edit(origin)
+        {
             return None;
         }
         let job = self
@@ -453,9 +456,18 @@ impl Application {
         if self.is_closing() || !matches!(self.navigation(), NavigationState::QueueEdit { .. }) {
             return false;
         }
+        let fixed_operation = matches!(
+            self.navigation(),
+            NavigationState::QueueEdit {
+                origin: QueueEditOrigin::Queue(_)
+            }
+        );
         let Some(edit) = self.queue_edit.as_mut() else {
             return false;
         };
+        if fixed_operation && edit.active_operation != operation {
+            return false;
+        }
         if edit.active_operation != operation {
             edit.active_operation = operation;
             edit.error = None;
@@ -465,7 +477,10 @@ impl Application {
     }
 
     pub(crate) fn save_queue_edit(&mut self) -> bool {
-        if !matches!(self.navigation(), NavigationState::QueueEdit { .. }) {
+        let NavigationState::QueueEdit { origin } = self.navigation() else {
+            return false;
+        };
+        if self.is_closing() {
             return false;
         }
         let capabilities = self.discovery.upscale_capabilities();
@@ -475,6 +490,22 @@ impl Application {
         if !self.queue.scheduler.can_edit() {
             edit.error = Some(MediaError::invalid_request(
                 QueueMutationError::AutomaticAdvancementActive.to_string(),
+            ));
+            edit.error_details_open = true;
+            return false;
+        }
+        // Queue entry edits settings for the retained operation, not a different tool.
+        // The legacy source-workspace origin remains only for its retained adapter.
+        if matches!(origin, QueueEditOrigin::Queue(_))
+            && let Some(job) = self
+                .queue
+                .scheduler
+                .waiting_jobs()
+                .find(|job| job.id() == edit.job_id)
+            && Operation::from(job.operation()) != edit.active_operation
+        {
+            edit.error = Some(MediaError::invalid_request(
+                "Queue edits cannot change the retained operation.",
             ));
             edit.error_details_open = true;
             return false;

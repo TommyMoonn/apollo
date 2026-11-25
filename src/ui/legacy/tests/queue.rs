@@ -186,10 +186,10 @@ fn queue_reorder_actions_move_only_the_requested_waiting_item() {
         .unwrap()
         .unwrap();
 
-    assert!(app.handle_queue_action(QueueAction::MoveEarlier(second)));
+    assert!(app.handle_queue_action(crate::ui::queue::WaitingAction::Earlier.command(second)));
     assert_eq!(app.core.queue.scheduler().jobs()[0].id(), second);
     assert_eq!(app.core.queue.scheduler().jobs()[1].id(), first);
-    assert!(app.handle_queue_action(QueueAction::MoveLater(second)));
+    assert!(app.handle_queue_action(crate::ui::queue::WaitingAction::Later.command(second)));
     assert_eq!(app.core.queue.scheduler().jobs()[0].id(), first);
     assert_eq!(app.core.queue.scheduler().jobs()[1].id(), second);
     fs::remove_dir_all(directory).unwrap();
@@ -343,30 +343,86 @@ fn queue_edit_hydrates_the_queued_request_and_cancel_preserves_it() {
 }
 
 #[test]
-fn queue_edit_can_change_operation_with_atomic_same_id_replacement() {
+fn queue_edit_keeps_operation_source_id_and_order_on_save() {
     let (directory, path) = temp_file("queue-edit-replace");
     let mut app = app();
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+    app.select_tool(Operation::Remux);
     let job_id = app
-        .enqueue_current_operation(Operation::AudioMix)
+        .enqueue_current_operation(Operation::Remux)
         .unwrap()
         .unwrap();
+    app.state
+        .remux
+        .as_mut()
+        .unwrap()
+        .selection
+        .set_custom_output_path(directory.join("second.mkv"));
+    let second = app
+        .enqueue_current_operation(Operation::Remux)
+        .unwrap()
+        .unwrap();
+    let original = app.core.queue.scheduler().jobs().to_vec();
     app.enter_queue();
     assert!(app.handle_queue_action(QueueAction::Edit(job_id)));
+    assert!(!app.select_queue_edit_tool(Operation::FrameCapture));
+    // A direct draft change must not bypass the fixed-operation guard at save.
     app.core.queue_edit_mut().unwrap().active_operation = Operation::FrameCapture;
-
+    assert!(!app.save_queue_edit());
+    assert_eq!(app.core.queue.scheduler().jobs(), original);
+    assert!(app.core.queue_edit().is_some());
+    let edit = app.core.queue_edit_mut().unwrap();
+    edit.active_operation = Operation::Remux;
+    let output = directory.join("edited.mkv");
+    edit.remux.set_custom_output_path(output.clone());
     assert!(app.save_queue_edit());
-
-    assert_eq!(app.core.queue.scheduler().jobs().len(), 1);
-    assert_eq!(app.core.queue.scheduler().jobs()[0].id(), job_id);
-    assert!(matches!(
-        app.core.queue.scheduler().jobs()[0].operation(),
-        QueuedOperation::FrameCapture(_)
-    ));
+    let jobs = app.core.queue.scheduler().jobs();
+    assert_eq!(jobs[0].id(), job_id);
+    assert_eq!(jobs[0].source_identity(), original[0].source_identity());
+    assert_eq!(jobs[0].media(), original[0].media());
+    assert_eq!(jobs[0].operation().output(), output);
+    assert!(matches!(jobs[0].operation(), QueuedOperation::Remux(_)));
+    assert_eq!(jobs[1].id(), second);
+    assert_eq!(jobs[1], original[1]);
     assert!(matches!(
         app.core.navigation(),
         NavigationState::Queue { .. }
     ));
+    assert!(app.core.queue_edit().is_none());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn queue_edit_rejects_removed_job_without_losing_draft_or_return_origin() {
+    let (directory, path) = temp_file("queue-edit-removed");
+    let mut app = app();
+    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+    app.select_tool(Operation::Remux);
+    let job = app
+        .enqueue_current_operation(Operation::Remux)
+        .unwrap()
+        .unwrap();
+    app.enter_queue();
+    let queue_route = app.core.navigation();
+    assert!(app.handle_queue_action(QueueAction::Edit(job)));
+    let output = directory.join("draft.mkv");
+    app.core
+        .queue_edit_mut()
+        .unwrap()
+        .remux
+        .set_custom_output_path(output.clone());
+    assert!(app.handle_queue_action(QueueAction::Remove(job)));
+    assert!(!app.save_queue_edit());
+    let edit = app.core.queue_edit().unwrap();
+    assert_eq!(edit.job_id, job);
+    assert_eq!(
+        edit.remux.validated_request(&edit.media).unwrap().output,
+        output
+    );
+    assert!(edit.error.is_some());
+    assert!(app.core.queue.scheduler().jobs().is_empty());
+    assert!(app.finish_queue_edit());
+    assert_eq!(app.core.navigation(), queue_route);
     assert!(app.core.queue_edit().is_none());
     fs::remove_dir_all(directory).unwrap();
 }

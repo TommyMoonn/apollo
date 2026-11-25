@@ -2,7 +2,7 @@
 
 #[cfg(any(windows, test))]
 use crate::{
-    app::{Application, QueueAction},
+    app::{Application, Operation, QueueAction},
     media::{
         error::{MediaError, MediaOutputContainer},
         progress::MediaProgress,
@@ -166,6 +166,132 @@ impl Controls {
     }
 }
 
+/// Only forms that implement the shared QueueEdit mode may be opened from Queue.
+#[cfg(any(windows, test))]
+pub(crate) const fn editor_migrated(operation: Operation) -> bool {
+    match operation {
+        Operation::AudioMix
+        | Operation::Remux
+        | Operation::AudioExtract
+        | Operation::VideoUpscale
+        | Operation::FrameCapture => false,
+    }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum WaitingAction {
+    Earlier,
+    Later,
+    Edit,
+    Remove,
+}
+
+#[cfg(any(windows, test))]
+impl WaitingAction {
+    pub(crate) const ALL: [Self; 4] = [Self::Earlier, Self::Later, Self::Edit, Self::Remove];
+
+    #[cfg(windows)]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Earlier => "Move up",
+            Self::Later => "Move down",
+            Self::Edit => "Edit settings",
+            Self::Remove => "Remove",
+        }
+    }
+
+    pub(crate) fn command(self, id: JobId) -> QueueAction {
+        match self {
+            Self::Earlier => QueueAction::MoveEarlier(id),
+            Self::Later => QueueAction::MoveLater(id),
+            Self::Edit => QueueAction::Edit(id),
+            Self::Remove => QueueAction::Remove(id),
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WaitingControls {
+    pub index: usize,
+    count: usize,
+    pub edit_blocked: Option<&'static str>,
+}
+
+#[cfg(any(windows, test))]
+fn edit_unavailable(queue: &MediaQueue, job: &QueuedJob) -> Option<&'static str> {
+    if !queue.can_edit() {
+        return Some(match queue.run_state() {
+            QueueRunState::Running => {
+                "Stop the queue and wait for any active job to finish before editing."
+            }
+            QueueRunState::StoppingAfterCurrent | QueueRunState::Stopped => {
+                "Wait for the active job to settle before editing."
+            }
+        });
+    }
+    (!editor_migrated(Operation::from(job.operation())))
+        .then_some("Editing is unavailable for operations that have not been migrated.")
+}
+
+#[cfg(any(windows, test))]
+impl WaitingControls {
+    fn at(queue: &MediaQueue, job: &QueuedJob, index: usize, count: usize) -> Self {
+        let edit_blocked = edit_unavailable(queue, job);
+        Self {
+            index,
+            count,
+            edit_blocked,
+        }
+    }
+
+    pub(crate) fn for_job(queue: &MediaQueue, id: JobId) -> Option<Self> {
+        let index = queue.waiting_jobs().position(|job| job.id() == id)?;
+        let job = queue.waiting_jobs().nth(index)?;
+        Some(Self::at(queue, job, index, queue.waiting_jobs().count()))
+    }
+
+    pub(crate) fn allows(self, action: WaitingAction) -> bool {
+        match action {
+            WaitingAction::Earlier => self.index > 0,
+            WaitingAction::Later => self.index + 1 < self.count,
+            WaitingAction::Edit => self.edit_blocked.is_none(),
+            WaitingAction::Remove => true,
+        }
+    }
+}
+
+/// Keep focus on the moved job, or the nearest surviving waiting row after removal.
+#[cfg(any(windows, test))]
+pub(crate) fn waiting_focus_after(
+    queue: &MediaQueue,
+    id: JobId,
+    previous_index: usize,
+    action: WaitingAction,
+) -> Option<(JobId, WaitingAction)> {
+    if action == WaitingAction::Remove {
+        let job = queue
+            .waiting_jobs()
+            .nth(previous_index)
+            .or_else(|| queue.waiting_jobs().last())?;
+        return Some((job.id(), WaitingAction::Remove));
+    }
+    let controls = WaitingControls::for_job(queue, id)?;
+    let action = if controls.allows(action) {
+        action
+    } else {
+        match action {
+            WaitingAction::Earlier if controls.allows(WaitingAction::Later) => WaitingAction::Later,
+            WaitingAction::Later if controls.allows(WaitingAction::Earlier) => {
+                WaitingAction::Earlier
+            }
+            _ => WaitingAction::Remove,
+        }
+    };
+    Some((id, action))
+}
+
 /// FFmpeg may report its last timestamp before publication and cleanup settle.
 #[cfg(any(windows, test))]
 pub(crate) fn unsettled_fraction(fraction: Option<f32>) -> Option<f32> {
@@ -219,14 +345,11 @@ fn failure_copy(job: &QueuedJob) -> Option<String> {
 #[cfg(windows)]
 mod view {
     use super::*;
-    use crate::{
-        app::Operation,
-        ui::{
-            components,
-            design::{METRICS as M, Palette, TextRole},
-        },
+    use crate::ui::{
+        components::{self, ActionState, Button, Tone},
+        design::{METRICS as M, Palette, TextRole},
     };
-    use gpui::{Div, Pixels, Role, Stateful, Window, div, prelude::*, px, rgba};
+    use gpui::{Div, FocusHandle, Pixels, Role, Stateful, Window, div, prelude::*, px, rgba};
 
     pub(crate) fn header(
         queue: &MediaQueue,
@@ -279,6 +402,7 @@ mod view {
         palette: Palette,
         window: &Window,
         animate: bool,
+        mut waiting_action: impl FnMut(JobId, WaitingAction) -> (ActionState, Option<FocusHandle>),
     ) -> Div {
         let jobs = queue.jobs();
         if jobs.is_empty() && action_error.is_none() {
@@ -331,7 +455,22 @@ mod view {
                         .flex_col()
                         .gap(px(M.compact))
                         .child(components::heading(section.title(count)))
-                        .children(section.jobs(jobs).map(|job| {
+                        .children(
+                            (section == Section::Waiting)
+                                .then(|| {
+                                    section
+                                        .jobs(jobs)
+                                        .find_map(|job| edit_unavailable(queue, job))
+                                })
+                                .flatten()
+                                .map(|reason| {
+                                    TextRole::Secondary
+                                        .apply(div())
+                                        .text_color(rgba(palette.secondary()))
+                                        .child(reason)
+                                }),
+                        )
+                        .children(section.jobs(jobs).enumerate().map(|(index, job)| {
                             let active = queue.active_job() == Some(job.id());
                             let cancelling = active && queue.cancellation_pending();
                             let details =
@@ -397,11 +536,63 @@ mod view {
                                         ),
                                 );
                             }
+                            if section == Section::Waiting {
+                                content = content.child(waiting_actions(
+                                    job,
+                                    WaitingControls::at(queue, job, index, count),
+                                    palette,
+                                    window,
+                                    &mut waiting_action,
+                                ));
+                            }
                             content.child(components::separator(palette))
                         })),
                 )
             }))
     }
+    fn waiting_actions(
+        job: &QueuedJob,
+        controls: WaitingControls,
+        palette: Palette,
+        window: &Window,
+        action_state: &mut impl FnMut(JobId, WaitingAction) -> (ActionState, Option<FocusHandle>),
+    ) -> Div {
+        let id = job.id();
+        let name = file_name(job.operation().input());
+        let output = destination(job).to_string_lossy();
+        let buttons = WaitingAction::ALL.map(|action| {
+            let mut button =
+                Button::new((action.label(), id.get()), action.label(), Tone::Standard);
+            let focus = if controls.allows(action) {
+                let (state, focus) = action_state(id, action);
+                button.state = state;
+                focus
+            } else {
+                None
+            };
+            let mut element = button.render(palette, window).aria_label(format!(
+                "{} for {} ({})",
+                action.label(),
+                name,
+                job.operation().display_name()
+            ));
+            let description = if action == WaitingAction::Edit {
+                controls
+                    .edit_blocked
+                    .map(|reason| format!("{reason} Destination: {output}"))
+            } else {
+                None
+            };
+            element = element
+                .aria_description(description.unwrap_or_else(|| format!("Destination: {output}")));
+            if let Some(focus) = focus {
+                element = element.track_focus(&focus);
+            }
+            element
+        });
+        components::selector(buttons).justify_end()
+    }
+
     fn row(
         job: &QueuedJob,
         cancelling: bool,
