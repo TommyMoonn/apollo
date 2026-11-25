@@ -20,7 +20,7 @@ Rustup is the recommended way to install the pinned Rust toolchain. From the rep
 
 ### GPUI build requirements
 
-Apollo uses the official GPUI 0.2.2 crate with its Windows manifest feature. Linux GUI backends are not enabled; the application executable targets Windows x64. The existing Rust 1.97.1 pin is retained pending verification of the complete locked GPUI graph. The migration shell starts tool discovery and accepts worker wakes independently of rendering. File-processing actions remain disabled until their feature surfaces migrate.
+Apollo pins official Zed `gpui` and `gpui_platform` to [v1.29.3 (d01b134)](https://github.com/zed-industries/zed/tree/d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7). Both use exact package versions and the same immutable revision. On Windows, `gpui_platform` enables GPUI’s `windows-manifest` feature through its target-specific dependency. Linux GUI backends are not enabled. The application executable targets Windows x64. Rust 1.98.1 matches the upstream release toolchain. The migration shell starts tool discovery and accepts worker wakes independently of rendering. File-processing actions remain disabled until their feature surfaces migrate.
 
 Before the first Windows build, ensure the pinned Geist Variable file is present as documented in [font assets](../assets/fonts/README.md). The [UI design guide](DESIGN.md) defines the shared presentation contracts.
 
@@ -36,7 +36,9 @@ $env:GPUI_FXC_PATH = $fxc.FullName
 
 The Windows packaging workflow sets this path explicitly before its release build. Debug checks and coverage retain their existing commands. The upstream build embeds the Windows manifest and release shaders; Apollo retains its own icon and version resource.
 
-Owner-managed offline bundles must be refreshed after resolving the new lockfile: include the official GPUI package and all transitive sources for the locked graph, not only the existing egui dependency graph. Windows release builds also need the installed Windows SDK; the Rust archive does not supply it.
+After changing a GPUI revision, resolve the dependency graph before running the locked recipes. Run `cargo check --all-targets` without `--locked`. If resolution fails against the previous graph, use `cargo generate-lockfile` to resolve a fresh graph and review the resulting lockfile diff before committing. Then run `just verify`. Keep the resolved lockfile in version control.
+
+Owner-managed offline bundles must be refreshed after resolving the new lockfile. Include the pinned Rust 1.98.1 toolchain and all locked Cargo sources, including Git-sourced GPUI workspace crates and their transitive dependencies. The older crates.io GPUI vendor bundle cannot resolve this revision. Preserve the Git source-replacement entries emitted by `cargo vendor`. Windows release builds also need the installed Windows SDK; the Rust archive does not supply it.
 
 FFmpeg and FFprobe run as separate processes. The Windows release packages include the pinned pair; `cargo build` does not download or copy media tools. Apollo discovers and validates them through one shared application owner rather than feature-specific checks. The queue owns file execution, using operation-specific preparation and shared settlement code; see [Architecture](ARCHITECTURE.md#source-intake-and-execution) for the execution boundaries.
 

@@ -3,8 +3,9 @@
 use std::{borrow::Cow, cell::Cell, path::PathBuf, process::ExitCode, rc::Rc};
 
 use gpui::{
-    App, Application as GpuiApplication, Bounds, Context, FocusHandle, FontWeight, Task,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgba, size,
+    App, Bounds, Context, FocusHandle, FontWeight, Task, TextRenderingMode, TitlebarOptions,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, prelude::*, px, rgba,
+    size,
 };
 
 use crate::app::{Application, NavigationState, background, discovery::MediaToolsState};
@@ -66,7 +67,7 @@ impl ApolloRoot {
             }
         });
         let focus = cx.focus_handle();
-        window.focus(&focus);
+        window.focus(&focus, cx);
         let (settings_path, preferences, settings_error) = match settings::settings_path() {
             Ok(path) => {
                 let (preferences, error) = AppSettings::load(&path);
@@ -214,13 +215,13 @@ impl ApolloRoot {
             if self.exit == ExitState::Open {
                 // Restore the initiating control when still actionable; otherwise use the root.
                 if self.can_open_files() || focus != self.open_focus {
-                    window.focus(&focus);
+                    window.focus(&focus, cx);
                 } else {
-                    window.focus(&self.focus);
+                    window.focus(&self.focus, cx);
                 }
             } else if self.exit == ExitState::Confirming {
                 self.previous_focus = Some(focus);
-                window.focus(&self.dialog_focus);
+                window.focus(&self.dialog_focus, cx);
             }
         }
         cx.notify();
@@ -236,7 +237,7 @@ impl ApolloRoot {
             if self.core.poll_shutdown(|| progress.begin()) && !self.file_dialog.is_pending() {
                 if self.core.shutdown_failure().is_some() {
                     self.exit = ExitState::Failed;
-                    window.focus(&self.dialog_focus);
+                    window.focus(&self.dialog_focus, cx);
                     cx.notify();
                 } else {
                     window.remove_window();
@@ -256,7 +257,7 @@ impl ApolloRoot {
         } else {
             self.previous_focus = window.focused(cx);
             self.exit = ExitState::Confirming;
-            window.focus(&self.dialog_focus);
+            window.focus(&self.dialog_focus, cx);
             cx.notify();
         }
     }
@@ -275,9 +276,9 @@ impl ApolloRoot {
             && !matches!(self.core.discovery.state(), MediaToolsState::Unavailable(_)))
             || (focus == self.open_focus && !self.can_open_files())
         {
-            window.focus(&self.focus);
+            window.focus(&self.focus, cx);
         } else {
-            window.focus(&focus);
+            window.focus(&focus, cx);
         }
         cx.notify();
     }
@@ -286,7 +287,7 @@ impl ApolloRoot {
         if self.core.begin_shutdown() {
             self.exit = ExitState::Settling;
             self.previous_focus = None;
-            window.focus(&self.focus);
+            window.focus(&self.focus, cx);
             cx.notify();
             self.settle_background(window, cx);
         }
@@ -303,7 +304,7 @@ impl ApolloRoot {
                         ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
                             if root.retry_discovery() {
                                 if root.core.discovery.is_pending() {
-                                    window.focus(&root.focus);
+                                    window.focus(&root.focus, cx);
                                 }
                                 cx.notify();
                             }
@@ -405,7 +406,7 @@ impl Render for ApolloRoot {
                 if !root.can_open_files() {
                     return;
                 }
-                window.focus(&root.open_focus);
+                window.focus(&root.open_focus, cx);
                 root.start_file_dialog(
                     FileDialogRequest::OpenSources {
                         initial_directory: None,
@@ -531,9 +532,9 @@ impl Render for ApolloRoot {
                     && !event.keystroke.modifiers.platform
                 {
                     if event.keystroke.modifiers.shift {
-                        window.focus_prev();
+                        window.focus_prev(cx);
                     } else {
-                        window.focus_next();
+                        window.focus_next(cx);
                     }
                     cx.stop_propagation();
                 }
@@ -564,6 +565,8 @@ fn open_root(cx: &mut App) -> Result<(), String> {
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            // Subpixel glyph rendering requires an opaque native window.
+            window_background: WindowBackgroundAppearance::Opaque,
             window_min_size: Some(size(px(min_width), px(min_height))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Apollo".into()),
@@ -586,10 +589,12 @@ fn open_root(cx: &mut App) -> Result<(), String> {
 pub fn run() -> ExitCode {
     let failed = Rc::new(Cell::new(false));
     let startup_failed = Rc::clone(&failed);
-    GpuiApplication::new()
+    gpui_platform::application()
         .with_assets(components::Assets)
         .run(move |cx: &mut App| {
-            cx.on_window_closed(|cx| {
+            // Respect the OS text-smoothing preference instead of forcing ClearType.
+            cx.set_text_rendering_mode(TextRenderingMode::PlatformDefault);
+            cx.on_window_closed(|cx, _window_id| {
                 if cx.windows().is_empty() {
                     cx.quit();
                 }

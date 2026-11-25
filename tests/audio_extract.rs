@@ -229,7 +229,9 @@ fn assert_invocation(format: AudioExtractFormat, required_pairs: &[&str]) {
             "0" | "0:0" | "0:3" | "0:11" | "0:v" | "0:s" | "0:d"
         )
     }));
-    for pair in required_pairs.chunks_exact(2) {
+    let (pairs, remainder) = required_pairs.as_chunks::<2>();
+    assert!(remainder.is_empty(), "expected complete argument pairs");
+    for pair in pairs {
         assert!(
             args.windows(2).any(|actual| actual == [pair[0], pair[1]]),
             "missing pair {pair:?} from {args:?}"

@@ -561,7 +561,7 @@ fn write_dibv5_payload(
             size_of::<BITMAPV5HEADER>(),
         );
         let pixels = destination.as_mut_ptr().add(size_of::<BITMAPV5HEADER>());
-        for (index, rgba) in image.rgba.chunks_exact(4).enumerate() {
+        for (index, rgba) in image.rgba.as_chunks::<4>().0.iter().enumerate() {
             let bgra = pixels.add(index * 4);
             *bgra = rgba[2];
             *bgra.add(1) = rgba[1];

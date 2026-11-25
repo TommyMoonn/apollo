@@ -72,7 +72,7 @@ license file alone is not evidence that this review has been completed.
 
 ## Rust dependency inventory
 
-The following table records the pre-GPUI locked Windows x64 runtime dependency inventory, plus the newly pinned GPUI release. GPUI's transitive graph and corresponding notices must be reconciled after dependency resolution and before distributing the migrated application. License expressions are reproduced from package metadata.
+The following table records the pre-GPUI locked Windows x64 runtime dependency inventory, plus the direct GPUI packages pinned to Zed v1.29.3 (commit `d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7`). GPUI's complete transitive graph and corresponding notices must be reconciled against the resolved lockfile before distributing the migrated application. License expressions are reproduced from package metadata.
 
 | Package | Version | License expression | Upstream source |
 | --- | --- | --- | --- |
@@ -120,7 +120,8 @@ The following table records the pre-GPUI locked Windows x64 runtime dependency i
 | `form_urlencoded` | `1.2.2` | `MIT OR Apache-2.0` | https://github.com/servo/rust-url |
 | `getrandom` | `0.3.4` | `MIT OR Apache-2.0` | https://github.com/rust-random/getrandom |
 | `glifo` | `0.2.0` | `Apache-2.0 OR MIT` | https://github.com/linebender/vello |
-| `gpui` | `0.2.2` | `Apache-2.0` | https://github.com/zed-industries/zed |
+| `gpui` | `0.2.2` (d01b134) | `Apache-2.0` | https://github.com/zed-industries/zed/tree/d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7/crates/gpui |
+| `gpui_platform` | `0.1.0` (d01b134) | `Apache-2.0` | https://github.com/zed-industries/zed/tree/d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7/crates/gpui_platform |
 | `glow` | `0.17.0` | `MIT OR Apache-2.0 OR Zlib` | https://github.com/grovesNL/glow |
 | `glutin` | `0.32.3` | `Apache-2.0` | https://github.com/rust-windowing/glutin |
 | `glutin-winit` | `0.5.0` | `MIT` | https://github.com/rust-windowing/glutin |
