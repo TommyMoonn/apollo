@@ -7,13 +7,13 @@ use super::{
 };
 use crate::{
     app::{
-        batch::{BatchAction, BatchEditTarget, BatchReadiness, batch_defaults_from_editor},
+        batch::{BatchAction, BatchEditTarget, BatchSourceState, batch_defaults_from_editor},
         dialogs::{DialogTarget, FileDialogRequest},
     },
     queue::QueuedOperation,
     ui::{
         OperationSurfaceMode,
-        batch::{self as batch_ui, BatchItemEditAction, BatchItemView},
+        batch::{self as batch_ui, BatchItemView},
         layout, media_error, theme,
         workspace::{self, WorkspaceMode},
     },
@@ -124,27 +124,30 @@ impl ApolloApp {
                 readiness: item.readiness,
                 reason: item.reason.as_deref(),
                 included: item.included,
-                edit_action: item.can_edit().then_some(match item.readiness {
-                    BatchReadiness::Ready => BatchItemEditAction::Override,
-                    _ => BatchItemEditAction::Review,
-                }),
+                can_edit: item.can_edit(),
+                overridden: item.overridden,
+                inspection_failed: matches!(item.source, BatchSourceState::Failed),
                 can_toggle_included: item.can_toggle_included(),
             })
             .collect::<Vec<_>>();
         let queue_enabled = self.file_intake_enabled();
-        let action = batch_ui::show(
-            ui,
-            batch.operation,
-            &views,
-            availability,
-            self.core.queue.scheduler().pending_count(),
-            queue_enabled,
-            batch_ui::BatchFeedback {
-                status: batch.error.as_deref(),
-                append_error: batch.append_error.as_ref(),
-                append_error_details_open: &mut self.batch_append_error_details_open,
-            },
-        );
+        let action = ui
+            .add_enabled_ui(!self.file_dialog.is_pending(), |ui| {
+                batch_ui::show(
+                    ui,
+                    batch.operation,
+                    &views,
+                    availability,
+                    self.core.queue.scheduler().pending_count(),
+                    queue_enabled,
+                    batch_ui::BatchFeedback {
+                        status: batch.error.as_deref(),
+                        append_error: batch.append_error.as_ref(),
+                        append_error_details_open: &mut self.batch_append_error_details_open,
+                    },
+                )
+            })
+            .inner;
         match action {
             BatchAction::OpenQueue => self.enter_queue(),
             BatchAction::SelectOperation(operation) => self.core.select_batch_operation(operation),
@@ -189,8 +192,8 @@ impl ApolloApp {
                 operation,
                 WorkspaceMode::FixedSourceEdit {
                     context: match target {
-                        BatchEditTarget::Defaults => "Configuring batch defaults",
-                        BatchEditTarget::Item(_) => "Overriding batch item",
+                        BatchEditTarget::Defaults => "Edit shared settings",
+                        BatchEditTarget::Item(_) => "Edit settings",
                     },
                     enabled,
                     operation_switching: false,

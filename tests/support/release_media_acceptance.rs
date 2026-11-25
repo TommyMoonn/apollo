@@ -65,6 +65,7 @@ pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &s
             remux(tools, identity, media, directory);
             audio_extract(tools, identity, media, directory);
             frame_capture(tools, identity, media, directory);
+            mixed_batch(tools, identity, media, directory);
             upscale(
                 tools,
                 identity,
@@ -207,6 +208,84 @@ fn settle_queued(
         );
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Verify that one admission settles distinct typed jobs from multiple inspected sources in FIFO order.
+fn mixed_batch(tools: &MediaTools, identity: &SourceIdentity, media: &MediaFile, directory: &Path) {
+    let second_path = directory.join("batch-source.mp4");
+    fs::copy(&media.path, &second_path).unwrap();
+    let mut intake = MediaIntake::default();
+    let MediaLoadStart::Probe(probe) = intake.begin_load(&second_path).unwrap() else {
+        panic!("fresh batch source must be probed");
+    };
+    intake
+        .complete_probe(probe, probe_media(tools, &second_path))
+        .unwrap();
+    let (second_identity, second) = intake.current_with_identity().unwrap();
+    let remux = QueuedOperation::Remux(RemuxRequest {
+        input: media.path.clone(),
+        output: directory.join("batch-remux.mkv"),
+        container: MediaContainer::Matroska,
+    });
+    let extract = QueuedOperation::AudioExtract(AudioExtractRequest {
+        input: second.path.clone(),
+        output: directory.join("batch-audio.flac"),
+        audio_stream_index: second.audio_streams[1].stream_index,
+        format: AudioExtractFormat::Flac,
+    });
+    let frame = QueuedOperation::FrameCapture(FrameCaptureRequest {
+        input: second.path.clone(),
+        output: directory.join("batch-frame.png"),
+        position: FrameTimestamp::from_milliseconds(500).into(),
+        format: FrameCaptureFormat::Png,
+    });
+    let mut queue = MediaQueue::new();
+    let candidates = [
+        (identity, media, &remux),
+        (second_identity, second, &extract),
+        (second_identity, second, &frame),
+    ];
+    let ids = queue.enqueue_batch(&candidates).unwrap();
+    assert_eq!(queue.pending_count(), 3);
+    assert!(!queue.is_started());
+    assert!(queue.start(tools, true, |_| MediaProcessWake::default()));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut previous = 0;
+    while queue.is_started() {
+        if let Some(active) = queue.active_job() {
+            let index = ids.iter().position(|id| *id == active).unwrap();
+            assert!(index >= previous);
+            assert!(
+                queue.jobs()[..index]
+                    .iter()
+                    .all(|job| matches!(job.state(), QueueJobState::Completed { .. }))
+            );
+            previous = index;
+        }
+        queue.poll(Some(tools), true, |_| MediaProcessWake::default());
+        assert!(Instant::now() < deadline, "mixed batch did not settle");
+        thread::sleep(Duration::from_millis(5));
+    }
+    for ((job, id), (_, _, request)) in queue.jobs().iter().zip(ids).zip(candidates) {
+        assert_eq!(job.id(), id);
+        assert_eq!(
+            job.state(),
+            &QueueJobState::Completed {
+                output: request.output().to_path_buf()
+            }
+        );
+    }
+    let remuxed = probe_media(tools, remux.output()).unwrap();
+    assert_video(&remuxed, "h264", 320, 180);
+    assert_eq!(remuxed.audio_streams.len(), 2);
+    let audio = probe_media(tools, extract.output()).unwrap();
+    assert!(audio.video_streams.is_empty());
+    assert_eq!(audio.audio_streams.len(), 1);
+    assert_eq!(audio.audio_streams[0].codec.as_deref(), Some("flac"));
+    let image = probe_media(tools, frame.output()).unwrap();
+    assert_video(&image, "png", 320, 180);
+    assert!(image.audio_streams.is_empty());
+    println!("PASS mixed batch: Remux, Audio Extract, Frame Capture");
 }
 
 fn assert_video(media: &MediaFile, codec: &str, width: u32, height: u32) {

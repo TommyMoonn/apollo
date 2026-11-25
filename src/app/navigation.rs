@@ -221,6 +221,7 @@ impl Application {
 
     pub(crate) fn show_batch_setup(&mut self) {
         self.set_navigation(NavigationState::BatchSetup);
+        self.refresh_batch_admission();
     }
 
     pub(crate) fn show_batch_edit(&mut self) {

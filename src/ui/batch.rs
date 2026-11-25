@@ -7,13 +7,12 @@ use crate::{app::Operation, media::error::MediaError};
 use super::{fonts, layout, media_error, media_lifecycle, theme, widgets};
 
 const TITLE: &str = "Batch setup";
-const DEFAULTS_LABEL: &str = "Configure defaults";
+const DEFAULTS_LABEL: &str = "Edit shared settings";
 const ADD_FILES_LABEL: &str = "Add files";
-const OVERRIDE_LABEL: &str = "Override";
-const REVIEW_LABEL: &str = "Review";
-const EXCLUDE_LABEL: &str = "Exclude";
+const EDIT_LABEL: &str = "Edit settings";
+const SKIP_LABEL: &str = "Skip";
+const DETAILS_LABEL: &str = "Details";
 const INCLUDE_LABEL: &str = "Include";
-const ENQUEUE_LABEL: &str = "Add batch to queue";
 const BACK_LABEL: &str = "Back";
 
 use crate::app::{BatchAction, BatchAvailability, BatchItemId, BatchReadiness};
@@ -21,9 +20,9 @@ use crate::app::{BatchAction, BatchAvailability, BatchItemId, BatchReadiness};
 impl BatchReadiness {
     const fn label(self) -> &'static str {
         match self {
-            Self::Inspecting => "Inspecting",
+            Self::Inspecting => "Checking",
             Self::Ready => "Ready",
-            Self::NeedsAttention => "Needs attention",
+            Self::NeedsAttention => "Needs review",
             Self::Incompatible => "Incompatible",
         }
     }
@@ -36,14 +35,22 @@ pub struct BatchItemView<'a> {
     pub readiness: BatchReadiness,
     pub reason: Option<&'a str>,
     pub included: bool,
-    pub edit_action: Option<BatchItemEditAction>,
+    pub can_edit: bool,
+    pub overridden: bool,
+    pub inspection_failed: bool,
     pub can_toggle_included: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BatchItemEditAction {
-    Override,
-    Review,
+impl BatchItemView<'_> {
+    fn status(&self) -> &'static str {
+        if self.inspection_failed {
+            "Couldn't open"
+        } else if !self.included {
+            "Skipped"
+        } else {
+            self.readiness.label()
+        }
+    }
 }
 
 pub struct BatchFeedback<'a> {
@@ -78,7 +85,20 @@ pub fn show(
             show_operation_switcher(ui, operation, &action);
             ui.add_space(theme::SPACING.related);
             let action_width = batch_action_width(ui);
-            let row_plan = layout::batch_row_plan(ui.available_width(), action_width);
+            let metadata_lines = if items.iter().any(|item| item.overridden) {
+                2.0
+            } else {
+                1.0
+            };
+            let row_height = ui.text_style_height(&TextStyle::Body)
+                + (ui.text_style_height(&fonts::technical_text_style()) + theme::SPACING.tight)
+                    * metadata_lines;
+            let row_plan = layout::batch_row_plan(
+                ui.available_width(),
+                action_width,
+                batch_state_width(ui),
+                row_height,
+            );
             if matches!(row_plan.layout, layout::BatchRowLayout::Inline) {
                 show_column_guide(ui, row_plan);
                 ui.add_space(theme::SPACING.tight);
@@ -86,10 +106,28 @@ pub fn show(
             for item in items {
                 widgets::separator(ui);
                 ui.add_space(theme::SPACING.compact);
-                show_item(ui, item.id, item, row_plan, &action);
+                ui.push_id(item.id.0, |ui| {
+                    show_item(ui, item.id, item, row_plan, &action)
+                });
                 ui.add_space(theme::SPACING.compact);
             }
             widgets::separator(ui);
+            let unresolved = items
+                .iter()
+                .filter(|item| item.included && item.readiness != BatchReadiness::Ready)
+                .count();
+            if unresolved > 0 {
+                ui.add_space(theme::SPACING.related);
+                let _ = widgets::inline_status(
+                    ui,
+                    &if unresolved == 1 {
+                        "1 included file needs review or inspection.".to_owned()
+                    } else {
+                        format!("{unresolved} included files need review or inspection.")
+                    },
+                    widgets::InlineStatusKind::Error,
+                );
+            }
             if let Some(error) = feedback.status {
                 ui.add_space(theme::SPACING.related);
                 let _ = widgets::inline_status(ui, error, widgets::InlineStatusKind::Error);
@@ -100,9 +138,13 @@ pub fn show(
             }
         },
         |ui| {
-            if widgets::primary_button_enabled(ui, ENQUEUE_LABEL, availability.can_enqueue)
-                .clicked()
-            {
+            let included = items.iter().filter(|item| item.included).count();
+            let label = if included == 1 {
+                "Add 1 job to queue".to_owned()
+            } else {
+                format!("Add {included} jobs to queue")
+            };
+            if widgets::primary_button_enabled(ui, &label, availability.can_enqueue).clicked() {
                 action.set(BatchAction::Enqueue);
             }
             if widgets::secondary_button(ui, BACK_LABEL).clicked() {
@@ -142,7 +184,7 @@ fn show_header(
         ui.add_space(theme::SPACING.compact);
         ui.allocate_ui_with_layout(
             vec2(ui.available_width(), theme::COMPACT_CONTROL_HEIGHT),
-            Layout::right_to_left(Align::Center),
+            Layout::right_to_left(Align::Center).with_main_wrap(true),
             |ui| {
                 show_header_actions(
                     ui,
@@ -238,7 +280,7 @@ fn show_item(
 ) {
     match plan.layout {
         layout::BatchRowLayout::Inline => show_inline_item(ui, index, item, plan, action),
-        layout::BatchRowLayout::Stacked => show_stacked_item(ui, index, item, action),
+        layout::BatchRowLayout::Stacked => show_stacked_item(ui, index, item, plan, action),
     }
 }
 
@@ -252,43 +294,59 @@ fn show_inline_item(
     let (row, _) =
         ui.allocate_exact_size(vec2(ui.available_width(), plan.row_height), Sense::hover());
     let cells = plan.columns(row);
-    exact_cell(
-        ui,
-        cells.identity,
-        Layout::top_down(Align::Min).with_main_align(Align::Center),
-        |ui| show_identity(ui, item),
-    );
+    show_identity_cell(ui, cells.identity, item);
     exact_cell(
         ui,
         cells.state,
-        Layout::top_down(Align::Min).with_main_align(Align::Center),
+        Layout::left_to_right(Align::Center),
         |ui| show_status(ui, item),
     );
-    exact_cell(
-        ui,
-        cells.actions,
-        Layout::right_to_left(Align::Center),
-        |ui| show_item_actions(ui, index, item, action),
-    );
+    show_action_cell(ui, cells.actions, index, item, action);
 }
 
 fn show_stacked_item(
     ui: &mut Ui,
     index: BatchItemId,
     item: &BatchItemView<'_>,
+    plan: layout::BatchRowPlan,
     action: &Cell<BatchAction>,
 ) {
-    show_identity(ui, item);
+    let (identity, _) =
+        ui.allocate_exact_size(vec2(ui.available_width(), plan.row_height), Sense::hover());
+    show_identity_cell(ui, identity, item);
     ui.add_space(theme::SPACING.compact);
-    show_status(ui, item);
-    if item.edit_action.is_some() || item.can_toggle_included {
-        ui.add_space(theme::SPACING.tight);
-        ui.allocate_ui_with_layout(
-            vec2(ui.available_width(), theme::COMPACT_CONTROL_HEIGHT),
-            Layout::right_to_left(Align::Center),
-            |ui| show_item_actions(ui, index, item, action),
-        );
-    }
+    ui.allocate_ui_with_layout(
+        vec2(
+            ui.available_width(),
+            widgets::plain_button_intrinsic_size(ui, DETAILS_LABEL).y,
+        ),
+        Layout::left_to_right(Align::Center),
+        |ui| show_status(ui, item),
+    );
+    ui.add_space(theme::SPACING.tight);
+    let (edit, toggle) = action_sizes(ui);
+    let (row, _) = ui.allocate_exact_size(
+        vec2(ui.available_width(), edit.y.max(toggle.y)),
+        Sense::hover(),
+    );
+    let group = Rect::from_min_max(
+        egui::pos2(row.right() - plan.action_width, row.top()),
+        row.right_bottom(),
+    );
+    show_action_cell(ui, group, index, item, action);
+}
+
+fn show_identity_cell(ui: &mut Ui, rect: Rect, item: &BatchItemView<'_>) {
+    let metadata_lines =
+        usize::from(item.output.and_then(Path::file_name).is_some()) + usize::from(item.overridden);
+    let height = ui.text_style_height(&TextStyle::Body)
+        + (ui.text_style_height(&fonts::technical_text_style()) + theme::SPACING.tight)
+            * metadata_lines as f32;
+    let identity =
+        Rect::from_center_size(rect.center(), vec2(rect.width(), height.min(rect.height())));
+    exact_cell(ui, identity, Layout::top_down(Align::Min), |ui| {
+        show_identity(ui, item)
+    });
 }
 
 fn show_identity(ui: &mut Ui, item: &BatchItemView<'_>) {
@@ -316,23 +374,77 @@ fn show_identity(ui: &mut Ui, item: &BatchItemView<'_>) {
             output,
         );
     }
-}
-
-fn show_status(ui: &mut Ui, item: &BatchItemView<'_>) {
-    ui.spacing_mut().item_spacing.y = theme::SPACING.tight;
-    media_lifecycle::technical_faint(ui, item.readiness.label());
-    if let Some(reason) = item.reason {
-        let response = ui.add(
+    if item.overridden {
+        ui.add(
             egui::Label::new(
-                RichText::new(reason)
+                RichText::new("Custom settings")
                     .text_style(fonts::technical_text_style())
                     .color(theme::SECONDARY_FAINT),
             )
-            .truncate()
+            .extend()
             .selectable(false),
         );
-        response.on_hover_text(reason);
     }
+}
+
+fn show_status(ui: &mut Ui, item: &BatchItemView<'_>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = theme::INLINE_ACTION_GAP;
+        ui.add(
+            egui::Label::new(
+                RichText::new(item.status())
+                    .text_style(TextStyle::Button)
+                    .color(theme::SECONDARY),
+            )
+            .extend()
+            .selectable(false),
+        );
+        if let Some(reason) = item.reason.filter(|reason| !reason.is_empty()) {
+            let id = ui
+                .id()
+                .with(("batch-reason", item.id.0, item.source, reason));
+            if widgets::plain_button(ui, DETAILS_LABEL).clicked() {
+                ui.data_mut(|data| data.insert_temp(id, true));
+            }
+            if ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false)) {
+                let modal = egui::Modal::new(id).show(ui.ctx(), |ui| {
+                    ui.set_max_width(400.0);
+                    ui.heading(item.status());
+                    media_lifecycle::diagnostic_viewport(ui, reason);
+                    widgets::secondary_button(ui, "Close").clicked()
+                });
+                if modal.inner || modal.should_close() {
+                    ui.data_mut(|data| data.remove::<bool>(id));
+                }
+            }
+        }
+    });
+}
+
+fn action_sizes(ui: &Ui) -> (egui::Vec2, egui::Vec2) {
+    let edit = widgets::plain_action_slot_size(ui, EDIT_LABEL);
+    let toggle = widgets::plain_action_slot_size(ui, SKIP_LABEL)
+        .max(widgets::plain_action_slot_size(ui, INCLUDE_LABEL));
+    (edit, toggle)
+}
+
+// Allocate the complete action pair from left to right so keyboard order follows visual order.
+fn show_action_cell(
+    ui: &mut Ui,
+    rect: Rect,
+    index: BatchItemId,
+    item: &BatchItemView<'_>,
+    action: &Cell<BatchAction>,
+) {
+    let mut cell = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    cell.set_min_size(rect.size());
+    let focus_outset = theme::FOCUS_OFFSET + theme::FOCUS_STROKE_WIDTH;
+    cell.set_clip_rect(ui.clip_rect().intersect(rect.expand(focus_outset)));
+    show_item_actions(&mut cell, index, item, action);
 }
 
 fn show_item_actions(
@@ -342,35 +454,60 @@ fn show_item_actions(
     action: &Cell<BatchAction>,
 ) {
     ui.spacing_mut().item_spacing.x = theme::INLINE_ACTION_GAP;
+    let (edit, toggle) = action_sizes(ui);
+    if item.can_edit {
+        if widgets::plain_button_sized(ui, EDIT_LABEL, edit).clicked() {
+            action.set(BatchAction::EditItem(index));
+        }
+    } else {
+        ui.allocate_space(edit);
+    }
     if item.can_toggle_included {
-        let toggle_label = if item.included {
-            EXCLUDE_LABEL
+        let label = if item.included {
+            SKIP_LABEL
         } else {
             INCLUDE_LABEL
         };
-        if widgets::plain_button(ui, toggle_label).clicked() {
+        if widgets::plain_button_sized(ui, label, toggle).clicked() {
             action.set(BatchAction::ToggleIncluded(index));
         }
-    }
-    if let Some(edit_action) = item.edit_action {
-        let label = match edit_action {
-            BatchItemEditAction::Override => OVERRIDE_LABEL,
-            BatchItemEditAction::Review => REVIEW_LABEL,
-        };
-        if widgets::plain_button(ui, label).clicked() {
-            action.set(BatchAction::EditItem(index));
-        }
+    } else {
+        ui.allocate_space(toggle);
     }
 }
 
 fn batch_action_width(ui: &Ui) -> f32 {
-    let edit = widgets::plain_button_intrinsic_size(ui, OVERRIDE_LABEL)
-        .x
-        .max(widgets::plain_button_intrinsic_size(ui, REVIEW_LABEL).x);
-    let toggle = widgets::plain_button_intrinsic_size(ui, EXCLUDE_LABEL)
-        .x
-        .max(widgets::plain_button_intrinsic_size(ui, INCLUDE_LABEL).x);
-    edit + theme::INLINE_ACTION_GAP + toggle
+    let (edit, toggle) = action_sizes(ui);
+    (edit.x + theme::INLINE_ACTION_GAP + toggle.x).ceil()
+}
+
+fn batch_state_width(ui: &Ui) -> f32 {
+    let width = [
+        "Checking",
+        "Ready",
+        "Needs review",
+        "Incompatible",
+        "Skipped",
+        "Couldn't open",
+    ]
+    .into_iter()
+    .map(|label| {
+        ui.painter()
+            .layout_no_wrap(
+                label.to_owned(),
+                TextStyle::Button.resolve(ui.style()),
+                theme::SECONDARY,
+            )
+            .size()
+            .x
+    })
+    .fold(0.0, f32::max);
+    (width
+        + theme::INLINE_ACTION_GAP
+        + widgets::plain_button_intrinsic_size(ui, DETAILS_LABEL).x
+        + theme::FOCUS_OFFSET
+        + theme::FOCUS_STROKE_WIDTH)
+        .ceil()
 }
 
 fn show_column_guide(ui: &mut Ui, plan: layout::BatchRowPlan) {
@@ -409,8 +546,7 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        ADD_FILES_LABEL, BatchFeedback, BatchItemEditAction, BatchItemView, BatchReadiness,
-        DEFAULTS_LABEL, TITLE, show,
+        ADD_FILES_LABEL, BatchFeedback, BatchItemView, BatchReadiness, DEFAULTS_LABEL, TITLE, show,
     };
     use crate::{
         app::Operation,
@@ -463,7 +599,9 @@ mod tests {
             readiness: BatchReadiness::Ready,
             reason: None,
             included: true,
-            edit_action: Some(BatchItemEditAction::Override),
+            can_edit: true,
+            overridden: false,
+            inspection_failed: false,
             can_toggle_included: true,
         });
         let context = egui::Context::default();
@@ -519,7 +657,9 @@ mod tests {
             readiness: BatchReadiness::Ready,
             reason: None,
             included: true,
-            edit_action: Some(BatchItemEditAction::Override),
+            can_edit: true,
+            overridden: false,
+            inspection_failed: false,
             can_toggle_included: true,
         });
         let context = egui::Context::default();
@@ -547,7 +687,7 @@ mod tests {
         });
 
         let ready = output_text_rects(&output, "Ready");
-        let exclude = output_text_rects(&output, "Exclude");
+        let exclude = output_text_rects(&output, "Skip");
         assert_eq!(ready.len(), 3);
         assert_eq!(exclude.len(), 3);
         assert!(
@@ -564,5 +704,82 @@ mod tests {
         assert!(output_text_rects(&output, "Status").len() == 1);
         assert!(output_text_rects(&output, "Actions").len() == 1);
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn mixed_batch_rows_keep_status_details_and_toggle_slots_aligned() {
+        use super::{action_sizes, batch_action_width, batch_state_width, show_item};
+        use crate::app::{BatchAction, BatchItemId};
+        use crate::ui::layout;
+        use std::cell::Cell;
+        let mut item = BatchItemView {
+            id: BatchItemId(0),
+            source: Path::new("a-very-long-source-name-that-must-truncate-inside-its-own-cell.mp4"),
+            output: Some(Path::new(
+                "a-very-long-output-name-that-must-truncate-inside-its-own-cell.mkv",
+            )),
+            readiness: BatchReadiness::NeedsAttention,
+            reason: Some("A detailed reason that must not occupy the status column"),
+            included: true,
+            can_edit: true,
+            overridden: true,
+            inspection_failed: false,
+            can_toggle_included: true,
+        };
+        for width in [
+            layout::MAX_CONTENT_WIDTH,
+            layout::MINIMUM_CONTENT_SIZE.x - 2.0 * f32::from(layout::CONTENT_PADDING),
+        ] {
+            let context = egui::Context::default();
+            fonts::install(&context);
+            theme::install(&context);
+            let render = |item: &BatchItemView<'_>| {
+                let mut output = context.run_ui(Default::default(), |ui| {
+                    ui.set_width(width);
+                    let plan = layout::batch_row_plan(
+                        width,
+                        batch_action_width(ui),
+                        batch_state_width(ui),
+                        60.0,
+                    );
+                    let (_, toggle) = action_sizes(ui);
+                    assert!(
+                        toggle.x
+                            >= crate::ui::widgets::plain_button_intrinsic_size(ui, "Include").x
+                    );
+                    show_item(ui, item.id, item, plan, &Cell::new(BatchAction::None));
+                });
+                output.textures_delta.clear();
+                output
+            };
+            item.included = true;
+            let included = render(&item);
+            let status = output_text_rects(&included, "Needs review")[0];
+            let details = output_text_rects(&included, "Details")[0];
+            let edit = output_text_rects(&included, "Edit settings")[0];
+            let skip = output_text_rects(&included, "Skip")[0];
+            assert!(
+                details.left() >= status.right(),
+                "{width}: {status:?}, {details:?}"
+            );
+            assert!(
+                (output_text_baseline(&included, "Needs review").unwrap()
+                    - output_text_baseline(&included, "Details").unwrap())
+                .abs()
+                    <= 1.0
+            );
+            assert!(edit.right() <= skip.left());
+            item.included = false;
+            let skipped = render(&item);
+            let include = output_text_rects(&skipped, "Include")[0];
+            let edit_after = output_text_rects(&skipped, "Edit settings")[0];
+            assert!(
+                (skip.center() - include.center()).length() <= 1.0,
+                "{width}: {skip:?}, {include:?}"
+            );
+            assert!((edit.center() - edit_after.center()).length() <= 1.0);
+            assert_eq!(output_text_rects(&skipped, "Skipped").len(), 1);
+            assert_eq!(output_text_rects(&skipped, "Details").len(), 1);
+        }
     }
 }

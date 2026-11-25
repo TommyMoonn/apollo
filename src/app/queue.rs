@@ -202,11 +202,26 @@ impl Application {
     }
 
     pub(crate) fn poll_media_queue(&mut self, wake: impl FnMut() -> MediaProcessWake) {
+        let before = self.batch_setup.is_some().then(|| {
+            (
+                self.queue.scheduler().pending_count(),
+                self.queue.scheduler().active_job(),
+            )
+        });
         self.queue.poll(
             self.discovery.ready(),
             self.discovery.settled_capabilities().is_some(),
             wake,
         );
+        if before.is_some_and(|before| {
+            before
+                != (
+                    self.queue.scheduler().pending_count(),
+                    self.queue.scheduler().active_job(),
+                )
+        }) {
+            self.refresh_batch_admission();
+        }
     }
 
     pub(crate) fn queue_action(

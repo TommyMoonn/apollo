@@ -167,6 +167,11 @@ pub fn plain_button_intrinsic_size(ui: &Ui, label: &str) -> Vec2 {
     )
 }
 
+/// Padded slot for adjacent plain actions whose labels can change independently.
+pub fn plain_action_slot_size(ui: &Ui, label: &str) -> Vec2 {
+    plain_button_intrinsic_size(ui, label) + vec2(BUTTON_HORIZONTAL_PADDING * 2.0, 0.0)
+}
+
 /// Truncate a one-line identity while retaining its complete path on hover.
 #[must_use]
 pub fn truncated_identity(ui: &mut Ui, text: RichText, complete_path: &Path) -> Response {
@@ -256,15 +261,12 @@ pub fn compact_secondary_button_intrinsic_size(ui: &Ui, label: &str) -> Vec2 {
 /// or Show details. Keyboard focus still receives the shared focus outline.
 #[must_use]
 pub fn plain_button(ui: &mut Ui, label: &str) -> Response {
-    let galley = ui.painter().layout_no_wrap(
-        label.to_owned(),
-        plain_button_text_style().resolve(ui.style()),
-        theme::SECONDARY,
-    );
-    let desired_size = vec2(
-        galley.size().x,
-        theme::COMPACT_CONTROL_HEIGHT.max(galley.size().y),
-    );
+    plain_button_sized(ui, label, plain_button_intrinsic_size(ui, label))
+}
+
+#[must_use]
+pub fn plain_button_sized(ui: &mut Ui, label: &str, size: Vec2) -> Response {
+    let desired_size = size.max(plain_button_intrinsic_size(ui, label));
     let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
     let state = interaction_state(&response);
     let foreground = match state {
@@ -1817,6 +1819,10 @@ mod tests {
         }
 
         activate_with_keyboard(|ui| mode_button(ui, "Audio Mix", false));
+        activate_with_keyboard(|ui| super::plain_button(ui, "Details"));
+        activate_with_keyboard(|ui| {
+            super::plain_button_sized(ui, "Skip", super::plain_action_slot_size(ui, "Include"))
+        });
         activate_with_keyboard(|ui| {
             selectable_row(
                 ui,

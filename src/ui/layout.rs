@@ -60,7 +60,6 @@ pub const QUEUE_ROW_HEIGHT: f32 = 44.0;
 
 /// Batch rows share Queue's two-line identity rhythm while reserving stable status and actions.
 pub const BATCH_IDENTITY_MIN_WIDTH: f32 = 180.0;
-pub const BATCH_STATE_WIDTH: f32 = 150.0;
 pub const BATCH_ROW_HEIGHT: f32 = 44.0;
 
 /// Useful source identity width retained beside workspace source actions before compact metadata
@@ -847,10 +846,15 @@ pub fn queue_row_plan(
     }
 }
 
-pub fn batch_row_plan(available_width: f32, action_width: f32) -> BatchRowPlan {
+pub fn batch_row_plan(
+    available_width: f32,
+    action_width: f32,
+    state_width: f32,
+    row_height: f32,
+) -> BatchRowPlan {
     let available_width = safe_dimension(available_width);
     let action_width = safe_dimension(action_width);
-    let fixed_width = BATCH_STATE_WIDTH + action_width + 2.0 * theme::SPACING.related;
+    let fixed_width = state_width + action_width + 2.0 * theme::SPACING.related;
     let identity_width = (available_width - fixed_width).max(0.0);
     let layout = if identity_width >= BATCH_IDENTITY_MIN_WIDTH {
         BatchRowLayout::Inline
@@ -859,9 +863,9 @@ pub fn batch_row_plan(available_width: f32, action_width: f32) -> BatchRowPlan {
     };
     BatchRowPlan {
         layout,
-        row_height: BATCH_ROW_HEIGHT,
+        row_height: row_height.max(BATCH_ROW_HEIGHT),
         identity_width,
-        state_width: BATCH_STATE_WIDTH,
+        state_width,
         action_width,
     }
 }
@@ -1077,7 +1081,7 @@ mod tests {
     #[test]
     fn batch_rows_keep_shared_bounded_cells_and_stack_at_narrow_width() {
         let action_width = 128.0;
-        let wide = batch_row_plan(620.0, action_width);
+        let wide = batch_row_plan(620.0, action_width, 150.0, BATCH_ROW_HEIGHT);
         assert_eq!(wide.layout, BatchRowLayout::Inline);
         assert_eq!(wide.action_width, action_width);
         assert!(wide.identity_width >= BATCH_IDENTITY_MIN_WIDTH);
@@ -1097,7 +1101,7 @@ mod tests {
         );
 
         assert_eq!(
-            batch_row_plan(420.0, action_width).layout,
+            batch_row_plan(420.0, action_width, 150.0, BATCH_ROW_HEIGHT).layout,
             BatchRowLayout::Stacked
         );
     }

@@ -137,15 +137,8 @@ impl MediaQueue {
         let raw_last = raw_start
             .checked_add(offset)
             .ok_or(BatchEnqueueError::JobIdExhausted)?;
-        for (index, (identity, media, operation)) in items.iter().enumerate() {
-            Self::validate_admission(identity, media, operation)
-                .and_then(|()| {
-                    Self::validate_unreserved_destination(
-                        operation.output(),
-                        self.exact_reservations(),
-                    )
-                })
-                .map_err(|error| BatchEnqueueError::Item { index, error })?;
+        if let Some(error) = self.batch_admission_errors(items).into_iter().next() {
+            return Err(error);
         }
 
         let mut ids = Vec::with_capacity(items.len());
@@ -161,6 +154,51 @@ impl MediaQueue {
         }
         self.next_job_id = raw_last.checked_add(1);
         Ok(ids)
+    }
+
+    /// Check all included candidates using the same rules as atomic submission.
+    pub(crate) fn batch_admission_errors(
+        &self,
+        items: &[(&SourceIdentity, &MediaFile, &QueuedOperation)],
+    ) -> Vec<BatchEnqueueError> {
+        // Resolve existing paths once for this admission pass, not once per candidate.
+        let reserved: Vec<_> = self
+            .pending_jobs()
+            .flat_map(|job| Self::job_destinations(job).map(move |path| (job.id(), path)))
+            .collect();
+        let mut destinations = Vec::new();
+        let mut errors = Vec::new();
+        for (index, (identity, media, operation)) in items.iter().enumerate() {
+            let result = Self::validate_admission(identity, media, operation)
+                .and_then(|()| {
+                    normalized_output_destination(operation.output())
+                        .map_err(QueueEnqueueError::Output)
+                })
+                .and_then(|destination| {
+                    if let Some((id, _)) = reserved
+                        .iter()
+                        .find(|(_, path)| same_destination(&destination, path))
+                    {
+                        Err(QueueEnqueueError::DestinationReserved(*id))
+                    } else {
+                        Ok(destination)
+                    }
+                });
+            match result {
+                Ok(destination) => {
+                    if destinations
+                        .iter()
+                        .any(|other: &std::path::PathBuf| same_destination(&destination, other))
+                    {
+                        errors.push(BatchEnqueueError::DuplicateDestination { index });
+                    } else {
+                        destinations.push(destination);
+                    }
+                }
+                Err(error) => errors.push(BatchEnqueueError::Item { index, error }),
+            }
+        }
+        errors
     }
 
     pub(crate) fn next_job_ready(&self, capabilities_ready: bool) -> bool {
@@ -287,6 +325,17 @@ impl MediaQueue {
             .filter(|job| job.collision_policy() == OutputCollisionPolicy::Exact)
     }
 
+    /// The requested destination and, for an active job, the selected publication name.
+    fn job_destinations(job: &QueuedJob) -> impl Iterator<Item = std::path::PathBuf> + '_ {
+        let active = match job.state() {
+            QueueJobState::Running { output } => Some(output.as_path()),
+            _ => None,
+        };
+        std::iter::once(job.operation().output())
+            .chain(active)
+            .filter_map(|path| normalized_output_destination(path).ok())
+    }
+
     /// Derive reservations from retained pending jobs, including the active selected name.
     /// Normal submissions can share numbered destinations, but not an exact retry reservation.
     fn validate_unreserved_destination<'a>(
@@ -300,13 +349,7 @@ impl MediaQueue {
         let destination =
             normalized_output_destination(output).map_err(QueueEnqueueError::Output)?;
         for job in jobs {
-            let matches = |path| {
-                normalized_output_destination(path)
-                    .is_ok_and(|other| same_destination(&destination, &other))
-            };
-            if matches(job.operation().output())
-                || matches!(job.state(), QueueJobState::Running { output } if matches(output))
-            {
+            if Self::job_destinations(job).any(|other| same_destination(&destination, &other)) {
                 return Err(QueueEnqueueError::DestinationReserved(job.id()));
             }
         }
@@ -535,7 +578,7 @@ impl MediaQueue {
             .expect("active queue job remains retained until it reaches a terminal state")
     }
 
-    fn validate_admission(
+    pub(crate) fn validate_admission(
         source_identity: &SourceIdentity,
         media: &MediaFile,
         operation: &QueuedOperation,
@@ -602,8 +645,8 @@ mod tests {
             tools::{MediaTools, VideoEncoderCapability},
         },
         queue::model::{
-            JobId, QueueEnqueueError, QueueJobFailure, QueueJobState, QueueMutationError,
-            QueueRunState, QueuedOperation, WaitingJobMove,
+            BatchEnqueueError, JobId, QueueEnqueueError, QueueJobFailure, QueueJobState,
+            QueueMutationError, QueueRunState, QueuedOperation, WaitingJobMove,
         },
         remux::model::RemuxRequest,
         upscale::model::{
@@ -736,6 +779,67 @@ mod tests {
         assert_eq!(next.get(), 3);
         assert_eq!(queue.jobs()[2].source_identity(), &first_media_identity);
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn batch_conflicts_reject_atomically_and_active_reservations_release_on_settlement() {
+        let directory = TestDirectory::new("batch-reservation");
+        let (identity, source) = media(&directory, "source.mkv");
+        let output = directory.path().join("result.mkv");
+        let alias = directory.path().join(".").join("result.mkv");
+        let request = remux(&source, output.clone());
+        let duplicate = remux(&source, alias);
+        let mut queue = MediaQueue::new();
+        assert_eq!(
+            queue.enqueue_batch(&[
+                (&identity, &source, &request),
+                (&identity, &source, &duplicate)
+            ]),
+            Err(BatchEnqueueError::DuplicateDestination { index: 1 })
+        );
+        assert!(queue.jobs().is_empty());
+        let active = queue.enqueue(&identity, &source, request.clone()).unwrap();
+        assert_eq!(active.get(), 1);
+        assert_eq!(
+            queue.enqueue_batch(&[(&identity, &source, &duplicate)]),
+            Err(BatchEnqueueError::Item {
+                index: 0,
+                error: QueueEnqueueError::DestinationReserved(active)
+            })
+        );
+        // A pre-existing file makes the active job reserve its selected numbered name too.
+        fs::write(&output, b"existing").unwrap();
+        let process = FakeProcessControl::running();
+        let mut launcher = |_, _| Ok(process.clone());
+        let tools = tools(&directory);
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
+        let selected = remux(&source, directory.path().join("result (1).mkv"));
+        assert_eq!(
+            queue.enqueue_batch(&[(&identity, &source, &selected)]),
+            Err(BatchEnqueueError::Item {
+                index: 0,
+                error: QueueEnqueueError::DestinationReserved(active)
+            })
+        );
+        assert!(queue.stop_after_current());
+        let other = remux(&source, directory.path().join("other.mkv"));
+        let ids = queue
+            .enqueue_batch(&[(&identity, &source, &other)])
+            .unwrap();
+        assert_eq!(ids[0].get(), 2);
+        assert_eq!(queue.run_state(), QueueRunState::StoppingAfterCurrent);
+        fs::write(queue.temporary_output_path().unwrap(), b"finished").unwrap();
+        process.set_state(MediaProcessState::Completed);
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        let history = queue.jobs()[0].clone();
+        let ids = queue
+            .enqueue_batch(&[(&identity, &source, &request)])
+            .unwrap();
+        assert_eq!(ids[0].get(), 3);
+        assert_eq!(queue.jobs()[0], history);
+        assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
+        assert_eq!(queue.jobs()[2].state(), &QueueJobState::Waiting);
     }
 
     #[test]
@@ -1198,8 +1302,8 @@ mod tests {
         let first = queue
             .enqueue(&source_identity, &source, remux(&source, output.clone()))
             .unwrap();
-        let ids = queue
-            .enqueue_batch(&[(&source_identity, &source, &remux(&source, output.clone()))])
+        let second = queue
+            .enqueue(&source_identity, &source, remux(&source, output.clone()))
             .unwrap();
         fs::write(&output, b"external output").unwrap();
         let first_process = FakeProcessControl::running();
@@ -1209,7 +1313,7 @@ mod tests {
         assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
         for (id, process, bytes, suffix) in [
             (first, first_process, b"first".as_slice(), 1),
-            (ids[0], second_process, b"second".as_slice(), 2),
+            (second, second_process, b"second".as_slice(), 2),
         ] {
             assert_eq!(queue.active_job(), Some(id));
             let actual = directory.path().join(format!("result ({suffix}).mkv"));

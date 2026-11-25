@@ -482,14 +482,10 @@ fn inspection_append_and_atomic_enqueue_preserve_item_identity() {
     assert_eq!(batch.items.len(), 5);
     assert_eq!(batch.items[1], retained);
     assert_eq!(batch.items[2].id, BatchItemId(2));
-    assert_eq!(
-        app.batch_availability(),
-        Some(BatchAvailability {
-            can_configure: true,
-            can_add_files: true,
-            can_enqueue: true
-        })
-    );
+    assert!(!app.batch_availability().unwrap().can_enqueue);
+    assert_eq!(batch.items[4].readiness, BatchReadiness::NeedsAttention);
+    assert!(!app.enqueue_batch());
+    assert_no_batch_execution(&app);
     assert!(app.begin_batch_edit(BatchEditTarget::Item(BatchItemId(2))));
     app.batch_edit
         .as_mut()
@@ -497,13 +493,43 @@ fn inspection_append_and_atomic_enqueue_preserve_item_identity() {
         .remux
         .set_custom_output_path(output.clone());
     assert!(app.save_batch_edit());
+    assert!(!app.batch_availability().unwrap().can_enqueue);
+    assert_eq!(
+        app.batch_setup.as_ref().unwrap().items[2].readiness,
+        BatchReadiness::NeedsAttention
+    );
+    assert!(app.begin_batch_edit(BatchEditTarget::Item(BatchItemId(2))));
+    let alias_output = first_dir.join("alias-output.mkv");
+    app.batch_edit
+        .as_mut()
+        .unwrap()
+        .remux
+        .set_custom_output_path(alias_output.clone());
+    assert!(app.save_batch_edit());
+    app.toggle_batch_item(BatchItemId(4));
+    assert!(app.batch_availability().unwrap().can_enqueue);
+    app.toggle_batch_item(BatchItemId(4));
+    assert!(!app.batch_availability().unwrap().can_enqueue);
+    assert!(app.begin_batch_edit(BatchEditTarget::Item(BatchItemId(4))));
+    app.batch_edit
+        .as_mut()
+        .unwrap()
+        .remux
+        .set_custom_output_path(last_dir.join("second-output.mkv"));
+    assert!(app.save_batch_edit());
+    assert!(app.batch_availability().unwrap().can_enqueue);
     assert!(app.enqueue_batch());
     assert!(app.batch_setup.is_none());
+    assert!(!app.enqueue_batch());
     let jobs = app.queue.scheduler().jobs();
     assert_eq!(jobs.len(), 4);
+    assert_eq!(
+        jobs.iter().map(|job| job.id().get()).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
     assert_eq!(jobs[0].operation().input(), first);
     assert_eq!(jobs[0].operation().output(), output);
-    assert_eq!(jobs[1].operation().output(), output);
+    assert_eq!(jobs[1].operation().output(), alias_output);
     assert_eq!(jobs[2].operation().input(), last);
     assert_eq!(jobs[3].operation().input(), last);
     assert_eq!(
@@ -638,4 +664,56 @@ fn stale_batch_admission_marks_only_the_originating_item_and_retains_other_reque
     assert_eq!(jobs[0].operation(), first.operation.as_ref().unwrap());
     fs::remove_dir_all(first_dir).unwrap();
     fs::remove_dir_all(second_dir).unwrap();
+}
+
+#[test]
+fn batch_readiness_recovers_after_pending_destination_is_removed_in_queue() {
+    let (directory, path) = temp_file("reservation-release");
+    let source = media(&path);
+    let mut app = app();
+    let identity = SourceIdentity::read(&path).unwrap();
+    let editor = OperationEditorState::new(0, None, source.clone(), Operation::Remux);
+    let request = editor.validated_request(None).unwrap();
+    let pending = app
+        .queue
+        .enqueue(&identity, &source, request.clone())
+        .unwrap();
+    app.batch_setup = Some(BatchSetupState {
+        origin: BatchOrigin::NoSource,
+        operation: Operation::Remux,
+        defaults: batch_defaults_from_editor(&editor),
+        items: vec![BatchItem {
+            id: BatchItemId(6),
+            path: path.clone(),
+            included: true,
+            source: ready_batch_source(source),
+            operation: Some(request.clone()),
+            readiness: BatchReadiness::Ready,
+            reason: None,
+            overridden: false,
+        }],
+        error: None,
+        append_error: None,
+    });
+    app.show_batch_setup();
+    assert!(!app.batch_availability().unwrap().can_enqueue);
+    assert!(
+        app.batch_setup.as_ref().unwrap().items[0]
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("reserved")
+    );
+    assert!(app.enter_queue());
+    assert!(matches!(
+        app.queue_action(crate::app::QueueAction::Remove(pending), Default::default),
+        crate::app::queue::QueueEffect::Handled(true)
+    ));
+    app.return_from_queue();
+    assert!(app.batch_availability().unwrap().can_enqueue);
+    assert!(app.batch_setup.as_ref().unwrap().items[0].reason.is_none());
+    assert!(app.enqueue_batch());
+    assert_eq!(app.queue.scheduler().jobs()[0].id().get(), 2);
+    assert_eq!(app.queue.scheduler().jobs()[0].operation(), &request);
+    fs::remove_dir_all(directory).unwrap();
 }

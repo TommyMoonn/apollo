@@ -24,8 +24,8 @@ pub const ADD_TO_QUEUE_LABEL: &str = "Add to queue";
 pub const ADDED_TO_QUEUE_LABEL: &str = "Added to queue";
 pub const SAVE_QUEUE_CHANGES_LABEL: &str = "Save changes";
 pub const CANCEL_QUEUE_EDIT_LABEL: &str = "Cancel edit";
-pub const APPLY_BATCH_DEFAULTS_LABEL: &str = "Apply defaults";
-pub const SAVE_BATCH_OVERRIDE_LABEL: &str = "Save override";
+pub const APPLY_BATCH_DEFAULTS_LABEL: &str = "Apply settings";
+pub const SAVE_BATCH_OVERRIDE_LABEL: &str = "Save changes";
 pub const CANCEL_BATCH_EDIT_LABEL: &str = "Cancel";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

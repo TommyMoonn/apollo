@@ -8,7 +8,7 @@ use crate::{
         batch::BatchInspectionOwner, container::MediaContainer, error::MediaError,
         intake::SourceIdentity, model::MediaFile,
     },
-    queue::QueuedOperation,
+    queue::{BatchEnqueueError, QueuedOperation},
     upscale::{
         draft::UpscaleEncoderCapabilities,
         model::{UpscaleEncoderSettings, UpscaleTarget, VideoCodec},
@@ -313,6 +313,7 @@ impl Application {
             batch.defaults = batch_defaults_from_editor(&editor);
         }
         refresh_batch_items(batch, capabilities);
+        self.refresh_batch_admission();
         if complete {
             self.batch_inspection = None;
         }
@@ -467,10 +468,10 @@ impl Application {
                 let Some(item) = batch.items.iter_mut().find(|item| item.id == index) else {
                     return false;
                 };
+                item.overridden |= item.operation.as_ref() != Some(&operation);
                 item.operation = Some(operation);
                 item.readiness = BatchReadiness::Ready;
                 item.reason = None;
-                item.overridden = true;
             }
         }
         self.finish_batch_edit()
@@ -531,19 +532,31 @@ impl Application {
                 true
             }
             Err(error) => {
-                let (batch_id, message) = match &error {
-                    crate::queue::BatchEnqueueError::Item { index, error } => {
-                        (source_ids.get(*index).copied(), error.to_string())
-                    }
-                    crate::queue::BatchEnqueueError::JobIdExhausted => (None, error.to_string()),
+                let message = match &error {
+                    BatchEnqueueError::Item { error, .. } => error.to_string(),
+                    _ => error.to_string(),
                 };
-                if let Some(index) = batch_id
-                    && let Some(item) = batch.items.iter_mut().find(|item| item.id == index)
-                {
-                    item.readiness = BatchReadiness::NeedsAttention;
-                    item.reason = Some(message.clone());
+                self.refresh_batch_admission();
+                if let Some(batch) = self.batch_setup.as_mut() {
+                    // Preserve the precise failure even if the filesystem changed again during refresh.
+                    let index = match &error {
+                        BatchEnqueueError::Item { index, .. }
+                        | BatchEnqueueError::DuplicateDestination { index } => {
+                            source_ids.get(*index)
+                        }
+                        BatchEnqueueError::JobIdExhausted => None,
+                    };
+                    if let Some(item) =
+                        index.and_then(|id| batch.items.iter_mut().find(|item| item.id == *id))
+                    {
+                        item.readiness = BatchReadiness::NeedsAttention;
+                        item.reason = Some(match error {
+                            BatchEnqueueError::Item { error, .. } => error.to_string(),
+                            _ => message.clone(),
+                        });
+                    }
+                    batch.error = Some(format!("Batch was not queued: {message}"));
                 }
-                batch.error = Some(format!("Batch was not queued: {message}"));
                 false
             }
         }
@@ -571,6 +584,7 @@ impl Application {
                 batch.defaults = batch_defaults_from_editor(&editor);
             }
             refresh_batch_items(batch, capabilities);
+            self.refresh_batch_admission();
         }
     }
 
@@ -585,6 +599,59 @@ impl Application {
             && item.can_toggle_included()
         {
             item.included = !item.included;
+            self.refresh_batch_admission();
+        }
+    }
+
+    /// Reconcile retained requests when settings, membership or queue reservations change.
+    /// This is called by state transitions, never by the renderer.
+    pub(crate) fn refresh_batch_admission(&mut self) {
+        let Some(batch) = self.batch_setup.as_mut() else {
+            return;
+        };
+        batch.error = None;
+        let mut ids = Vec::new();
+        let mut candidates = Vec::new();
+        let capabilities = self.discovery.settled_capabilities();
+        for item in &mut batch.items {
+            let (
+                BatchSourceState::Ready {
+                    source_identity,
+                    media,
+                },
+                Some(operation),
+            ) = (&item.source, &mut item.operation)
+            else {
+                continue;
+            };
+            // Retain custom requests while discovery changes. Their settings remain editable.
+            if let Err(error) = operation.refresh_encoder_capabilities(capabilities) {
+                item.readiness = BatchReadiness::NeedsAttention;
+                item.reason = Some(error.to_string());
+                continue;
+            }
+            item.readiness = BatchReadiness::Ready;
+            item.reason = None;
+            if item.included {
+                ids.push(item.id);
+                candidates.push((source_identity, media, &*operation));
+            } else if let Err(error) =
+                crate::queue::MediaQueue::validate_admission(source_identity, media, operation)
+            {
+                item.readiness = BatchReadiness::NeedsAttention;
+                item.reason = Some(error.to_string());
+            }
+        }
+        for error in self.queue.scheduler().batch_admission_errors(&candidates) {
+            let (index, message) = match error {
+                BatchEnqueueError::Item { index, error } => (index, error.to_string()),
+                BatchEnqueueError::DuplicateDestination { index } => (index, error.to_string()),
+                BatchEnqueueError::JobIdExhausted => continue,
+            };
+            if let Some(item) = batch.items.iter_mut().find(|item| item.id == ids[index]) {
+                item.readiness = BatchReadiness::NeedsAttention;
+                item.reason = Some(message);
+            }
         }
     }
 
@@ -619,6 +686,7 @@ impl Application {
             && batch.operation == Operation::VideoUpscale
         {
             refresh_batch_items(batch, self.discovery.upscale_capabilities());
+            self.refresh_batch_admission();
         }
     }
 }

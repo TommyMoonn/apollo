@@ -272,6 +272,9 @@ pub enum QueueEnqueueError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BatchEnqueueError {
     JobIdExhausted,
+    DuplicateDestination {
+        index: usize,
+    },
     Item {
         index: usize,
         error: QueueEnqueueError,
@@ -283,6 +286,7 @@ impl fmt::Display for BatchEnqueueError {
         match self {
             Self::JobIdExhausted => formatter.write_str("queue job identifiers are exhausted"),
             Self::Item { index, error } => write!(formatter, "batch item {index}: {error}"),
+            Self::DuplicateDestination { .. } => formatter.write_str("another included file uses this output; choose a different destination or skip that file"),
         }
     }
 }
