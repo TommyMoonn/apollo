@@ -1,31 +1,23 @@
-use std::{
-    borrow::Cow,
-    cell::Cell,
-    ffi::{OsStr, OsString},
-    path::PathBuf,
-};
+use crate::upscale::draft::{UpscaleDraft, UpscaleEncoderCapabilities, capability_for_codec};
+
+use std::{borrow::Cow, cell::Cell, ffi::OsString};
 
 use egui::{RichText, Ui};
 
 use crate::{
-    media::{
-        model::MediaFile,
-        output::MediaOutputError,
-        tools::{VideoEncoderCapabilities, VideoEncoderCapability},
-    },
+    media::{model::MediaFile, output::MediaOutputError, tools::VideoEncoderCapability},
     upscale::{
         model::{
-            CpuQuality, NvencQuality, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget,
-            VideoCodec, VideoEncoderBackend, VideoEncoderSelection,
+            CpuQuality, NvencQuality, UpscaleTarget, VideoCodec, VideoEncoderBackend,
+            VideoEncoderSelection,
         },
-        sizing::{OutputDimensions, calculate_output_dimensions, resolve_target_boundary},
-        validation::{UpscaleValidationError, validate_upscale_request},
+        validation::UpscaleValidationError,
     },
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error,
-    output_name::OutputNameState, show_queue_confirmation, theme, widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error, show_queue_confirmation,
+    theme, widgets,
 };
 
 const PRESET_TARGETS: [UpscaleTarget; 3] = [
@@ -44,23 +36,6 @@ const ENCODING_LABEL: &str = "Encoding";
 const CODEC_LABEL: &str = "Codec";
 const QUALITY_GUIDANCE: &str = "Lower value = better quality / larger file";
 
-#[derive(Debug, Clone, Copy)]
-pub enum UpscaleEncoderCapabilities<'a> {
-    Checking,
-    Ready(&'a VideoEncoderCapabilities),
-}
-
-/// Pre-execution Upscale state. Sizing remains owned by `upscale::sizing`, while execution stays
-/// deferred to the shared process integration phase.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpscaleSelectionState {
-    target: UpscaleTarget,
-    custom_boundary: Option<(u32, u32)>,
-    codec: VideoCodec,
-    encoder_settings: UpscaleEncoderSettings,
-    output_name: OutputNameState,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UpscaleSelectionAction {
     #[default]
@@ -72,223 +47,6 @@ pub enum UpscaleSelectionAction {
     CancelQueueEdit,
 }
 
-impl UpscaleSelectionState {
-    /// New Upscale sessions follow the selected prototype defaults: 4K, H.264, MP4 output.
-    pub fn new(media: &MediaFile) -> Self {
-        let target = UpscaleTarget::Uhd4k;
-        Self {
-            target,
-            custom_boundary: None,
-            codec: VideoCodec::H264,
-            encoder_settings: UpscaleEncoderSettings::default(),
-            output_name: OutputNameState::new(
-                &media.path,
-                generated_output_stem(media, target)
-                    .expect("the default preset has a valid generated output name"),
-            ),
-        }
-    }
-
-    pub fn from_request(media: &MediaFile, request: &UpscaleRequest) -> Self {
-        let custom_boundary = request
-            .target
-            .is_custom()
-            .then(|| request.target.boundary());
-        let mut state = Self {
-            target: request.target,
-            custom_boundary,
-            codec: request.codec,
-            encoder_settings: request.encoder_settings.clone(),
-            output_name: OutputNameState::new(
-                &media.path,
-                request
-                    .output
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_os_string(),
-            ),
-        };
-        state.output_name.set_custom_path(request.output.clone());
-        state
-    }
-
-    pub fn target(&self) -> UpscaleTarget {
-        self.target
-    }
-
-    pub fn codec(&self) -> VideoCodec {
-        self.codec
-    }
-
-    pub fn encoder_selection(&self) -> VideoEncoderSelection {
-        self.encoder_settings.selection()
-    }
-
-    pub fn encoder_settings(&self) -> &UpscaleEncoderSettings {
-        &self.encoder_settings
-    }
-
-    pub fn set_encoder_selection(&mut self, selection: VideoEncoderSelection) {
-        self.encoder_settings.set_selection(selection);
-    }
-
-    pub fn cpu_quality(&self, codec: VideoCodec) -> CpuQuality {
-        self.encoder_settings.cpu_quality(codec)
-    }
-
-    pub fn set_cpu_quality(&mut self, codec: VideoCodec, quality: CpuQuality) {
-        self.encoder_settings.set_cpu_quality(codec, quality);
-    }
-
-    pub fn nvenc_quality(&self, codec: VideoCodec) -> NvencQuality {
-        self.encoder_settings.nvenc_quality(codec)
-    }
-
-    pub fn set_nvenc_quality(&mut self, codec: VideoCodec, quality: NvencQuality) {
-        self.encoder_settings.set_nvenc_quality(codec, quality);
-    }
-
-    pub fn output_path(&self) -> PathBuf {
-        self.output_name.path("mp4")
-    }
-
-    pub fn output_filename_stem(&self) -> &OsStr {
-        self.output_name.stem()
-    }
-
-    pub fn output_is_customized(&self) -> bool {
-        self.output_name.is_customized()
-    }
-
-    pub fn set_target(&mut self, media: &MediaFile, target: UpscaleTarget) {
-        if self.target == target {
-            return;
-        }
-
-        self.target = target;
-        if let UpscaleTarget::Custom {
-            max_width,
-            max_height,
-        } = target
-        {
-            self.custom_boundary = Some((max_width, max_height));
-        }
-        self.refresh_generated_output_stem(media);
-    }
-
-    pub fn select_custom_target(&mut self, media: &MediaFile) {
-        if matches!(self.target, UpscaleTarget::Custom { .. }) {
-            return;
-        }
-
-        let (max_width, max_height) = self.custom_boundary.unwrap_or_else(|| {
-            source_dimensions(media)
-                .and_then(|(width, height)| {
-                    resolve_target_boundary(self.target, width, height).ok()
-                })
-                .map_or_else(
-                    || self.target.boundary(),
-                    |boundary| (boundary.width, boundary.height),
-                )
-        });
-        self.set_target(
-            media,
-            UpscaleTarget::Custom {
-                max_width,
-                max_height,
-            },
-        );
-    }
-
-    pub fn custom_boundary(&self) -> Option<(u32, u32)> {
-        self.custom_boundary
-    }
-
-    pub fn set_custom_boundary(&mut self, media: &MediaFile, max_width: u32, max_height: u32) {
-        self.custom_boundary = Some((max_width, max_height));
-        if matches!(self.target, UpscaleTarget::Custom { .. }) {
-            self.target = UpscaleTarget::Custom {
-                max_width,
-                max_height,
-            };
-            self.refresh_generated_output_stem(media);
-        }
-    }
-
-    pub fn set_codec(&mut self, codec: VideoCodec) {
-        self.codec = codec;
-    }
-
-    pub fn set_output_filename_stem(&mut self, stem: OsString) {
-        self.output_name.set_stem(stem);
-    }
-
-    pub fn set_custom_output_path(&mut self, output: PathBuf) {
-        self.output_name.set_custom_path(output);
-    }
-
-    pub fn output_dimensions(&self, media: &MediaFile) -> Option<OutputDimensions> {
-        let (width, height) = source_dimensions(media)?;
-        calculate_output_dimensions(width, height, self.target).ok()
-    }
-
-    pub fn can_upscale(&self, media: &MediaFile) -> bool {
-        self.validation(media).is_ok()
-    }
-
-    fn validation(&self, media: &MediaFile) -> Result<(), UpscaleValidationError> {
-        validate_upscale_request(&self.request(media), media)
-    }
-
-    fn ready_validation(
-        &self,
-        media: &MediaFile,
-        capabilities: UpscaleEncoderCapabilities<'_>,
-    ) -> Option<Result<(), UpscaleValidationError>> {
-        let capability = match capabilities {
-            UpscaleEncoderCapabilities::Checking
-                if self.encoder_selection() != VideoEncoderSelection::Cpu =>
-            {
-                return None;
-            }
-            UpscaleEncoderCapabilities::Checking => VideoEncoderCapability::EncoderNotCompiled,
-            UpscaleEncoderCapabilities::Ready(capabilities) => {
-                capability_for_codec(capabilities, self.codec).clone()
-            }
-        };
-        Some(validate_upscale_request(
-            &self.request_with_nvenc_capability(media, capability),
-            media,
-        ))
-    }
-
-    /// Build the current typed request without starting work or calculating command dimensions.
-    pub fn request(&self, media: &MediaFile) -> UpscaleRequest {
-        self.request_with_nvenc_capability(media, VideoEncoderCapability::EncoderNotCompiled)
-    }
-
-    pub fn request_with_nvenc_capability(
-        &self,
-        media: &MediaFile,
-        nvenc_capability: VideoEncoderCapability,
-    ) -> UpscaleRequest {
-        UpscaleRequest {
-            input: media.path.clone(),
-            output: self.output_path(),
-            target: self.target,
-            codec: self.codec,
-            encoder_settings: self.encoder_settings.clone(),
-            nvenc_capability,
-        }
-    }
-
-    fn refresh_generated_output_stem(&mut self, media: &MediaFile) {
-        if let Some(stem) = generated_output_stem(media, self.target) {
-            self.output_name.set_generated_stem(stem);
-        }
-    }
-}
-
 /// Render the complete pre-execution Upscale configuration surface.
 ///
 /// The caller owns source acquisition and execution orchestration. This surface only mutates
@@ -296,7 +54,7 @@ impl UpscaleSelectionState {
 pub fn show<'a>(
     ui: &mut Ui,
     media: &MediaFile,
-    state: &mut UpscaleSelectionState,
+    state: &mut UpscaleDraft,
     capabilities: UpscaleEncoderCapabilities<'_>,
     mode: impl Into<OperationSurfaceMode<'a>>,
 ) -> UpscaleSelectionAction {
@@ -421,7 +179,7 @@ pub fn show<'a>(
     action.get()
 }
 
-fn show_codec_selector(ui: &mut Ui, state: &mut UpscaleSelectionState) {
+fn show_codec_selector(ui: &mut Ui, state: &mut UpscaleDraft) {
     let mut requested = None;
     select_codec(ui, state, &mut requested);
     if let Some(codec) = requested {
@@ -429,7 +187,7 @@ fn show_codec_selector(ui: &mut Ui, state: &mut UpscaleSelectionState) {
     }
 }
 
-fn select_codec(ui: &mut Ui, state: &UpscaleSelectionState, requested: &mut Option<VideoCodec>) {
+fn select_codec(ui: &mut Ui, state: &UpscaleDraft, requested: &mut Option<VideoCodec>) {
     widgets::select_menu(ui, codec_label(state.codec()), &CODEC_OPTIONS, |ui| {
         for codec in [VideoCodec::H264, VideoCodec::H265] {
             if widgets::select_menu_option(ui, codec_label(codec), state.codec() == codec).clicked()
@@ -456,7 +214,7 @@ fn upscale_ready_feedback(error: &UpscaleValidationError) -> Option<Cow<'_, str>
 
 fn show_encoding_controls(
     ui: &mut Ui,
-    state: &mut UpscaleSelectionState,
+    state: &mut UpscaleDraft,
     capabilities: UpscaleEncoderCapabilities<'_>,
 ) {
     let selection = state.encoder_selection();
@@ -537,16 +295,6 @@ fn show_encoding_controls(
     ui.label(RichText::new(QUALITY_GUIDANCE).color(theme::SECONDARY));
 }
 
-fn capability_for_codec(
-    capabilities: &VideoEncoderCapabilities,
-    codec: VideoCodec,
-) -> &VideoEncoderCapability {
-    match codec {
-        VideoCodec::H264 => &capabilities.h264_nvenc,
-        VideoCodec::H265 => &capabilities.h265_nvenc,
-    }
-}
-
 fn quality_backend(
     selection: VideoEncoderSelection,
     codec: VideoCodec,
@@ -595,7 +343,7 @@ fn encoder_option_label(selection: VideoEncoderSelection) -> &'static str {
     }
 }
 
-fn show_target_list(ui: &mut Ui, media: &MediaFile, state: &mut UpscaleSelectionState) {
+fn show_target_list(ui: &mut Ui, media: &MediaFile, state: &mut UpscaleDraft) {
     widgets::separator(ui);
 
     for target in PRESET_TARGETS {
@@ -630,7 +378,7 @@ fn show_target_list(ui: &mut Ui, media: &MediaFile, state: &mut UpscaleSelection
 fn show_custom_target_controls(
     ui: &mut Ui,
     media: &MediaFile,
-    state: &mut UpscaleSelectionState,
+    state: &mut UpscaleDraft,
 ) -> layout::FieldPairLayout {
     let (mut max_width, mut max_height) = state
         .custom_boundary()
@@ -688,37 +436,6 @@ fn show_custom_target_controls(
     field_layout
 }
 
-fn source_dimensions(media: &MediaFile) -> Option<(u32, u32)> {
-    let video = media.video_streams.first()?;
-    match (video.width, video.height) {
-        (Some(width), Some(height)) if width > 0 && height > 0 => Some((width, height)),
-        _ => None,
-    }
-}
-
-fn generated_output_stem(media: &MediaFile, target: UpscaleTarget) -> Option<OsString> {
-    let stem = media
-        .path
-        .file_stem()
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| OsStr::new("output"));
-
-    let mut output_stem = OsString::from(stem);
-    output_stem.push("-");
-    match target {
-        UpscaleTarget::Qhd1440 => output_stem.push("1440"),
-        UpscaleTarget::Uhd4k => output_stem.push("4k"),
-        UpscaleTarget::Uhd8k => output_stem.push("8k"),
-        UpscaleTarget::Custom { .. } => {
-            let (source_width, source_height) = source_dimensions(media)?;
-            let dimensions =
-                calculate_output_dimensions(source_width, source_height, target).ok()?;
-            output_stem.push(format!("{}x{}", dimensions.width, dimensions.height));
-        }
-    }
-    Some(output_stem)
-}
-
 pub(super) fn target_label(target: UpscaleTarget) -> &'static str {
     match target {
         UpscaleTarget::Qhd1440 => "1440p",
@@ -746,80 +463,22 @@ pub(super) fn codec_label(codec: VideoCodec) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        ffi::OsString,
-        path::{Path, PathBuf},
-    };
+    use std::{ffi::OsString, path::PathBuf};
 
     use crate::{
-        media::{
-            model::{FrameRate, MediaFile, VideoStream},
-            output::MediaOutputError,
-            tools::{VideoEncoderCapabilities, VideoEncoderCapability},
-        },
+        media::{output::MediaOutputError, tools::VideoEncoderCapability},
         upscale::{
-            model::{
-                CpuQuality, NvencQuality, UpscaleTarget, VideoCodec, VideoEncoderBackend,
-                VideoEncoderSelection,
-            },
+            model::{VideoCodec, VideoEncoderBackend, VideoEncoderSelection},
             validation::UpscaleValidationError,
         },
     };
 
     use super::{
-        UpscaleEncoderCapabilities, UpscaleSelectionState, encoder_selection_label,
-        quality_backend, show_custom_target_controls, show_encoding_controls,
-        upscale_ready_feedback,
+        UpscaleDraft, UpscaleEncoderCapabilities, encoder_selection_label, quality_backend,
+        show_custom_target_controls, show_encoding_controls, upscale_ready_feedback,
     };
 
-    fn capabilities(
-        h264_nvenc: VideoEncoderCapability,
-        h265_nvenc: VideoEncoderCapability,
-    ) -> VideoEncoderCapabilities {
-        VideoEncoderCapabilities {
-            h264_nvenc,
-            h265_nvenc,
-        }
-    }
-
-    fn media(width: Option<u32>, height: Option<u32>) -> MediaFile {
-        MediaFile {
-            path: PathBuf::from("captures/recording.mkv"),
-            duration: None,
-            streams: Vec::new(),
-            video_streams: vec![VideoStream {
-                stream_index: 0,
-                codec: Some("h264".to_owned()),
-                width,
-                height,
-                frame_rate: FrameRate::new(60, 1),
-                format: Default::default(),
-            }],
-            audio_streams: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn default_policy_selects_4k_h264_and_mp4_output() {
-        let media = media(Some(1920), Some(1080));
-        let state = UpscaleSelectionState::new(&media);
-
-        assert_eq!(state.target(), UpscaleTarget::Uhd4k);
-        assert_eq!(state.codec(), VideoCodec::H264);
-        assert_eq!(state.output_path(), Path::new("captures/recording-4k.mp4"));
-        assert!(!state.output_is_customized());
-        assert_eq!(state.encoder_selection(), VideoEncoderSelection::Auto);
-        assert_eq!(
-            state.cpu_quality(VideoCodec::H264),
-            CpuQuality::H264_DEFAULT
-        );
-        assert_eq!(
-            state.cpu_quality(VideoCodec::H265),
-            CpuQuality::H265_DEFAULT
-        );
-        assert_eq!(state.nvenc_quality(VideoCodec::H264), NvencQuality::DEFAULT);
-        assert_eq!(state.nvenc_quality(VideoCodec::H265), NvencQuality::DEFAULT);
-    }
+    use crate::upscale::draft::tests::{capabilities, media};
 
     #[test]
     fn auto_label_and_quality_follow_the_selected_codec_capability() {
@@ -865,7 +524,7 @@ mod tests {
     #[test]
     fn checking_capability_is_compact_and_keeps_cpu_ready() {
         let source = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&source);
+        let mut state = UpscaleDraft::new(&source);
 
         assert_eq!(
             encoder_selection_label(
@@ -899,7 +558,7 @@ mod tests {
     #[test]
     fn explicit_unavailable_nvenc_preserves_selection_and_reason() {
         let source = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&source);
+        let mut state = UpscaleDraft::new(&source);
         state.set_encoder_selection(VideoEncoderSelection::NvidiaNvenc);
         let unavailable = capabilities(
             VideoEncoderCapability::RuntimeUnavailable {
@@ -924,33 +583,13 @@ mod tests {
     }
 
     #[test]
-    fn backend_and_codec_quality_values_are_preserved_independently() {
-        let source = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&source);
-        state.set_cpu_quality(VideoCodec::H264, CpuQuality::new(12).unwrap());
-        state.set_cpu_quality(VideoCodec::H265, CpuQuality::new(24).unwrap());
-        state.set_nvenc_quality(VideoCodec::H264, NvencQuality::new(8).unwrap());
-        state.set_nvenc_quality(VideoCodec::H265, NvencQuality::new(30).unwrap());
-
-        state.set_encoder_selection(VideoEncoderSelection::NvidiaNvenc);
-        state.set_codec(VideoCodec::H265);
-        state.set_encoder_selection(VideoEncoderSelection::Cpu);
-        state.set_codec(VideoCodec::H264);
-
-        assert_eq!(state.cpu_quality(VideoCodec::H264).value(), 12);
-        assert_eq!(state.cpu_quality(VideoCodec::H265).value(), 24);
-        assert_eq!(state.nvenc_quality(VideoCodec::H264).value(), 8);
-        assert_eq!(state.nvenc_quality(VideoCodec::H265).value(), 30);
-    }
-
-    #[test]
     fn encoding_controls_fit_narrow_and_normal_ready_content_widths() {
         let context = egui::Context::default();
         crate::ui::fonts::install(&context);
         let mut output = context.run_ui(Default::default(), |ui| {
             for width in [344.0, 564.0] {
                 let source = media(Some(1920), Some(1080));
-                let mut state = UpscaleSelectionState::new(&source);
+                let mut state = UpscaleDraft::new(&source);
                 let capabilities = capabilities(
                     VideoEncoderCapability::Available,
                     VideoEncoderCapability::Available,
@@ -972,128 +611,6 @@ mod tests {
     }
 
     #[test]
-    fn target_selection_updates_generated_output_name() {
-        let media = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&media);
-
-        state.set_target(&media, UpscaleTarget::Qhd1440);
-        assert_eq!(state.target(), UpscaleTarget::Qhd1440);
-        assert_eq!(
-            state.output_path(),
-            Path::new("captures/recording-1440.mp4")
-        );
-
-        state.set_target(&media, UpscaleTarget::Uhd8k);
-        assert_eq!(state.target(), UpscaleTarget::Uhd8k);
-        assert_eq!(state.output_path(), Path::new("captures/recording-8k.mp4"));
-    }
-
-    #[test]
-    fn first_custom_selection_seeds_the_resolved_preset_boundary() {
-        let landscape = media(Some(1920), Some(1080));
-        let mut landscape_state = UpscaleSelectionState::new(&landscape);
-        landscape_state.select_custom_target(&landscape);
-
-        assert_eq!(
-            landscape_state.target(),
-            UpscaleTarget::Custom {
-                max_width: 3840,
-                max_height: 2160,
-            }
-        );
-        assert_eq!(landscape_state.custom_boundary(), Some((3840, 2160)));
-        assert_eq!(
-            landscape_state.output_path(),
-            PathBuf::from("captures/recording-3840x2160.mp4")
-        );
-
-        let portrait = media(Some(1080), Some(1920));
-        let mut portrait_state = UpscaleSelectionState::new(&portrait);
-        portrait_state.select_custom_target(&portrait);
-        assert_eq!(portrait_state.custom_boundary(), Some((2160, 3840)));
-    }
-
-    #[test]
-    fn custom_values_survive_preset_switches_and_update_the_request() {
-        let media = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&media);
-        state.select_custom_target(&media);
-        state.set_custom_boundary(&media, 3000, 2000);
-
-        state.set_target(&media, UpscaleTarget::Uhd8k);
-        assert_eq!(state.custom_boundary(), Some((3000, 2000)));
-        state.select_custom_target(&media);
-
-        assert_eq!(
-            state.request(&media).target,
-            UpscaleTarget::Custom {
-                max_width: 3000,
-                max_height: 2000,
-            }
-        );
-        assert_eq!(
-            state.output_dimensions(&media),
-            Some(crate::upscale::sizing::OutputDimensions {
-                width: 3000,
-                height: 1688,
-            })
-        );
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/recording-3000x1688.mp4")
-        );
-    }
-
-    #[test]
-    fn invalid_custom_values_are_retained_but_non_runnable() {
-        let media = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&media);
-        state.select_custom_target(&media);
-        state.set_custom_boundary(&media, 2999, 0);
-
-        assert_eq!(state.custom_boundary(), Some((2999, 0)));
-        assert_eq!(state.output_dimensions(&media), None);
-        assert!(!state.can_upscale(&media));
-        assert!(matches!(
-            state.validation(&media),
-            Err(UpscaleValidationError::InvalidTargetBoundary {
-                target_width: 2999,
-                target_height: 0,
-            })
-        ));
-    }
-
-    #[test]
-    fn manual_output_stem_survives_custom_dimension_changes() {
-        let media = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&media);
-        state.select_custom_target(&media);
-        state.set_output_filename_stem(OsString::from("deliberate-name"));
-
-        state.set_custom_boundary(&media, 3000, 2000);
-
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/deliberate-name.mp4")
-        );
-        assert!(state.output_is_customized());
-    }
-
-    #[test]
-    fn replacement_source_starts_without_retained_custom_values() {
-        let first = media(Some(1920), Some(1080));
-        let mut first_state = UpscaleSelectionState::new(&first);
-        first_state.select_custom_target(&first);
-        first_state.set_custom_boundary(&first, 3000, 2000);
-
-        let replacement = media(Some(1280), Some(720));
-        let replacement_state = UpscaleSelectionState::new(&replacement);
-
-        assert_eq!(replacement_state.target(), UpscaleTarget::Uhd4k);
-        assert_eq!(replacement_state.custom_boundary(), None);
-    }
-
-    #[test]
     fn custom_controls_stack_at_narrow_width_and_stay_inline_at_normal_width() {
         let context = egui::Context::default();
         crate::ui::fonts::install(&context);
@@ -1103,7 +620,7 @@ mod tests {
                 (564.0, crate::ui::layout::FieldPairLayout::Columns),
             ] {
                 let media = media(Some(1920), Some(1080));
-                let mut state = UpscaleSelectionState::new(&media);
+                let mut state = UpscaleDraft::new(&media);
                 state.select_custom_target(&media);
                 let rendered = ui.allocate_ui(egui::vec2(width, 240.0), |ui| {
                     ui.set_width(width);
@@ -1118,21 +635,11 @@ mod tests {
     }
 
     #[test]
-    fn codec_selection_updates_state() {
-        let media = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&media);
-
-        state.set_codec(VideoCodec::H265);
-
-        assert_eq!(state.codec(), VideoCodec::H265);
-    }
-
-    #[test]
     fn ten_bit_source_disables_h264_with_visible_guidance_and_accepts_h265() {
         let mut source = media(Some(1920), Some(1080));
         source.video_streams[0].format.pixel_format = Some("yuv420p10le".to_owned());
         source.video_streams[0].format.bit_depth = Some(10);
-        let mut state = UpscaleSelectionState::new(&source);
+        let mut state = UpscaleDraft::new(&source);
         let error = state.validation(&source).unwrap_err();
         assert!(!state.can_upscale(&source));
         assert_eq!(
@@ -1144,41 +651,9 @@ mod tests {
     }
 
     #[test]
-    fn ultrawide_actual_output_uses_shared_aspect_preserving_sizing() {
-        let media = media(Some(1920), Some(800));
-        let state = UpscaleSelectionState::new(&media);
-
-        assert_eq!(
-            state.output_dimensions(&media),
-            Some(crate::upscale::sizing::OutputDimensions {
-                width: 3840,
-                height: 1600,
-            })
-        );
-    }
-
-    #[test]
-    fn pure_request_validity_controls_primary_action() {
-        let source = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&source);
-        state.set_custom_output_path(PathBuf::from("recording-4k.mp4"));
-
-        assert!(state.can_upscale(&source));
-
-        state.set_custom_output_path(source.path.clone());
-        assert!(state.can_upscale(&source));
-
-        state.set_custom_output_path(PathBuf::new());
-        assert!(!state.can_upscale(&source));
-
-        state.set_custom_output_path(PathBuf::from("missing-upscale-ui-parent/output.mp4"));
-        assert!(state.can_upscale(&source));
-    }
-
-    #[test]
     fn output_feedback_is_limited_to_pure_request_errors() {
         let source = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&source);
+        let mut state = UpscaleDraft::new(&source);
         state.set_custom_output_path(PathBuf::new());
 
         let error = state.validation(&source).unwrap_err();
@@ -1213,90 +688,10 @@ mod tests {
         assert_eq!(upscale_ready_feedback(&target_error), None);
         assert_eq!(upscale_ready_feedback(&output_error), None);
     }
-
-    #[test]
-    fn invalid_dimensions_and_downscale_target_disable_primary_action() {
-        let source = media(Some(3840), Some(2160));
-        let mut state = UpscaleSelectionState::new(&source);
-        state.set_custom_output_path(PathBuf::from("recording-upscaled.mp4"));
-
-        assert!(!state.can_upscale(&source));
-
-        state.set_target(&source, UpscaleTarget::Uhd8k);
-        assert!(state.can_upscale(&source));
-
-        let missing_dimensions = media(None, Some(1080));
-        assert!(!UpscaleSelectionState::new(&missing_dimensions).can_upscale(&missing_dimensions));
-    }
-
-    #[test]
-    fn generated_default_filename_uses_selected_target_suffix() {
-        let media = media(Some(1920), Some(1080));
-        let state = UpscaleSelectionState::new(&media);
-
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/recording-4k.mp4")
-        );
-        assert!(!state.output_is_customized());
-    }
-
-    #[test]
-    fn customized_output_stem_is_preserved_across_target_changes() {
-        let media = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&media);
-        state.set_custom_output_path(PathBuf::from("exports/final-video.mkv"));
-
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("exports/final-video.mp4")
-        );
-        state.set_output_filename_stem(OsString::from("renamed upscale"));
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("exports/renamed upscale.mp4")
-        );
-
-        state.set_target(&media, UpscaleTarget::Uhd8k);
-
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("exports/renamed upscale.mp4")
-        );
-        assert_eq!(
-            state.output_filename_stem(),
-            OsString::from("renamed upscale")
-        );
-        assert!(state.output_is_customized());
-    }
-
-    #[test]
-    fn edited_filename_stem_preserves_unicode_spaces_and_mp4_extension() {
-        let media = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&media);
-
-        state.set_output_filename_stem(OsString::from("final upscale 日本語"));
-
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/final upscale 日本語.mp4")
-        );
-        assert_eq!(
-            state.request(&media).output,
-            PathBuf::from("captures/final upscale 日本語.mp4")
-        );
-
-        state.set_target(&media, UpscaleTarget::Uhd8k);
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/final upscale 日本語.mp4")
-        );
-    }
-
     #[test]
     fn empty_or_unusable_filename_stem_disables_upscale_and_invalidates_request_output() {
         let media = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&media);
+        let mut state = UpscaleDraft::new(&media);
 
         for stem in ["", "   ", "../escape", "bad\\name"] {
             state.set_output_filename_stem(OsString::from(stem));
@@ -1311,31 +706,5 @@ mod tests {
                 Some("Enter a usable output filename.")
             );
         }
-    }
-
-    #[test]
-    fn windows_reserved_device_stem_disables_upscale() {
-        let media = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&media);
-
-        state.set_output_filename_stem(OsString::from("NuL"));
-
-        assert!(!state.can_upscale(&media));
-        assert!(state.request(&media).output.as_os_str().is_empty());
-    }
-
-    #[test]
-    fn request_uses_current_pre_execution_selection() {
-        let media = media(Some(1920), Some(1080));
-        let mut state = UpscaleSelectionState::new(&media);
-        state.set_target(&media, UpscaleTarget::Uhd8k);
-        state.set_codec(VideoCodec::H265);
-
-        let request = state.request(&media);
-
-        assert_eq!(request.input, media.path);
-        assert_eq!(request.output, PathBuf::from("captures/recording-8k.mp4"));
-        assert_eq!(request.target, UpscaleTarget::Uhd8k);
-        assert_eq!(request.codec, VideoCodec::H265);
     }
 }

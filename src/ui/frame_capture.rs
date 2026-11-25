@@ -1,32 +1,22 @@
-use std::{
-    cell::Cell,
-    ffi::{OsStr, OsString},
-    path::{Path, PathBuf},
-    str::FromStr,
-    time::Duration,
-};
+use crate::frame_capture::draft::{FrameCaptureDraft, FrameCaptureReadyError};
+
+use std::{cell::Cell, ffi::OsString, time::Duration};
 
 use egui::{Align, Label, Layout, RichText, TextEdit, TextureId, Ui, WidgetInfo, WidgetType};
 
 use crate::{
     frame_capture::{
         frame_index::{FrameDirection, FrameStep},
-        model::{
-            FrameCaptureFormat, FrameCaptureRequest, FramePosition, FrameTimestamp,
-            FrameTimestampParseError,
-        },
+        model::{FrameCaptureFormat, FramePosition, FrameTimestamp},
         preview::{PreviewImage, PreviewState},
-        validation::{
-            FrameCaptureValidationError, validate_frame_capture_request, validate_frame_position,
-            validate_frame_timestamp,
-        },
+        validation::FrameCaptureValidationError,
     },
     media::{model::MediaFile, output::MediaOutputError},
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error,
-    output_name::OutputNameState, show_queue_confirmation, theme, widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error, show_queue_confirmation,
+    theme, widgets,
 };
 
 const TIMESTAMP_LABEL: &str = "Timestamp";
@@ -81,15 +71,6 @@ impl FrameCaptureLivePreview {
         .flatten();
         Self { status, texture }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameCaptureSelectionState {
-    timestamp_text: String,
-    position: FramePosition,
-    step: FrameStep,
-    format: FrameCaptureFormat,
-    output_name: OutputNameState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,147 +137,11 @@ pub struct FrameCopyActionState {
     pub status: FrameCopyStatus,
 }
 
-impl FrameCaptureSelectionState {
-    pub fn new(media: &MediaFile) -> Self {
-        Self {
-            timestamp_text: FrameTimestamp::ZERO.to_string(),
-            position: FrameTimestamp::ZERO.into(),
-            step: FrameStep::One,
-            format: FrameCaptureFormat::Png,
-            output_name: OutputNameState::new(
-                &media.path,
-                default_output_stem(&media.path, FrameTimestamp::ZERO),
-            ),
-        }
-    }
-
-    pub fn from_request(media: &MediaFile, request: &FrameCaptureRequest) -> Self {
-        let mut state = Self {
-            timestamp_text: request.position.to_string(),
-            position: request.position,
-            step: FrameStep::One,
-            format: request.format,
-            output_name: OutputNameState::new(
-                &media.path,
-                default_output_stem(&media.path, request.position.display_timestamp()),
-            ),
-        };
-        state.output_name.set_custom_path(request.output.clone());
-        state
-    }
-
-    pub fn timestamp_text(&self) -> &str {
-        &self.timestamp_text
-    }
-
-    pub fn valid_timestamp(&self, media: &MediaFile) -> Option<FrameTimestamp> {
-        let timestamp = FrameTimestamp::from_str(&self.timestamp_text).ok()?;
-        validate_frame_timestamp(timestamp, media.duration)
-            .is_ok()
-            .then_some(timestamp)
-    }
-
-    pub fn valid_position(&self, media: &MediaFile) -> Option<FramePosition> {
-        let timestamp = FrameTimestamp::from_str(&self.timestamp_text).ok()?;
-        validate_frame_timestamp(timestamp, media.duration).ok()?;
-        validate_frame_position(self.position, media.duration)
-            .is_ok()
-            .then_some(self.position)
-    }
-
-    pub fn set_timestamp_text(&mut self, media: &MediaFile, timestamp: String) {
-        self.timestamp_text = timestamp;
-        if let Some(timestamp) = self.valid_timestamp(media) {
-            self.position = timestamp.into();
-            self.output_name
-                .set_generated_stem(default_output_stem(&media.path, timestamp));
-        }
-    }
-
-    pub fn set_position(&mut self, media: &MediaFile, position: FramePosition) {
-        self.position = position;
-        let timestamp = position.display_timestamp();
-        self.timestamp_text = timestamp.to_string();
-        self.output_name
-            .set_generated_stem(default_output_stem(&media.path, timestamp));
-    }
-
-    pub const fn step(&self) -> FrameStep {
-        self.step
-    }
-
-    pub fn set_step(&mut self, step: FrameStep) {
-        self.step = step;
-    }
-
-    pub fn format(&self) -> FrameCaptureFormat {
-        self.format
-    }
-
-    pub fn set_format(&mut self, format: FrameCaptureFormat) {
-        self.format = format;
-    }
-
-    pub fn output_path(&self) -> PathBuf {
-        self.output_name.path(self.format.extension())
-    }
-
-    pub fn output_filename_stem(&self) -> &OsStr {
-        self.output_name.stem()
-    }
-
-    pub fn output_is_customized(&self) -> bool {
-        self.output_name.is_customized()
-    }
-
-    pub fn set_output_filename_stem(&mut self, stem: OsString) {
-        self.output_name.set_stem(stem);
-    }
-
-    pub fn set_custom_output_path(&mut self, output: PathBuf) {
-        self.output_name.set_custom_path(output);
-    }
-
-    pub fn request(&self, media: &MediaFile) -> Option<FrameCaptureRequest> {
-        let position = self.valid_position(media)?;
-        Some(FrameCaptureRequest {
-            input: media.path.clone(),
-            output: self.output_path(),
-            position,
-            format: self.format,
-        })
-    }
-
-    pub fn can_capture(&self, media: &MediaFile) -> bool {
-        self.validation(media).is_ok()
-    }
-
-    fn validation(&self, media: &MediaFile) -> Result<(), FrameCaptureReadyError> {
-        let timestamp = FrameTimestamp::from_str(&self.timestamp_text)
-            .map_err(FrameCaptureReadyError::Timestamp)?;
-        validate_frame_timestamp(timestamp, media.duration)
-            .map_err(FrameCaptureReadyError::Request)?;
-        let request = FrameCaptureRequest {
-            input: media.path.clone(),
-            output: self.output_path(),
-            position: self.position,
-            format: self.format,
-        };
-        validate_frame_capture_request(&request, media).map_err(FrameCaptureReadyError::Request)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum FrameCaptureReadyError {
-    Timestamp(FrameTimestampParseError),
-    Request(FrameCaptureValidationError),
-}
-
 pub fn show<'a>(
     ui: &mut Ui,
     media: &MediaFile,
     presentation: &FrameCapturePresentation,
-    state: &mut FrameCaptureSelectionState,
+    state: &mut FrameCaptureDraft,
     position_surface: FrameCapturePositionSurface,
     copy: Option<FrameCopyActionState>,
     mode: impl Into<OperationSurfaceMode<'a>>,
@@ -484,7 +329,7 @@ fn show_precision_position(
     ui: &mut Ui,
     media: &MediaFile,
     presentation: &FrameCapturePresentation,
-    state: &mut FrameCaptureSelectionState,
+    state: &mut FrameCaptureDraft,
     navigation: FrameNavigationAvailability,
     action: &Cell<FrameCaptureSelectionAction>,
 ) {
@@ -601,7 +446,7 @@ fn show_legacy_timestamp(
     ui: &mut Ui,
     media: &MediaFile,
     presentation: &FrameCapturePresentation,
-    state: &mut FrameCaptureSelectionState,
+    state: &mut FrameCaptureDraft,
 ) {
     let _ = widgets::section_label(ui, TIMESTAMP_LABEL);
     ui.add_space(theme::SPACING.compact);
@@ -621,7 +466,7 @@ fn show_legacy_timestamp(
     }
 }
 
-fn show_step_selector(ui: &mut Ui, state: &mut FrameCaptureSelectionState) {
+fn show_step_selector(ui: &mut Ui, state: &mut FrameCaptureDraft) {
     let mut requested = None;
     widgets::select_menu(ui, step_label(state.step()), &STEP_OPTIONS, |ui| {
         for step in [
@@ -677,7 +522,7 @@ fn copy_button_label(status: FrameCopyStatus) -> &'static str {
     }
 }
 
-fn show_format_selector(ui: &mut Ui, state: &mut FrameCaptureSelectionState) {
+fn show_format_selector(ui: &mut Ui, state: &mut FrameCaptureDraft) {
     let mut requested = None;
     widgets::select_menu(ui, format_label(state.format()), &FORMAT_OPTIONS, |ui| {
         for format in [FrameCaptureFormat::Png, FrameCaptureFormat::Jpeg] {
@@ -715,18 +560,6 @@ fn ready_feedback(error: &FrameCaptureReadyError) -> Option<&'static str> {
         }) => Some("Output filename must match the selected format."),
         FrameCaptureReadyError::Request(FrameCaptureValidationError::Output(_)) => None,
     }
-}
-
-fn default_output_stem(input: &Path, timestamp: FrameTimestamp) -> OsString {
-    let stem = input
-        .file_stem()
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| OsStr::new("output"));
-    let mut output = OsString::from(stem);
-    output.push("-frame");
-    output.push("-");
-    output.push(timestamp.filename_component());
-    output
 }
 
 pub(super) fn format_label(format: FrameCaptureFormat) -> &'static str {
@@ -778,74 +611,31 @@ fn format_duration(duration: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, path::PathBuf, time::Duration};
+    use std::{path::PathBuf, time::Duration};
 
     use crate::{
         frame_capture::{
-            clipboard::copy_frame_action_eligible,
             frame_index::FrameStep,
             model::{
                 FrameCaptureFormat, FramePosition, FrameTimeBase, FrameTimestamp,
                 ResolvedFramePosition,
             },
         },
-        media::model::{MediaFile, MediaStream, StreamKind, VideoStream},
         ui::{fonts, theme},
     };
 
     use super::{
-        FrameCaptureLivePreview, FrameCapturePositionSurface, FrameCapturePresentation,
-        FrameCaptureSelectionState, FrameNavigationAvailability, LivePreviewStatus, PositionSettle,
+        FrameCaptureDraft, FrameCaptureLivePreview, FrameCapturePositionSurface,
+        FrameCapturePresentation, FrameNavigationAvailability, LivePreviewStatus, PositionSettle,
         format_duration, ready_feedback, scrubber_maximum, scrubber_settle,
     };
 
-    fn media(duration: Option<Duration>) -> MediaFile {
-        MediaFile {
-            path: PathBuf::from("captures/recording.mkv"),
-            duration,
-            streams: vec![MediaStream {
-                stream_index: 7,
-                kind: StreamKind::Video,
-                codec: Some("h264".into()),
-            }],
-            video_streams: vec![VideoStream {
-                stream_index: 7,
-                codec: Some("h264".into()),
-                width: Some(1920),
-                height: Some(1080),
-                frame_rate: None,
-                format: Default::default(),
-            }],
-            audio_streams: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn defaults_to_zero_png_and_timestamped_frame_suffix() {
-        let media = media(Some(Duration::from_secs(10)));
-        let state = FrameCaptureSelectionState::new(&media);
-        assert_eq!(state.timestamp_text(), "00:00:00.000");
-        assert_eq!(state.format(), FrameCaptureFormat::Png);
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/recording-frame-00-00-00-000.png")
-        );
-        assert!(state.can_capture(&media));
-        assert_eq!(
-            state
-                .request(&media)
-                .unwrap()
-                .position
-                .display_timestamp()
-                .milliseconds(),
-            0
-        );
-    }
+    use crate::frame_capture::draft::tests::media;
 
     #[test]
     fn timestamp_edits_drive_request_and_invalid_feedback() {
         let media = media(Some(Duration::from_secs(10)));
-        let mut state = FrameCaptureSelectionState::new(&media);
+        let mut state = FrameCaptureDraft::new(&media);
         state.set_timestamp_text(&media, "00:00:01.250".into());
         let preview_timestamp = state.valid_timestamp(&media).unwrap();
         assert_eq!(
@@ -896,7 +686,7 @@ mod tests {
             format: FrameCaptureFormat::Png,
         };
 
-        let state = FrameCaptureSelectionState::from_request(&media, &request);
+        let state = FrameCaptureDraft::from_request(&media, &request);
 
         assert_eq!(state.timestamp_text(), "00:00:00.033");
         assert_eq!(state.request(&media).unwrap().position, position.into());
@@ -935,7 +725,7 @@ mod tests {
         let context = egui::Context::default();
         fonts::install(&context);
         theme::install(&context);
-        let mut state = FrameCaptureSelectionState::new(&media(None));
+        let mut state = FrameCaptureDraft::new(&media(None));
         let media = media(None);
         state.set_timestamp_text(&media, "not a timestamp".into());
         let presentation = FrameCapturePresentation::new(&media);
@@ -958,45 +748,13 @@ mod tests {
     }
 
     #[test]
-    fn format_changes_extension_and_preserves_custom_stem() {
-        let media = media(None);
-        let mut state = FrameCaptureSelectionState::new(&media);
-        state.set_output_filename_stem(OsString::from("chosen frame"));
-        state.set_timestamp_text(&media, "00:00:04.250".into());
-        state.set_format(FrameCaptureFormat::Jpeg);
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/chosen frame.jpg")
-        );
-        state.set_format(FrameCaptureFormat::Png);
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/chosen frame.png")
-        );
-        assert!(state.output_is_customized());
-    }
-
-    #[test]
-    fn out_of_duration_timestamp_preserves_the_last_valid_generated_name() {
-        let media = media(Some(Duration::from_secs(2)));
-        let mut state = FrameCaptureSelectionState::new(&media);
-        state.set_timestamp_text(&media, "00:00:01.500".into());
-        let valid_output = state.output_path();
-
-        state.set_timestamp_text(&media, "00:00:02.000".into());
-
-        assert!(!state.can_capture(&media));
-        assert_eq!(state.output_path(), valid_output);
-    }
-
-    #[test]
     fn known_duration_and_format_detail_render_as_compact_context() {
         let context = egui::Context::default();
         fonts::install(&context);
         theme::install(&context);
         let media = media(Some(Duration::from_millis(754_567)));
         let presentation = FrameCapturePresentation::new(&media);
-        let mut state = FrameCaptureSelectionState::new(&media);
+        let mut state = FrameCaptureDraft::new(&media);
 
         let mut output = context.run_ui(Default::default(), |ui| {
             let _ = super::show(
@@ -1032,7 +790,7 @@ mod tests {
         theme::install(&context);
         let media = media(Some(Duration::from_secs(10)));
         let presentation = FrameCapturePresentation::new(&media);
-        let mut state = FrameCaptureSelectionState::new(&media);
+        let mut state = FrameCaptureDraft::new(&media);
         let preview = FrameCaptureLivePreview {
             status: LivePreviewStatus::Updating,
             texture: None,
@@ -1065,17 +823,6 @@ mod tests {
                 .iter()
                 .any(|shape| { shape_contains(&shape.shape, super::PREVIEW_UPDATING_TEXT) })
         );
-    }
-
-    #[test]
-    fn invalid_capture_output_does_not_block_copying_a_valid_frame() {
-        let media = media(Some(Duration::from_secs(10)));
-        let mut state = FrameCaptureSelectionState::new(&media);
-        state.set_output_filename_stem(OsString::new());
-
-        assert!(!state.can_capture(&media));
-        let position = state.valid_position(&media).unwrap();
-        assert!(copy_frame_action_eligible(&media, position));
     }
 
     #[test]
@@ -1115,7 +862,7 @@ mod tests {
         theme::install(&context);
         let media = media(Some(Duration::from_millis(10_250)));
         let presentation = FrameCapturePresentation::new(&media);
-        let mut state = FrameCaptureSelectionState::new(&media);
+        let mut state = FrameCaptureDraft::new(&media);
         let preview = FrameCaptureLivePreview {
             status: LivePreviewStatus::Idle,
             texture: None,
@@ -1163,7 +910,7 @@ mod tests {
         theme::install(&context);
         let media = media(Some(Duration::from_secs(10)));
         let presentation = FrameCapturePresentation::new(&media);
-        let mut state = FrameCaptureSelectionState::new(&media);
+        let mut state = FrameCaptureDraft::new(&media);
         state.set_timestamp_text(&media, "invalid".to_owned());
         let retained = (
             egui::TextureId::Managed(9),
@@ -1227,7 +974,7 @@ mod tests {
         theme::install(&context);
         let media = media(Some(Duration::from_secs(10)));
         let presentation = FrameCapturePresentation::new(&media);
-        let mut state = FrameCaptureSelectionState::new(&media);
+        let mut state = FrameCaptureDraft::new(&media);
         state.set_timestamp_text(&media, "00:00:01.250".into());
         let request_before = state.request(&media).unwrap();
         let preview = FrameCaptureLivePreview {
@@ -1272,28 +1019,6 @@ mod tests {
             format_duration(Duration::from_millis(3_723_004)),
             "01:02:03.004"
         );
-    }
-
-    #[test]
-    fn browse_path_preserves_directory_while_format_owns_extension() {
-        let media = media(None);
-        let mut state = FrameCaptureSelectionState::new(&media);
-        state.set_custom_output_path(PathBuf::from("exports/still.jpg"));
-        assert_eq!(state.output_path(), PathBuf::from("exports/still.png"));
-        state.set_format(FrameCaptureFormat::Jpeg);
-        assert_eq!(state.output_path(), PathBuf::from("exports/still.jpg"));
-    }
-
-    #[test]
-    fn duration_and_missing_video_validation_control_primary_action() {
-        let mut media = media(Some(Duration::from_millis(500)));
-        let mut state = FrameCaptureSelectionState::new(&media);
-        state.set_timestamp_text(&media, "00:00:00.501".into());
-        assert!(!state.can_capture(&media));
-
-        state.set_timestamp_text(&media, "00:00:00.000".into());
-        media.video_streams.clear();
-        assert!(!state.can_capture(&media));
     }
 
     fn shape_contains(shape: &egui::Shape, expected: &str) -> bool {

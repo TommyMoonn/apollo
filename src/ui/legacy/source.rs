@@ -1,11 +1,12 @@
 //! Source actions and presentation settlement for the legacy renderer.
+
+use super::audio_extract::AudioExtractToolState;
+use super::audio_mix::AudioMixToolState;
+use super::remux::RemuxToolState;
+use super::upscale::UpscaleToolState;
 use super::{
     ApolloApp, completion_wake,
-    state::{
-        AudioExtractToolState, AudioMixToolState, FrameCaptureEditorState, FrameCaptureToolState,
-        RemuxToolState, UpscaleToolState,
-    },
-    workflows::queued_operation_tool,
+    state::{FrameCaptureEditorState, FrameCaptureToolState},
 };
 use crate::app::{Operation, QueueEditOrigin, source::SourceSettlement};
 use crate::file_dialog::{DialogTarget, FileDialogRequest};
@@ -14,19 +15,10 @@ use crate::media::intake::{MediaIntakeRequest, MediaLoadStart};
 use crate::media::{model::MediaFile, probe::MediaProbeError};
 use crate::queue::QueuedJob;
 use crate::ui::frame_capture::{FrameCopyStatus, PositionSettle};
+use crate::ui::frame_capture_progress::FrameCaptureLifecycleUiState;
 use crate::ui::{
     SourceAction, file_intake::FileIntakeAction, source_presentation::SourcePresentation,
     workspace::WorkspaceAction,
-};
-use crate::ui::{
-    audio_extract::AudioExtractSelectionState, audio_mix::AudioMixSelectionState,
-    remux::RemuxSelectionState, upscale::UpscaleSelectionState,
-};
-use crate::ui::{
-    audio_extract_progress::AudioExtractLifecycleUiState,
-    audio_mix_progress::AudioMixLifecycleUiState,
-    frame_capture_progress::FrameCaptureLifecycleUiState, remux_progress::RemuxLifecycleUiState,
-    upscale_progress::UpscaleLifecycleUiState,
 };
 use egui::Context;
 use std::{path::Path, sync::Arc, time::Instant};
@@ -121,14 +113,7 @@ impl ApolloApp {
                     .as_ref()
                     .is_some_and(|session| session.session_id == session_id)
                 {
-                    self.state.audio_mix = Some(AudioMixToolState {
-                        session_id,
-                        selection: AudioMixSelectionState::new(media),
-                        lifecycle_ui: AudioMixLifecycleUiState::default(),
-                        start_error: None,
-                        start_error_details_open: false,
-                        media: media.clone(),
-                    });
+                    self.state.audio_mix = Some(AudioMixToolState::new(session_id, media));
                 }
             }
             Operation::VideoUpscale => {
@@ -138,14 +123,7 @@ impl ApolloApp {
                     .as_ref()
                     .is_some_and(|session| session.session_id == session_id)
                 {
-                    self.state.upscale = Some(UpscaleToolState {
-                        session_id,
-                        selection: UpscaleSelectionState::new(media),
-                        lifecycle_ui: UpscaleLifecycleUiState::default(),
-                        start_error: None,
-                        start_error_details_open: false,
-                        media: media.clone(),
-                    });
+                    self.state.upscale = Some(UpscaleToolState::new(session_id, media));
                 }
             }
             Operation::Remux => {
@@ -155,14 +133,7 @@ impl ApolloApp {
                     .as_ref()
                     .is_some_and(|session| session.session_id == session_id)
                 {
-                    self.state.remux = Some(RemuxToolState {
-                        session_id,
-                        selection: RemuxSelectionState::new(media),
-                        lifecycle_ui: RemuxLifecycleUiState::default(),
-                        start_error: None,
-                        start_error_details_open: false,
-                        media: media.clone(),
-                    });
+                    self.state.remux = Some(RemuxToolState::new(session_id, media));
                 }
             }
             Operation::AudioExtract => {
@@ -172,14 +143,7 @@ impl ApolloApp {
                     .as_ref()
                     .is_some_and(|session| session.session_id == session_id)
                 {
-                    self.state.audio_extract = Some(AudioExtractToolState {
-                        session_id,
-                        selection: AudioExtractSelectionState::new(media),
-                        lifecycle_ui: AudioExtractLifecycleUiState::default(),
-                        start_error: None,
-                        start_error_details_open: false,
-                        media: media.clone(),
-                    });
+                    self.state.audio_extract = Some(AudioExtractToolState::new(session_id, media));
                 }
             }
             Operation::FrameCapture => {
@@ -354,7 +318,7 @@ impl ApolloApp {
     }
 
     pub(super) fn restore_queued_job_workspace(&mut self, job: &QueuedJob) -> bool {
-        let operation = queued_operation_tool(job.operation());
+        let operation = Operation::from(job.operation());
         self.core
             .source
             .restore(job.source_identity().clone(), job.media().clone());

@@ -1,8 +1,6 @@
-use std::{
-    cell::Cell,
-    ffi::{OsStr, OsString},
-    path::{Path, PathBuf},
-};
+use crate::remux::draft::RemuxDraft;
+
+use std::{cell::Cell, ffi::OsString};
 
 use egui::Ui;
 
@@ -12,15 +10,12 @@ use crate::{
         model::{MediaFile, StreamKind},
         output::MediaOutputError,
     },
-    remux::{
-        model::RemuxRequest,
-        validation::{RemuxValidationError, validate_remux_request},
-    },
+    remux::validation::RemuxValidationError,
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, layout, media_error, output_name::OutputNameState,
-    show_queue_confirmation, theme, widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, layout, media_error, show_queue_confirmation, theme,
+    widgets,
 };
 
 const OUTPUT_LABEL: &str = "Output";
@@ -79,12 +74,6 @@ struct RemuxStreamPresentation {
     description: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemuxSelectionState {
-    container: MediaContainer,
-    output_name: OutputNameState,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RemuxSelectionAction {
     #[default]
@@ -96,73 +85,11 @@ pub enum RemuxSelectionAction {
     CancelQueueEdit,
 }
 
-impl RemuxSelectionState {
-    pub fn new(media: &MediaFile) -> Self {
-        Self {
-            container: MediaContainer::Matroska,
-            output_name: OutputNameState::new(&media.path, default_output_stem(&media.path)),
-        }
-    }
-
-    pub fn from_request(media: &MediaFile, request: &RemuxRequest) -> Self {
-        let mut state = Self {
-            container: request.container,
-            output_name: OutputNameState::new(&media.path, default_output_stem(&media.path)),
-        };
-        state.output_name.set_custom_path(request.output.clone());
-        state
-    }
-
-    pub fn container(&self) -> MediaContainer {
-        self.container
-    }
-
-    pub fn set_container(&mut self, container: MediaContainer) {
-        self.container = container;
-    }
-
-    pub fn output_path(&self) -> PathBuf {
-        self.output_name.path(self.container.extension())
-    }
-
-    pub fn output_filename_stem(&self) -> &OsStr {
-        self.output_name.stem()
-    }
-
-    pub fn output_is_customized(&self) -> bool {
-        self.output_name.is_customized()
-    }
-
-    pub fn set_output_filename_stem(&mut self, stem: OsString) {
-        self.output_name.set_stem(stem);
-    }
-
-    pub fn set_custom_output_path(&mut self, output: PathBuf) {
-        self.output_name.set_custom_path(output);
-    }
-
-    pub fn can_remux(&self, media: &MediaFile) -> bool {
-        self.validation(media).is_ok()
-    }
-
-    pub fn request(&self, media: &MediaFile) -> RemuxRequest {
-        RemuxRequest {
-            input: media.path.clone(),
-            output: self.output_path(),
-            container: self.container,
-        }
-    }
-
-    fn validation(&self, media: &MediaFile) -> Result<(), RemuxValidationError> {
-        validate_remux_request(&self.request(media), media)
-    }
-}
-
 pub fn show<'a>(
     ui: &mut Ui,
     media: &MediaFile,
     presentation: &RemuxPresentation,
-    state: &mut RemuxSelectionState,
+    state: &mut RemuxDraft,
     mode: impl Into<OperationSurfaceMode<'a>>,
 ) -> RemuxSelectionAction {
     let mode = mode.into();
@@ -264,7 +191,7 @@ pub fn show<'a>(
     action.get()
 }
 
-fn show_container_selector(ui: &mut Ui, state: &mut RemuxSelectionState) {
+fn show_container_selector(ui: &mut Ui, state: &mut RemuxDraft) {
     let mut requested = None;
     widgets::select_menu(
         ui,
@@ -353,16 +280,6 @@ fn stream_kind_label(kind: StreamKind) -> &'static str {
     }
 }
 
-fn default_output_stem(input: &Path) -> OsString {
-    let stem = input
-        .file_stem()
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| OsStr::new("output"));
-    let mut output = OsString::from(stem);
-    output.push("-remuxed");
-    output
-}
-
 pub(super) fn container_label(container: MediaContainer) -> &'static str {
     match container {
         MediaContainer::Mp4 => "MP4",
@@ -372,92 +289,18 @@ pub(super) fn container_label(container: MediaContainer) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, path::PathBuf};
 
     use crate::{
         media::{
             container::MediaContainer,
-            model::{MediaFile, MediaStream, StreamKind},
+            model::{MediaStream, StreamKind},
         },
         remux::validation::RemuxValidationError,
     };
 
-    use super::{RemuxPresentation, RemuxSelectionState, remux_ready_feedback};
+    use super::{RemuxPresentation, remux_ready_feedback};
 
-    fn media() -> MediaFile {
-        MediaFile {
-            path: PathBuf::from("captures/recording.mkv"),
-            duration: None,
-            streams: vec![MediaStream {
-                stream_index: 0,
-                kind: StreamKind::Video,
-                codec: Some("h264".to_owned()),
-            }],
-            video_streams: Vec::new(),
-            audio_streams: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn default_state_uses_matroska_and_remuxed_output_name() {
-        let media = media();
-        let state = RemuxSelectionState::new(&media);
-
-        assert_eq!(state.container(), MediaContainer::Matroska);
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/recording-remuxed.mkv")
-        );
-        assert!(!state.output_is_customized());
-        assert!(state.can_remux(&media));
-    }
-
-    #[test]
-    fn container_changes_only_the_authoritative_extension() {
-        let media = media();
-        let mut state = RemuxSelectionState::new(&media);
-
-        state.set_container(MediaContainer::Mp4);
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/recording-remuxed.mp4")
-        );
-        state.set_container(MediaContainer::Matroska);
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/recording-remuxed.mkv")
-        );
-    }
-
-    #[test]
-    fn custom_output_stem_survives_container_changes() {
-        let media = media();
-        let mut state = RemuxSelectionState::new(&media);
-        state.set_output_filename_stem(OsString::from("delivery copy"));
-
-        state.set_container(MediaContainer::Mp4);
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/delivery copy.mp4")
-        );
-        state.set_container(MediaContainer::Matroska);
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/delivery copy.mkv")
-        );
-        assert!(state.output_is_customized());
-    }
-
-    #[test]
-    fn custom_browse_path_keeps_directory_and_selected_container_extension() {
-        let media = media();
-        let mut state = RemuxSelectionState::new(&media);
-        state.set_custom_output_path(PathBuf::from("exports/final.mp4"));
-
-        assert_eq!(state.output_path(), PathBuf::from("exports/final.mkv"));
-        state.set_container(MediaContainer::Mp4);
-        assert_eq!(state.output_path(), PathBuf::from("exports/final.mp4"));
-    }
+    use crate::remux::draft::tests::media_with_streams;
 
     #[test]
     fn incompatible_mp4_feedback_is_visible_before_execution() {
@@ -512,25 +355,5 @@ mod tests {
             "Stream 15 (data, BIN_DATA) cannot be copied into MP4. Neither MP4 nor MKV can copy every source stream."
         );
         assert!(!feedback.contains("Use MKV instead"));
-    }
-
-    #[test]
-    fn validation_controls_primary_enablement() {
-        let mut media = media();
-        let mut state = RemuxSelectionState::new(&media);
-        assert!(state.can_remux(&media));
-
-        state.set_output_filename_stem(OsString::new());
-        assert!(!state.can_remux(&media));
-
-        state = RemuxSelectionState::new(&media);
-        media.streams.clear();
-        assert!(!state.can_remux(&media));
-    }
-
-    fn media_with_streams(streams: Vec<MediaStream>) -> MediaFile {
-        let mut media = media();
-        media.streams = streams;
-        media
     }
 }

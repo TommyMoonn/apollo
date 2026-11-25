@@ -6,6 +6,7 @@ pub mod intake;
 pub mod model;
 pub(crate) mod operation;
 pub mod output;
+pub(crate) mod output_name;
 pub mod probe;
 pub mod process;
 pub mod progress;

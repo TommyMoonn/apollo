@@ -12,7 +12,6 @@ pub mod layout;
 pub mod legacy;
 pub mod media_error;
 mod media_lifecycle;
-mod output_name;
 pub mod queue;
 pub mod remux;
 pub mod remux_progress;

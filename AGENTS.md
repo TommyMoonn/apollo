@@ -36,14 +36,14 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 - `src/ui/` contains operation screens, queue and batch views, shared controls, layout, typography and themes. `src/ui/legacy/` hosts the egui application adapter, its editor state and feature coordination.
 - `src/media/` handles media intake, probing, tool discovery, stream models, child processes, output publication and progress parsing.
 - `src/queue/` handles queued requests, destination reservations, execution order and job state.
-- `src/audio_mix/`, `src/upscale/`, `src/remux/`, `src/audio_extract/` and `src/frame_capture/` contain operation requests, validation, command construction and execution. Frame Capture also handles frame indexing, previews and clipboard extraction.
+- `src/audio_mix/`, `src/upscale/`, `src/remux/`, `src/audio_extract/` and `src/frame_capture/` contain editable drafts, operation requests, validation, command construction and execution. Frame Capture also handles frame indexing, previews and clipboard extraction.
 - `src/settings.rs` persists remembered source and output directories. `src/file_dialog.rs` handles native file dialogs. `src/progress_repaint.rs` coordinates repaints in response to progress updates.
 - `tests/` contains Rust integration tests, FFprobe fixtures, the optional tooling smoke check and Windows release acceptance support. Rust unit tests live alongside the implementation.
 - `scripts/` contains repository and release tooling. `distribution/` contains media-tool version pins and acceptance records. `installer/` contains Windows installer sources. `docs/` contains engineering guides.
 
 ## Keep ownership clear
 
-`Application` owns the route, media-tool discovery, source intake, queue and immediate executors. `ApolloApp` owns one core and coordinates the egui shell and background work. Keep route transitions in the core and renderer-dependent editor state in the adapter until its owner is extracted. Keep execution input validation in the operation request models and validators so presentation code does not introduce a separate execution path.
+`Application` owns the route, media-tool discovery, source intake, queue and immediate executors. `ApolloApp` owns one core and coordinates the egui shell and background work. Keep route transitions in the core and renderer-dependent presentation and worker state in the adapter. Each operation owns its typed draft and request construction in `draft.rs`. Normal forms and independent editors reuse these drafts; the adapter retains presentation, lifecycle feedback and action routing. Keep execution validation in the operation validators and executors.
 
 `SourceSession` in `src/app/source.rs` owns source acceptance, worker settlement and session retirement. `MediaIntake` remains responsible for source identity, retained probe results and pending requests. Keep accepted source presentation and drafts intact until replacement succeeds. `BatchInspectionOwner` manages batch probing and limits it to two concurrent probes. Preserve request identity checks so results from an earlier request cannot replace the current source or batch state.
 

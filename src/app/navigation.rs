@@ -29,6 +29,19 @@ impl Operation {
     }
 }
 
+impl From<&crate::queue::QueuedOperation> for Operation {
+    fn from(operation: &crate::queue::QueuedOperation) -> Self {
+        use crate::queue::QueuedOperation;
+        match operation {
+            QueuedOperation::AudioMix(_) => Self::AudioMix,
+            QueuedOperation::Upscale(_) => Self::VideoUpscale,
+            QueuedOperation::Remux(_) => Self::Remux,
+            QueuedOperation::AudioExtract(_) => Self::AudioExtract,
+            QueuedOperation::FrameCapture(_) => Self::FrameCapture,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NavigationState {
     #[default]

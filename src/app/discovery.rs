@@ -61,6 +61,17 @@ impl MediaToolsDiscovery {
         self.ready().map(|tools| &tools.video_encoders)
     }
 
+    pub(crate) fn upscale_capabilities(
+        &self,
+    ) -> Option<crate::upscale::draft::UpscaleEncoderCapabilities<'_>> {
+        use crate::upscale::draft::UpscaleEncoderCapabilities;
+        self.ready()?;
+        Some(self.settled_capabilities().map_or(
+            UpscaleEncoderCapabilities::Checking,
+            UpscaleEncoderCapabilities::Ready,
+        ))
+    }
+
     pub(crate) fn is_pending(&self) -> bool {
         self.pending.is_some()
     }

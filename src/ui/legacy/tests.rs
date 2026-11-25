@@ -1,3 +1,4 @@
+use crate::frame_capture::draft::FrameCaptureDraft;
 mod navigation;
 mod source;
 
@@ -70,18 +71,11 @@ use crate::{
     queue::{QueueJobFailure, QueueJobState, QueueRunState, QueuedOperation},
     remux::execution::RemuxExecutionState,
     ui::{
-        QueueAction, SourceAction,
-        audio_extract::AudioExtractSelectionAction,
-        audio_mix::AudioMixSelectionAction,
-        batch::BatchReadiness,
-        file_intake::FileIntakeAction,
-        fonts,
-        frame_capture::{FrameCaptureSelectionAction, FrameCaptureSelectionState},
-        frame_capture_progress::FrameCaptureThumbnailState,
-        layout, media_error,
-        remux::RemuxSelectionAction,
-        theme,
-        upscale::UpscaleSelectionAction,
+        QueueAction, SourceAction, audio_extract::AudioExtractSelectionAction,
+        audio_mix::AudioMixSelectionAction, batch::BatchReadiness, file_intake::FileIntakeAction,
+        fonts, frame_capture::FrameCaptureSelectionAction,
+        frame_capture_progress::FrameCaptureThumbnailState, layout, media_error,
+        remux::RemuxSelectionAction, theme, upscale::UpscaleSelectionAction,
     },
     upscale::{
         execution::UpscaleExecutionState,
@@ -147,6 +141,11 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
     assert!(output_contains_text(&output, "Auto (checking...)"));
     assert!(output_contains_text(&output, "Checking NVIDIA NVENC..."));
     assert!(
+        app.enqueue_current_operation(Operation::VideoUpscale)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
         app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested)
             .is_ok()
     );
@@ -163,6 +162,11 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
     let output = render(&mut app);
     assert!(output_contains_text(&output, "Checking NVIDIA NVENC..."));
     assert!(
+        app.enqueue_current_operation(Operation::VideoUpscale)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
         app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested)
             .is_ok()
     );
@@ -176,6 +180,18 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
         .unwrap()
         .selection
         .set_encoder_selection(VideoEncoderSelection::Cpu);
+    let job_id = app
+        .enqueue_current_operation(Operation::VideoUpscale)
+        .unwrap()
+        .unwrap();
+    assert!(app.begin_queue_edit(job_id, QueueEditOrigin::SourceWorkspace));
+    app.queue_edit
+        .as_mut()
+        .unwrap()
+        .upscale
+        .set_encoder_selection(VideoEncoderSelection::Auto);
+    assert!(!app.save_queue_edit());
+    assert!(app.finish_queue_edit());
     // The missing executable produces a start error only after CPU passes ready validation.
     assert!(matches!(
         app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested),
@@ -199,6 +215,37 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
         settled_navigation_repaint_delay(&context, &mut app),
         Duration::MAX
     );
+    // Batch defaults and overrides cannot bypass the pending capability gate.
+    app.batch_setup = Some(BatchSetupState {
+        origin: BatchOrigin::SourceWorkspace {
+            active_operation: Operation::VideoUpscale,
+        },
+        operation: Operation::VideoUpscale,
+        defaults: None,
+        items: vec![BatchItem {
+            path: path.clone(),
+            included: true,
+            source: ready_batch_source(media(&path)),
+            operation: None,
+            readiness: BatchReadiness::Inspecting,
+            reason: None,
+            overridden: false,
+        }],
+        error: None,
+        append_error: None,
+        append_error_details_open: false,
+    });
+    app.core.show_batch_setup();
+    refresh_batch_items(
+        app.batch_setup.as_mut().unwrap(),
+        app.core.discovery.upscale_capabilities(),
+    );
+    let item = &app.batch_setup.as_ref().unwrap().items[0];
+    assert_eq!(item.readiness, BatchReadiness::NeedsAttention);
+    assert!(item.operation.is_none());
+    assert!(app.begin_batch_edit(BatchEditTarget::Item(0)));
+    assert!(!app.save_batch_edit());
+    assert!(app.finish_batch_edit());
     while wake_rx.try_recv().is_ok() {}
     app.tools_error_details_open = true;
     release_tx.send(()).unwrap();
@@ -208,6 +255,12 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
     app.poll_background_work();
     assert!(!app.core.discovery.is_pending());
     assert!(!app.tools_error_details_open);
+    let item = &app.batch_setup.as_ref().unwrap().items[0];
+    assert_eq!(item.readiness, BatchReadiness::Ready);
+    assert!(
+        matches!(item.operation.as_ref(), Some(QueuedOperation::Upscale(request)) if request.nvenc_capability == VideoEncoderCapability::Available)
+    );
+    assert!(app.finish_batch_setup());
     assert_eq!(app.state.upscale.as_ref().unwrap().selection, before);
     assert!(output_contains_text(
         &render(&mut app),
@@ -1310,7 +1363,7 @@ fn batch_override_cancel_is_non_mutating_and_save_updates_only_the_item() {
     let (directory, path) = temp_file("batch-override");
     let source = media(&path);
     let mut app = app();
-    let selection = crate::ui::remux::RemuxSelectionState::new(&source);
+    let selection = crate::remux::draft::RemuxDraft::new(&source);
     let original = QueuedOperation::Remux(selection.request(&source));
     app.batch_setup = Some(BatchSetupState {
         origin: BatchOrigin::NoSource,
@@ -1379,9 +1432,7 @@ fn batch_override_cancel_is_non_mutating_and_save_updates_only_the_item() {
 fn batch_frame_capture_defaults_stay_simple_while_item_override_owns_precision_support() {
     let (directory, path) = temp_file("batch-frame-capture-preview");
     let source = media(&path);
-    let request = FrameCaptureSelectionState::new(&source)
-        .request(&source)
-        .unwrap();
+    let request = FrameCaptureDraft::new(&source).request(&source).unwrap();
     let mut app = app();
     app.batch_setup = Some(BatchSetupState {
         origin: BatchOrigin::NoSource,
@@ -2757,9 +2808,8 @@ fn genuine_existing_output_keeps_filesystem_output_exists_feedback() {
 fn batch_append_ignores_duplicates_without_mutating_existing_configuration() {
     let (directory, path) = temp_file("batch-append-duplicate");
     let source = media(&path);
-    let operation = QueuedOperation::Remux(
-        crate::ui::remux::RemuxSelectionState::new(&source).request(&source),
-    );
+    let operation =
+        QueuedOperation::Remux(crate::remux::draft::RemuxDraft::new(&source).request(&source));
     let mut app = app();
     app.batch_setup = Some(BatchSetupState {
         origin: BatchOrigin::NoSource,
@@ -2799,9 +2849,8 @@ fn batch_append_ignores_duplicates_without_mutating_existing_configuration() {
 fn batch_append_picker_failure_is_visible_and_never_leaks_to_intake() {
     let (directory, path) = temp_file("batch-append-picker-failure");
     let source = media(&path);
-    let operation = QueuedOperation::Remux(
-        crate::ui::remux::RemuxSelectionState::new(&source).request(&source),
-    );
+    let operation =
+        QueuedOperation::Remux(crate::remux::draft::RemuxDraft::new(&source).request(&source));
     let mut app = app();
     app.batch_setup = Some(BatchSetupState {
         origin: BatchOrigin::NoSource,
@@ -2862,9 +2911,8 @@ fn batch_append_picker_failure_is_visible_and_never_leaks_to_intake() {
 fn batch_append_picker_cancellation_preserves_the_complete_batch_state() {
     let (directory, path) = temp_file("batch-append-picker-cancel");
     let source = media(&path);
-    let operation = QueuedOperation::Remux(
-        crate::ui::remux::RemuxSelectionState::new(&source).request(&source),
-    );
+    let operation =
+        QueuedOperation::Remux(crate::remux::draft::RemuxDraft::new(&source).request(&source));
     let mut app = app();
     app.batch_setup = Some(BatchSetupState {
         origin: BatchOrigin::NoSource,
@@ -3050,53 +3098,201 @@ fn workspace_queue_frame_capture_switch_and_cancel_retire_support_work() {
 }
 
 #[test]
-fn queue_edit_hydrates_each_operation_from_its_immutable_request() {
-    let (directory, path) = temp_file("queue-edit-hydration");
+fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_other_editors() {
+    use super::state::OperationEditorState;
+    use crate::upscale::model::{CpuQuality, VideoEncoderSelection};
+
+    fn set_editor_stem(edit: &mut OperationEditorState, stem: &OsStr) {
+        let stem = stem.to_os_string();
+        match edit.active_operation {
+            Operation::AudioMix => edit.audio_mix.set_output_filename_stem(stem),
+            Operation::VideoUpscale => edit.upscale.set_output_filename_stem(stem),
+            Operation::Remux => edit.remux.set_output_filename_stem(stem),
+            Operation::AudioExtract => edit.audio_extract.set_output_filename_stem(stem),
+            Operation::FrameCapture => edit.frame_capture.set_output_filename_stem(stem),
+        }
+    }
+
+    let (directory, path) = temp_file("draft-round-trip");
     let mut app = app();
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
     let mut job_ids = Vec::new();
-    for operation in [
-        Operation::AudioMix,
-        Operation::VideoUpscale,
-        Operation::Remux,
-        Operation::AudioExtract,
-        Operation::FrameCapture,
-    ] {
+    for operation in Operation::ALL {
         app.select_tool(operation);
+        match operation {
+            Operation::AudioMix => {
+                let session = app.state.audio_mix.as_mut().unwrap();
+                session
+                    .selection
+                    .set_track_gain(&session.media, 1, TrackGain::from_tenths_db(-35));
+                session.selection.set_normalization_enabled(true);
+                session
+                    .selection
+                    .set_normalization_targets(LoudnessTargets::from_tenths(-180, -20, 100));
+                session
+                    .selection
+                    .set_container(&session.media, OutputContainer::Mkv);
+                session
+                    .selection
+                    .set_output_filename_stem("custom-mix".into());
+            }
+            Operation::VideoUpscale => {
+                let session = app.state.upscale.as_mut().unwrap();
+                session.selection.set_target(
+                    &session.media,
+                    UpscaleTarget::Custom {
+                        max_width: 2560,
+                        max_height: 1440,
+                    },
+                );
+                session.selection.set_codec(VideoCodec::H265);
+                session
+                    .selection
+                    .set_encoder_selection(VideoEncoderSelection::Cpu);
+                session
+                    .selection
+                    .set_cpu_quality(VideoCodec::H265, CpuQuality::new(23).unwrap());
+                session
+                    .selection
+                    .set_output_filename_stem("custom-upscale".into());
+            }
+            Operation::Remux => {
+                let session = app.state.remux.as_mut().unwrap();
+                session.selection.set_container(MediaContainer::Mp4);
+                session
+                    .selection
+                    .set_output_filename_stem("custom-remux".into());
+            }
+            Operation::AudioExtract => {
+                let session = app.state.audio_extract.as_mut().unwrap();
+                session.selection.set_format(AudioExtractFormat::Flac);
+                session
+                    .selection
+                    .set_output_filename_stem("custom-audio".into());
+            }
+            Operation::FrameCapture => {
+                let session = app.state.frame_capture.as_mut().unwrap();
+                session.editor.selection.set_position(
+                    &session.media,
+                    FrameTimestamp::from_milliseconds(2250).into(),
+                );
+                session.selection.set_format(FrameCaptureFormat::Jpeg);
+                session
+                    .selection
+                    .set_output_filename_stem("custom-frame".into());
+            }
+        }
         job_ids.push(app.enqueue_current_operation(operation).unwrap().unwrap());
     }
     app.enter_queue();
-
-    for job_id in job_ids {
-        let original = app
-            .core
-            .media_queue
-            .jobs()
-            .iter()
-            .find(|job| job.id() == job_id)
-            .unwrap()
-            .operation()
-            .clone();
+    let originals = app
+        .core
+        .media_queue
+        .jobs()
+        .iter()
+        .map(|job| job.operation().clone())
+        .collect::<Vec<_>>();
+    for (job_id, original) in job_ids.into_iter().zip(&originals) {
         assert!(app.handle_queue_action(QueueAction::Edit(job_id)));
-        let edit = app.queue_edit.as_mut().unwrap();
-        let hydrated = match &original {
+        let stem = original.output().file_stem().unwrap();
+        set_editor_stem(&mut app.queue_edit.as_mut().unwrap().editor, OsStr::new(""));
+        assert!(!app.save_queue_edit());
+        assert_eq!(
+            app.core
+                .media_queue
+                .jobs()
+                .iter()
+                .find(|job| job.id() == job_id)
+                .unwrap()
+                .operation(),
+            original
+        );
+        set_editor_stem(&mut app.queue_edit.as_mut().unwrap().editor, stem);
+        assert!(app.save_queue_edit());
+        assert_eq!(
+            app.core
+                .media_queue
+                .jobs()
+                .iter()
+                .find(|job| job.id() == job_id)
+                .unwrap()
+                .operation(),
+            original
+        );
+
+        app.batch_setup = Some(BatchSetupState {
+            origin: BatchOrigin::Queue {
+                origin: QueueOrigin::SourceWorkspace {
+                    active_operation: Operation::FrameCapture,
+                },
+            },
+            operation: Operation::from(original),
+            defaults: None,
+            items: vec![BatchItem {
+                path: path.clone(),
+                included: true,
+                source: ready_batch_source(media(&path)),
+                operation: Some(original.clone()),
+                readiness: BatchReadiness::Ready,
+                reason: None,
+                overridden: false,
+            }],
+            error: None,
+            append_error: None,
+            append_error_details_open: false,
+        });
+        app.core.show_batch_setup();
+        assert!(app.begin_batch_edit(BatchEditTarget::Item(0)));
+        set_editor_stem(&mut app.batch_edit.as_mut().unwrap().editor, OsStr::new(""));
+        assert!(!app.save_batch_edit());
+        assert_eq!(
+            app.batch_setup.as_ref().unwrap().items[0]
+                .operation
+                .as_ref(),
+            Some(original)
+        );
+        set_editor_stem(&mut app.batch_edit.as_mut().unwrap().editor, stem);
+        assert!(app.save_batch_edit());
+        assert_eq!(
+            app.batch_setup.as_ref().unwrap().items[0]
+                .operation
+                .as_ref(),
+            Some(original)
+        );
+        assert!(app.finish_batch_setup());
+    }
+    // Independent editor changes never rewrite normal source drafts.
+    for original in &originals {
+        let request = match original {
             QueuedOperation::AudioMix(_) => {
-                QueuedOperation::AudioMix(edit.audio_mix.request(&edit.media))
+                let s = app.state.audio_mix.as_ref().unwrap();
+                QueuedOperation::AudioMix(s.selection.request(&s.media))
             }
-            QueuedOperation::Upscale(request) => QueuedOperation::Upscale(
-                edit.upscale
-                    .request_with_nvenc_capability(&edit.media, request.nvenc_capability.clone()),
-            ),
-            QueuedOperation::Remux(_) => QueuedOperation::Remux(edit.remux.request(&edit.media)),
+            QueuedOperation::Upscale(_) => {
+                let s = app.state.upscale.as_ref().unwrap();
+                QueuedOperation::Upscale(
+                    s.selection
+                        .request_for_capabilities(
+                            &s.media,
+                            app.core.discovery.upscale_capabilities().unwrap(),
+                        )
+                        .unwrap(),
+                )
+            }
+            QueuedOperation::Remux(_) => {
+                let s = app.state.remux.as_ref().unwrap();
+                QueuedOperation::Remux(s.selection.request(&s.media))
+            }
             QueuedOperation::AudioExtract(_) => {
-                QueuedOperation::AudioExtract(edit.audio_extract.request(&edit.media).unwrap())
+                let s = app.state.audio_extract.as_ref().unwrap();
+                QueuedOperation::AudioExtract(s.selection.request(&s.media).unwrap())
             }
             QueuedOperation::FrameCapture(_) => {
-                QueuedOperation::FrameCapture(edit.frame_capture.request(&edit.media).unwrap())
+                let s = app.state.frame_capture.as_ref().unwrap();
+                QueuedOperation::FrameCapture(s.selection.request(&s.media).unwrap())
             }
         };
-        assert_eq!(hydrated, original);
-        assert!(app.finish_queue_edit());
+        assert_eq!(&request, original);
     }
     fs::remove_dir_all(directory).unwrap();
 }

@@ -8,14 +8,14 @@ use std::{
 /// The directory stays as structured path state. The editable filename stem is stored separately,
 /// and feature owners supply the authoritative extension when constructing a request path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct OutputNameState {
+pub(crate) struct OutputNameState {
     directory: PathBuf,
     stem: OsString,
     customized: bool,
 }
 
 impl OutputNameState {
-    pub(super) fn new(source: &Path, generated_stem: OsString) -> Self {
+    pub(crate) fn new(source: &Path, generated_stem: OsString) -> Self {
         Self {
             directory: parent_directory(source),
             stem: generated_stem,
@@ -23,19 +23,19 @@ impl OutputNameState {
         }
     }
 
-    pub(super) fn stem(&self) -> &OsStr {
+    pub(crate) fn stem(&self) -> &OsStr {
         &self.stem
     }
 
-    pub(super) fn is_customized(&self) -> bool {
+    pub(crate) fn is_customized(&self) -> bool {
         self.customized
     }
 
-    pub(super) fn is_usable(&self) -> bool {
+    pub(crate) fn is_usable(&self) -> bool {
         filename_stem_is_usable(&self.stem)
     }
 
-    pub(super) fn path(&self, extension: &str) -> PathBuf {
+    pub(crate) fn path(&self, extension: &str) -> PathBuf {
         if !self.is_usable() {
             return PathBuf::new();
         }
@@ -51,20 +51,20 @@ impl OutputNameState {
         }
     }
 
-    pub(super) fn set_generated_stem(&mut self, generated_stem: OsString) {
+    pub(crate) fn set_generated_stem(&mut self, generated_stem: OsString) {
         if !self.customized {
             self.stem = generated_stem;
         }
     }
 
-    pub(super) fn set_stem(&mut self, stem: OsString) {
+    pub(crate) fn set_stem(&mut self, stem: OsString) {
         if self.stem != stem {
             self.stem = stem;
             self.customized = true;
         }
     }
 
-    pub(super) fn set_custom_path(&mut self, path: PathBuf) {
+    pub(crate) fn set_custom_path(&mut self, path: PathBuf) {
         self.directory = parent_directory(&path);
         self.stem = path
             .file_stem()

@@ -1,5 +1,10 @@
 //! Legacy egui composition. The library core owns route and non-rendering state.
 
+mod audio_extract;
+mod audio_mix;
+mod remux;
+mod upscale;
+
 mod render;
 mod source;
 mod state;
@@ -110,6 +115,12 @@ impl ApolloApp {
     fn poll_background_work(&mut self) {
         if self.core.discovery.poll() {
             self.tools_error_details_open = false;
+            // Batch defaults prepared while capabilities were pending must be reconsidered on settlement.
+            if let Some(batch) = self.batch_setup.as_mut()
+                && batch.operation == crate::app::Operation::VideoUpscale
+            {
+                workflows::refresh_batch_items(batch, self.core.discovery.upscale_capabilities());
+            }
         }
         self.poll_media_queue();
         if !matches!(self.core.discovery.state(), MediaToolsState::Ready(_)) {

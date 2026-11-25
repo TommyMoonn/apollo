@@ -1,22 +1,17 @@
-use std::{
-    cell::Cell,
-    ffi::{OsStr, OsString},
-    path::{Path, PathBuf},
-};
+use crate::audio_extract::draft::{AudioExtractDraft, AudioExtractReadyError};
+
+use std::{cell::Cell, ffi::OsString};
 
 use egui::{Label, RichText, Ui};
 
 use crate::{
-    audio_extract::{
-        model::{AudioExtractFormat, AudioExtractRequest},
-        validation::{AudioExtractValidationError, validate_audio_extract_request},
-    },
+    audio_extract::{model::AudioExtractFormat, validation::AudioExtractValidationError},
     media::{model::MediaFile, output::MediaOutputError},
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error,
-    output_name::OutputNameState, show_queue_confirmation, theme, widgets,
+    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error, show_queue_confirmation,
+    theme, widgets,
 };
 
 const AUDIO_TRACK_LABEL: &str = "Audio track";
@@ -26,13 +21,6 @@ const BROWSE_LABEL: &str = "Browse";
 const EXTRACT_LABEL: &str = "Extract";
 const FORMAT_OPTIONS: [&str; 3] = ["Original (copy)", "AAC", "FLAC"];
 const NO_AUDIO_FEEDBACK: &str = "This source has no audio tracks to extract.";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AudioExtractSelectionState {
-    selected_stream_index: Option<u32>,
-    format: AudioExtractFormat,
-    output_name: OutputNameState,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioExtractPresentation {
@@ -79,124 +67,11 @@ pub enum AudioExtractSelectionAction {
     CancelQueueEdit,
 }
 
-impl AudioExtractSelectionState {
-    pub fn new(media: &MediaFile) -> Self {
-        let selected_stream_index = media
-            .audio_streams
-            .first()
-            .map(|stream| stream.stream_index);
-        Self {
-            selected_stream_index,
-            format: AudioExtractFormat::Original,
-            output_name: OutputNameState::new(
-                &media.path,
-                default_output_stem(
-                    &media.path,
-                    media.audio_streams.len(),
-                    selected_stream_index,
-                ),
-            ),
-        }
-    }
-
-    pub fn from_request(media: &MediaFile, request: &AudioExtractRequest) -> Self {
-        let mut state = Self {
-            selected_stream_index: Some(request.audio_stream_index),
-            format: request.format,
-            output_name: OutputNameState::new(
-                &media.path,
-                default_output_stem(
-                    &media.path,
-                    media.audio_streams.len(),
-                    Some(request.audio_stream_index),
-                ),
-            ),
-        };
-        state.output_name.set_custom_path(request.output.clone());
-        state
-    }
-
-    pub fn selected_stream_index(&self) -> Option<u32> {
-        self.selected_stream_index
-    }
-
-    pub fn select_stream(&mut self, media: &MediaFile, stream_index: u32) -> bool {
-        if !media
-            .audio_streams
-            .iter()
-            .any(|stream| stream.stream_index == stream_index)
-        {
-            return false;
-        }
-        self.selected_stream_index = Some(stream_index);
-        self.output_name.set_generated_stem(default_output_stem(
-            &media.path,
-            media.audio_streams.len(),
-            self.selected_stream_index,
-        ));
-        true
-    }
-
-    pub fn format(&self) -> AudioExtractFormat {
-        self.format
-    }
-
-    pub fn set_format(&mut self, format: AudioExtractFormat) {
-        self.format = format;
-    }
-
-    pub fn output_path(&self) -> PathBuf {
-        self.output_name.path(self.format.extension())
-    }
-
-    pub fn output_filename_stem(&self) -> &OsStr {
-        self.output_name.stem()
-    }
-
-    pub fn output_is_customized(&self) -> bool {
-        self.output_name.is_customized()
-    }
-
-    pub fn set_output_filename_stem(&mut self, stem: OsString) {
-        self.output_name.set_stem(stem);
-    }
-
-    pub fn set_custom_output_path(&mut self, output: PathBuf) {
-        self.output_name.set_custom_path(output);
-    }
-
-    pub fn request(&self, media: &MediaFile) -> Option<AudioExtractRequest> {
-        Some(AudioExtractRequest {
-            input: media.path.clone(),
-            output: self.output_path(),
-            audio_stream_index: self.selected_stream_index?,
-            format: self.format,
-        })
-    }
-
-    pub fn can_extract(&self, media: &MediaFile) -> bool {
-        self.validation(media).is_ok()
-    }
-
-    fn validation(&self, media: &MediaFile) -> Result<(), AudioExtractReadyError> {
-        let request = self
-            .request(media)
-            .ok_or(AudioExtractReadyError::NoAudioStreams)?;
-        validate_audio_extract_request(&request, media).map_err(AudioExtractReadyError::Request)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AudioExtractReadyError {
-    NoAudioStreams,
-    Request(AudioExtractValidationError),
-}
-
 pub fn show<'a>(
     ui: &mut Ui,
     media: &MediaFile,
     presentation: &AudioExtractPresentation,
-    state: &mut AudioExtractSelectionState,
+    state: &mut AudioExtractDraft,
     mode: impl Into<OperationSurfaceMode<'a>>,
 ) -> AudioExtractSelectionAction {
     let mode = mode.into();
@@ -315,7 +190,7 @@ fn show_audio_tracks(
     ui: &mut Ui,
     media: &MediaFile,
     presentation: &AudioExtractPresentation,
-    state: &mut AudioExtractSelectionState,
+    state: &mut AudioExtractDraft,
 ) {
     widgets::separator(ui);
     if presentation.tracks.is_empty() {
@@ -369,7 +244,7 @@ fn track_metadata(stream: &crate::media::model::AudioStream) -> String {
     parts.join(" · ")
 }
 
-fn show_format_selector(ui: &mut Ui, state: &mut AudioExtractSelectionState) {
+fn show_format_selector(ui: &mut Ui, state: &mut AudioExtractDraft) {
     let mut requested = None;
     widgets::select_menu(ui, format_label(state.format()), &FORMAT_OPTIONS, |ui| {
         for format in [
@@ -411,25 +286,6 @@ fn ready_feedback(error: &AudioExtractReadyError) -> Option<&'static str> {
     }
 }
 
-fn default_output_stem(
-    input: &Path,
-    audio_stream_count: usize,
-    selected_stream_index: Option<u32>,
-) -> OsString {
-    let stem = input
-        .file_stem()
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| OsStr::new("output"));
-    let mut output = OsString::from(stem);
-    output.push("-audio");
-    if audio_stream_count > 1
-        && let Some(stream_index) = selected_stream_index
-    {
-        output.push(format!("-{stream_index}"));
-    }
-    output
-}
-
 pub(super) fn format_label(format: AudioExtractFormat) -> &'static str {
     match format {
         AudioExtractFormat::Original => "Original (copy)",
@@ -448,150 +304,12 @@ fn format_detail(format: AudioExtractFormat) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, path::PathBuf};
 
-    use crate::{
-        audio_extract::model::AudioExtractFormat,
-        media::model::{AudioStream, MediaFile, MediaStream, StreamKind},
-    };
+    use crate::media::model::StreamKind;
 
-    use super::{AudioExtractSelectionState, NO_AUDIO_FEEDBACK, ready_feedback};
+    use super::{AudioExtractDraft, NO_AUDIO_FEEDBACK, ready_feedback};
 
-    fn media() -> MediaFile {
-        MediaFile {
-            path: PathBuf::from("captures/recording.mkv"),
-            duration: None,
-            streams: vec![
-                MediaStream {
-                    stream_index: 0,
-                    kind: StreamKind::Video,
-                    codec: Some("h264".into()),
-                },
-                MediaStream {
-                    stream_index: 3,
-                    kind: StreamKind::Audio,
-                    codec: Some("aac".into()),
-                },
-                MediaStream {
-                    stream_index: 7,
-                    kind: StreamKind::Audio,
-                    codec: Some("opus".into()),
-                },
-            ],
-            video_streams: Vec::new(),
-            audio_streams: vec![
-                AudioStream {
-                    stream_index: 3,
-                    codec: Some("aac".into()),
-                    channels: Some(2),
-                    channel_layout: Some("stereo".into()),
-                    title: Some("Program".into()),
-                    language: None,
-                },
-                AudioStream {
-                    stream_index: 7,
-                    codec: Some("opus".into()),
-                    channels: Some(2),
-                    channel_layout: Some("stereo".into()),
-                    title: Some("Commentary".into()),
-                    language: Some("eng".into()),
-                },
-            ],
-        }
-    }
-
-    #[test]
-    fn multi_track_source_defaults_to_first_absolute_index_and_indexed_audio_suffix() {
-        let media = media();
-        let mut state = AudioExtractSelectionState::new(&media);
-        assert_eq!(state.selected_stream_index(), Some(3));
-        assert_eq!(state.format(), AudioExtractFormat::Original);
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/recording-audio-3.mka")
-        );
-        assert!(state.can_extract(&media));
-        assert_eq!(state.request(&media).unwrap().audio_stream_index, 3);
-
-        state.set_format(AudioExtractFormat::Aac);
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/recording-audio-3.m4a")
-        );
-    }
-
-    #[test]
-    fn single_track_source_keeps_the_simple_audio_suffix() {
-        let mut media = media();
-        media.audio_streams.truncate(1);
-        media
-            .streams
-            .retain(|stream| stream.kind != StreamKind::Audio || stream.stream_index == 3);
-
-        let state = AudioExtractSelectionState::new(&media);
-
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/recording-audio.mka")
-        );
-    }
-
-    #[test]
-    fn selection_uses_only_probed_absolute_audio_indexes() {
-        let media = media();
-        let mut state = AudioExtractSelectionState::new(&media);
-        assert!(state.select_stream(&media, 7));
-        assert_eq!(state.request(&media).unwrap().audio_stream_index, 7);
-        assert!(!state.select_stream(&media, 0));
-        assert!(!state.select_stream(&media, 99));
-        assert_eq!(state.selected_stream_index(), Some(7));
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/recording-audio-7.mka")
-        );
-    }
-
-    #[test]
-    fn customized_output_stem_survives_later_track_and_format_changes() {
-        let media = media();
-        let mut state = AudioExtractSelectionState::new(&media);
-        state.set_output_filename_stem(OsString::from("chosen commentary"));
-
-        assert!(state.select_stream(&media, 7));
-        state.set_format(AudioExtractFormat::Flac);
-
-        assert_eq!(
-            state.output_path(),
-            PathBuf::from("captures/chosen commentary.flac")
-        );
-        assert!(state.output_is_customized());
-    }
-
-    #[test]
-    fn format_changes_authoritative_extension_and_preserves_custom_stem() {
-        let media = media();
-        let mut state = AudioExtractSelectionState::new(&media);
-        state.set_output_filename_stem(OsString::from("dialogue final"));
-        for (format, expected) in [
-            (AudioExtractFormat::Aac, "captures/dialogue final.m4a"),
-            (AudioExtractFormat::Flac, "captures/dialogue final.flac"),
-            (AudioExtractFormat::Original, "captures/dialogue final.mka"),
-        ] {
-            state.set_format(format);
-            assert_eq!(state.output_path(), PathBuf::from(expected));
-        }
-        assert!(state.output_is_customized());
-    }
-
-    #[test]
-    fn browse_path_preserves_directory_while_format_owns_extension() {
-        let media = media();
-        let mut state = AudioExtractSelectionState::new(&media);
-        state.set_custom_output_path(PathBuf::from("exports/voice.flac"));
-        assert_eq!(state.output_path(), PathBuf::from("exports/voice.mka"));
-        state.set_format(AudioExtractFormat::Flac);
-        assert_eq!(state.output_path(), PathBuf::from("exports/voice.flac"));
-    }
+    use crate::audio_extract::draft::tests::media;
 
     #[test]
     fn no_audio_source_is_non_runnable_with_clear_feedback() {
@@ -600,7 +318,7 @@ mod tests {
         media
             .streams
             .retain(|stream| stream.kind != StreamKind::Audio);
-        let state = AudioExtractSelectionState::new(&media);
+        let state = AudioExtractDraft::new(&media);
         assert_eq!(state.selected_stream_index(), None);
         assert!(!state.can_extract(&media));
         assert_eq!(

@@ -1,3 +1,7 @@
+use super::audio_extract::AudioExtractToolState;
+use super::audio_mix::AudioMixToolState;
+use super::remux::RemuxToolState;
+use super::upscale::UpscaleToolState;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
@@ -8,8 +12,11 @@ use std::{io, thread};
 use egui::TextureHandle;
 
 use crate::app::{BatchOrigin, Operation};
+use crate::audio_extract::draft::AudioExtractDraft;
 use crate::audio_extract::model::AudioExtractFormat;
+use crate::audio_mix::draft::AudioMixDraft;
 use crate::audio_mix::model::{LoudnessNormalization, OutputContainer};
+use crate::frame_capture::draft::FrameCaptureDraft;
 use crate::frame_capture::frame_index::{
     FrameDirection, FrameIndexState, FrameNavigation, FrameNavigator, FrameStep,
 };
@@ -26,65 +33,15 @@ use crate::media::intake::SourceIdentity;
 use crate::media::model::MediaFile;
 use crate::media::process::MediaProcessEvent;
 use crate::queue::{JobId, QueuedJob, QueuedOperation};
-use crate::ui::audio_extract::AudioExtractSelectionState;
-use crate::ui::audio_extract_progress::AudioExtractLifecycleUiState;
-use crate::ui::audio_mix::AudioMixSelectionState;
-use crate::ui::audio_mix_progress::AudioMixLifecycleUiState;
+use crate::remux::draft::RemuxDraft;
 use crate::ui::batch::BatchReadiness;
-use crate::ui::frame_capture::{
-    FrameCaptureSelectionState, FrameCopyStatus, FrameNavigationAvailability, PositionSettle,
-};
+use crate::ui::frame_capture::{FrameCopyStatus, FrameNavigationAvailability, PositionSettle};
 use crate::ui::frame_capture_progress::{
     FrameCaptureLifecycleUiState, FrameCaptureThumbnailRequest,
 };
-use crate::ui::remux::RemuxSelectionState;
-use crate::ui::remux_progress::RemuxLifecycleUiState;
 use crate::ui::source_presentation::SourcePresentation;
-use crate::ui::upscale::UpscaleSelectionState;
-use crate::ui::upscale_progress::UpscaleLifecycleUiState;
+use crate::upscale::draft::UpscaleDraft;
 use crate::upscale::model::{UpscaleEncoderSettings, UpscaleTarget, VideoCodec};
-
-use super::workflows::queued_operation_tool;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AudioMixToolState {
-    pub(super) session_id: u64,
-    pub(super) media: MediaFile,
-    pub(super) selection: AudioMixSelectionState,
-    pub(super) lifecycle_ui: AudioMixLifecycleUiState,
-    pub(super) start_error: Option<MediaError>,
-    pub(super) start_error_details_open: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct UpscaleToolState {
-    pub(super) session_id: u64,
-    pub(super) media: MediaFile,
-    pub(super) selection: UpscaleSelectionState,
-    pub(super) lifecycle_ui: UpscaleLifecycleUiState,
-    pub(super) start_error: Option<MediaError>,
-    pub(super) start_error_details_open: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RemuxToolState {
-    pub(super) session_id: u64,
-    pub(super) media: MediaFile,
-    pub(super) selection: RemuxSelectionState,
-    pub(super) lifecycle_ui: RemuxLifecycleUiState,
-    pub(super) start_error: Option<MediaError>,
-    pub(super) start_error_details_open: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AudioExtractToolState {
-    pub(super) session_id: u64,
-    pub(super) media: MediaFile,
-    pub(super) selection: AudioExtractSelectionState,
-    pub(super) lifecycle_ui: AudioExtractLifecycleUiState,
-    pub(super) start_error: Option<MediaError>,
-    pub(super) start_error_details_open: bool,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FrameCaptureToolState {
@@ -113,7 +70,7 @@ impl DerefMut for FrameCaptureToolState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FrameCaptureEditorState {
-    pub(super) selection: FrameCaptureSelectionState,
+    pub(super) selection: FrameCaptureDraft,
     pub(super) session_id: u64,
     pub(super) source_identity: Option<SourceIdentity>,
     pub(super) preview: FramePreview<PreviewImage>,
@@ -130,7 +87,7 @@ impl FrameCaptureEditorState {
         media: &MediaFile,
     ) -> Self {
         Self {
-            selection: FrameCaptureSelectionState::new(media),
+            selection: FrameCaptureDraft::new(media),
             session_id,
             source_identity,
             preview: FramePreview::default(),
@@ -146,12 +103,12 @@ impl FrameCaptureEditorState {
         media: &MediaFile,
         request: &crate::frame_capture::model::FrameCaptureRequest,
     ) {
-        self.selection = FrameCaptureSelectionState::from_request(media, request);
+        self.selection = FrameCaptureDraft::from_request(media, request);
     }
 }
 
 impl Deref for FrameCaptureEditorState {
-    type Target = FrameCaptureSelectionState;
+    type Target = FrameCaptureDraft;
 
     fn deref(&self) -> &Self::Target {
         &self.selection
@@ -247,10 +204,10 @@ pub(super) struct OperationEditorState {
     pub(super) media: MediaFile,
     pub(super) presentation: Arc<SourcePresentation>,
     pub(super) active_operation: Operation,
-    pub(super) audio_mix: AudioMixSelectionState,
-    pub(super) upscale: UpscaleSelectionState,
-    pub(super) remux: RemuxSelectionState,
-    pub(super) audio_extract: AudioExtractSelectionState,
+    pub(super) audio_mix: AudioMixDraft,
+    pub(super) upscale: UpscaleDraft,
+    pub(super) remux: RemuxDraft,
+    pub(super) audio_extract: AudioExtractDraft,
     pub(super) frame_capture: FrameCaptureEditorState,
     pub(super) error: Option<MediaError>,
     pub(super) error_details_open: bool,
@@ -267,10 +224,10 @@ impl OperationEditorState {
             session_id,
             presentation: Arc::new(SourcePresentation::new(&media)),
             active_operation,
-            audio_mix: AudioMixSelectionState::new(&media),
-            upscale: UpscaleSelectionState::new(&media),
-            remux: RemuxSelectionState::new(&media),
-            audio_extract: AudioExtractSelectionState::new(&media),
+            audio_mix: AudioMixDraft::new(&media),
+            upscale: UpscaleDraft::new(&media),
+            remux: RemuxDraft::new(&media),
+            audio_extract: AudioExtractDraft::new(&media),
             frame_capture: FrameCaptureEditorState::new(session_id, source_identity, &media),
             media,
             error: None,
@@ -281,16 +238,16 @@ impl OperationEditorState {
     pub(super) fn hydrate(&mut self, operation: &QueuedOperation) {
         match operation {
             QueuedOperation::AudioMix(request) => {
-                self.audio_mix = AudioMixSelectionState::from_request(&self.media, request);
+                self.audio_mix = AudioMixDraft::from_request(&self.media, request);
             }
             QueuedOperation::Upscale(request) => {
-                self.upscale = UpscaleSelectionState::from_request(&self.media, request);
+                self.upscale = UpscaleDraft::from_request(&self.media, request);
             }
             QueuedOperation::Remux(request) => {
-                self.remux = RemuxSelectionState::from_request(&self.media, request);
+                self.remux = RemuxDraft::from_request(&self.media, request);
             }
             QueuedOperation::AudioExtract(request) => {
-                self.audio_extract = AudioExtractSelectionState::from_request(&self.media, request);
+                self.audio_extract = AudioExtractDraft::from_request(&self.media, request);
             }
             QueuedOperation::FrameCapture(request) => {
                 self.frame_capture.hydrate(&self.media, request);
@@ -337,7 +294,7 @@ impl QueueEditState {
             session_id,
             Some(source_identity),
             media,
-            queued_operation_tool(job.operation()),
+            Operation::from(job.operation()),
         );
         editor.hydrate(job.operation());
         Self {

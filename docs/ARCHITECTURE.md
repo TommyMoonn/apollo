@@ -25,9 +25,9 @@ The library exports the application core and UI modules through `src/lib.rs`. Th
 
 ## Composition and navigation
 
-`src/app/navigation.rs` owns `Operation`, routes and return origins for queue and batch flows. Route transitions do not require an egui context. The adapter commits these transitions after the existing source, editor and queue actions succeed; it retains renderer-dependent drafts and worker coordination until those responsibilities are extracted. Queue return and batch submission preserve the original source operation. Queue history changes remain with `MediaQueue`.
+`src/app/navigation.rs` owns `Operation`, routes and return origins for queue and batch flows. Route transitions do not require an egui context. The adapter commits these transitions after the existing source, editor and queue actions succeed; it retains renderer-dependent editor presentation and worker coordination. Queue return and batch submission preserve the original source operation. Queue history changes remain with `MediaQueue`.
 
-`src/ui/legacy/mod.rs` constructs the application, installs the existing font and theme definitions and coordinates background updates and shutdown. `render.rs` dispatches the active route and draws the shell. `source.rs` handles source actions and presentation settlement. `workflows.rs` retains the other feature actions, and `state.rs` retains editor and worker state that still depends on egui.
+`src/ui/legacy/mod.rs` constructs the application, installs the existing font and theme definitions and coordinates background updates and shutdown. `render.rs` dispatches the active route and draws the shell. `source.rs` handles source actions and presentation settlement. The four ordinary operation adapters (`audio_mix.rs`, `upscale.rs`, `remux.rs` and `audio_extract.rs`) own their ready surfaces, immediate actions and lifecycle feedback. `workflows.rs` retains queue, batch, dialog and frame support coordination; `state.rs` retains editor and worker state that still depends on egui.
 
 Each root update first polls media-tool discovery and queue events. While base tools are checking or unavailable, it renders that status and returns. Once ready, the update polls dialogs, source inspection, batch inspection, frame preview, frame index, clipboard and thumbnails in that order before handling drops and rendering the active route. Shutdown cancels clipboard work and the queue; owned resources retain their existing cleanup.
 
@@ -55,7 +55,7 @@ Pass process arguments separately instead of constructing shell commands. Map st
 | Audio Extract | Map one selected audio stream to original MKA, AAC or FLAC output. |
 | Frame Capture | Extract one video frame as PNG or JPEG; preview and clipboard paths have separate lifecycles. |
 
-Each operation owns its request model, validator, command builder and executor. Extend these paths instead of creating alternate processing pipelines in UI code.
+Each operation owns its editable configuration in `draft.rs`, alongside its request model, validator, command builder and executor. Normal forms and queue and batch editors use the same typed request construction. `src/media/output_name.rs` owns shared filename stem and directory editing; the selected operation supplies the extension. Invalid editable text stays in the draft until corrected. Audio Mix caches pure readiness validation and invalidates it when draft or relevant source metadata changes. Upscale uses the current discovery capability state: explicit CPU is available while NVENC is pending, whereas Auto and explicit NVENC wait for settlement. Immediate executors and queue execution repeat their applicable validation before starting work. Extend these paths instead of creating alternate processing pipelines in UI code.
 
 ## Media-tool discovery
 

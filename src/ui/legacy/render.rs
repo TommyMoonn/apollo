@@ -19,11 +19,10 @@ use crate::ui::remux::RemuxSelectionAction;
 use crate::ui::upscale::UpscaleSelectionAction;
 use crate::ui::workspace::{EditableQueuedJob, WorkspaceAction, WorkspaceMode};
 use crate::ui::{
-    OperationSurfaceMode, audio_extract as audio_extract_ui, audio_extract_progress,
-    audio_mix as audio_mix_ui, audio_mix_progress, batch as batch_ui, file_intake,
-    frame_capture as frame_capture_ui, frame_capture_progress, layout, media_error,
-    queue as queue_ui, remux as remux_ui, remux_progress, theme, upscale as upscale_ui,
-    upscale_progress, widgets, workspace,
+    OperationSurfaceMode, audio_extract as audio_extract_ui, audio_mix as audio_mix_ui,
+    batch as batch_ui, file_intake, frame_capture as frame_capture_ui, frame_capture_progress,
+    layout, media_error, queue as queue_ui, remux as remux_ui, theme, upscale as upscale_ui,
+    widgets, workspace,
 };
 
 use super::ApolloApp;
@@ -33,8 +32,7 @@ use super::state::{
 };
 use super::workflows::{
     batch_defaults_from_editor, editor_output_dialog_request, refresh_batch_items,
-    shows_audio_extract_lifecycle, shows_audio_mix_lifecycle, shows_frame_capture_lifecycle,
-    shows_remux_lifecycle, shows_upscale_lifecycle,
+    shows_frame_capture_lifecycle,
 };
 use crate::app::discovery::MediaToolsState;
 
@@ -304,9 +302,7 @@ impl ApolloApp {
         );
         match action {
             BatchAction::SelectOperation(operation) => {
-                let capabilities = self
-                    .ready_media_tools()
-                    .map(|tools| tools.video_encoders.clone());
+                let capabilities = self.core.discovery.upscale_capabilities();
                 if let Some(batch) = self.batch_setup.as_mut()
                     && batch.operation != operation
                 {
@@ -323,7 +319,7 @@ impl ApolloApp {
                         let editor = OperationEditorState::new(0, None, media, operation);
                         batch.defaults = batch_defaults_from_editor(&editor);
                     }
-                    refresh_batch_items(batch, capabilities.as_ref());
+                    refresh_batch_items(batch, capabilities);
                 }
             }
             BatchAction::ConfigureDefaults => {
@@ -381,8 +377,8 @@ impl ApolloApp {
             )
         });
         let capabilities = self.core.discovery.settled_capabilities().map_or(
-            upscale_ui::UpscaleEncoderCapabilities::Checking,
-            upscale_ui::UpscaleEncoderCapabilities::Ready,
+            crate::upscale::draft::UpscaleEncoderCapabilities::Checking,
+            crate::upscale::draft::UpscaleEncoderCapabilities::Ready,
         );
         let Some(edit) = self.batch_edit.as_mut() else {
             return;
@@ -472,8 +468,8 @@ impl ApolloApp {
             });
         }
         let capabilities = self.core.discovery.settled_capabilities().map_or(
-            upscale_ui::UpscaleEncoderCapabilities::Checking,
-            upscale_ui::UpscaleEncoderCapabilities::Ready,
+            crate::upscale::draft::UpscaleEncoderCapabilities::Checking,
+            crate::upscale::draft::UpscaleEncoderCapabilities::Ready,
         );
         let action = show_operation_editor(
             ui,
@@ -507,390 +503,6 @@ impl ApolloApp {
             }
             QueueEditAction::None => {}
         }
-    }
-
-    fn show_audio_mix_tool(&mut self, ui: &mut Ui) {
-        if shows_audio_mix_lifecycle(self.core.audio_mix_executor.state()) {
-            let action = {
-                let session = self
-                    .state
-                    .audio_mix
-                    .as_mut()
-                    .expect("audio mix source exists while lifecycle surface is shown");
-                let request = session.selection.request(&session.media);
-                audio_mix_progress::show(
-                    ui,
-                    &session.media,
-                    &request,
-                    &mut self.core.audio_mix_executor,
-                    &mut session.lifecycle_ui,
-                )
-            };
-            self.handle_audio_mix_lifecycle_action(action);
-            return;
-        }
-
-        if self.show_audio_mix_start_error(ui) {
-            return;
-        }
-
-        let presentation = self
-            .state
-            .source_presentation
-            .as_ref()
-            .expect("source presentation exists while workspace is shown")
-            .clone();
-        let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
-        let queue_confirmation = self.core.queue_confirmation == Some(Operation::AudioMix);
-        let action_error = self
-            .core
-            .operation_action_error
-            .as_ref()
-            .filter(|(tool, _)| *tool == Operation::AudioMix)
-            .map(|(_, error)| error.clone());
-        let action = ui
-            .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
-                let session = self
-                    .state
-                    .audio_mix
-                    .as_mut()
-                    .expect("audio mix source exists while ready surface is shown");
-                audio_mix_ui::show(
-                    ui,
-                    &session.media,
-                    &presentation.audio_mix,
-                    &mut session.selection,
-                    OperationSurfaceMode::Immediate {
-                        start_allowed: immediate_start_allowed,
-                        queue_confirmation,
-                        action_error: action_error.as_ref(),
-                    },
-                )
-            })
-            .inner;
-        if let Err(error) = self.handle_audio_mix_action(action)
-            && let Some(session) = self.state.audio_mix.as_mut()
-        {
-            session.start_error = Some(error.user_error());
-            session.start_error_details_open = false;
-        }
-    }
-
-    fn show_audio_mix_start_error(&mut self, ui: &mut Ui) -> bool {
-        let Some(session) = self.state.audio_mix.as_mut() else {
-            return false;
-        };
-        let Some(error) = session.start_error.as_ref() else {
-            return false;
-        };
-
-        let title = if error.kind() == MediaErrorKind::OutputPickerUnavailable {
-            "Output picker unavailable"
-        } else {
-            "Audio mix could not start"
-        };
-        let response = layout::focus_content(ui, |ui| {
-            let mut sizing_details_open = session.start_error_details_open;
-            let details_open = if ui.is_sizing_pass() {
-                &mut sizing_details_open
-            } else {
-                &mut session.start_error_details_open
-            };
-            media_error::show_failure_content(ui, title, error, details_open, "Back")
-        });
-        if response.inner.clicked() {
-            session.start_error = None;
-            session.start_error_details_open = false;
-        }
-        true
-    }
-
-    fn show_upscale_tool(&mut self, ui: &mut Ui) {
-        if shows_upscale_lifecycle(self.core.upscale_executor.state()) {
-            let action = {
-                let upscale = self
-                    .state
-                    .upscale
-                    .as_mut()
-                    .expect("upscale source exists while lifecycle surface is shown");
-                let request = upscale.selection.request(&upscale.media);
-                upscale_progress::show(
-                    ui,
-                    &upscale.media,
-                    &request,
-                    &mut self.core.upscale_executor,
-                    &mut upscale.lifecycle_ui,
-                )
-            };
-            self.handle_upscale_lifecycle_action(action);
-            return;
-        }
-
-        if self.show_upscale_start_error(ui) {
-            return;
-        }
-
-        let enabled = self.workspace_interaction_enabled();
-        let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
-        let queue_confirmation = self.core.queue_confirmation == Some(Operation::VideoUpscale);
-        let action_error = self
-            .core
-            .operation_action_error
-            .as_ref()
-            .filter(|(tool, _)| *tool == Operation::VideoUpscale)
-            .map(|(_, error)| error.clone());
-        let capabilities = self.core.discovery.settled_capabilities().map_or(
-            upscale_ui::UpscaleEncoderCapabilities::Checking,
-            upscale_ui::UpscaleEncoderCapabilities::Ready,
-        );
-        let action = ui
-            .add_enabled_ui(enabled, |ui| {
-                let upscale = self
-                    .state
-                    .upscale
-                    .as_mut()
-                    .expect("upscale source exists while ready surface is shown");
-                upscale_ui::show(
-                    ui,
-                    &upscale.media,
-                    &mut upscale.selection,
-                    capabilities,
-                    OperationSurfaceMode::Immediate {
-                        start_allowed: immediate_start_allowed,
-                        queue_confirmation,
-                        action_error: action_error.as_ref(),
-                    },
-                )
-            })
-            .inner;
-        if let Err(error) = self.handle_upscale_action(action)
-            && let Some(session) = self.state.upscale.as_mut()
-        {
-            session.start_error = Some(error.user_error());
-            session.start_error_details_open = false;
-        }
-    }
-
-    pub(super) fn show_upscale_start_error(&mut self, ui: &mut Ui) -> bool {
-        let Some(session) = self.state.upscale.as_mut() else {
-            return false;
-        };
-        let Some(error) = session.start_error.as_ref() else {
-            return false;
-        };
-
-        let title = if error.kind() == MediaErrorKind::OutputPickerUnavailable {
-            "Output picker unavailable"
-        } else {
-            "Upscale could not start"
-        };
-        let response = layout::focus_content(ui, |ui| {
-            let mut sizing_details_open = session.start_error_details_open;
-            let details_open = if ui.is_sizing_pass() {
-                &mut sizing_details_open
-            } else {
-                &mut session.start_error_details_open
-            };
-            media_error::show_failure_content(ui, title, error, details_open, "Back")
-        });
-        if response.inner.clicked() {
-            session.start_error = None;
-            session.start_error_details_open = false;
-        }
-        true
-    }
-
-    fn show_remux_tool(&mut self, ui: &mut Ui) {
-        if shows_remux_lifecycle(self.core.remux_executor.state()) {
-            let action = {
-                let remux = self
-                    .state
-                    .remux
-                    .as_mut()
-                    .expect("remux source exists while lifecycle surface is shown");
-                let request = remux.selection.request(&remux.media);
-                remux_progress::show(
-                    ui,
-                    &request,
-                    &mut self.core.remux_executor,
-                    &mut remux.lifecycle_ui,
-                )
-            };
-            self.handle_remux_lifecycle_action(action);
-            return;
-        }
-
-        if self.show_remux_start_error(ui) {
-            return;
-        }
-
-        let presentation = self
-            .state
-            .source_presentation
-            .as_ref()
-            .expect("source presentation exists while workspace is shown")
-            .clone();
-        let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
-        let queue_confirmation = self.core.queue_confirmation == Some(Operation::Remux);
-        let action_error = self
-            .core
-            .operation_action_error
-            .as_ref()
-            .filter(|(tool, _)| *tool == Operation::Remux)
-            .map(|(_, error)| error.clone());
-        let action = ui
-            .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
-                let remux = self
-                    .state
-                    .remux
-                    .as_mut()
-                    .expect("remux source exists while ready surface is shown");
-                remux_ui::show(
-                    ui,
-                    &remux.media,
-                    &presentation.remux,
-                    &mut remux.selection,
-                    OperationSurfaceMode::Immediate {
-                        start_allowed: immediate_start_allowed,
-                        queue_confirmation,
-                        action_error: action_error.as_ref(),
-                    },
-                )
-            })
-            .inner;
-        if let Err(error) = self.handle_remux_action(action)
-            && let Some(session) = self.state.remux.as_mut()
-        {
-            session.start_error = Some(error.user_error());
-            session.start_error_details_open = false;
-        }
-    }
-
-    fn show_remux_start_error(&mut self, ui: &mut Ui) -> bool {
-        let Some(session) = self.state.remux.as_mut() else {
-            return false;
-        };
-        let Some(error) = session.start_error.as_ref() else {
-            return false;
-        };
-
-        let title = if error.kind() == MediaErrorKind::OutputPickerUnavailable {
-            "Output picker unavailable"
-        } else {
-            "Remux could not start"
-        };
-        let response = layout::focus_content(ui, |ui| {
-            let mut sizing_details_open = session.start_error_details_open;
-            let details_open = if ui.is_sizing_pass() {
-                &mut sizing_details_open
-            } else {
-                &mut session.start_error_details_open
-            };
-            media_error::show_failure_content(ui, title, error, details_open, "Back")
-        });
-        if response.inner.clicked() {
-            session.start_error = None;
-            session.start_error_details_open = false;
-        }
-        true
-    }
-
-    fn show_audio_extract_tool(&mut self, ui: &mut Ui) {
-        if shows_audio_extract_lifecycle(self.core.audio_extract_executor.state()) {
-            let action = {
-                let session = self
-                    .state
-                    .audio_extract
-                    .as_mut()
-                    .expect("audio extract source exists while lifecycle surface is shown");
-                let request = session
-                    .selection
-                    .request(&session.media)
-                    .expect("running audio extract session owns a selected audio stream");
-                audio_extract_progress::show(
-                    ui,
-                    &request,
-                    &mut self.core.audio_extract_executor,
-                    &mut session.lifecycle_ui,
-                )
-            };
-            self.handle_audio_extract_lifecycle_action(action);
-            return;
-        }
-
-        if self.show_audio_extract_start_error(ui) {
-            return;
-        }
-
-        let presentation = self
-            .state
-            .source_presentation
-            .as_ref()
-            .expect("source presentation exists while workspace is shown")
-            .clone();
-        let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
-        let queue_confirmation = self.core.queue_confirmation == Some(Operation::AudioExtract);
-        let action_error = self
-            .core
-            .operation_action_error
-            .as_ref()
-            .filter(|(tool, _)| *tool == Operation::AudioExtract)
-            .map(|(_, error)| error.clone());
-        let action = ui
-            .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
-                let session = self
-                    .state
-                    .audio_extract
-                    .as_mut()
-                    .expect("audio extract source exists while ready surface is shown");
-                audio_extract_ui::show(
-                    ui,
-                    &session.media,
-                    &presentation.audio_extract,
-                    &mut session.selection,
-                    OperationSurfaceMode::Immediate {
-                        start_allowed: immediate_start_allowed,
-                        queue_confirmation,
-                        action_error: action_error.as_ref(),
-                    },
-                )
-            })
-            .inner;
-        if let Err(error) = self.handle_audio_extract_action(action)
-            && let Some(session) = self.state.audio_extract.as_mut()
-        {
-            session.start_error = Some(error.user_error());
-            session.start_error_details_open = false;
-        }
-    }
-
-    fn show_audio_extract_start_error(&mut self, ui: &mut Ui) -> bool {
-        let Some(session) = self.state.audio_extract.as_mut() else {
-            return false;
-        };
-        let Some(error) = session.start_error.as_ref() else {
-            return false;
-        };
-
-        let title = if error.kind() == MediaErrorKind::OutputPickerUnavailable {
-            "Output picker unavailable"
-        } else {
-            "Audio extraction could not start"
-        };
-        let response = layout::focus_content(ui, |ui| {
-            let mut sizing_details_open = session.start_error_details_open;
-            let details_open = if ui.is_sizing_pass() {
-                &mut sizing_details_open
-            } else {
-                &mut session.start_error_details_open
-            };
-            media_error::show_failure_content(ui, title, error, details_open, "Back")
-        });
-        if response.inner.clicked() {
-            session.start_error = None;
-            session.start_error_details_open = false;
-        }
-        true
     }
 
     fn show_frame_capture_tool(&mut self, ui: &mut Ui) {
@@ -1033,7 +645,7 @@ impl ApolloApp {
 fn show_operation_editor(
     ui: &mut Ui,
     edit: &mut OperationEditorState,
-    capabilities: upscale_ui::UpscaleEncoderCapabilities<'_>,
+    capabilities: crate::upscale::draft::UpscaleEncoderCapabilities<'_>,
     mode: OperationSurfaceMode,
     enabled: bool,
     id: impl std::hash::Hash + std::fmt::Debug,

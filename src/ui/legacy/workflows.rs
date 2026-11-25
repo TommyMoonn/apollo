@@ -1,5 +1,10 @@
 //! Existing feature actions and worker coordination. Extracted incrementally by their owning phases.
 
+use super::audio_extract::AudioExtractToolState;
+use super::audio_mix::AudioMixToolState;
+use super::remux::RemuxToolState;
+use super::upscale::UpscaleToolState;
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,15 +15,18 @@ use std::time::Instant;
 use egui::{ColorImage, TextureOptions};
 
 use crate::app::{NavigationState, Operation, ProcessExecutionArbitration, QueueEditOrigin};
-use crate::audio_extract::execution::{AudioExtractExecutionState, AudioExtractStartError};
+use crate::audio_extract::draft::AudioExtractDraft;
+use crate::audio_extract::execution::AudioExtractExecutionState;
 use crate::audio_extract::model::AudioExtractFormat;
-use crate::audio_mix::execution::{AudioMixExecutionState, AudioMixStartError};
+use crate::audio_mix::draft::AudioMixDraft;
+use crate::audio_mix::execution::AudioMixExecutionState;
 use crate::audio_mix::model::{LoudnessNormalization, OutputContainer};
 use crate::file_dialog::{
     DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogRequest, FileDialogStartError,
     OutputFormat, SaveDialogOptions,
 };
 use crate::frame_capture::clipboard::{CopyFrameError, CopyFrameRequest, CopyFrameWorker};
+use crate::frame_capture::draft::FrameCaptureDraft;
 use crate::frame_capture::execution::{FrameCaptureExecutionState, FrameCaptureStartError};
 use crate::frame_capture::frame_index::{
     FrameDirection, FrameIndexError, FrameIndexRequest, FrameIndexState, FrameNavigation,
@@ -32,37 +40,27 @@ use crate::media::container::MediaContainer;
 use crate::media::error::MediaError;
 use crate::media::model::MediaFile;
 use crate::media::process::{MediaProcessEvent, MediaProcessWake};
-use crate::media::tools::{MediaTools, VideoEncoderCapabilities};
+use crate::media::tools::MediaTools;
 use crate::queue::{
     JobId, QueueEnqueueError, QueueJobState, QueueRunState, QueuedOperation, WaitingJobMove,
 };
-use crate::remux::execution::{RemuxExecutionState, RemuxStartError};
+use crate::remux::draft::RemuxDraft;
+use crate::remux::execution::RemuxExecutionState;
 use crate::ui::QueueAction;
-use crate::ui::audio_extract::{AudioExtractSelectionAction, AudioExtractSelectionState};
-use crate::ui::audio_extract_progress::AudioExtractLifecycleAction;
-use crate::ui::audio_mix::{AudioMixSelectionAction, AudioMixSelectionState};
-use crate::ui::audio_mix_progress::AudioMixLifecycleAction;
 use crate::ui::batch::BatchReadiness;
-use crate::ui::frame_capture::{
-    FrameCaptureSelectionAction, FrameCaptureSelectionState, FrameCopyStatus, PositionSettle,
-};
+use crate::ui::frame_capture::{FrameCaptureSelectionAction, FrameCopyStatus, PositionSettle};
 use crate::ui::frame_capture_progress::{
     FrameCaptureLifecycleAction, FrameCaptureThumbnailRequest,
 };
-use crate::ui::remux::{RemuxSelectionAction, RemuxSelectionState};
-use crate::ui::remux_progress::RemuxLifecycleAction;
-use crate::ui::upscale::{UpscaleSelectionAction, UpscaleSelectionState};
-use crate::ui::upscale_progress::UpscaleLifecycleAction;
-use crate::upscale::execution::{UpscaleExecutionState, UpscaleStartError};
+use crate::upscale::draft::{UpscaleDraft, UpscaleEncoderCapabilities};
+use crate::upscale::execution::UpscaleExecutionState;
 use crate::upscale::model::VideoCodec;
-use crate::upscale::validation::validate_upscale_request;
 
 use super::state::{
-    AudioExtractToolState, AudioMixToolState, BatchDefaults, BatchEditState, BatchEditTarget,
-    BatchInspectionSession, BatchItem, BatchSetupState, BatchSourceState, FrameCaptureEditorState,
-    FrameCaptureThumbnailLoad, FrameCaptureToolState, FramePreviewDecode, FramePreviewTexture,
-    LegacyEditorState, OperationEditorState, PendingFrameStep, QueueEditState, QueueExecutionEvent,
-    RemuxToolState, UpscaleToolState,
+    BatchDefaults, BatchEditState, BatchEditTarget, BatchInspectionSession, BatchItem,
+    BatchSetupState, BatchSourceState, FrameCaptureEditorState, FrameCaptureThumbnailLoad,
+    FrameCaptureToolState, FramePreviewDecode, FramePreviewTexture, LegacyEditorState,
+    OperationEditorState, PendingFrameStep, QueueEditState, QueueExecutionEvent,
 };
 use super::{ApolloApp, completion_wake};
 
@@ -289,31 +287,27 @@ impl ApolloApp {
         match operation {
             QueuedOperation::AudioMix(request) => {
                 if let Some(session) = self.state.audio_mix.as_mut() {
-                    session.selection =
-                        AudioMixSelectionState::from_request(&session.media, request);
+                    session.selection = AudioMixDraft::from_request(&session.media, request);
                 }
             }
             QueuedOperation::Upscale(request) => {
                 if let Some(session) = self.state.upscale.as_mut() {
-                    session.selection =
-                        UpscaleSelectionState::from_request(&session.media, request);
+                    session.selection = UpscaleDraft::from_request(&session.media, request);
                 }
             }
             QueuedOperation::Remux(request) => {
                 if let Some(session) = self.state.remux.as_mut() {
-                    session.selection = RemuxSelectionState::from_request(&session.media, request);
+                    session.selection = RemuxDraft::from_request(&session.media, request);
                 }
             }
             QueuedOperation::AudioExtract(request) => {
                 if let Some(session) = self.state.audio_extract.as_mut() {
-                    session.selection =
-                        AudioExtractSelectionState::from_request(&session.media, request);
+                    session.selection = AudioExtractDraft::from_request(&session.media, request);
                 }
             }
             QueuedOperation::FrameCapture(request) => {
                 if let Some(session) = self.state.frame_capture.as_mut() {
-                    session.selection =
-                        FrameCaptureSelectionState::from_request(&session.media, request);
+                    session.selection = FrameCaptureDraft::from_request(&session.media, request);
                     let position = session.selection.valid_position(&session.media);
                     self.update_frame_capture_position(
                         position,
@@ -326,15 +320,13 @@ impl ApolloApp {
     }
 
     pub(super) fn save_queue_edit(&mut self) -> bool {
-        let nvenc_capabilities = self
-            .ready_media_tools()
-            .map(|tools| tools.video_encoders.clone());
+        let nvenc_capabilities = self.core.discovery.upscale_capabilities();
         let Some(edit) = self.queue_edit.as_mut() else {
             return false;
         };
         let job_id = edit.job_id;
         let edit = &mut edit.editor;
-        let Some(operation) = operation_from_editor(edit, nvenc_capabilities.as_ref()) else {
+        let Some(operation) = operation_from_editor(edit, nvenc_capabilities) else {
             return false;
         };
         match self
@@ -357,72 +349,53 @@ impl ApolloApp {
         &mut self,
         operation: Operation,
     ) -> Result<Option<JobId>, QueueEnqueueError> {
+        // Borrow each draft and its source directly; the queue owns the resulting immutable request.
         let queued = match operation {
-            Operation::AudioMix => self.state.audio_mix.as_mut().and_then(|session| {
-                session.selection.can_mix(&session.media).then(|| {
-                    (
-                        session.media.clone(),
-                        QueuedOperation::AudioMix(session.selection.request(&session.media)),
-                    )
-                })
+            Operation::AudioMix => self.state.audio_mix.as_ref().and_then(|session| {
+                session
+                    .selection
+                    .validated_request(&session.media)
+                    .ok()
+                    .map(|request| (&session.media, QueuedOperation::AudioMix(request)))
             }),
             Operation::VideoUpscale => {
-                let Some(session) = self.state.upscale.as_ref() else {
+                let Some(capabilities) = self.core.discovery.upscale_capabilities() else {
                     return Ok(None);
                 };
-                if self.core.discovery.is_pending()
-                    && session.selection.encoder_selection()
-                        != crate::upscale::model::VideoEncoderSelection::Cpu
-                {
-                    return Ok(None);
-                }
-                let Some(tools) = self.ready_media_tools() else {
-                    return Ok(None);
-                };
-                let nvenc_capability = match session.selection.codec() {
-                    VideoCodec::H264 => tools.video_encoders.h264_nvenc.clone(),
-                    VideoCodec::H265 => tools.video_encoders.h265_nvenc.clone(),
-                };
-                let request = session
-                    .selection
-                    .request_with_nvenc_capability(&session.media, nvenc_capability);
-                validate_upscale_request(&request, &session.media)
-                    .is_ok()
-                    .then(|| (session.media.clone(), QueuedOperation::Upscale(request)))
+                self.state.upscale.as_ref().and_then(|session| {
+                    session
+                        .selection
+                        .validated_request(&session.media, capabilities)?
+                        .ok()
+                        .map(|request| (&session.media, QueuedOperation::Upscale(request)))
+                })
             }
             Operation::Remux => self.state.remux.as_ref().and_then(|session| {
-                session.selection.can_remux(&session.media).then(|| {
-                    (
-                        session.media.clone(),
-                        QueuedOperation::Remux(session.selection.request(&session.media)),
-                    )
-                })
+                session
+                    .selection
+                    .validated_request(&session.media)
+                    .ok()
+                    .map(|request| (&session.media, QueuedOperation::Remux(request)))
             }),
             Operation::AudioExtract => self.state.audio_extract.as_ref().and_then(|session| {
-                session.selection.can_extract(&session.media).then(|| {
-                    session.selection.request(&session.media).map(|request| {
-                        (
-                            session.media.clone(),
-                            QueuedOperation::AudioExtract(request),
-                        )
-                    })
-                })?
+                session
+                    .selection
+                    .validated_request(&session.media)
+                    .ok()
+                    .map(|request| (&session.media, QueuedOperation::AudioExtract(request)))
             }),
             Operation::FrameCapture => self.state.frame_capture.as_ref().and_then(|session| {
-                session.selection.can_capture(&session.media).then(|| {
-                    session.selection.request(&session.media).map(|request| {
-                        (
-                            session.media.clone(),
-                            QueuedOperation::FrameCapture(request),
-                        )
-                    })
-                })?
+                session
+                    .selection
+                    .validated_request(&session.media)
+                    .ok()
+                    .map(|request| (&session.media, QueuedOperation::FrameCapture(request)))
             }),
         };
         let Some((media, request)) = queued else {
             return Ok(None);
         };
-        self.core.media_queue.enqueue(&media, request).map(Some)
+        self.core.media_queue.enqueue(media, request).map(Some)
     }
 
     pub(super) fn enqueue_from_ready_surface(&mut self, operation: Operation) {
@@ -1093,9 +1066,7 @@ impl ApolloApp {
         let results = owner.owner.poll();
         let complete = owner.owner.is_complete();
         let item_offset = owner.item_offset;
-        let capabilities = self
-            .ready_media_tools()
-            .map(|tools| tools.video_encoders.clone());
+        let capabilities = self.core.discovery.upscale_capabilities();
         let Some(batch) = self.batch_setup.as_mut() else {
             self.batch_inspection = None;
             return;
@@ -1128,7 +1099,7 @@ impl ApolloApp {
             let editor = OperationEditorState::new(0, None, media, batch.operation);
             batch.defaults = batch_defaults_from_editor(&editor);
         }
-        refresh_batch_items(batch, capabilities.as_ref());
+        refresh_batch_items(batch, capabilities);
         if complete {
             self.batch_inspection = None;
         }
@@ -1260,9 +1231,7 @@ impl ApolloApp {
     }
 
     pub(super) fn save_batch_edit(&mut self) -> bool {
-        let capabilities = self
-            .ready_media_tools()
-            .map(|tools| tools.video_encoders.clone());
+        let capabilities = self.core.discovery.upscale_capabilities();
         let Some(edit) = self.batch_edit.as_mut() else {
             return false;
         };
@@ -1276,12 +1245,10 @@ impl ApolloApp {
                     return false;
                 };
                 batch.defaults = Some(defaults);
-                refresh_batch_items(batch, capabilities.as_ref());
+                refresh_batch_items(batch, capabilities);
             }
             BatchEditTarget::Item(index) => {
-                let Some(operation) =
-                    operation_from_editor(&mut edit.editor, capabilities.as_ref())
-                else {
+                let Some(operation) = operation_from_editor(&edit.editor, capabilities) else {
                     return false;
                 };
                 let Some(item) = batch.items.get_mut(index) else {
@@ -1396,242 +1363,6 @@ impl ApolloApp {
         session
             .lifecycle_ui
             .settle_thumbnail(load.request_id, result);
-    }
-
-    pub(super) fn handle_audio_mix_action(
-        &mut self,
-        action: AudioMixSelectionAction,
-    ) -> Result<(), AudioMixStartError> {
-        if self.file_dialog.is_pending() {
-            return Ok(());
-        }
-        if action != AudioMixSelectionAction::None {
-            self.core.queue_confirmation = None;
-            self.core.operation_action_error = None;
-        }
-        match action {
-            AudioMixSelectionAction::BrowseOutput => {
-                let Some(session) = self.state.audio_mix.as_ref() else {
-                    return Ok(());
-                };
-                let request = audio_mix_output_dialog_request(session);
-                self.start_file_dialog(request);
-            }
-            AudioMixSelectionAction::QueueRequested => {
-                self.enqueue_from_ready_surface(Operation::AudioMix);
-            }
-            AudioMixSelectionAction::MixRequested => {
-                if !self.execution_arbitration().immediate_start_allowed() {
-                    return Ok(());
-                }
-                let Some(session) = self.state.audio_mix.as_ref() else {
-                    return Ok(());
-                };
-                let Some(tools) = self.ready_media_tools().cloned() else {
-                    return Ok(());
-                };
-                let request = session.selection.request(&session.media);
-                let wake = self.progress_repaint.begin();
-                self.core.audio_mix_executor.start_with_wake(
-                    &tools,
-                    &session.media,
-                    &request,
-                    wake,
-                )?;
-            }
-            AudioMixSelectionAction::SaveQueueChanges
-            | AudioMixSelectionAction::CancelQueueEdit
-            | AudioMixSelectionAction::None => {}
-        }
-        Ok(())
-    }
-
-    pub(super) fn handle_audio_mix_lifecycle_action(&self, action: AudioMixLifecycleAction) {
-        if let AudioMixLifecycleAction::OpenFolder(path) = action
-            && let Err(error) = open_folder(&path)
-        {
-            eprintln!("Audio Mix output folder could not be opened: {error}");
-        }
-    }
-
-    pub(super) fn handle_upscale_action(
-        &mut self,
-        action: UpscaleSelectionAction,
-    ) -> Result<(), UpscaleStartError> {
-        if self.file_dialog.is_pending() {
-            return Ok(());
-        }
-        if action != UpscaleSelectionAction::None {
-            self.core.queue_confirmation = None;
-            self.core.operation_action_error = None;
-        }
-        match action {
-            UpscaleSelectionAction::BrowseOutput => {
-                let Some(session) = self.state.upscale.as_ref() else {
-                    return Ok(());
-                };
-                let request = upscale_output_dialog_request(session);
-                self.start_file_dialog(request);
-            }
-            UpscaleSelectionAction::QueueRequested => {
-                self.enqueue_from_ready_surface(Operation::VideoUpscale);
-            }
-            UpscaleSelectionAction::UpscaleRequested => {
-                if !self.execution_arbitration().immediate_start_allowed() {
-                    return Ok(());
-                }
-                let Some(upscale) = self.state.upscale.as_ref() else {
-                    return Ok(());
-                };
-                if self.core.discovery.is_pending()
-                    && upscale.selection.encoder_selection()
-                        != crate::upscale::model::VideoEncoderSelection::Cpu
-                {
-                    return Ok(());
-                }
-                let Some(tools) = self.ready_media_tools().cloned() else {
-                    return Ok(());
-                };
-                let nvenc_capability = match upscale.selection.codec() {
-                    VideoCodec::H264 => tools.video_encoders.h264_nvenc.clone(),
-                    VideoCodec::H265 => tools.video_encoders.h265_nvenc.clone(),
-                };
-                let request = upscale
-                    .selection
-                    .request_with_nvenc_capability(&upscale.media, nvenc_capability);
-                let wake = self.progress_repaint.begin();
-                self.core.upscale_executor.start_with_wake(
-                    &tools,
-                    &upscale.media,
-                    &request,
-                    wake,
-                )?;
-            }
-            UpscaleSelectionAction::SaveQueueChanges
-            | UpscaleSelectionAction::CancelQueueEdit
-            | UpscaleSelectionAction::None => {}
-        }
-        Ok(())
-    }
-
-    pub(super) fn handle_upscale_lifecycle_action(&self, action: UpscaleLifecycleAction) {
-        if let UpscaleLifecycleAction::OpenFolder(path) = action
-            && let Err(error) = open_folder(&path)
-        {
-            eprintln!("Upscale output folder could not be opened: {error}");
-        }
-    }
-
-    pub(super) fn handle_remux_action(
-        &mut self,
-        action: RemuxSelectionAction,
-    ) -> Result<(), RemuxStartError> {
-        if self.file_dialog.is_pending() {
-            return Ok(());
-        }
-        if action != RemuxSelectionAction::None {
-            self.core.queue_confirmation = None;
-            self.core.operation_action_error = None;
-        }
-        match action {
-            RemuxSelectionAction::BrowseOutput => {
-                let Some(session) = self.state.remux.as_ref() else {
-                    return Ok(());
-                };
-                self.start_file_dialog(remux_output_dialog_request(session));
-            }
-            RemuxSelectionAction::QueueRequested => {
-                self.enqueue_from_ready_surface(Operation::Remux);
-            }
-            RemuxSelectionAction::RemuxRequested => {
-                if !self.execution_arbitration().immediate_start_allowed() {
-                    return Ok(());
-                }
-                let Some(remux) = self.state.remux.as_ref() else {
-                    return Ok(());
-                };
-                let Some(tools) = self.ready_media_tools().cloned() else {
-                    return Ok(());
-                };
-                let request = remux.selection.request(&remux.media);
-                let wake = self.progress_repaint.begin();
-                self.core
-                    .remux_executor
-                    .start_with_wake(&tools, &remux.media, &request, wake)?;
-            }
-            RemuxSelectionAction::SaveQueueChanges
-            | RemuxSelectionAction::CancelQueueEdit
-            | RemuxSelectionAction::None => {}
-        }
-        Ok(())
-    }
-
-    pub(super) fn handle_remux_lifecycle_action(&self, action: RemuxLifecycleAction) {
-        if let RemuxLifecycleAction::OpenFolder(path) = action
-            && let Err(error) = open_folder(&path)
-        {
-            eprintln!("Remux output folder could not be opened: {error}");
-        }
-    }
-
-    pub(super) fn handle_audio_extract_action(
-        &mut self,
-        action: AudioExtractSelectionAction,
-    ) -> Result<(), AudioExtractStartError> {
-        if self.file_dialog.is_pending() {
-            return Ok(());
-        }
-        if action != AudioExtractSelectionAction::None {
-            self.core.queue_confirmation = None;
-            self.core.operation_action_error = None;
-        }
-        match action {
-            AudioExtractSelectionAction::BrowseOutput => {
-                let Some(session) = self.state.audio_extract.as_ref() else {
-                    return Ok(());
-                };
-                self.start_file_dialog(audio_extract_output_dialog_request(session));
-            }
-            AudioExtractSelectionAction::QueueRequested => {
-                self.enqueue_from_ready_surface(Operation::AudioExtract);
-            }
-            AudioExtractSelectionAction::ExtractRequested => {
-                if !self.execution_arbitration().immediate_start_allowed() {
-                    return Ok(());
-                }
-                let Some(session) = self.state.audio_extract.as_ref() else {
-                    return Ok(());
-                };
-                let Some(request) = session.selection.request(&session.media) else {
-                    return Ok(());
-                };
-                let Some(tools) = self.ready_media_tools().cloned() else {
-                    return Ok(());
-                };
-                let wake = self.progress_repaint.begin();
-                self.core.audio_extract_executor.start_with_wake(
-                    &tools,
-                    &session.media,
-                    &request,
-                    wake,
-                )?;
-            }
-            AudioExtractSelectionAction::SaveQueueChanges
-            | AudioExtractSelectionAction::CancelQueueEdit
-            | AudioExtractSelectionAction::None => {}
-        }
-        Ok(())
-    }
-
-    pub(super) fn handle_audio_extract_lifecycle_action(
-        &self,
-        action: AudioExtractLifecycleAction,
-    ) {
-        if let AudioExtractLifecycleAction::OpenFolder(path) = action
-            && let Err(error) = open_folder(&path)
-        {
-            eprintln!("Audio Extract output folder could not be opened: {error}");
-        }
     }
 
     pub(super) fn handle_frame_capture_action(
@@ -2144,49 +1875,37 @@ pub(super) fn editor_output_dialog_request(edit: &OperationEditorState) -> FileD
     }
 }
 
-pub(super) fn queued_operation_tool(operation: &QueuedOperation) -> Operation {
-    match operation {
-        QueuedOperation::AudioMix(_) => Operation::AudioMix,
-        QueuedOperation::Upscale(_) => Operation::VideoUpscale,
-        QueuedOperation::Remux(_) => Operation::Remux,
-        QueuedOperation::AudioExtract(_) => Operation::AudioExtract,
-        QueuedOperation::FrameCapture(_) => Operation::FrameCapture,
-    }
-}
-
 fn operation_from_editor(
-    edit: &mut OperationEditorState,
-    nvenc_capabilities: Option<&VideoEncoderCapabilities>,
+    edit: &OperationEditorState,
+    capabilities: Option<UpscaleEncoderCapabilities<'_>>,
 ) -> Option<QueuedOperation> {
-    let media = edit.media.clone();
+    let media = &edit.media;
     match edit.active_operation {
-        Operation::AudioMix if edit.audio_mix.can_mix(&media) => {
-            Some(QueuedOperation::AudioMix(edit.audio_mix.request(&media)))
-        }
-        Operation::VideoUpscale => {
-            let capabilities = nvenc_capabilities?;
-            let capability = match edit.upscale.codec() {
-                VideoCodec::H264 => capabilities.h264_nvenc.clone(),
-                VideoCodec::H265 => capabilities.h265_nvenc.clone(),
-            };
-            let request = edit
-                .upscale
-                .request_with_nvenc_capability(&media, capability);
-            validate_upscale_request(&request, &media).ok()?;
-            Some(QueuedOperation::Upscale(request))
-        }
-        Operation::Remux if edit.remux.can_remux(&media) => {
-            Some(QueuedOperation::Remux(edit.remux.request(&media)))
-        }
-        Operation::AudioExtract if edit.audio_extract.can_extract(&media) => edit
+        Operation::AudioMix => edit
+            .audio_mix
+            .validated_request(media)
+            .ok()
+            .map(QueuedOperation::AudioMix),
+        Operation::VideoUpscale => edit
+            .upscale
+            .validated_request(media, capabilities?)?
+            .ok()
+            .map(QueuedOperation::Upscale),
+        Operation::Remux => edit
+            .remux
+            .validated_request(media)
+            .ok()
+            .map(QueuedOperation::Remux),
+        Operation::AudioExtract => edit
             .audio_extract
-            .request(&media)
+            .validated_request(media)
+            .ok()
             .map(QueuedOperation::AudioExtract),
-        Operation::FrameCapture if edit.frame_capture.can_capture(&media) => edit
+        Operation::FrameCapture => edit
             .frame_capture
-            .request(&media)
+            .validated_request(media)
+            .ok()
             .map(QueuedOperation::FrameCapture),
-        _ => None,
     }
 }
 
@@ -2230,13 +1949,13 @@ pub(super) fn batch_defaults_from_editor(edit: &OperationEditorState) -> Option<
 }
 
 fn apply_batch_defaults(edit: &mut OperationEditorState, defaults: &BatchDefaults) {
-    let media = edit.media.clone();
+    let media = &edit.media;
     match defaults {
         BatchDefaults::AudioMix {
             container,
             normalization,
         } => {
-            edit.audio_mix.set_container(&media, *container);
+            edit.audio_mix.set_container(media, *container);
             match normalization {
                 LoudnessNormalization::Off => {
                     edit.audio_mix.set_normalization_enabled(false);
@@ -2252,7 +1971,7 @@ fn apply_batch_defaults(edit: &mut OperationEditorState, defaults: &BatchDefault
             codec,
             encoder_settings,
         } => {
-            edit.upscale.set_target(&media, *target);
+            edit.upscale.set_target(media, *target);
             edit.upscale.set_codec(*codec);
             edit.upscale
                 .set_encoder_selection(encoder_settings.selection());
@@ -2271,7 +1990,8 @@ fn apply_batch_defaults(edit: &mut OperationEditorState, defaults: &BatchDefault
         }
         BatchDefaults::FrameCapture { timestamp, format } => {
             edit.frame_capture
-                .set_timestamp_text(&media, timestamp.to_string());
+                .selection
+                .set_timestamp_text(media, timestamp.to_string());
             edit.frame_capture.set_format(*format);
         }
     }
@@ -2279,7 +1999,7 @@ fn apply_batch_defaults(edit: &mut OperationEditorState, defaults: &BatchDefault
 
 pub(super) fn refresh_batch_items(
     batch: &mut BatchSetupState,
-    capabilities: Option<&VideoEncoderCapabilities>,
+    capabilities: Option<UpscaleEncoderCapabilities<'_>>,
 ) {
     let defaults = batch.defaults.clone();
     for item in &mut batch.items {
@@ -2317,7 +2037,7 @@ pub(super) fn refresh_batch_items(
         {
             apply_batch_defaults(&mut editor, defaults);
         }
-        match operation_from_editor(&mut editor, capabilities) {
+        match operation_from_editor(&editor, capabilities) {
             Some(operation) => {
                 item.operation = Some(operation);
                 item.readiness = BatchReadiness::Ready;
@@ -2326,6 +2046,15 @@ pub(super) fn refresh_batch_items(
                 item.readiness = BatchReadiness::NeedsAttention;
                 item.reason = Some(
                     match batch.operation {
+                        Operation::VideoUpscale
+                            if matches!(
+                                capabilities,
+                                Some(UpscaleEncoderCapabilities::Checking)
+                            ) && editor.upscale.encoder_selection()
+                                != crate::upscale::model::VideoEncoderSelection::Cpu =>
+                        {
+                            "Checking NVIDIA NVENC..."
+                        }
                         Operation::VideoUpscale => "Shared target is not valid for this source.",
                         Operation::FrameCapture => "Timestamp is outside this source's duration.",
                         Operation::Remux => "Container is not compatible with this source.",
@@ -2353,7 +2082,7 @@ pub(super) fn audio_mix_output_dialog_request(session: &AudioMixToolState) -> Fi
     )
 }
 
-fn upscale_output_dialog_request(session: &UpscaleToolState) -> FileDialogRequest {
+pub(super) fn upscale_output_dialog_request(session: &UpscaleToolState) -> FileDialogRequest {
     output_dialog_request(
         DialogTarget::UpscaleOutput {
             session_id: session.session_id,
@@ -2487,7 +2216,7 @@ fn duplicate_source_message(count: usize) -> String {
     }
 }
 
-fn open_folder(path: &Path) -> io::Result<()> {
+pub(super) fn open_folder(path: &Path) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     let mut command = Command::new("explorer");
     #[cfg(target_os = "macos")]

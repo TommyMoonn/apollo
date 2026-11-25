@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod command;
+pub mod draft;
 pub mod execution;
 pub mod frame_index;
 pub mod model;
