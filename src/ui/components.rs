@@ -479,7 +479,7 @@ pub fn progress(
                         TextRole::Status
                             .apply(div())
                             .text_center()
-                            .child(format!("{label} · {:.0}%", fraction * 100.)),
+                            .child(format!("{label} · {}%", (fraction * 100.).floor() as u32)),
                     )
                     .child(
                         div()
@@ -534,6 +534,22 @@ impl gpui::Render for PathTooltip {
                     .child(self.0.clone()),
             )
     }
+}
+
+/// Shared confirmation surface; the caller owns dismissal, focus and action validity.
+pub fn confirmation(
+    title: &str,
+    message: &str,
+    actions: impl IntoIterator<Item = Stateful<Div>>,
+    palette: Palette,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(M.related))
+        .w_full()
+        .child(empty_state(title, message, palette))
+        .child(action_bar(palette, actions))
 }
 
 #[cfg(test)]

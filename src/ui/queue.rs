@@ -1,7 +1,14 @@
 //! Queue presentation derived directly from the scheduler's retained records.
 
 #[cfg(any(windows, test))]
-use crate::queue::{QueueJobState, QueuedJob};
+use crate::{
+    app::{Application, QueueAction},
+    media::{
+        error::{MediaError, MediaOutputContainer},
+        progress::MediaProgress,
+    },
+    queue::{JobId, MediaQueue, QueueJobFailure, QueueJobState, QueueRunState, QueuedJob},
+};
 #[cfg(any(windows, test))]
 use std::path::Path;
 
@@ -71,12 +78,149 @@ fn file_name(path: &Path) -> String {
         .into_owned()
 }
 
+/// Derive availability from the same readiness and ownership checks used at launch.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Controls {
+    pub primary_label: &'static str,
+    pub primary: Option<QueueAction>,
+    pub status: &'static str,
+    pub cancel_job: Option<JobId>,
+    pub cancel_queue: bool,
+}
+
+#[cfg(any(windows, test))]
+impl Controls {
+    pub(crate) fn for_app(app: &Application) -> Self {
+        Self::new(
+            app.queue.scheduler(),
+            app.queue_start_allowed(),
+            app.discovery.settled_capabilities().is_some(),
+        )
+    }
+
+    pub(crate) fn new(queue: &MediaQueue, start_allowed: bool, capabilities_ready: bool) -> Self {
+        let active = queue.active_job();
+        let cancelling = queue.cancellation_pending();
+        let waiting = queue.waiting_jobs().next().is_some();
+        let ready = queue.next_job_ready(capabilities_ready);
+        let (primary_label, primary, status) = if cancelling {
+            (
+                "Cancelling",
+                None,
+                match queue.run_state() {
+                    QueueRunState::Running => "Running",
+                    QueueRunState::StoppingAfterCurrent => "Stopping after current",
+                    QueueRunState::Stopped => "Stopped",
+                },
+            )
+        } else {
+            match queue.run_state() {
+                QueueRunState::Running => (
+                    if active.is_some() {
+                        "Stop after current"
+                    } else {
+                        "Stop queue"
+                    },
+                    Some(QueueAction::StopAfterCurrent),
+                    if active.is_some() {
+                        "Running"
+                    } else {
+                        "Checking encoders"
+                    },
+                ),
+                QueueRunState::StoppingAfterCurrent => {
+                    ("Stopping after current", None, "Finishing current job")
+                }
+                QueueRunState::Stopped if active.is_some() => ("Finishing", None, "Stopped"),
+                QueueRunState::Stopped => (
+                    "Start queue",
+                    (start_allowed && queue.can_start(capabilities_ready))
+                        .then_some(QueueAction::Start),
+                    if waiting && !start_allowed {
+                        "Start unavailable"
+                    } else if waiting && !ready {
+                        "Checking encoders"
+                    } else {
+                        "Stopped"
+                    },
+                ),
+            }
+        };
+        Self {
+            primary_label,
+            primary,
+            status,
+            cancel_job: active.filter(|_| !cancelling),
+            cancel_queue: queue.pending_count() > 0 && !cancelling,
+        }
+    }
+
+    pub(crate) fn allows(self, action: QueueAction, expected_job: Option<JobId>) -> bool {
+        match action {
+            QueueAction::Start | QueueAction::StopAfterCurrent => self.primary == Some(action),
+            QueueAction::CancelCurrent => expected_job.is_some() && self.cancel_job == expected_job,
+            QueueAction::CancelQueue => self.cancel_queue,
+            _ => false,
+        }
+    }
+}
+
+/// FFmpeg may report its last timestamp before publication and cleanup settle.
+#[cfg(any(windows, test))]
+pub(crate) fn unsettled_fraction(fraction: Option<f32>) -> Option<f32> {
+    fraction.filter(|value| value.is_finite() && (0.0..1.0).contains(value))
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn job_progress(queue: &MediaQueue, job_id: JobId) -> Option<&MediaProgress> {
+    if queue.active_job() == Some(job_id) {
+        queue.active_progress()
+    } else {
+        None
+    }
+}
+
+#[cfg(any(windows, test))]
+fn failure_copy(job: &QueuedJob) -> Option<String> {
+    let QueueJobState::Failed(failure) = job.state() else {
+        return None;
+    };
+    let error = match failure {
+        QueueJobFailure::SourceUnavailable(error) => MediaError::from_intake_error(error),
+        QueueJobFailure::SourceChanged => MediaError::source_changed(failure.to_string()),
+        QueueJobFailure::Preparation(error) => error.user_error(),
+        QueueJobFailure::ProcessStart(error) => MediaError::from_process_start_error(error),
+        QueueJobFailure::Execution(error) => {
+            let container = match job
+                .operation()
+                .output()
+                .extension()
+                .and_then(|ext| ext.to_str())
+            {
+                Some(ext) if ext.eq_ignore_ascii_case("mp4") => MediaOutputContainer::Mp4,
+                Some(ext) if ext.eq_ignore_ascii_case("mkv") => MediaOutputContainer::Mkv,
+                _ => MediaOutputContainer::Other,
+            };
+            MediaError::from_execution_failure(error, container)
+        }
+    };
+    Some(
+        format!(
+            "{} {}",
+            error.message(),
+            error.guidance().unwrap_or_default()
+        )
+        .trim()
+        .to_owned(),
+    )
+}
+
 #[cfg(windows)]
 mod view {
     use super::*;
     use crate::{
         app::Operation,
-        queue::MediaQueue,
         ui::{
             components,
             design::{METRICS as M, Palette, TextRole},
@@ -88,6 +232,8 @@ mod view {
         queue: &MediaQueue,
         back: Stateful<Div>,
         add: Stateful<Div>,
+        primary: Stateful<Div>,
+        controls: Controls,
         palette: Palette,
     ) -> Div {
         div()
@@ -109,11 +255,33 @@ mod view {
                     .text_color(rgba(palette.secondary()))
                     .child(summary(queue.jobs())),
             )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(M.related))
+                    .child(
+                        TextRole::Status
+                            .apply(div())
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(controls.status),
+                    )
+                    .child(primary),
+            )
             .child(components::separator(palette))
     }
-    pub(crate) fn body(queue: &MediaQueue, palette: Palette, window: &Window) -> Div {
+    pub(crate) fn body(
+        queue: &MediaQueue,
+        active_cancel: Option<Stateful<Div>>,
+        action_error: Option<&str>,
+        palette: Palette,
+        window: &Window,
+        animate: bool,
+    ) -> Div {
         let jobs = queue.jobs();
-        if jobs.is_empty() {
+        if jobs.is_empty() && action_error.is_none() {
             return div()
                 .flex()
                 .flex_col()
@@ -142,12 +310,16 @@ mod view {
         .into_iter()
         .map(|label| components::text_width(text, TextRole::Status, label))
         .fold(px(0.), Pixels::max);
+        let mut active_cancel = active_cancel;
         div()
             .flex()
             .flex_col()
             .w_full()
             .min_w_0()
             .gap(px(M.section))
+            .children(
+                action_error.map(|error| components::inline_message(error.to_owned(), palette)),
+            )
             .children(Section::ALL.into_iter().filter_map(|section| {
                 let count = section.jobs(jobs).count();
                 if count == 0 {
@@ -160,14 +332,72 @@ mod view {
                         .gap(px(M.compact))
                         .child(components::heading(section.title(count)))
                         .children(section.jobs(jobs).map(|job| {
-                            row(
-                                job,
-                                queue.active_job() == Some(job.id())
-                                    && queue.cancellation_pending(),
-                                palette,
-                                operation_width,
-                                status_width,
-                            )
+                            let active = queue.active_job() == Some(job.id());
+                            let cancelling = active && queue.cancellation_pending();
+                            let details =
+                                row(job, cancelling, palette, operation_width, status_width);
+                            let mut content =
+                                div().flex().flex_col().gap(px(M.compact)).child(details);
+                            if active {
+                                let progress = job_progress(queue, job.id());
+                                let fraction = progress.and_then(|p| p.fraction);
+                                let label = if cancelling {
+                                    "Cancelling"
+                                } else if fraction.is_some_and(|f| f.is_finite() && f >= 1.) {
+                                    "Finalizing output"
+                                } else {
+                                    "Processing"
+                                };
+                                let timing = progress.and_then(|p| {
+                                    p.processed.map(|processed| {
+                                        let processed =
+                                            super::super::media_lifecycle::format_duration(
+                                                processed,
+                                            );
+                                        match p.total {
+                                            Some(total) => format!(
+                                                "Processed {processed} / {}",
+                                                super::super::media_lifecycle::format_duration(
+                                                    total
+                                                )
+                                            ),
+                                            None => format!("Processed {processed}"),
+                                        }
+                                    })
+                                });
+                                content = content.child(
+                                    div()
+                                        .id(("queue-active", job.id().get()))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(M.tight))
+                                        .child(components::progress(
+                                            "job-progress",
+                                            components::ProgressState::Active {
+                                                label,
+                                                fraction: unsettled_fraction(fraction),
+                                            },
+                                            palette,
+                                            animate,
+                                        ))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(M.related))
+                                                .child(
+                                                    TextRole::Secondary
+                                                        .apply(div())
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .child(timing.unwrap_or_default()),
+                                                )
+                                                .children(active_cancel.take()),
+                                        ),
+                                );
+                            }
+                            content.child(components::separator(palette))
                         })),
                 )
             }))
@@ -250,7 +480,7 @@ mod view {
                     )
                     .child(components::status(state, palette, None).w(status_width)),
             )
-            .child(components::separator(palette))
+            .children(failure_copy(job).map(|message| components::inline_message(message, palette)))
     }
 }
 #[cfg(windows)]
@@ -262,7 +492,7 @@ mod tests {
     use crate::{
         audio_extract::model::{AudioExtractFormat, AudioExtractRequest},
         media::{container::MediaContainer, intake::SourceIdentity, model::MediaFile},
-        queue::{JobId, QueueJobFailure, QueuedOperation},
+        queue::QueuedOperation,
         remux::model::RemuxRequest,
     };
     fn job(id: u64, source: &Path, output: &Path, state: QueueJobState) -> QueuedJob {
@@ -285,6 +515,24 @@ mod tests {
         job.set_state(state);
         job
     }
+    #[test]
+    fn empty_application_disables_scheduler_actions() {
+        let controls = Controls::for_app(&Application::default());
+        assert_eq!(controls.primary_label, "Start queue");
+        assert!(!controls.allows(QueueAction::Start, None));
+        assert!(!controls.allows(QueueAction::CancelQueue, None));
+        assert!(!controls.allows(QueueAction::CancelCurrent, Some(JobId::new(1))));
+    }
+
+    #[test]
+    fn progress_never_claims_completion_before_settlement() {
+        for fraction in [None, Some(f32::NAN), Some(-0.1), Some(1.), Some(1.1)] {
+            assert_eq!(unsettled_fraction(fraction), None);
+        }
+        assert_eq!(unsettled_fraction(Some(0.)), Some(0.));
+        assert_eq!(unsettled_fraction(Some(0.999)), Some(0.999));
+    }
+
     #[test]
     fn groups_preserve_job_identity_and_scheduler_order_across_states() {
         let dir = tempfile::tempdir().unwrap();
@@ -336,6 +584,12 @@ mod tests {
         assert_eq!(ids(Section::Waiting), [4, 3]);
         assert_eq!(ids(Section::Finished), [1, 5, 6]);
         assert_eq!(summary(&jobs), "1 processing · 2 waiting · 3 finished");
+        assert!(
+            failure_copy(&jobs[4])
+                .unwrap()
+                .contains("source has changed")
+        );
+        assert!(failure_copy(&jobs[0]).is_none());
         assert_eq!(summary(&[]), "0 processing · 0 waiting · 0 finished");
         assert_eq!(
             summary(&jobs[0..1]),

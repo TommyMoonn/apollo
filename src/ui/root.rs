@@ -8,8 +8,11 @@ use gpui::{
     size,
 };
 
-use crate::app::{Application, NavigationState, Operation, background, discovery::MediaToolsState};
+use crate::app::{
+    Application, NavigationState, Operation, QueueAction, background, discovery::MediaToolsState,
+};
 use crate::progress_wake::MediaProgressWakeOwner;
+use crate::queue::JobId;
 use crate::{
     app::dialogs::{
         DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogRequest, InputDialogOrigin,
@@ -70,10 +73,12 @@ fn queue_progress_state(
         ProgressState::Active {
             label: if cancelling {
                 "Cancelling queue job"
+            } else if fraction.is_some_and(|value| value.is_finite() && value >= 1.) {
+                "Finalizing queue job"
             } else {
                 "Processing queue"
             },
-            fraction,
+            fraction: queue::unsettled_fraction(fraction),
         }
     } else if run_state != crate::queue::QueueRunState::Stopped {
         ProgressState::Waiting("Waiting to process queue")
@@ -89,6 +94,8 @@ struct ApolloRoot {
     dialog_focus: FocusHandle,
     retry_focus: FocusHandle,
     previous_focus: Option<FocusHandle>,
+    queue_cancel_confirming: bool,
+    queue_cancel_focus: FocusHandle,
     open_focus: FocusHandle,
     picker_focus: Option<FocusHandle>,
     drag_origin: Option<DropContext>,
@@ -148,6 +155,8 @@ impl ApolloRoot {
             dialog_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             retry_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             previous_focus: None,
+            queue_cancel_confirming: false,
+            queue_cancel_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             exit: ExitState::Open,
             wake,
             progress_wake,
@@ -183,6 +192,7 @@ impl ApolloRoot {
 
     fn can_open_files(&self) -> bool {
         self.exit == ExitState::Open
+            && !self.queue_cancel_confirming
             && !self.file_dialog.is_pending()
             && matches!(
                 self.core.navigation(),
@@ -217,6 +227,98 @@ impl ApolloRoot {
                 cx,
             );
         }
+    }
+
+    fn queue_controls(&self) -> queue::Controls {
+        queue::Controls::for_app(&self.core)
+    }
+
+    fn dispatch_queue_action(
+        &mut self,
+        action: QueueAction,
+        expected_job: Option<JobId>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_navigate() || self.core.queue_origin().is_none() {
+            return;
+        }
+        if !self.queue_controls().allows(action, expected_job) {
+            self.core.queue_action_error =
+                Some("The queue has changed. Check its current state before trying again.".into());
+            cx.notify();
+            return;
+        }
+        let progress = &mut self.progress_wake;
+        if matches!(
+            self.core.queue_action(action, || progress.begin()),
+            crate::app::queue::QueueEffect::Handled(false)
+        ) {
+            self.core.queue_action_error.get_or_insert_with(|| "The action could not be completed. Check the current queue state and try again if available.".into());
+        }
+        cx.notify();
+    }
+
+    fn request_cancel_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_navigate()
+            || self.core.queue_origin().is_none()
+            || !self.queue_controls().cancel_queue
+        {
+            return;
+        }
+        self.invalidate_drag();
+        self.previous_focus = window.focused(cx);
+        self.queue_cancel_confirming = true;
+        window.focus(&self.dialog_focus, cx);
+        cx.notify();
+    }
+
+    fn resolve_cancel_queue(
+        &mut self,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !std::mem::take(&mut self.queue_cancel_confirming) {
+            return;
+        }
+        if confirmed {
+            self.dispatch_queue_action(QueueAction::CancelQueue, None, cx);
+        }
+        let previous = self.previous_focus.take();
+        let focus = if self.queue_controls().cancel_queue && self.can_navigate() {
+            previous.unwrap_or_else(|| self.queue_cancel_focus.clone())
+        } else {
+            self.focus.clone()
+        };
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn cancel_queue_view(
+        &self,
+        palette: Palette,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
+        let mut keep = Button::new("keep-queue", "Keep queue", Tone::Standard);
+        keep.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+            root.resolve_cancel_queue(false, window, cx);
+        })));
+        let mut cancel = Button::new("confirm-cancel-queue", "Cancel queue", Tone::Destructive);
+        if self.queue_controls().cancel_queue {
+            cancel.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                root.resolve_cancel_queue(true, window, cx);
+            })));
+        }
+        components::confirmation(
+            "Cancel queue?",
+            "Cancel unfinished jobs and stop the queue? Completed files are kept.",
+            [
+                keep.render(palette, window).track_focus(&self.dialog_focus),
+                cancel.render(palette, window),
+            ],
+            palette,
+        )
     }
 
     fn accept_drop(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
@@ -254,7 +356,9 @@ impl ApolloRoot {
     }
 
     fn can_navigate(&self) -> bool {
-        self.exit == ExitState::Open && !self.file_dialog.is_pending()
+        self.exit == ExitState::Open
+            && !self.queue_cancel_confirming
+            && !self.file_dialog.is_pending()
     }
 
     fn navigate(
@@ -424,6 +528,9 @@ impl ApolloRoot {
         if self.exit != ExitState::Open {
             return;
         }
+        if self.queue_cancel_confirming {
+            self.resolve_cancel_queue(false, window, cx);
+        }
         self.invalidate_drag();
         if self.core.queue.scheduler().pending_count() == 0 {
             self.begin_close(window, cx);
@@ -527,19 +634,15 @@ impl ApolloRoot {
                         root.begin_close(window, cx);
                     }
                 })));
-                content
-                    .child(components::empty_state(
-                        "Exit Apollo?",
-                        "Cancel unfinished jobs and exit? Completed files are kept.",
-                        palette,
-                    ))
-                    .child(components::action_bar(
-                        palette,
-                        [
-                            keep.render(palette, window).track_focus(&self.dialog_focus),
-                            exit.render(palette, window),
-                        ],
-                    ))
+                components::confirmation(
+                    "Exit Apollo?",
+                    "Cancel unfinished jobs and exit? Completed files are kept.",
+                    [
+                        keep.render(palette, window).track_focus(&self.dialog_focus),
+                        exit.render(palette, window),
+                    ],
+                    palette,
+                )
             }
             ExitState::Settling => components::centered_spinner(
                 "shutdown",
@@ -766,10 +869,93 @@ impl Render for ApolloRoot {
                     add
                 };
                 let scheduler = self.core.queue.scheduler();
+                let controls = self.queue_controls();
+                let mut primary =
+                    Button::new("queue-primary", controls.primary_label, Tone::Primary);
+                primary.alternate_labels = &[
+                    "Start queue",
+                    "Stop queue",
+                    "Stop after current",
+                    "Stopping after current",
+                    "Finishing",
+                    "Cancelling",
+                ];
+                if let Some(action) = controls.primary.filter(|_| self.can_navigate()) {
+                    primary.state =
+                        ActionState::Enabled(Box::new(cx.listener(move |root, _, _, cx| {
+                            root.dispatch_queue_action(action, None, cx);
+                        })));
+                }
+                let active_cancel = scheduler.active_job().map(|id| {
+                    let cancelling = scheduler.cancellation_pending();
+                    let mut cancel = Button::new(
+                        ("cancel-active", id.get()),
+                        if cancelling {
+                            "Cancelling"
+                        } else {
+                            "Cancel job"
+                        },
+                        Tone::Standard,
+                    );
+                    cancel.alternate_labels = &["Cancel job", "Cancelling"];
+                    if controls.cancel_job == Some(id) && self.can_navigate() {
+                        cancel.state =
+                            ActionState::Enabled(Box::new(cx.listener(move |root, _, _, cx| {
+                                root.dispatch_queue_action(
+                                    QueueAction::CancelCurrent,
+                                    Some(id),
+                                    cx,
+                                );
+                            })));
+                    }
+                    cancel.render(palette, window)
+                });
+                let mut cancel_queue =
+                    Button::new("cancel-queue", "Cancel queue", Tone::Destructive);
+                if controls.cancel_queue && self.can_navigate() {
+                    cancel_queue.state =
+                        ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                            window.focus(&root.queue_cancel_focus, cx);
+                            root.request_cancel_queue(window, cx);
+                        })));
+                }
+                let cancel_queue = cancel_queue.render(palette, window);
+                let cancel_queue = if controls.cancel_queue && self.can_navigate() {
+                    cancel_queue.track_focus(&self.queue_cancel_focus)
+                } else {
+                    cancel_queue
+                };
+                let start_guidance = if scheduler.waiting_jobs().next().is_some()
+                    && !scheduler.is_started()
+                    && !scheduler.is_running()
+                    && !self.core.queue_start_allowed()
+                {
+                    Some(if self.core.discovery.ready().is_none() {
+                        "Return to the source screen to check or retry media tool discovery."
+                    } else {
+                        "Wait for the current operation to finish before starting the queue."
+                    })
+                } else {
+                    None
+                };
                 (
-                    queue::header(scheduler, back.render(palette, window), add, palette),
-                    queue::body(scheduler, palette, window),
-                    div(),
+                    queue::header(
+                        scheduler,
+                        back.render(palette, window),
+                        add,
+                        primary.render(palette, window),
+                        controls,
+                        palette,
+                    ),
+                    queue::body(
+                        scheduler,
+                        active_cancel,
+                        self.core.queue_action_error.as_deref().or(start_guidance),
+                        palette,
+                        window,
+                        animate,
+                    ),
+                    components::action_bar(palette, [cancel_queue]),
                 )
             }
             NavigationState::Settings { .. } => (
@@ -808,9 +994,11 @@ impl Render for ApolloRoot {
             .flex()
             .flex_col()
             .gap(px(M.tight))
-            .child(work)
+            .when(!matches!(route, NavigationState::Queue { .. }), |footer| {
+                footer.child(work)
+            })
             .child(footer);
-        let body = if self.exit == ExitState::Open {
+        let body = if self.exit == ExitState::Open && !self.queue_cancel_confirming {
             let surface = div()
                 .flex()
                 .flex_col()
@@ -866,7 +1054,11 @@ impl Render for ApolloRoot {
                     .min_h_full()
                     .justify_center()
                     .p(px(M.inset))
-                    .child(self.exit_view(palette, window, cx)),
+                    .child(if self.queue_cancel_confirming {
+                        self.cancel_queue_view(palette, window, cx)
+                    } else {
+                        self.exit_view(palette, window, cx)
+                    }),
             )
         };
 
@@ -881,6 +1073,9 @@ impl Render for ApolloRoot {
             .on_key_down(cx.listener(|root, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && root.exit == ExitState::Confirming {
                     root.dismiss_close(window, cx);
+                    cx.stop_propagation();
+                } else if event.keystroke.key == "escape" && root.queue_cancel_confirming {
+                    root.resolve_cancel_queue(false, window, cx);
                     cx.stop_propagation();
                 } else if event.keystroke.key == "escape"
                     && matches!(
@@ -1160,6 +1355,13 @@ mod tests {
                 }
             );
         }
+        assert_eq!(
+            queue_progress_state(QueueRunState::Running, true, false, Some(1.)),
+            ProgressState::Active {
+                label: "Finalizing queue job",
+                fraction: None
+            }
+        );
         assert_eq!(
             queue_progress_state(QueueRunState::Stopped, false, false, None),
             ProgressState::Idle

@@ -207,6 +207,11 @@ impl MediaQueue {
         })
     }
 
+    /// A start is available only when the FIFO head can launch and no execution is owned.
+    pub(crate) fn can_start(&self, capabilities_ready: bool) -> bool {
+        self.can_edit() && self.next_job_ready(capabilities_ready)
+    }
+
     /// Returns whether a start request changed queue state, even if all launches failed.
     pub fn start<F>(
         &mut self,
@@ -409,10 +414,7 @@ impl MediaQueue {
         F: FnMut(JobId, MediaProcessCommand) -> Result<P, MediaProcessStartError>,
         P: ProcessControl + 'static,
     {
-        if self.run_state != QueueRunState::Stopped
-            || self.active_job.is_some()
-            || !self.next_job_ready(capabilities_ready)
-        {
+        if !self.can_start(capabilities_ready) {
             return false;
         }
 
@@ -1693,6 +1695,85 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_controls_follow_owned_job_across_cancel_stop_and_restart() {
+        use crate::{
+            app::QueueAction,
+            ui::queue::{Controls, job_progress},
+        };
+        let directory = TestDirectory::new("queue-control-transitions");
+        let (identity, media) = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let first_id = queue
+            .enqueue(
+                &identity,
+                &media,
+                remux(&media, directory.path().join("first.mkv")),
+            )
+            .unwrap();
+        let second_id = queue
+            .enqueue(
+                &identity,
+                &media,
+                remux(&media, directory.path().join("second.mkv")),
+            )
+            .unwrap();
+        let first = FakeProcessControl::deferred_cancellation();
+        let first_handle = first.clone();
+        let second = FakeProcessControl::deferred_cancellation();
+        let second_handle = second.clone();
+        let mut processes = VecDeque::from([first, second]);
+        let mut launcher = |_, _| Ok(processes.pop_front().expect("one launch per job"));
+        let tools = tools(&directory);
+        let controls = |queue: &MediaQueue| Controls::new(queue, true, true);
+        assert!(controls(&queue).allows(QueueAction::Start, None));
+        assert!(!Controls::new(&queue, false, true).allows(QueueAction::Start, None));
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
+        assert!(controls(&queue).allows(QueueAction::StopAfterCurrent, None));
+        assert!(controls(&queue).allows(QueueAction::CancelCurrent, Some(first_id)));
+        assert!(!controls(&queue).allows(QueueAction::CancelCurrent, Some(second_id)));
+        first_handle.progress.lock().unwrap().extend([
+            "out_time_us=5000000".to_owned(),
+            "progress=continue".to_owned(),
+        ]);
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+        assert_eq!(
+            job_progress(&queue, first_id).and_then(|progress| progress.fraction),
+            Some(0.5)
+        );
+        assert!(job_progress(&queue, second_id).is_none());
+        assert!(queue.stop_after_current());
+        assert_eq!(controls(&queue).primary_label, "Stopping after current");
+        assert!(queue.cancel_current());
+        assert!(!controls(&queue).allows(QueueAction::CancelCurrent, Some(first_id)));
+        assert!(!controls(&queue).allows(QueueAction::CancelQueue, None));
+        assert!(!controls(&queue).allows(QueueAction::Start, None));
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+        assert_eq!(queue.active_job(), Some(first_id));
+        assert_eq!(
+            job_progress(&queue, first_id).and_then(|progress| progress.fraction),
+            Some(0.5)
+        );
+        first_handle.set_state(MediaProcessState::Cancelled);
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+        assert!(controls(&queue).allows(QueueAction::Start, None));
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
+        assert!(job_progress(&queue, first_id).is_none());
+        assert!(job_progress(&queue, second_id).is_none()); // no measured progress yet
+        assert!(!controls(&queue).allows(QueueAction::CancelCurrent, Some(first_id)));
+        assert!(controls(&queue).allows(QueueAction::CancelCurrent, Some(second_id)));
+        assert!(queue.cancel_queue());
+        assert_eq!(controls(&queue).primary_label, "Cancelling");
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert!(!controls(&queue).allows(QueueAction::Start, None));
+        assert!(!controls(&queue).allows(QueueAction::CancelQueue, None));
+        second_handle.set_state(MediaProcessState::Cancelled);
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+        assert_eq!(controls(&queue).primary_label, "Start queue");
+        assert!(!controls(&queue).allows(QueueAction::Start, None));
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[test]
     fn cancel_queue_cancels_active_and_waiting_jobs_without_advancing() {
         let directory = TestDirectory::new("stop");
         let (first_media_identity, first_media) = media(&directory, "first-source.mkv");
@@ -2719,6 +2800,7 @@ mod tests {
     #[derive(Clone)]
     struct FakeProcessControl {
         state: Arc<Mutex<MediaProcessState>>,
+        progress: Arc<Mutex<Vec<String>>>,
         defer_cancellation: bool,
     }
 
@@ -2726,6 +2808,7 @@ mod tests {
         fn running() -> Self {
             Self {
                 state: Arc::new(Mutex::new(MediaProcessState::Running)),
+                progress: Arc::new(Mutex::new(Vec::new())),
                 defer_cancellation: false,
             }
         }
@@ -2763,7 +2846,7 @@ mod tests {
         }
 
         fn drain_progress(&self) -> Vec<String> {
-            Vec::new()
+            std::mem::take(&mut *self.progress.lock().unwrap())
         }
     }
 
