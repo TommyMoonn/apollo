@@ -29,6 +29,7 @@ pub enum MediaErrorKind {
     FfprobeValidationFailed,
     ProbeFailure,
     SourceUnavailable,
+    SourceChanged,
     MissingStream,
     Mp4Incompatibility,
     EncoderUnavailable,
@@ -66,6 +67,9 @@ impl MediaError {
             MediaErrorKind::FfprobeValidationFailed => "FFprobe could not be validated.",
             MediaErrorKind::ProbeFailure => "This file could not be inspected.",
             MediaErrorKind::SourceUnavailable => "This source file is unavailable.",
+            MediaErrorKind::SourceChanged => {
+                "The inspected source has changed or cannot be verified."
+            }
             MediaErrorKind::MissingStream => "A required media stream is missing or unsupported.",
             MediaErrorKind::Mp4Incompatibility => "A source stream cannot be written into MP4.",
             MediaErrorKind::EncoderUnavailable => "The required encoder is unavailable.",
@@ -109,6 +113,7 @@ impl MediaError {
             MediaErrorKind::SourceUnavailable => {
                 Some("Choose an existing readable media file and try again.")
             }
+            MediaErrorKind::SourceChanged => Some("Reopen the source before submitting a new job."),
             MediaErrorKind::MissingStream => {
                 Some("Choose a source containing the required media streams.")
             }
@@ -168,6 +173,10 @@ impl MediaError {
 
     pub fn source_unavailable(diagnostic: impl Into<String>) -> Self {
         Self::with_diagnostic(MediaErrorKind::SourceUnavailable, diagnostic)
+    }
+
+    pub fn source_changed(diagnostic: impl Into<String>) -> Self {
+        Self::with_diagnostic(MediaErrorKind::SourceChanged, diagnostic)
     }
 
     pub fn output_not_writable(diagnostic: impl Into<String>) -> Self {

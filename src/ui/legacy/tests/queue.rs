@@ -303,3 +303,44 @@ fn app_shutdown_cancels_waiting_queue_work() {
     ));
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn enqueue_rejects_stale_source_and_preserves_workspace_until_reopened() {
+    let (directory, path) = temp_file("stale-queue-admission");
+    let mut app = app();
+    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+    app.select_tool(Operation::Remux);
+    let output = directory.join("custom.mkv");
+    app.state
+        .remux
+        .as_mut()
+        .unwrap()
+        .selection
+        .set_custom_output_path(output.clone());
+    let selection = app.state.remux.as_ref().unwrap().selection.clone();
+    fs::write(
+        &path,
+        b"source changed after inspection with different length",
+    )
+    .unwrap();
+    app.enqueue_from_ready_surface(Operation::Remux);
+    assert!(app.core.queue.scheduler().jobs().is_empty());
+    assert!(app.core.queue_confirmation.is_none());
+    assert_eq!(
+        app.core.operation_action_error.as_ref().unwrap().1.kind(),
+        MediaErrorKind::SourceChanged
+    );
+    assert_workspace(&app.core, Operation::Remux);
+    assert_eq!(app.state.remux.as_ref().unwrap().selection, selection);
+    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+    app.select_tool(Operation::Remux);
+    app.enqueue_from_ready_surface(Operation::Remux);
+    assert_eq!(app.core.queue.scheduler().jobs().len(), 1);
+    assert_eq!(app.core.queue_confirmation, Some(Operation::Remux));
+    assert!(app.core.operation_action_error.is_none());
+    assert_eq!(
+        app.core.queue.scheduler().jobs()[0].source_identity(),
+        app.core.source.current_with_identity().unwrap().0
+    );
+    fs::remove_dir_all(directory).unwrap();
+}

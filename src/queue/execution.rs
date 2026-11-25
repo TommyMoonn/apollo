@@ -81,59 +81,58 @@ impl MediaQueue {
         self.active_job.is_some()
     }
 
+    /// Admit a request using the identity captured by the successful inspection, not a fresh one.
     pub fn enqueue(
         &mut self,
+        source_identity: &SourceIdentity,
         media: &MediaFile,
         operation: QueuedOperation,
     ) -> Result<JobId, QueueEnqueueError> {
         let raw_id = self.next_job_id.ok_or(QueueEnqueueError::JobIdExhausted)?;
-        let source_identity = Self::validate_admission(media, &operation)?;
+        Self::validate_admission(source_identity, media, &operation)?;
 
         let id = JobId::new(raw_id);
-        self.next_job_id = raw_id.checked_add(1);
         self.jobs.push(QueuedJob::new(
             id,
-            source_identity,
+            source_identity.clone(),
             media.clone(),
             operation,
         ));
+        self.next_job_id = raw_id.checked_add(1);
         Ok(id)
     }
 
+    /// Validate every candidate and the full ID range before retaining any batch jobs.
     pub fn enqueue_batch(
         &mut self,
-        items: &[(MediaFile, QueuedOperation)],
+        items: &[(&SourceIdentity, &MediaFile, &QueuedOperation)],
     ) -> Result<Vec<JobId>, BatchEnqueueError> {
         if items.is_empty() {
             return Ok(Vec::new());
         }
         let raw_start = self.next_job_id.ok_or(BatchEnqueueError::JobIdExhausted)?;
-        let mut prepared = Vec::with_capacity(items.len());
-
-        for (index, (media, operation)) in items.iter().enumerate() {
-            let source_identity = Self::validate_admission(media, operation)
+        let offset =
+            u64::try_from(items.len() - 1).map_err(|_| BatchEnqueueError::JobIdExhausted)?;
+        let raw_last = raw_start
+            .checked_add(offset)
+            .ok_or(BatchEnqueueError::JobIdExhausted)?;
+        for (index, (identity, media, operation)) in items.iter().enumerate() {
+            Self::validate_admission(identity, media, operation)
                 .map_err(|error| BatchEnqueueError::Item { index, error })?;
-            prepared.push((media.clone(), operation.clone(), source_identity));
         }
 
-        let mut raw_ids = Vec::with_capacity(items.len());
-        let mut next = Some(raw_start);
-        for _ in items {
-            let raw = next.ok_or(BatchEnqueueError::JobIdExhausted)?;
-            raw_ids.push(raw);
-            next = raw.checked_add(1);
-        }
-
-        let ids = raw_ids.iter().copied().map(JobId::new).collect::<Vec<_>>();
-        for (raw_id, (media, operation, identity)) in raw_ids.into_iter().zip(prepared) {
+        let mut ids = Vec::with_capacity(items.len());
+        for (raw_id, &(identity, media, operation)) in (raw_start..=raw_last).zip(items) {
+            let id = JobId::new(raw_id);
             self.jobs.push(QueuedJob::new(
-                JobId::new(raw_id),
-                identity,
-                media,
-                operation,
+                id,
+                identity.clone(),
+                media.clone(),
+                operation.clone(),
             ));
+            ids.push(id);
         }
-        self.next_job_id = next;
+        self.next_job_id = raw_last.checked_add(1);
         Ok(ids)
     }
 
@@ -194,17 +193,21 @@ impl MediaQueue {
         let index = self.waiting_job_index(id)?;
         let job = &self.jobs[index];
 
-        let replacement_identity = SourceIdentity::read(operation.input())
-            .map_err(QueueMutationError::SourceUnavailable)?;
-        if operation.input() != job.operation().input()
-            || !job
-                .source_identity()
-                .is_reliably_same(&replacement_identity)
-        {
-            return Err(QueueMutationError::SourceChanged);
-        }
-
-        preflight_output_destination(operation.output()).map_err(QueueMutationError::Output)?;
+        Self::validate_admission(job.source_identity(), job.media(), &operation).map_err(
+            |error| match error {
+                QueueEnqueueError::Source(error) => QueueMutationError::SourceUnavailable(error),
+                QueueEnqueueError::SourceChanged | QueueEnqueueError::SourceDoesNotMatchMedia => {
+                    QueueMutationError::SourceChanged
+                }
+                QueueEnqueueError::InvalidRequest(error) => {
+                    QueueMutationError::InvalidRequest(error)
+                }
+                QueueEnqueueError::Output(error) => QueueMutationError::Output(error),
+                QueueEnqueueError::JobIdExhausted => {
+                    unreachable!("admission validation does not allocate IDs")
+                }
+            },
+        )?;
         self.jobs[index].replace_operation(operation);
         Ok(())
     }
@@ -401,20 +404,26 @@ impl MediaQueue {
     }
 
     fn validate_admission(
+        source_identity: &SourceIdentity,
         media: &MediaFile,
         operation: &QueuedOperation,
-    ) -> Result<SourceIdentity, QueueEnqueueError> {
-        let source_identity =
-            SourceIdentity::read(operation.input()).map_err(QueueEnqueueError::Source)?;
-        let media_identity =
-            SourceIdentity::read(&media.path).map_err(QueueEnqueueError::Source)?;
-        if !source_identity.is_reliably_same(&media_identity) {
-            return Err(QueueEnqueueError::SourceDoesNotMatchMedia);
+    ) -> Result<(), QueueEnqueueError> {
+        let current = SourceIdentity::read(&media.path).map_err(QueueEnqueueError::Source)?;
+        if !source_identity.is_reliably_same(&current) {
+            return Err(QueueEnqueueError::SourceChanged);
         }
-
-        preflight_output_destination(operation.output()).map_err(QueueEnqueueError::Output)?;
-
-        Ok(source_identity)
+        // The ordinary case needs one identity read; aliases still require equivalence.
+        if operation.input() != media.path {
+            let input =
+                SourceIdentity::read(operation.input()).map_err(QueueEnqueueError::Source)?;
+            if !source_identity.is_reliably_same(&input) {
+                return Err(QueueEnqueueError::SourceDoesNotMatchMedia);
+            }
+        }
+        operation
+            .validate(media)
+            .map_err(QueueEnqueueError::InvalidRequest)?;
+        preflight_output_destination(operation.output()).map_err(QueueEnqueueError::Output)
     }
 
     #[cfg(test)]
@@ -440,7 +449,8 @@ mod tests {
         media::{
             container::MediaContainer,
             execution::ProcessControl,
-            model::{MediaFile, MediaStream, StreamKind},
+            intake::SourceIdentity,
+            model::{AudioStream, MediaFile, MediaStream, StreamKind},
             process::{MediaProcessFailure, MediaProcessStartError, MediaProcessState},
             tools::MediaTools,
         },
@@ -458,17 +468,29 @@ mod tests {
     #[test]
     fn job_ids_are_monotonic_and_removal_does_not_reuse_them() {
         let directory = TestDirectory::new("monotonic");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         let first = queue
-            .enqueue(&media, remux(&media, directory.path().join("first.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("first.mkv")),
+            )
             .unwrap();
         let second = queue
-            .enqueue(&media, remux(&media, directory.path().join("second.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("second.mkv")),
+            )
             .unwrap();
         assert!(queue.remove_waiting(first));
         let third = queue
-            .enqueue(&media, remux(&media, directory.path().join("third.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("third.mkv")),
+            )
             .unwrap();
 
         assert_eq!((first.get(), second.get(), third.get()), (1, 2, 3));
@@ -481,20 +503,22 @@ mod tests {
     #[test]
     fn batch_enqueue_is_atomic_ordered_and_keeps_run_state() {
         let directory = TestDirectory::new("batch-atomic");
-        let first_media = media(&directory, "first.mkv");
-        let second_media = media(&directory, "second.mkv");
+        let (first_media_identity, first_media) = media(&directory, "first.mkv");
+        let (second_media_identity, second_media) = media(&directory, "second.mkv");
         let mut queue = MediaQueue::new();
         let before = queue.run_state();
 
         let ids = queue
             .enqueue_batch(&[
                 (
-                    first_media.clone(),
-                    remux(&first_media, directory.path().join("first-output.mkv")),
+                    &first_media_identity,
+                    &first_media,
+                    &remux(&first_media, directory.path().join("first-output.mkv")),
                 ),
                 (
-                    second_media.clone(),
-                    remux(&second_media, directory.path().join("second-output.mkv")),
+                    &second_media_identity,
+                    &second_media,
+                    &remux(&second_media, directory.path().join("second-output.mkv")),
                 ),
             ])
             .unwrap();
@@ -510,12 +534,14 @@ mod tests {
         let count = queue.jobs().len();
         let result = queue.enqueue_batch(&[
             (
-                first_media.clone(),
-                remux(&first_media, directory.path().join("third-output.mkv")),
+                &first_media_identity,
+                &first_media,
+                &remux(&first_media, directory.path().join("third-output.mkv")),
             ),
             (
-                second_media.clone(),
-                remux(
+                &second_media_identity,
+                &second_media,
+                &remux(
                     &second_media,
                     directory.path().join("missing").join("invalid.mkv"),
                 ),
@@ -531,42 +557,142 @@ mod tests {
         assert_eq!(queue.jobs().len(), count);
         let mismatched = remux(&first_media, directory.path().join("new.mkv"));
         assert!(matches!(
-            queue.enqueue_batch(&[(second_media, mismatched)]),
+            queue.enqueue_batch(&[(&second_media_identity, &second_media, &mismatched)]),
             Err(crate::queue::BatchEnqueueError::Item {
                 index: 0,
                 error: QueueEnqueueError::SourceDoesNotMatchMedia
             })
         ));
         assert_eq!(queue.jobs().len(), count);
+        fs::write(&second_media.path, b"changed after inspection").unwrap();
+        let valid = remux(&first_media, directory.path().join("next.mkv"));
+        let stale = remux(&second_media, directory.path().join("stale.mkv"));
+        assert_eq!(
+            queue.enqueue_batch(&[
+                (&first_media_identity, &first_media, &valid),
+                (&second_media_identity, &second_media, &stale),
+            ]),
+            Err(crate::queue::BatchEnqueueError::Item {
+                index: 1,
+                error: QueueEnqueueError::SourceChanged,
+            })
+        );
+        assert_eq!(queue.jobs().len(), count);
+        assert_eq!(queue.run_state(), before);
+        let next = queue
+            .enqueue(&first_media_identity, &first_media, valid)
+            .unwrap();
+        assert_eq!(next.get(), 3);
+        assert_eq!(queue.jobs()[2].source_identity(), &first_media_identity);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
     }
 
     #[test]
     fn job_id_exhaustion_fails_instead_of_wrapping() {
         let directory = TestDirectory::new("id-exhaustion");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         queue.next_job_id = Some(u64::MAX);
+        let candidate = remux(&media, directory.path().join("last.mkv"));
+        assert_eq!(
+            queue.enqueue_batch(&[(&media_identity, &media, &candidate); 2]),
+            Err(crate::queue::BatchEnqueueError::JobIdExhausted)
+        );
+        assert!(queue.jobs().is_empty());
+        assert!(queue.enqueue_batch(&[]).unwrap().is_empty());
 
         let last = queue
-            .enqueue(&media, remux(&media, directory.path().join("last.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("last.mkv")),
+            )
             .unwrap();
         assert_eq!(last.get(), u64::MAX);
         assert_eq!(
-            queue.enqueue(&media, remux(&media, directory.path().join("wrapped.mkv"))),
+            queue.enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("wrapped.mkv"))
+            ),
             Err(QueueEnqueueError::JobIdExhausted)
         );
     }
 
     #[test]
+    fn single_admission_rejects_changed_missing_and_unrelated_sources() {
+        use crate::media::intake::MediaIntakeError;
+        let directory = TestDirectory::new("admission-source");
+        let (first_identity, first) = media(&directory, "first.mkv");
+        let (second_identity, second) = media(&directory, "second.mkv");
+        let output = directory.path().join("result.mkv");
+        let mut queue = MediaQueue::new();
+        assert_eq!(
+            queue.enqueue(&first_identity, &first, remux(&second, output.clone())),
+            Err(QueueEnqueueError::SourceDoesNotMatchMedia)
+        );
+        assert_eq!(
+            queue.enqueue(&first_identity, &second, remux(&second, output.clone())),
+            Err(QueueEnqueueError::SourceChanged)
+        );
+        fs::write(&first.path, b"changed after inspection").unwrap();
+        assert_eq!(
+            queue.enqueue(&first_identity, &first, remux(&first, output.clone())),
+            Err(QueueEnqueueError::SourceChanged)
+        );
+        fs::remove_file(&first.path).unwrap();
+        assert_eq!(
+            queue.enqueue(&first_identity, &first, remux(&first, output.clone())),
+            Err(QueueEnqueueError::Source(MediaIntakeError::Missing))
+        );
+        assert!(queue.jobs().is_empty());
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        let next = queue
+            .enqueue(&second_identity, &second, remux(&second, output))
+            .unwrap();
+        assert_eq!(next.get(), 1);
+        assert_eq!(queue.jobs()[0].source_identity(), &second_identity);
+        assert_eq!(queue.jobs()[0].media(), &second);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn admission_preserves_source_path_equivalence_without_staging() {
+        let directory = TestDirectory::new("admission-equivalent-source");
+        let (identity, media) = media(&directory, "source.mkv");
+        let subdir = directory.path().join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        let alias = subdir.join("..").join("source.mkv");
+        let operation = QueuedOperation::Remux(RemuxRequest {
+            input: alias,
+            output: directory.path().join("result.mkv"),
+            container: MediaContainer::Matroska,
+        });
+        let mut queue = MediaQueue::new();
+        queue.enqueue(&identity, &media, operation.clone()).unwrap();
+        assert_eq!(queue.jobs()[0].operation(), &operation);
+        assert_eq!(queue.jobs()[0].source_identity(), &identity);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[test]
     fn waiting_replacement_preserves_identity_snapshot_position_and_job_id() {
         let directory = TestDirectory::new("replace-operation");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         let first = queue
-            .enqueue(&media, remux(&media, directory.path().join("first.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("first.mkv")),
+            )
             .unwrap();
         let second = queue
-            .enqueue(&media, remux(&media, directory.path().join("second.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("second.mkv")),
+            )
             .unwrap();
         let source_identity = queue.jobs()[0].source_identity().clone();
         let media_snapshot = queue.jobs()[0].media().clone();
@@ -600,17 +726,29 @@ mod tests {
     #[test]
     fn waiting_job_view_keeps_distinct_jobs_in_insertion_order_and_retained_media() {
         let directory = TestDirectory::new("waiting-view");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         let terminal = queue
-            .enqueue(&media, remux(&media, directory.path().join("terminal.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("terminal.mkv")),
+            )
             .unwrap();
         assert!(queue.cancel_queue());
         let first = queue
-            .enqueue(&media, remux(&media, directory.path().join("first.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("first.mkv")),
+            )
             .unwrap();
         let second = queue
-            .enqueue(&media, remux(&media, directory.path().join("second.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("second.mkv")),
+            )
             .unwrap();
 
         let waiting = queue.waiting_jobs().collect::<Vec<_>>();
@@ -627,16 +765,24 @@ mod tests {
     #[test]
     fn waiting_replacement_revalidates_source_and_is_atomic_on_failure() {
         let directory = TestDirectory::new("replace-atomic");
-        let source_media = media(&directory, "source.mkv");
-        let other_media = media(&directory, "other.mkv");
+        let (source_media_identity, source_media) = media(&directory, "source.mkv");
+        let (_, other_media) = media(&directory, "other.mkv");
         let first_output = directory.path().join("first.mkv");
         let second_output = directory.path().join("second.mkv");
         let mut queue = MediaQueue::new();
         let first = queue
-            .enqueue(&source_media, remux(&source_media, first_output.clone()))
+            .enqueue(
+                &source_media_identity,
+                &source_media,
+                remux(&source_media, first_output.clone()),
+            )
             .unwrap();
         let second = queue
-            .enqueue(&source_media, remux(&source_media, second_output.clone()))
+            .enqueue(
+                &source_media_identity,
+                &source_media,
+                remux(&source_media, second_output.clone()),
+            )
             .unwrap();
         let original_operation = queue.jobs()[0].operation().clone();
         assert_eq!(
@@ -658,6 +804,14 @@ mod tests {
             Err(QueueMutationError::Output(_))
         ));
         assert_eq!(queue.jobs()[0].operation(), &original_operation);
+        assert!(matches!(
+            queue.replace_waiting_operation(
+                first,
+                remux(&source_media, directory.path().join("wrong.mp4"))
+            ),
+            Err(QueueMutationError::InvalidRequest(_))
+        ));
+        assert_eq!(queue.jobs()[0].operation(), &original_operation);
         queue
             .replace_waiting_operation(first, remux(&source_media, second_output.clone()))
             .unwrap();
@@ -672,10 +826,14 @@ mod tests {
     #[test]
     fn waiting_replacement_rejects_a_source_changed_after_enqueue() {
         let directory = TestDirectory::new("replace-changed-source");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         let id = queue
-            .enqueue(&media, remux(&media, directory.path().join("first.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("first.mkv")),
+            )
             .unwrap();
         let original = queue.jobs()[0].operation().clone();
         fs::write(&media.path, b"changed source with a different length").unwrap();
@@ -693,20 +851,36 @@ mod tests {
     #[test]
     fn waiting_reorder_moves_only_waiting_jobs_without_recreating_them() {
         let directory = TestDirectory::new("reorder");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         let terminal = queue
-            .enqueue(&media, remux(&media, directory.path().join("terminal.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("terminal.mkv")),
+            )
             .unwrap();
         assert!(queue.cancel_queue());
         let first = queue
-            .enqueue(&media, remux(&media, directory.path().join("first.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("first.mkv")),
+            )
             .unwrap();
         let second = queue
-            .enqueue(&media, remux(&media, directory.path().join("second.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("second.mkv")),
+            )
             .unwrap();
         let third = queue
-            .enqueue(&media, remux(&media, directory.path().join("third.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("third.mkv")),
+            )
             .unwrap();
         let operations = queue
             .jobs()
@@ -728,18 +902,20 @@ mod tests {
     }
 
     #[test]
-    fn terminal_job_no_longer_reserves_its_destination() {
+    fn terminal_job_does_not_block_reusing_its_destination() {
         let directory = TestDirectory::new("terminal-output");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let output = directory.path().join("result.mkv");
         let mut queue = MediaQueue::new();
         let first = queue
-            .enqueue(&media, remux(&media, output.clone()))
+            .enqueue(&media_identity, &media, remux(&media, output.clone()))
             .unwrap();
         assert!(queue.cancel_queue());
         assert!(matches!(queue.jobs()[0].state(), QueueJobState::Cancelled));
 
-        let second = queue.enqueue(&media, remux(&media, output)).unwrap();
+        let second = queue
+            .enqueue(&media_identity, &media, remux(&media, output))
+            .unwrap();
 
         assert!(second > first);
         assert_eq!(queue.jobs().len(), 2);
@@ -750,17 +926,19 @@ mod tests {
     fn changed_or_missing_source_fails_job_and_advances_in_order() {
         for missing in [false, true] {
             let directory = TestDirectory::new(if missing { "missing" } else { "changed" });
-            let first_media = media(&directory, "first-source.mkv");
-            let second_media = media(&directory, "second-source.mkv");
+            let (first_media_identity, first_media) = media(&directory, "first-source.mkv");
+            let (second_media_identity, second_media) = media(&directory, "second-source.mkv");
             let mut queue = MediaQueue::new();
             let first = queue
                 .enqueue(
+                    &first_media_identity,
                     &first_media,
                     remux(&first_media, directory.path().join("first-output.mkv")),
                 )
                 .unwrap();
             let second = queue
                 .enqueue(
+                    &second_media_identity,
                     &second_media,
                     remux(&second_media, directory.path().join("second-output.mkv")),
                 )
@@ -803,21 +981,35 @@ mod tests {
         };
 
         let directory = TestDirectory::new("launch-preflight");
-        let source = media(&directory, "source.mkv");
+        let (source_identity, source) = media(&directory, "source.mkv");
         let parent = directory.path().join("removed");
         fs::create_dir(&parent).unwrap();
         let mut queue = MediaQueue::new();
         queue
-            .enqueue(&source, remux(&source, parent.join("output.mkv")))
-            .unwrap();
-        queue
             .enqueue(
+                &source_identity,
                 &source,
-                remux(&source, directory.path().join("invalid.mp4")),
+                remux(&source, parent.join("output.mkv")),
             )
             .unwrap();
+        assert!(matches!(
+            queue.enqueue(
+                &source_identity,
+                &source,
+                remux(&source, directory.path().join("invalid.mp4"))
+            ),
+            Err(QueueEnqueueError::InvalidRequest(
+                QueuePreparationError::Remux(RemuxStartError::Validation(
+                    RemuxValidationError::OutputExtensionMismatch { .. }
+                ))
+            ))
+        ));
         let valid = queue
-            .enqueue(&source, remux(&source, directory.path().join("valid.mkv")))
+            .enqueue(
+                &source_identity,
+                &source,
+                remux(&source, directory.path().join("valid.mkv")),
+            )
             .unwrap();
         fs::remove_dir(&parent).unwrap();
 
@@ -838,25 +1030,21 @@ mod tests {
                 })
             )))
         ));
-        assert!(matches!(
-            queue.jobs()[1].state(),
-            QueueJobState::Failed(QueueJobFailure::Preparation(QueuePreparationError::Remux(
-                RemuxStartError::Validation(RemuxValidationError::OutputExtensionMismatch { .. })
-            )))
-        ));
+        assert_eq!(queue.jobs().len(), 2);
+        assert_eq!(valid.get(), 2);
     }
 
     #[test]
     fn shared_destinations_publish_distinct_outputs_and_advance() {
         let directory = TestDirectory::new("shared-output");
-        let source = media(&directory, "source.mkv");
+        let (source_identity, source) = media(&directory, "source.mkv");
         let output = directory.path().join("result.mkv");
         let mut queue = MediaQueue::new();
         let first = queue
-            .enqueue(&source, remux(&source, output.clone()))
+            .enqueue(&source_identity, &source, remux(&source, output.clone()))
             .unwrap();
         let ids = queue
-            .enqueue_batch(&[(source.clone(), remux(&source, output.clone()))])
+            .enqueue_batch(&[(&source_identity, &source, &remux(&source, output.clone()))])
             .unwrap();
         fs::write(&output, b"external output").unwrap();
         let first_process = FakeProcessControl::running();
@@ -902,17 +1090,19 @@ mod tests {
     fn success_failure_and_cancel_each_advance_to_one_next_process() {
         for outcome in [Outcome::Success, Outcome::Failure, Outcome::Cancel] {
             let directory = TestDirectory::new(outcome.label());
-            let first_media = media(&directory, "first-source.mkv");
-            let second_media = media(&directory, "second-source.mkv");
+            let (first_media_identity, first_media) = media(&directory, "first-source.mkv");
+            let (second_media_identity, second_media) = media(&directory, "second-source.mkv");
             let mut queue = MediaQueue::new();
             let first = queue
                 .enqueue(
+                    &first_media_identity,
                     &first_media,
                     remux(&first_media, directory.path().join("first-output.mkv")),
                 )
                 .unwrap();
             let second = queue
                 .enqueue(
+                    &second_media_identity,
                     &second_media,
                     remux(&second_media, directory.path().join("second-output.mkv")),
                 )
@@ -958,17 +1148,45 @@ mod tests {
     #[test]
     fn running_and_terminal_jobs_reject_waiting_mutation() {
         let directory = TestDirectory::new("mutation-state");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         let running = queue
-            .enqueue(&media, remux(&media, directory.path().join("running.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("running.mkv")),
+            )
             .unwrap();
         let waiting = queue
-            .enqueue(&media, remux(&media, directory.path().join("waiting.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("waiting.mkv")),
+            )
             .unwrap();
         let mut launcher = |_, _| Ok(FakeProcessControl::running());
         assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
 
+        let appended = queue
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("appended.mkv")),
+            )
+            .unwrap();
+        let batched = queue
+            .enqueue_batch(&[(
+                &media_identity,
+                &media,
+                &remux(&media, directory.path().join("batched.mkv")),
+            )])
+            .unwrap();
+        assert_eq!(queue.run_state(), QueueRunState::Running);
+        assert_eq!(queue.active_job(), Some(running));
+        assert_eq!(
+            queue.waiting_jobs().map(|job| job.id()).collect::<Vec<_>>(),
+            vec![waiting, appended, batched[0]]
+        );
         assert_eq!(
             queue.replace_waiting_operation(
                 running,
@@ -999,17 +1217,19 @@ mod tests {
     #[test]
     fn stop_after_current_completes_active_then_preserves_and_restarts_waiting() {
         let directory = TestDirectory::new("stop-after-current");
-        let first_media = media(&directory, "first-source.mkv");
-        let second_media = media(&directory, "second-source.mkv");
+        let (first_media_identity, first_media) = media(&directory, "first-source.mkv");
+        let (second_media_identity, second_media) = media(&directory, "second-source.mkv");
         let mut queue = MediaQueue::new();
         let first = queue
             .enqueue(
+                &first_media_identity,
                 &first_media,
                 remux(&first_media, directory.path().join("first-output.mkv")),
             )
             .unwrap();
         let second = queue
             .enqueue(
+                &second_media_identity,
                 &second_media,
                 remux(&second_media, directory.path().join("second-output.mkv")),
             )
@@ -1053,10 +1273,14 @@ mod tests {
     #[test]
     fn stop_after_current_without_an_active_job_stops_and_preserves_waiting() {
         let directory = TestDirectory::new("stop-without-active");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         let waiting = queue
-            .enqueue(&media, remux(&media, directory.path().join("waiting.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("waiting.mkv")),
+            )
             .unwrap();
         queue.run_state = QueueRunState::Running;
 
@@ -1070,18 +1294,30 @@ mod tests {
     #[test]
     fn cancel_queue_leaves_existing_terminal_history_unchanged() {
         let directory = TestDirectory::new("cancel-terminal-history");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         let terminal = queue
-            .enqueue(&media, remux(&media, directory.path().join("terminal.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("terminal.mkv")),
+            )
             .unwrap();
         queue.jobs[0].set_state(QueueJobState::Failed(QueueJobFailure::SourceChanged));
         let terminal_state = queue.jobs()[0].state().clone();
         let active = queue
-            .enqueue(&media, remux(&media, directory.path().join("active.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("active.mkv")),
+            )
             .unwrap();
         let waiting = queue
-            .enqueue(&media, remux(&media, directory.path().join("waiting.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("waiting.mkv")),
+            )
             .unwrap();
         let mut launcher = |_, _| Ok(FakeProcessControl::running());
         assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
@@ -1101,17 +1337,19 @@ mod tests {
     #[test]
     fn process_start_failure_advances_without_owning_two_processes() {
         let directory = TestDirectory::new("launch-failure");
-        let first_media = media(&directory, "first-source.mkv");
-        let second_media = media(&directory, "second-source.mkv");
+        let (first_media_identity, first_media) = media(&directory, "first-source.mkv");
+        let (second_media_identity, second_media) = media(&directory, "second-source.mkv");
         let mut queue = MediaQueue::new();
         queue
             .enqueue(
+                &first_media_identity,
                 &first_media,
                 remux(&first_media, directory.path().join("first-output.mkv")),
             )
             .unwrap();
         let second = queue
             .enqueue(
+                &second_media_identity,
                 &second_media,
                 remux(&second_media, directory.path().join("second-output.mkv")),
             )
@@ -1140,17 +1378,19 @@ mod tests {
     #[test]
     fn cancel_queue_cancels_active_and_waiting_jobs_without_advancing() {
         let directory = TestDirectory::new("stop");
-        let first_media = media(&directory, "first-source.mkv");
-        let second_media = media(&directory, "second-source.mkv");
+        let (first_media_identity, first_media) = media(&directory, "first-source.mkv");
+        let (second_media_identity, second_media) = media(&directory, "second-source.mkv");
         let mut queue = MediaQueue::new();
         queue
             .enqueue(
+                &first_media_identity,
                 &first_media,
                 remux(&first_media, directory.path().join("first-output.mkv")),
             )
             .unwrap();
         queue
             .enqueue(
+                &second_media_identity,
                 &second_media,
                 remux(&second_media, directory.path().join("second-output.mkv")),
             )
@@ -1180,11 +1420,11 @@ mod tests {
     #[test]
     fn successful_output_is_published_once_and_terminal_job_remains_until_cleared() {
         let directory = TestDirectory::new("publish-once");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let output = directory.path().join("output.mkv");
         let mut queue = MediaQueue::new();
         queue
-            .enqueue(&media, remux(&media, output.clone()))
+            .enqueue(&media_identity, &media, remux(&media, output.clone()))
             .unwrap();
         let process = FakeProcessControl::running();
         let handle = process.clone();
@@ -1210,11 +1450,12 @@ mod tests {
     #[test]
     fn disposable_history_cleanup_preserves_failed_and_pending_jobs() {
         let directory = TestDirectory::new("disposable-history");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         for index in 0..5 {
             queue
                 .enqueue(
+                    &media_identity,
                     &media,
                     remux(&media, directory.path().join(format!("output-{index}.mkv"))),
                 )
@@ -1251,10 +1492,14 @@ mod tests {
     #[test]
     fn dropping_queue_requests_cancellation_from_the_active_process_owner() {
         let directory = TestDirectory::new("drop-cancel");
-        let media = media(&directory, "source.mkv");
+        let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         queue
-            .enqueue(&media, remux(&media, directory.path().join("output.mkv")))
+            .enqueue(
+                &media_identity,
+                &media,
+                remux(&media, directory.path().join("output.mkv")),
+            )
             .unwrap();
         let process = FakeProcessControl::running();
         let handle = process.clone();
@@ -1267,20 +1512,38 @@ mod tests {
         assert_eq!(handle.state(), MediaProcessState::Cancelled);
     }
 
-    fn media(directory: &TestDirectory, file_name: &str) -> MediaFile {
+    fn media(directory: &TestDirectory, file_name: &str) -> (SourceIdentity, MediaFile) {
         let path = directory.path().join(file_name);
         fs::write(&path, b"source").unwrap();
-        MediaFile {
-            path,
-            duration: Some(std::time::Duration::from_secs(10)),
-            streams: vec![MediaStream {
-                stream_index: 0,
-                kind: StreamKind::Video,
-                codec: Some("h264".to_owned()),
-            }],
-            video_streams: Vec::new(),
-            audio_streams: Vec::new(),
-        }
+        let identity = SourceIdentity::read(&path).unwrap();
+        (
+            identity,
+            MediaFile {
+                path,
+                duration: Some(std::time::Duration::from_secs(10)),
+                streams: vec![
+                    MediaStream {
+                        stream_index: 0,
+                        kind: StreamKind::Video,
+                        codec: Some("h264".to_owned()),
+                    },
+                    MediaStream {
+                        stream_index: 1,
+                        kind: StreamKind::Audio,
+                        codec: Some("aac".to_owned()),
+                    },
+                ],
+                video_streams: Vec::new(),
+                audio_streams: vec![AudioStream {
+                    stream_index: 1,
+                    codec: Some("aac".to_owned()),
+                    channels: Some(2),
+                    channel_layout: Some("stereo".to_owned()),
+                    title: None,
+                    language: None,
+                }],
+            },
+        )
     }
 
     fn remux(media: &MediaFile, output: PathBuf) -> QueuedOperation {
@@ -1295,7 +1558,7 @@ mod tests {
         QueuedOperation::AudioExtract(AudioExtractRequest {
             input: media.path.clone(),
             output,
-            audio_stream_index: 0,
+            audio_stream_index: 1,
             format: AudioExtractFormat::Aac,
         })
     }

@@ -4,16 +4,20 @@ use crate::{
     audio_extract::{
         execution::{AudioExtractStartError, prepare_audio_extract_operation},
         model::AudioExtractRequest,
+        validation::validate_audio_extract_request,
     },
     audio_mix::{
         execution::{AudioMixStartError, prepare_audio_mix_operation},
         model::AudioMixRequest,
+        validation::validate_audio_mix_request,
     },
     frame_capture::{
         execution::{FrameCaptureStartError, prepare_frame_capture_operation},
         model::FrameCaptureRequest,
+        validation::validate_frame_capture_request,
     },
     media::{
+        error::MediaError,
         execution::MediaExecutionFailure,
         intake::{MediaIntake, MediaIntakeError, SourceIdentity},
         model::MediaFile,
@@ -25,10 +29,12 @@ use crate::{
     remux::{
         execution::{RemuxStartError, prepare_remux_operation},
         model::RemuxRequest,
+        validation::validate_remux_request,
     },
     upscale::{
         execution::{UpscaleStartError, prepare_upscale_operation},
         model::UpscaleRequest,
+        validation::validate_upscale_request,
     },
 };
 
@@ -91,6 +97,32 @@ impl QueuedOperation {
         }
     }
 
+    /// Validate the typed request without starting a process or staging output.
+    pub(crate) fn validate(&self, media: &MediaFile) -> Result<(), QueuePreparationError> {
+        match self {
+            Self::AudioMix(request) => {
+                validate_audio_mix_request(request, media).map_err(|error| {
+                    QueuePreparationError::AudioMix(AudioMixStartError::Validation(error))
+                })
+            }
+            Self::AudioExtract(request) => {
+                validate_audio_extract_request(request, media).map_err(|error| {
+                    QueuePreparationError::AudioExtract(AudioExtractStartError::Validation(error))
+                })
+            }
+            Self::Remux(request) => validate_remux_request(request, media)
+                .map_err(|error| QueuePreparationError::Remux(RemuxStartError::Validation(error))),
+            Self::Upscale(request) => validate_upscale_request(request, media).map_err(|error| {
+                QueuePreparationError::Upscale(UpscaleStartError::Validation(error))
+            }),
+            Self::FrameCapture(request) => {
+                validate_frame_capture_request(request, media).map_err(|error| {
+                    QueuePreparationError::FrameCapture(FrameCaptureStartError::Validation(error))
+                })
+            }
+        }
+    }
+
     pub(crate) fn prepare(
         &self,
         tools: &MediaTools,
@@ -119,6 +151,18 @@ pub enum QueuePreparationError {
     Remux(RemuxStartError),
     AudioExtract(AudioExtractStartError),
     FrameCapture(FrameCaptureStartError),
+}
+
+impl QueuePreparationError {
+    pub(crate) fn user_error(&self) -> MediaError {
+        match self {
+            Self::AudioMix(error) => error.user_error(),
+            Self::Upscale(error) => error.user_error(),
+            Self::Remux(error) => error.user_error(),
+            Self::AudioExtract(error) => error.user_error(),
+            Self::FrameCapture(error) => error.user_error(),
+        }
+    }
 }
 
 impl fmt::Display for QueuePreparationError {
@@ -189,6 +233,8 @@ pub enum QueueEnqueueError {
     JobIdExhausted,
     Source(MediaIntakeError),
     SourceDoesNotMatchMedia,
+    SourceChanged,
+    InvalidRequest(QueuePreparationError),
     Output(MediaOutputError),
 }
 
@@ -217,7 +263,7 @@ impl fmt::Display for QueueEnqueueError {
         match self {
             Self::JobIdExhausted => write!(formatter, "queue job identifiers are exhausted"),
             Self::Source(error) => {
-                write!(formatter, "source identity could not be captured: {error}")
+                write!(formatter, "source unavailable: {error}")
             }
             Self::SourceDoesNotMatchMedia => {
                 write!(
@@ -225,6 +271,10 @@ impl fmt::Display for QueueEnqueueError {
                     "operation source does not match the probed media"
                 )
             }
+            Self::SourceChanged => formatter.write_str(
+                "source changed or could not be verified after inspection; reopen the file",
+            ),
+            Self::InvalidRequest(error) => write!(formatter, "invalid queued operation: {error}"),
             Self::Output(error) => write!(formatter, "queue output is invalid: {error}"),
         }
     }
@@ -239,6 +289,7 @@ pub enum QueueMutationError {
     JobNotWaiting(JobId),
     SourceUnavailable(MediaIntakeError),
     SourceChanged,
+    InvalidRequest(QueuePreparationError),
     Output(MediaOutputError),
 }
 
@@ -254,6 +305,9 @@ impl fmt::Display for QueueMutationError {
                 write!(formatter, "queued source is unavailable: {error}")
             }
             Self::SourceChanged => formatter.write_str("queued source changed"),
+            Self::InvalidRequest(error) => {
+                write!(formatter, "invalid replacement operation: {error}")
+            }
             Self::Output(error) => write!(formatter, "replacement output is invalid: {error}"),
         }
     }

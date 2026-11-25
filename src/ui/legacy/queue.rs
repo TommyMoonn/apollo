@@ -144,7 +144,16 @@ impl ApolloApp {
         let Some((media, request)) = queued else {
             return Ok(None);
         };
-        self.core.queue.enqueue(media, request).map(Some)
+        let Some((identity, accepted_media)) = self.core.source.current_with_identity() else {
+            return Err(QueueEnqueueError::SourceDoesNotMatchMedia);
+        };
+        if media != accepted_media {
+            return Err(QueueEnqueueError::SourceDoesNotMatchMedia);
+        }
+        self.core
+            .queue
+            .enqueue(identity, accepted_media, request)
+            .map(Some)
     }
 
     pub(super) fn enqueue_from_ready_surface(&mut self, operation: Operation) {

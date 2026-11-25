@@ -504,7 +504,11 @@ impl Application {
             if !item.included {
                 continue;
             }
-            let BatchSourceState::Ready { media, .. } = &item.source else {
+            let BatchSourceState::Ready {
+                source_identity,
+                media,
+            } = &item.source
+            else {
                 batch.error = Some("Every included file must finish inspection.".to_owned());
                 return false;
             };
@@ -512,12 +516,12 @@ impl Application {
                 batch.error = Some("Resolve or exclude every included file.".to_owned());
                 return false;
             }
-            let Some(operation) = item.operation.clone() else {
+            let Some(operation) = item.operation.as_ref() else {
                 batch.error = Some("Every included file needs a valid operation.".to_owned());
                 return false;
             };
             source_ids.push(item.id);
-            queued.push((media.clone(), operation));
+            queued.push((source_identity, media, operation));
         }
         if queued.is_empty() {
             batch.error = Some("Include at least one ready file.".to_owned());

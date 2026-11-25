@@ -533,3 +533,63 @@ fn leaving_batch_retires_inspection_before_a_replacement_batch() {
     fs::remove_dir_all(old_dir).unwrap();
     fs::remove_dir_all(new_dir).unwrap();
 }
+
+#[test]
+fn stale_batch_admission_marks_only_the_originating_item_and_retains_other_requests() {
+    let (first_dir, first_path) = temp_file("admission-first");
+    let (second_dir, second_path) = temp_file("admission-second");
+    let mut app = app();
+    let items = [
+        (&first_path, BatchItemId(7)),
+        (&second_path, BatchItemId(12)),
+    ]
+    .into_iter()
+    .map(|(path, id)| BatchItem {
+        id,
+        path: path.clone(),
+        included: true,
+        source: ready_batch_source(media(path)),
+        operation: None,
+        readiness: BatchReadiness::Inspecting,
+        reason: None,
+        overridden: false,
+    })
+    .collect();
+    app.batch_setup = Some(BatchSetupState {
+        origin: BatchOrigin::NoSource,
+        operation: Operation::Remux,
+        defaults: Some(BatchDefaults::Remux {
+            container: MediaContainer::Matroska,
+        }),
+        items,
+        error: None,
+        append_error: None,
+    });
+    app.show_batch_setup();
+    refresh_batch_items(app.batch_setup.as_mut().unwrap(), None);
+    let first = app.batch_setup.as_ref().unwrap().items[0].clone();
+    assert_eq!(first.readiness, BatchReadiness::Ready);
+    fs::write(&second_path, b"changed source after inspection").unwrap();
+    assert!(!app.enqueue_batch());
+    assert_no_batch_execution(&app);
+    assert_eq!(app.navigation(), NavigationState::BatchSetup);
+    let batch = app.batch_setup.as_ref().unwrap();
+    assert_eq!(batch.items[0], first);
+    assert_eq!(batch.items[1].id, BatchItemId(12));
+    assert_eq!(batch.items[1].readiness, BatchReadiness::NeedsAttention);
+    assert!(
+        batch.items[1]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("source changed")
+    );
+    app.toggle_batch_item(BatchItemId(12));
+    assert!(app.enqueue_batch());
+    let jobs = app.queue.scheduler().jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].id().get(), 1);
+    assert_eq!(jobs[0].operation(), first.operation.as_ref().unwrap());
+    fs::remove_dir_all(first_dir).unwrap();
+    fs::remove_dir_all(second_dir).unwrap();
+}

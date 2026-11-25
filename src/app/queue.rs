@@ -3,10 +3,13 @@ use super::{
     Application, NavigationState, Operation, QueueEditOrigin, editor::OperationEditorState,
 };
 use crate::{
-    media::{error::MediaError, model::MediaFile, process::MediaProcessWake, tools::MediaTools},
+    media::{
+        error::MediaError, intake::SourceIdentity, model::MediaFile, process::MediaProcessWake,
+        tools::MediaTools,
+    },
     queue::{
-        BatchEnqueueError, JobId, MediaQueue, QueueEnqueueError, QueueJobState, QueueRunState,
-        QueuedJob, QueuedOperation, WaitingJobMove,
+        BatchEnqueueError, JobId, MediaQueue, QueueEnqueueError, QueueJobState, QueueMutationError,
+        QueueRunState, QueuedJob, QueuedOperation, WaitingJobMove,
     },
 };
 use std::{
@@ -71,15 +74,16 @@ impl QueueWorkflow {
 
     pub(crate) fn enqueue(
         &mut self,
+        source_identity: &SourceIdentity,
         media: &MediaFile,
         operation: QueuedOperation,
     ) -> Result<JobId, QueueEnqueueError> {
-        self.scheduler.enqueue(media, operation)
+        self.scheduler.enqueue(source_identity, media, operation)
     }
 
     pub(crate) fn enqueue_batch(
         &mut self,
-        requests: &[(MediaFile, QueuedOperation)],
+        requests: &[(&SourceIdentity, &MediaFile, &QueuedOperation)],
     ) -> Result<Vec<JobId>, BatchEnqueueError> {
         self.scheduler.enqueue_batch(requests)
     }
@@ -335,9 +339,19 @@ impl Application {
         {
             Ok(()) => true,
             Err(error) => {
-                edit.error = Some(MediaError::invalid_request(format!(
-                    "Could not save queue changes: {error}"
-                )));
+                edit.error = Some(match &error {
+                    QueueMutationError::SourceUnavailable(error) => {
+                        MediaError::from_intake_error(error)
+                    }
+                    QueueMutationError::SourceChanged => {
+                        MediaError::source_changed(error.to_string())
+                    }
+                    QueueMutationError::InvalidRequest(error) => error.user_error(),
+                    QueueMutationError::Output(error) => MediaError::from_output_error(error),
+                    _ => MediaError::invalid_request(format!(
+                        "Could not save queue changes: {error}"
+                    )),
+                });
                 edit.error_details_open = false;
                 false
             }
@@ -369,6 +383,8 @@ fn media_error_from_queue_enqueue(error: &QueueEnqueueError) -> MediaError {
             MediaError::source_unavailable(error.to_string())
         }
         QueueEnqueueError::Output(error) => MediaError::from_output_error(error),
+        QueueEnqueueError::SourceChanged => MediaError::source_changed(error.to_string()),
+        QueueEnqueueError::InvalidRequest(error) => error.user_error(),
         QueueEnqueueError::JobIdExhausted => MediaError::invalid_request(error.to_string()),
     }
 }

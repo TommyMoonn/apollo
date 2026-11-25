@@ -275,6 +275,49 @@ mod tests {
     }
 
     #[test]
+    fn queue_admission_cannot_refresh_an_unreliable_inspection_identity() {
+        use crate::{
+            media::{
+                container::MediaContainer,
+                model::{MediaStream, StreamKind},
+            },
+            queue::{MediaQueue, QueueEnqueueError, QueuedOperation},
+            remux::model::RemuxRequest,
+        };
+        let directory = temp_directory("unreliable-admission");
+        let path = directory.join("video.mkv");
+        fs::write(&path, b"video").unwrap();
+        let mut intake = MediaIntake::default();
+        let MediaLoadStart::Probe(probe) = intake.begin_load(&path).unwrap() else {
+            unreachable!("new source must be inspected");
+        };
+        let mut snapshot = media(&path);
+        snapshot.streams.push(MediaStream {
+            stream_index: 0,
+            kind: StreamKind::Video,
+            codec: Some("h264".to_owned()),
+        });
+        intake.pending_probe.as_mut().unwrap().identity.modified = None;
+        intake.complete_probe(probe, Ok(snapshot)).unwrap();
+        let (identity, snapshot) = intake.current_with_identity().unwrap();
+        let mut queue = MediaQueue::new();
+        assert_eq!(
+            queue.enqueue(
+                identity,
+                snapshot,
+                QueuedOperation::Remux(RemuxRequest {
+                    input: path,
+                    output: directory.join("output.mkv"),
+                    container: MediaContainer::Matroska,
+                })
+            ),
+            Err(QueueEnqueueError::SourceChanged)
+        );
+        assert!(queue.jobs().is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn directory_is_rejected() {
         let directory = temp_directory("directory");
         let mut intake = MediaIntake::default();
