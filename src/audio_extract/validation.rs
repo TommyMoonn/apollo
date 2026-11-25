@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::media::{
     model::{MediaFile, StreamKind},
-    output::{MediaOutputError, validate_output_path},
+    output::{MediaOutputError, check_output_extension, validate_output_path},
 };
 
 use super::model::AudioExtractRequest;
@@ -51,8 +51,7 @@ impl std::error::Error for AudioExtractValidationError {}
 
 /// Validate an Audio Extract request without accessing the destination filesystem.
 ///
-/// Destination identity, existence, and writability remain owned by `MediaOutput::prepare`
-/// immediately before process launch.
+/// Destination preflight, numbered-name selection and staging remain owned by `MediaOutput`.
 pub fn validate_audio_extract_request(
     request: &AudioExtractRequest,
     media: &MediaFile,
@@ -80,17 +79,6 @@ fn validate_output_extension(
     request: &AudioExtractRequest,
 ) -> Result<(), AudioExtractValidationError> {
     let expected = request.format.extension();
-    let actual = request
-        .output
-        .extension()
-        .and_then(|extension| extension.to_str());
-
-    if actual.is_some_and(|extension| extension.eq_ignore_ascii_case(expected)) {
-        return Ok(());
-    }
-
-    Err(AudioExtractValidationError::OutputExtensionMismatch {
-        expected,
-        actual: actual.map(str::to_owned),
-    })
+    check_output_extension(&request.output, expected)
+        .map_err(|actual| AudioExtractValidationError::OutputExtensionMismatch { expected, actual })
 }

@@ -18,6 +18,14 @@ pub fn build_frame_capture_invocation(
     request: &FrameCaptureRequest,
     primary_video_stream_index: u32,
 ) -> FfmpegInvocation {
+    build_frame_capture_invocation_to(request, primary_video_stream_index, &request.output)
+}
+
+pub(crate) fn build_frame_capture_invocation_to(
+    request: &FrameCaptureRequest,
+    primary_video_stream_index: u32,
+    output: &Path,
+) -> FfmpegInvocation {
     let mut args =
         frame_selection_args(&request.input, primary_video_stream_index, request.position);
     args.extend([
@@ -38,7 +46,7 @@ pub fn build_frame_capture_invocation(
         OsString::from("-nostats"),
         OsString::from("-f"),
         OsString::from(request.format.ffmpeg_muxer_name()),
-        request.output.as_os_str().to_os_string(),
+        output.as_os_str().to_os_string(),
     ]);
     FfmpegInvocation { args }
 }

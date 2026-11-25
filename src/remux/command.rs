@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::{ffi::OsString, path::Path};
 
 use crate::media::container::MediaContainer;
 
@@ -11,6 +11,10 @@ pub struct FfmpegInvocation {
 
 /// Build structured FFmpeg arguments from an already validated Remux request.
 pub fn build_remux_invocation(request: &RemuxRequest) -> FfmpegInvocation {
+    build_remux_invocation_to(request, &request.output)
+}
+
+pub(crate) fn build_remux_invocation_to(request: &RemuxRequest, output: &Path) -> FfmpegInvocation {
     let mut args = vec![
         OsString::from("-i"),
         request.input.as_os_str().to_os_string(),
@@ -32,7 +36,7 @@ pub fn build_remux_invocation(request: &RemuxRequest) -> FfmpegInvocation {
         OsString::from("-nostats"),
         OsString::from("-f"),
         OsString::from(request.container.ffmpeg_muxer_name()),
-        request.output.as_os_str().to_os_string(),
+        output.as_os_str().to_os_string(),
     ]);
     FfmpegInvocation { args }
 }

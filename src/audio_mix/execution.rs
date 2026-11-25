@@ -9,17 +9,15 @@ use crate::media::{
     model::MediaFile,
     operation::PreparedMediaOperation,
     output::{MediaOutput, MediaOutputError},
-    process::{
-        MediaProcessCommand, MediaProcessStartError, MediaProcessWake, ProcessProgressSource,
-    },
+    process::{MediaProcessCommand, MediaProcessStartError, MediaProcessWake},
     progress::MediaProgress,
     tools::MediaTools,
 };
 
 use super::{
-    command::{AudioMixCommandError, build_audio_mix_invocation},
+    command::{AudioMixCommandError, build_audio_mix_invocation_to},
     model::AudioMixRequest,
-    validation::{AudioMixValidationError, validate_audio_mix_request},
+    validation::{AudioMixValidationError, validate_audio_mix_layout},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,18 +171,22 @@ pub(crate) fn prepare_audio_mix_operation(
     media: &MediaFile,
     request: &AudioMixRequest,
 ) -> Result<PreparedMediaOperation, AudioMixStartError> {
-    validate_audio_mix_request(request, media).map_err(AudioMixStartError::Validation)?;
+    let layout =
+        validate_audio_mix_layout(request, media).map_err(AudioMixStartError::Validation)?;
 
     let output = MediaOutput::prepare(&request.output).map_err(AudioMixStartError::Output)?;
-    let mut staged_request = request.clone();
-    staged_request.output = output.temporary_path().to_path_buf();
-    let invocation =
-        build_audio_mix_invocation(&staged_request, media).map_err(AudioMixStartError::Command)?;
-    let command = MediaProcessCommand::new(&tools.ffmpeg)
-        .args(invocation.args)
-        .progress_source(ProcessProgressSource::Stdout);
-
-    Ok(PreparedMediaOperation::new(output, command, media.duration))
+    let invocation = build_audio_mix_invocation_to(
+        request,
+        media.video_streams[0].stream_index,
+        layout,
+        output.temporary_path(),
+    );
+    Ok(PreparedMediaOperation::new(
+        output,
+        tools,
+        invocation.args,
+        media.duration,
+    ))
 }
 
 fn map_execution_start_error(error: MediaExecutionStartError) -> AudioMixStartError {
@@ -272,6 +274,13 @@ mod tests {
             }
         );
         let args = observed_args.lock().unwrap();
+        let expected =
+            crate::audio_mix::command::build_audio_mix_invocation(&request, &media).unwrap();
+        assert_eq!(
+            &args[..args.len() - 1],
+            &expected.args[..expected.args.len() - 1]
+        );
+        assert_eq!(expected.args.last().unwrap(), request.output.as_os_str());
         let staged_output = PathBuf::from(args.last().unwrap());
         assert_ne!(staged_output, request.output);
         assert_eq!(staged_output.file_name(), request.output.file_name());

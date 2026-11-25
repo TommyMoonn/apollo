@@ -6,8 +6,8 @@ use crate::media::{
 };
 
 use super::{
-    model::{UpscaleRequest, UpscaleTarget, VideoCodec, VideoEncoderBackend},
-    sizing::{UpscaleSizingError, resolve_target_boundary},
+    model::{ResolvedVideoEncoder, UpscaleRequest, VideoCodec, VideoEncoderBackend},
+    sizing::{OutputDimensions, UpscaleSizingError, calculate_output_dimensions},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +87,13 @@ pub fn validate_upscale_request(
     request: &UpscaleRequest,
     media: &MediaFile,
 ) -> Result<(), UpscaleValidationError> {
+    validate_upscale_parameters(request, media).map(|_| ())
+}
+
+pub(crate) fn validate_upscale_parameters(
+    request: &UpscaleRequest,
+    media: &MediaFile,
+) -> Result<(OutputDimensions, ResolvedVideoEncoder, &'static str), UpscaleValidationError> {
     let video = media
         .video_streams
         .first()
@@ -100,20 +107,17 @@ pub fn validate_upscale_request(
         }
     };
 
-    if width == 0 || height == 0 {
-        return Err(UpscaleValidationError::InvalidSourceDimensions { width, height });
-    }
-
-    validate_target_is_larger(request.target, width, height)?;
+    let dimensions =
+        calculate_output_dimensions(width, height, request.target).map_err(map_sizing_error)?;
     let encoder = request.resolve_video_encoder().map_err(|error| {
         UpscaleValidationError::NvencUnavailable {
             reason: error.reason,
         }
     })?;
-    resolve_output_pixel_format(&video.format, request.codec, encoder.backend)?;
+    let pixel_format = resolve_output_pixel_format(&video.format, request.codec, encoder.backend)?;
     validate_output_path(&request.output).map_err(UpscaleValidationError::Output)?;
 
-    Ok(())
+    Ok((dimensions, encoder, pixel_format))
 }
 
 /// One format policy shared by ready validation and command construction.
@@ -169,35 +173,28 @@ pub fn resolve_output_pixel_format(
     }
 }
 
-fn validate_target_is_larger(
-    target: UpscaleTarget,
-    source_width: u32,
-    source_height: u32,
-) -> Result<(), UpscaleValidationError> {
-    let boundary = resolve_target_boundary(target, source_width, source_height).map_err(
-        |error| match error {
-            UpscaleSizingError::InvalidTargetBoundary {
-                boundary_width,
-                boundary_height,
-            } => UpscaleValidationError::InvalidTargetBoundary {
-                target_width: boundary_width,
-                target_height: boundary_height,
-            },
-            UpscaleSizingError::InvalidSourceDimensions { .. }
-            | UpscaleSizingError::TargetNotLarger { .. } => {
-                unreachable!("source and target-size eligibility are validated separately")
-            }
+fn map_sizing_error(error: UpscaleSizingError) -> UpscaleValidationError {
+    match error {
+        UpscaleSizingError::InvalidSourceDimensions { width, height } => {
+            UpscaleValidationError::InvalidSourceDimensions { width, height }
+        }
+        UpscaleSizingError::InvalidTargetBoundary {
+            boundary_width,
+            boundary_height,
+        } => UpscaleValidationError::InvalidTargetBoundary {
+            target_width: boundary_width,
+            target_height: boundary_height,
         },
-    )?;
-
-    if source_width < boundary.width && source_height < boundary.height {
-        return Ok(());
+        UpscaleSizingError::TargetNotLarger {
+            source_width,
+            source_height,
+            boundary_width,
+            boundary_height,
+        } => UpscaleValidationError::TargetNotLarger {
+            source_width,
+            source_height,
+            target_width: boundary_width,
+            target_height: boundary_height,
+        },
     }
-
-    Err(UpscaleValidationError::TargetNotLarger {
-        source_width,
-        source_height,
-        target_width: boundary.width,
-        target_height: boundary.height,
-    })
 }

@@ -9,15 +9,13 @@ use crate::media::{
     model::MediaFile,
     operation::PreparedMediaOperation,
     output::{MediaOutput, MediaOutputError},
-    process::{
-        MediaProcessCommand, MediaProcessStartError, MediaProcessWake, ProcessProgressSource,
-    },
+    process::{MediaProcessCommand, MediaProcessStartError, MediaProcessWake},
     progress::MediaProgress,
     tools::MediaTools,
 };
 
 use super::{
-    command::build_frame_capture_invocation,
+    command::build_frame_capture_invocation_to,
     model::FrameCaptureRequest,
     validation::{FrameCaptureValidationError, validate_frame_capture_request},
 };
@@ -185,14 +183,17 @@ pub(crate) fn prepare_frame_capture_operation(
         .stream_index;
 
     let output = MediaOutput::prepare(&request.output).map_err(FrameCaptureStartError::Output)?;
-    let mut staged_request = request.clone();
-    staged_request.output = output.temporary_path().to_path_buf();
-    let invocation = build_frame_capture_invocation(&staged_request, primary_video_stream_index);
-    let command = MediaProcessCommand::new(&tools.ffmpeg)
-        .args(invocation.args)
-        .progress_source(ProcessProgressSource::Stdout);
-
-    Ok(PreparedMediaOperation::new(output, command, None))
+    let invocation = build_frame_capture_invocation_to(
+        request,
+        primary_video_stream_index,
+        output.temporary_path(),
+    );
+    Ok(PreparedMediaOperation::new(
+        output,
+        tools,
+        invocation.args,
+        None,
+    ))
 }
 
 fn map_execution_start_error(error: MediaExecutionStartError) -> FrameCaptureStartError {
@@ -276,6 +277,12 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["-abort_on", "empty_output"])
         );
+        let expected = crate::frame_capture::command::build_frame_capture_invocation(&request, 7);
+        assert_eq!(
+            &args[..args.len() - 1],
+            &expected.args[..expected.args.len() - 1]
+        );
+        assert_eq!(expected.args.last().unwrap(), request.output.as_os_str());
         let staged_output = PathBuf::from(args.last().unwrap());
         assert_ne!(staged_output, request.output);
         assert_eq!(staged_output.file_name(), request.output.file_name());

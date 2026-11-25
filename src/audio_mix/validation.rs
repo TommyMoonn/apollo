@@ -2,12 +2,12 @@ use std::{collections::HashSet, fmt};
 
 use crate::media::{
     model::MediaFile,
-    output::{MediaOutputError, validate_output_path},
+    output::{MediaOutputError, check_output_extension, validate_output_path},
 };
 
 use super::model::{
-    AudioMixRequest, LoudnessNormalization, LoudnessTargets, MixedAudioLayoutError,
-    SelectedAudioTrack, TrackGain, resolve_mixed_audio_layout,
+    AudioMixRequest, LoudnessNormalization, LoudnessTargets, MixedAudioLayout,
+    MixedAudioLayoutError, SelectedAudioTrack, TrackGain, resolve_mixed_audio_layout,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +106,13 @@ pub fn validate_audio_mix_request(
     request: &AudioMixRequest,
     media: &MediaFile,
 ) -> Result<(), AudioMixValidationError> {
+    validate_audio_mix_layout(request, media).map(|_| ())
+}
+
+pub(crate) fn validate_audio_mix_layout(
+    request: &AudioMixRequest,
+    media: &MediaFile,
+) -> Result<MixedAudioLayout, AudioMixValidationError> {
     if media.video_streams.is_empty() {
         return Err(AudioMixValidationError::MissingVideoStream);
     }
@@ -116,13 +123,13 @@ pub fn validate_audio_mix_request(
 
     reject_duplicate_streams(&request.selected_tracks)?;
     validate_selected_tracks(&request.selected_tracks, media)?;
-    resolve_mixed_audio_layout(&request.selected_tracks, &media.audio_streams)
+    let layout = resolve_mixed_audio_layout(&request.selected_tracks, &media.audio_streams)
         .map_err(map_layout_error)?;
     validate_normalization(request.normalization)?;
     validate_output_extension(request)?;
     validate_output_path(&request.output).map_err(AudioMixValidationError::Output)?;
 
-    Ok(())
+    Ok(layout)
 }
 
 fn map_layout_error(error: MixedAudioLayoutError) -> AudioMixValidationError {
@@ -210,17 +217,6 @@ fn validate_selected_tracks(
 
 fn validate_output_extension(request: &AudioMixRequest) -> Result<(), AudioMixValidationError> {
     let expected = request.container.extension();
-    let actual = request
-        .output
-        .extension()
-        .and_then(|extension| extension.to_str());
-
-    if actual.is_some_and(|extension| extension.eq_ignore_ascii_case(expected)) {
-        return Ok(());
-    }
-
-    Err(AudioMixValidationError::OutputExtensionMismatch {
-        expected,
-        actual: actual.map(str::to_owned),
-    })
+    check_output_extension(&request.output, expected)
+        .map_err(|actual| AudioMixValidationError::OutputExtensionMismatch { expected, actual })
 }

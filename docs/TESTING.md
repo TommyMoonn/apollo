@@ -55,7 +55,7 @@ For concurrency tests, hold work at a controlled boundary and release it explici
 
 For application and UI tests, drive lifecycle events with explicit timestamps or completion signals. Check interaction, selection, focus, clipping, non-overlap and reachability at narrow and normal widths; avoid exact paint snapshots, copied theme constants and incidental pixel geometry. Retain renderer-specific regressions until their replacement proves the same behavior.
 
-For filesystem and processing changes, verify that cancellation, output collisions, failed processes and stale results preserve existing files and cannot publish an incomplete result. For queue changes, cover job transitions, numbered output publication and atomic batch insertion at their owning layer.
+For filesystem and processing changes, verify that cancellation, output collisions, failed processes and stale results preserve existing files and cannot publish an incomplete result. The operation executor tests compare the staged launch arguments with the domain command builders; queue tests also exercise a destination removed after admission and preserve typed preparation failures. For queue changes, cover job transitions, numbered output publication and atomic batch insertion at their owning layer.
 
 ## Real media tests
 

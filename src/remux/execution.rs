@@ -10,15 +10,13 @@ use crate::media::{
     model::MediaFile,
     operation::PreparedMediaOperation,
     output::{MediaOutput, MediaOutputError},
-    process::{
-        MediaProcessCommand, MediaProcessStartError, MediaProcessWake, ProcessProgressSource,
-    },
+    process::{MediaProcessCommand, MediaProcessStartError, MediaProcessWake},
     progress::MediaProgress,
     tools::MediaTools,
 };
 
 use super::{
-    command::build_remux_invocation,
+    command::build_remux_invocation_to,
     model::RemuxRequest,
     validation::{RemuxValidationError, validate_remux_request},
 };
@@ -176,14 +174,13 @@ pub(crate) fn prepare_remux_operation(
     validate_remux_request(request, media).map_err(RemuxStartError::Validation)?;
 
     let output = MediaOutput::prepare(&request.output).map_err(RemuxStartError::Output)?;
-    let mut staged_request = request.clone();
-    staged_request.output = output.temporary_path().to_path_buf();
-    let invocation = build_remux_invocation(&staged_request);
-    let command = MediaProcessCommand::new(&tools.ffmpeg)
-        .args(invocation.args)
-        .progress_source(ProcessProgressSource::Stdout);
-
-    Ok(PreparedMediaOperation::new(output, command, media.duration))
+    let invocation = build_remux_invocation_to(request, output.temporary_path());
+    Ok(PreparedMediaOperation::new(
+        output,
+        tools,
+        invocation.args,
+        media.duration,
+    ))
 }
 
 fn map_execution_start_error(error: MediaExecutionStartError) -> RemuxStartError {
@@ -265,6 +262,12 @@ mod tests {
         let args = observed_args.lock().unwrap();
         assert!(args.windows(2).any(|pair| pair == ["-map", "0"]));
         assert!(args.windows(2).any(|pair| pair == ["-c", "copy"]));
+        let expected = crate::remux::command::build_remux_invocation(&request);
+        assert_eq!(
+            &args[..args.len() - 1],
+            &expected.args[..expected.args.len() - 1]
+        );
+        assert_eq!(expected.args.last().unwrap(), request.output.as_os_str());
         let staged_output = PathBuf::from(args.last().unwrap());
         assert_ne!(staged_output, request.output);
         assert_eq!(staged_output.file_name(), request.output.file_name());
@@ -298,7 +301,7 @@ mod tests {
         let directory = TestDirectory::new("success-publishes");
         let (mut request, media) = valid_request_and_media(&directory);
         request.container = MediaContainer::Matroska;
-        request.output = request.input.clone();
+        request.output = directory.path().join(".").join("source.mkv");
         let actual_output = directory.path().join("source (1).mkv");
         let tools = fake_tools(&directory);
         let process = FakeProcessControl::running();

@@ -1,4 +1,4 @@
-use std::{ffi::OsString, fmt};
+use std::{ffi::OsString, fmt, path::Path};
 
 use crate::media::model::MediaFile;
 
@@ -61,6 +61,20 @@ pub fn build_audio_mix_invocation(
     let mixed_layout = resolve_mixed_audio_layout(&request.selected_tracks, &media.audio_streams)
         .map_err(AudioMixCommandError::MixedAudioLayout)?;
 
+    Ok(build_audio_mix_invocation_to(
+        request,
+        primary_video_stream,
+        mixed_layout,
+        &request.output,
+    ))
+}
+
+pub(crate) fn build_audio_mix_invocation_to(
+    request: &AudioMixRequest,
+    primary_video_stream: u32,
+    mixed_layout: MixedAudioLayout,
+    output: &Path,
+) -> FfmpegInvocation {
     let mut args = vec![
         OsString::from("-i"),
         request.input.as_os_str().to_os_string(),
@@ -93,10 +107,10 @@ pub fn build_audio_mix_invocation(
         OsString::from("48000"),
         OsString::from("-metadata:s:a:0"),
         OsString::from("title=Mixed Audio"),
-        request.output.as_os_str().to_os_string(),
+        output.as_os_str().to_os_string(),
     ]);
 
-    Ok(FfmpegInvocation { args })
+    FfmpegInvocation { args }
 }
 
 fn mix_filter(

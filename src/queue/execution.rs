@@ -87,15 +87,7 @@ impl MediaQueue {
         operation: QueuedOperation,
     ) -> Result<JobId, QueueEnqueueError> {
         let raw_id = self.next_job_id.ok_or(QueueEnqueueError::JobIdExhausted)?;
-        let source_identity =
-            SourceIdentity::read(operation.input()).map_err(QueueEnqueueError::Source)?;
-        let media_identity =
-            SourceIdentity::read(&media.path).map_err(QueueEnqueueError::Source)?;
-        if !source_identity.is_reliably_same(&media_identity) {
-            return Err(QueueEnqueueError::SourceDoesNotMatchMedia);
-        }
-
-        preflight_output_destination(operation.output()).map_err(QueueEnqueueError::Output)?;
+        let source_identity = Self::validate_admission(media, &operation)?;
 
         let id = JobId::new(raw_id);
         self.next_job_id = raw_id.checked_add(1);
@@ -119,29 +111,8 @@ impl MediaQueue {
         let mut prepared = Vec::with_capacity(items.len());
 
         for (index, (media, operation)) in items.iter().enumerate() {
-            let source_identity = SourceIdentity::read(operation.input()).map_err(|error| {
-                BatchEnqueueError::Item {
-                    index,
-                    error: QueueEnqueueError::Source(error),
-                }
-            })?;
-            let media_identity =
-                SourceIdentity::read(&media.path).map_err(|error| BatchEnqueueError::Item {
-                    index,
-                    error: QueueEnqueueError::Source(error),
-                })?;
-            if !source_identity.is_reliably_same(&media_identity) {
-                return Err(BatchEnqueueError::Item {
-                    index,
-                    error: QueueEnqueueError::SourceDoesNotMatchMedia,
-                });
-            }
-            preflight_output_destination(operation.output()).map_err(|error| {
-                BatchEnqueueError::Item {
-                    index,
-                    error: QueueEnqueueError::Output(error),
-                }
-            })?;
+            let source_identity = Self::validate_admission(media, operation)
+                .map_err(|error| BatchEnqueueError::Item { index, error })?;
             prepared.push((media.clone(), operation.clone(), source_identity));
         }
 
@@ -347,13 +318,9 @@ impl MediaQueue {
             .iter()
             .position(|job| matches!(job.state(), QueueJobState::Waiting))
         {
-            let job_id = self.jobs[index].id();
-            let input = self.jobs[index].operation().input().to_path_buf();
-            let source_identity = self.jobs[index].source_identity().clone();
-            let media = self.jobs[index].media().clone();
-            let operation = self.jobs[index].operation().clone();
-
-            let current_identity = match SourceIdentity::read(&input) {
+            let job = &self.jobs[index];
+            let job_id = job.id();
+            let current_identity = match SourceIdentity::read(job.operation().input()) {
                 Ok(identity) => identity,
                 Err(error) => {
                     self.jobs[index].set_state(QueueJobState::Failed(
@@ -362,12 +329,12 @@ impl MediaQueue {
                     continue;
                 }
             };
-            if !source_identity.is_reliably_same(&current_identity) {
+            if !job.source_identity().is_reliably_same(&current_identity) {
                 self.jobs[index].set_state(QueueJobState::Failed(QueueJobFailure::SourceChanged));
                 continue;
             }
 
-            let prepared = match operation.prepare(tools, &media) {
+            let prepared = match job.operation().prepare(tools, job.media()) {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     self.jobs[index]
@@ -431,6 +398,23 @@ impl MediaQueue {
             .iter_mut()
             .find(|job| job.id() == id)
             .expect("active queue job remains retained until it reaches a terminal state")
+    }
+
+    fn validate_admission(
+        media: &MediaFile,
+        operation: &QueuedOperation,
+    ) -> Result<SourceIdentity, QueueEnqueueError> {
+        let source_identity =
+            SourceIdentity::read(operation.input()).map_err(QueueEnqueueError::Source)?;
+        let media_identity =
+            SourceIdentity::read(&media.path).map_err(QueueEnqueueError::Source)?;
+        if !source_identity.is_reliably_same(&media_identity) {
+            return Err(QueueEnqueueError::SourceDoesNotMatchMedia);
+        }
+
+        preflight_output_destination(operation.output()).map_err(QueueEnqueueError::Output)?;
+
+        Ok(source_identity)
     }
 
     #[cfg(test)]
@@ -808,6 +792,58 @@ mod tests {
             );
             assert_eq!(queue.jobs()[0].id(), first);
         }
+    }
+
+    #[test]
+    fn launch_rechecks_destination_and_preserves_typed_preparation_failure() {
+        use crate::{
+            media::output::MediaOutputError,
+            queue::model::QueuePreparationError,
+            remux::{execution::RemuxStartError, validation::RemuxValidationError},
+        };
+
+        let directory = TestDirectory::new("launch-preflight");
+        let source = media(&directory, "source.mkv");
+        let parent = directory.path().join("removed");
+        fs::create_dir(&parent).unwrap();
+        let mut queue = MediaQueue::new();
+        queue
+            .enqueue(&source, remux(&source, parent.join("output.mkv")))
+            .unwrap();
+        queue
+            .enqueue(
+                &source,
+                remux(&source, directory.path().join("invalid.mp4")),
+            )
+            .unwrap();
+        let valid = queue
+            .enqueue(&source, remux(&source, directory.path().join("valid.mkv")))
+            .unwrap();
+        fs::remove_dir(&parent).unwrap();
+
+        let mut launches = Vec::new();
+        let mut launcher = |id, _| {
+            launches.push(id);
+            Ok(FakeProcessControl::running())
+        };
+        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert_eq!(launches, vec![valid]);
+        assert_eq!(queue.active_job(), Some(valid));
+        assert!(matches!(
+            queue.jobs()[0].state(),
+            QueueJobState::Failed(QueueJobFailure::Preparation(QueuePreparationError::Remux(
+                RemuxStartError::Output(MediaOutputError::OutputParentUnavailable {
+                    kind: std::io::ErrorKind::NotFound,
+                    ..
+                })
+            )))
+        ));
+        assert!(matches!(
+            queue.jobs()[1].state(),
+            QueueJobState::Failed(QueueJobFailure::Preparation(QueuePreparationError::Remux(
+                RemuxStartError::Validation(RemuxValidationError::OutputExtensionMismatch { .. })
+            )))
+        ));
     }
 
     #[test]

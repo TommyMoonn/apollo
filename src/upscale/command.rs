@@ -1,4 +1,4 @@
-use std::{ffi::OsString, fmt};
+use std::{ffi::OsString, fmt, path::Path};
 
 use crate::media::{
     container::MediaContainer,
@@ -6,7 +6,9 @@ use crate::media::{
 };
 
 use super::{
-    model::{EncoderQuality, UpscaleRequest, VideoCodec, VideoEncoderBackend},
+    model::{
+        EncoderQuality, ResolvedVideoEncoder, UpscaleRequest, VideoCodec, VideoEncoderBackend,
+    },
     sizing::OutputDimensions,
     validation::{UpscaleValidationError, resolve_output_pixel_format},
 };
@@ -57,18 +59,40 @@ pub fn build_upscale_invocation(
             .map_err(|error| UpscaleCommandError::NvencUnavailable {
                 reason: error.reason,
             })?;
-    let video_encoder = match (resolved_encoder.backend, request.codec) {
-        (VideoEncoderBackend::Cpu, VideoCodec::H264) => "libx264",
-        (VideoEncoderBackend::Cpu, VideoCodec::H265) => "libx265",
-        (VideoEncoderBackend::NvidiaNvenc, VideoCodec::H264) => "h264_nvenc",
-        (VideoEncoderBackend::NvidiaNvenc, VideoCodec::H265) => "hevc_nvenc",
-    };
     let pixel_format = resolve_output_pixel_format(
         &primary_video_stream.format,
         request.codec,
         resolved_encoder.backend,
     )
     .map_err(UpscaleCommandError::VideoFormat)?;
+    Ok(build_upscale_invocation_to(
+        request,
+        media,
+        dimensions,
+        resolved_encoder,
+        pixel_format,
+        &request.output,
+    ))
+}
+
+pub(crate) fn build_upscale_invocation_to(
+    request: &UpscaleRequest,
+    media: &MediaFile,
+    dimensions: OutputDimensions,
+    resolved_encoder: ResolvedVideoEncoder,
+    pixel_format: &str,
+    output: &Path,
+) -> FfmpegInvocation {
+    let primary_video_stream = media
+        .video_streams
+        .first()
+        .expect("validated upscale media has a video stream");
+    let video_encoder = match (resolved_encoder.backend, request.codec) {
+        (VideoEncoderBackend::Cpu, VideoCodec::H264) => "libx264",
+        (VideoEncoderBackend::Cpu, VideoCodec::H265) => "libx265",
+        (VideoEncoderBackend::NvidiaNvenc, VideoCodec::H264) => "h264_nvenc",
+        (VideoEncoderBackend::NvidiaNvenc, VideoCodec::H265) => "hevc_nvenc",
+    };
     let stream_index = primary_video_stream.stream_index;
 
     let mut args = vec![
@@ -127,10 +151,10 @@ pub fn build_upscale_invocation(
         OsString::from("-nostats"),
         OsString::from("-f"),
         OsString::from("mp4"),
-        request.output.as_os_str().to_os_string(),
+        output.as_os_str().to_os_string(),
     ]);
 
-    Ok(FfmpegInvocation { args })
+    FfmpegInvocation { args }
 }
 
 fn mp4_audio_codec(media: &MediaFile) -> Option<&'static str> {

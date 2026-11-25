@@ -117,6 +117,17 @@ pub fn validate_output_path(output: &Path) -> Result<(), MediaOutputError> {
         .ok_or_else(|| MediaOutputError::InvalidOutputPath(output.to_path_buf()))
 }
 
+/// Check the selected extension without accessing the filesystem. The error carries the
+/// actual extension (if valid UTF-8), so each domain can retain its own diagnostic.
+pub(crate) fn check_output_extension(output: &Path, expected: &str) -> Result<(), Option<String>> {
+    let actual = output.extension().and_then(|extension| extension.to_str());
+    if actual.is_some_and(|extension| extension.eq_ignore_ascii_case(expected)) {
+        Ok(())
+    } else {
+        Err(actual.map(str::to_owned))
+    }
+}
+
 /// Perform the filesystem-backed destination safety preflight without creating staging state.
 pub fn preflight_output_destination(output: &Path) -> Result<(), MediaOutputError> {
     validated_output_destination(output).map(|_| ())
@@ -469,7 +480,7 @@ mod tests {
 
     use super::{
         MediaOutput, MediaOutputDisposition, MediaOutputError, STAGING_DIRECTORY_PREFIX,
-        preflight_output_destination, validate_output_path,
+        check_output_extension, preflight_output_destination, validate_output_path,
     };
     use crate::media::process::{MediaProcessFailure, MediaProcessState};
 
@@ -484,6 +495,15 @@ mod tests {
             validate_output_path(Path::new("")),
             Err(MediaOutputError::InvalidOutputPath(PathBuf::new()))
         );
+        assert_eq!(
+            check_output_extension(Path::new("missing-parent/movie.MP4"), "mp4"),
+            Ok(())
+        );
+        assert_eq!(
+            check_output_extension(Path::new("movie.mkv"), "mp4"),
+            Err(Some("mkv".to_owned()))
+        );
+        assert_eq!(check_output_extension(Path::new("movie"), "mp4"), Err(None));
     }
 
     #[test]
@@ -743,6 +763,34 @@ mod tests {
         );
         assert_eq!(fs::read(third).unwrap(), b"next complete");
         assert!(!first.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_source_alias_is_not_replaced() {
+        use std::os::unix::fs::symlink;
+        let directory = TestDirectory::new("source-alias");
+        let source = directory.path().join("source.mkv");
+        let alias = directory.path().join("alias.mkv");
+        fs::write(&source, b"source").unwrap();
+        symlink(&source, &alias).unwrap();
+        let mut prepared = MediaOutput::prepare(&alias).unwrap();
+        let numbered = directory.path().join("alias (1).mkv");
+        assert_eq!(prepared.final_path(), numbered);
+        fs::write(prepared.temporary_path(), b"completed output").unwrap();
+        assert_eq!(
+            prepared.settle(&MediaProcessState::Completed).unwrap(),
+            MediaOutputDisposition::Published(numbered.clone())
+        );
+        assert!(
+            fs::symlink_metadata(&alias)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&alias).unwrap(), b"source");
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(numbered).unwrap(), b"completed output");
     }
 
     #[cfg(unix)]

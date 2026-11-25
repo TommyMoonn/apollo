@@ -9,15 +9,13 @@ use crate::media::{
     model::MediaFile,
     operation::PreparedMediaOperation,
     output::{MediaOutput, MediaOutputError},
-    process::{
-        MediaProcessCommand, MediaProcessStartError, MediaProcessWake, ProcessProgressSource,
-    },
+    process::{MediaProcessCommand, MediaProcessStartError, MediaProcessWake},
     progress::MediaProgress,
     tools::MediaTools,
 };
 
 use super::{
-    command::build_audio_extract_invocation,
+    command::build_audio_extract_invocation_to,
     model::{AudioExtractMetadata, AudioExtractRequest},
     validation::{AudioExtractValidationError, validate_audio_extract_request},
 };
@@ -181,14 +179,13 @@ pub(crate) fn prepare_audio_extract_operation(
         .unwrap_or_default();
 
     let output = MediaOutput::prepare(&request.output).map_err(AudioExtractStartError::Output)?;
-    let mut staged_request = request.clone();
-    staged_request.output = output.temporary_path().to_path_buf();
-    let invocation = build_audio_extract_invocation(&staged_request, &metadata);
-    let command = MediaProcessCommand::new(&tools.ffmpeg)
-        .args(invocation.args)
-        .progress_source(ProcessProgressSource::Stdout);
-
-    Ok(PreparedMediaOperation::new(output, command, media.duration))
+    let invocation = build_audio_extract_invocation_to(request, &metadata, output.temporary_path());
+    Ok(PreparedMediaOperation::new(
+        output,
+        tools,
+        invocation.args,
+        media.duration,
+    ))
 }
 
 fn map_execution_start_error(error: MediaExecutionStartError) -> AudioExtractStartError {
@@ -280,6 +277,21 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["-metadata:s:a:0", "language=eng"])
         );
+        let expected = crate::audio_extract::command::build_audio_extract_invocation(
+            &request,
+            &crate::audio_extract::model::AudioExtractMetadata::from(
+                media
+                    .audio_streams
+                    .iter()
+                    .find(|stream| stream.stream_index == request.audio_stream_index)
+                    .unwrap(),
+            ),
+        );
+        assert_eq!(
+            &args[..args.len() - 1],
+            &expected.args[..expected.args.len() - 1]
+        );
+        assert_eq!(expected.args.last().unwrap(), request.output.as_os_str());
         let staged_output = PathBuf::from(args.last().unwrap());
         assert_ne!(staged_output, request.output);
         assert_eq!(staged_output.file_name(), request.output.file_name());

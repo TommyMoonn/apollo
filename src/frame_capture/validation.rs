@@ -2,7 +2,7 @@ use std::{fmt, time::Duration};
 
 use crate::media::{
     model::MediaFile,
-    output::{MediaOutputError, validate_output_path},
+    output::{MediaOutputError, check_output_extension, validate_output_path},
 };
 
 use super::model::{FrameCaptureRequest, FramePosition};
@@ -53,8 +53,7 @@ impl std::error::Error for FrameCaptureValidationError {}
 
 /// Validate a Frame Capture request without accessing the destination filesystem.
 ///
-/// Destination identity, existence, and writability remain owned by `MediaOutput::prepare`
-/// immediately before process launch.
+/// Destination preflight, numbered-name selection and staging remain owned by `MediaOutput`.
 pub fn validate_frame_capture_request(
     request: &FrameCaptureRequest,
     media: &MediaFile,
@@ -97,15 +96,6 @@ fn validate_output_extension(
     request: &FrameCaptureRequest,
 ) -> Result<(), FrameCaptureValidationError> {
     let expected = request.format.extension();
-    let actual = request
-        .output
-        .extension()
-        .and_then(|extension| extension.to_str());
-    if actual.is_some_and(|extension| extension.eq_ignore_ascii_case(expected)) {
-        return Ok(());
-    }
-    Err(FrameCaptureValidationError::OutputExtensionMismatch {
-        expected,
-        actual: actual.map(str::to_owned),
-    })
+    check_output_extension(&request.output, expected)
+        .map_err(|actual| FrameCaptureValidationError::OutputExtensionMismatch { expected, actual })
 }

@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::{ffi::OsString, path::Path};
 
 use super::model::{AudioExtractFormat, AudioExtractMetadata, AudioExtractRequest};
 
@@ -11,6 +11,14 @@ pub struct FfmpegInvocation {
 pub fn build_audio_extract_invocation(
     request: &AudioExtractRequest,
     metadata: &AudioExtractMetadata,
+) -> FfmpegInvocation {
+    build_audio_extract_invocation_to(request, metadata, &request.output)
+}
+
+pub(crate) fn build_audio_extract_invocation_to(
+    request: &AudioExtractRequest,
+    metadata: &AudioExtractMetadata,
+    output: &Path,
 ) -> FfmpegInvocation {
     let mut args = vec![
         OsString::from("-i"),
@@ -38,7 +46,7 @@ pub fn build_audio_extract_invocation(
         OsString::from("-nostats"),
         OsString::from("-f"),
         OsString::from(request.format.ffmpeg_muxer_name()),
-        request.output.as_os_str().to_os_string(),
+        output.as_os_str().to_os_string(),
     ]);
 
     FfmpegInvocation { args }
