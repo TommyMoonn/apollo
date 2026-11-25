@@ -3,7 +3,7 @@
 use std::{borrow::Cow, cell::Cell, path::PathBuf, process::ExitCode, rc::Rc};
 
 use gpui::{
-    App, Bounds, Context, FocusHandle, FontWeight, Task, TextRenderingMode, TitlebarOptions,
+    App, Bounds, Context, ExternalPaths, FocusHandle, Task, TextRenderingMode, TitlebarOptions,
     Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, prelude::*, px, rgba,
     size,
 };
@@ -23,6 +23,7 @@ use super::{
     MINIMUM_CONTENT_DIMENSIONS, REFERENCE_CONTENT_DIMENSIONS,
     components::{self, ActionState, Button, Tone},
     design::{FONT_FAMILY, METRICS as M, Palette},
+    file_intake,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,12 @@ enum ExitState {
     Failed,
 }
 
+#[derive(Clone, Copy)]
+enum DropContext {
+    Eligible(InputDialogOrigin),
+    Blocked,
+}
+
 struct ApolloRoot {
     core: Application,
     focus: FocusHandle,
@@ -41,6 +48,7 @@ struct ApolloRoot {
     previous_focus: Option<FocusHandle>,
     open_focus: FocusHandle,
     picker_focus: Option<FocusHandle>,
+    drag_origin: Option<DropContext>,
     file_dialog: FileDialogOwner,
     dialog_origin: Option<InputDialogOrigin>,
     settings_path: Option<PathBuf>,
@@ -86,6 +94,7 @@ impl ApolloRoot {
             core,
             open_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             picker_focus: None,
+            drag_origin: None,
             file_dialog,
             dialog_origin: None,
             settings_path,
@@ -131,10 +140,51 @@ impl ApolloRoot {
     fn can_open_files(&self) -> bool {
         self.exit == ExitState::Open
             && !self.file_dialog.is_pending()
-            && self.core.discovery.ready().is_some()
-            && self.core.batch_origin().is_some()
-            && !self.core.source.is_inspecting()
-            && !self.core.frame_work.copy_active()
+            && matches!(
+                self.core.navigation(),
+                NavigationState::NoSource | NavigationState::SourceWorkspace { .. }
+            )
+            && self.core.can_accept_source_paths()
+    }
+
+    fn accept_drop(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(DropContext::Eligible(origin)) = self.drag_origin.take() else {
+            return;
+        };
+        if !self.can_open_files() || !origin.is_current(&self.core) {
+            return;
+        }
+        let before = self.core.settings.clone();
+        let wake = self.wake.clone();
+        self.core
+            .accept_source_paths(origin, paths.paths().to_vec(), move || {
+                background::notify(&wake)
+            });
+        self.persist_changed_settings(&before);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn close_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.exit != ExitState::Open
+            || self.file_dialog.is_pending()
+            || !matches!(
+                self.core.navigation(),
+                NavigationState::NoSource | NavigationState::SourceWorkspace { .. }
+            )
+        {
+            return;
+        }
+        self.core.close_source();
+        self.invalidate_drag();
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn invalidate_drag(&mut self) {
+        if self.drag_origin.is_some() {
+            self.drag_origin = Some(DropContext::Blocked);
+        }
     }
 
     fn start_file_dialog(
@@ -146,6 +196,7 @@ impl ApolloRoot {
         if self.exit != ExitState::Open || self.file_dialog.is_pending() {
             return;
         }
+        self.invalidate_drag();
         let request = self.core.prepare_file_dialog_request(request);
         let target = request.target();
         let origin = InputDialogOrigin::capture(&self.core);
@@ -171,7 +222,11 @@ impl ApolloRoot {
         let wake = self.wake.clone();
         self.core
             .settle_native_dialog(origin, completion, move || background::notify(&wake));
-        if self.core.settings != before {
+        self.persist_changed_settings(&before);
+    }
+
+    fn persist_changed_settings(&mut self, before: &AppSettings) {
+        if &self.core.settings != before {
             self.settings_dirty = true;
             self.persist_settings();
         }
@@ -252,6 +307,7 @@ impl ApolloRoot {
         if self.exit != ExitState::Open {
             return;
         }
+        self.invalidate_drag();
         if self.core.queue.scheduler().pending_count() == 0 {
             self.begin_close(window, cx);
         } else {
@@ -296,7 +352,7 @@ impl ApolloRoot {
     fn discovery_view(&self, palette: Palette, window: &Window, cx: &Context<Self>) -> gpui::Div {
         match self.core.discovery.state() {
             MediaToolsState::Checking => components::pending("Checking media tools", palette),
-            MediaToolsState::Ready(_) => components::status("Media tools ready", palette, None),
+            MediaToolsState::Ready(_) => div(),
             MediaToolsState::Unavailable(error) => {
                 let mut retry = Button::new("retry-tools", "Retry", Tone::Standard);
                 if self.exit == ExitState::Open && !self.core.discovery.is_pending() {
@@ -315,7 +371,17 @@ impl ApolloRoot {
                     .flex_col()
                     .gap(px(M.related))
                     .child(components::status("Media tools unavailable", palette, None))
-                    .child(components::inline_message(error.to_string(), palette))
+                    .child({
+                        let error = crate::media::error::MediaError::from_tools_error(error);
+                        components::inline_message(
+                            format!(
+                                "{} {}",
+                                error.message(),
+                                error.guidance().unwrap_or_default()
+                            ),
+                            palette,
+                        )
+                    })
                     .child(
                         div().child(retry.render(palette, window).track_focus(&self.retry_focus)),
                     )
@@ -387,19 +453,36 @@ impl ApolloRoot {
 
 impl Render for ApolloRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let message = match self.core.navigation() {
-            NavigationState::NoSource => "Choose a media file. The source view is being migrated.",
-            NavigationState::BatchSetup | NavigationState::BatchEdit => {
-                "Batch configuration is unavailable during the UI migration."
-            }
-            _ => "This view is unavailable during the UI migration.",
-        };
-
         let palette = Palette::DARK;
-        let mut open = Button::new("open-files", "Open files", Tone::Primary);
-        open.alternate_labels = &["Opening files…"];
+        if !cx.has_active_drag() {
+            self.drag_origin = None;
+        }
+        let has_source = matches!(
+            self.core.navigation(),
+            NavigationState::SourceWorkspace { .. }
+        );
+        let inspecting = self.core.source.is_inspecting();
+        let batch = matches!(
+            self.core.navigation(),
+            NavigationState::BatchSetup | NavigationState::BatchEdit
+        );
+        let mut open = Button::new(
+            "open-files",
+            if has_source {
+                "Change file"
+            } else {
+                "Open files"
+            },
+            Tone::Standard,
+        );
+        open.alternate_labels = &["Opening files…", "Checking file…"];
         if self.file_dialog.is_pending() {
             open.label = "Opening files…";
+            open.state = ActionState::Busy;
+        } else if inspecting {
+            if has_source {
+                open.label = "Checking file…";
+            }
             open.state = ActionState::Busy;
         } else if self.can_open_files() {
             open.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
@@ -423,8 +506,98 @@ impl Render for ApolloRoot {
         } else {
             open
         };
+        let mut close = Button::new(
+            "close-source",
+            if has_source {
+                "Close source"
+            } else {
+                "Cancel inspection"
+            },
+            Tone::Quiet,
+        );
+        if self.exit == ExitState::Open && !self.file_dialog.is_pending() {
+            close.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                if root.core.source.current().is_some() || root.core.source.is_inspecting() {
+                    root.close_source(window, cx);
+                }
+            })));
+        }
+        let close = close.render(palette, window);
         let queue_label = super::queue_count_label(self.core.queue.scheduler().pending_count());
         let queue = Button::new("queue", &queue_label, Tone::Standard).render(palette, window);
+        let surface = if batch {
+            let mut back = Button::new("batch-back", "Back", Tone::Standard);
+            back.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                if root.exit != ExitState::Open || root.file_dialog.is_pending() {
+                    return;
+                }
+                if let Some(origin) = root.core.batch_setup.as_ref().map(|batch| batch.origin) {
+                    root.invalidate_drag();
+                    root.core.return_from_batch(origin);
+                    window.focus(&root.focus, cx);
+                    cx.notify();
+                }
+            })));
+            let count = self
+                .core
+                .batch_setup
+                .as_ref()
+                .map_or(0, |batch| batch.items.len());
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(M.related))
+                .child(components::heading(format!("{count} files selected")))
+                .children(
+                    self.core
+                        .batch_inspecting()
+                        .then(|| components::pending("Checking files", palette)),
+                )
+                .child(components::inline_message(
+                    "Batch configuration and submission are unavailable during the UI migration.",
+                    palette,
+                ))
+                .child(div().child(back.render(palette, window)))
+        } else if has_source {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(M.related))
+                .w_full()
+                .children(self.core.source.current().map(|media| {
+                    file_intake::summary(
+                        super::workspace::WorkspacePresentation::new(media),
+                        media.path.to_string_lossy().into_owned(),
+                        palette,
+                    )
+                }))
+                .child(components::selector([open, close]))
+                .child(components::separator(palette))
+                .child(components::inline_message(
+                    "Operation controls are unavailable during the UI migration.",
+                    palette,
+                ))
+        } else if self.core.navigation() == NavigationState::NoSource {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .flex_1()
+                .w_full()
+                .child(file_intake::landing(
+                    open,
+                    inspecting.then_some(close),
+                    inspecting,
+                    palette,
+                ))
+        } else {
+            components::empty_state(
+                "Unavailable",
+                "This view is unavailable during the UI migration.",
+                palette,
+            )
+        };
         let scheduler = self.core.queue.scheduler();
         let work = scheduler.is_started().then(|| {
             if let Some(fraction) = scheduler
@@ -448,20 +621,15 @@ impl Render for ApolloRoot {
                 .min_h_full()
                 .p(px(M.inset))
                 .gap(px(M.section))
-                .child(
-                    div()
-                        .text_size(px(M.title))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Apollo"),
-                )
-                .child(components::separator(palette))
-                .child(self.discovery_view(palette, window, cx))
+                .child(div().flex().justify_center().child(file_intake::wordmark()))
                 .children(
                     self.core
-                        .source
-                        .is_inspecting()
-                        .then(|| components::pending("Checking file…", palette)),
+                        .discovery
+                        .ready()
+                        .is_none()
+                        .then(|| self.discovery_view(palette, window, cx)),
                 )
+                .child(surface)
                 .children(self.core.source.error().map(|error| {
                     let message = format!(
                         "{} {}",
@@ -492,17 +660,7 @@ impl Render for ApolloRoot {
                     feedback
                 }))
                 .children(work)
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .justify_center()
-                        .items_start()
-                        .gap(px(M.related))
-                        .child(components::empty_state("Unavailable", message, palette)),
-                )
-                .child(components::action_bar(palette, [queue, open]))
+                .child(components::action_bar(palette, [queue]))
         } else {
             div()
                 .flex()
@@ -513,7 +671,7 @@ impl Render for ApolloRoot {
                 .child(self.exit_view(palette, window, cx))
         };
 
-        div()
+        let root = div()
             .id("apollo-root")
             .tab_group()
             .track_focus(&self.focus)
@@ -541,22 +699,62 @@ impl Render for ApolloRoot {
             }))
             .overflow_y_scroll()
             .child(body)
+            .border(px(M.rule))
+            .border_color(rgba(palette.background))
+            .on_file_drop_exit(cx.listener(|root, _, _, _| {
+                root.drag_origin = None;
+            }))
+            .on_drag_move::<ExternalPaths>(cx.listener(
+                |root, event: &gpui::DragMoveEvent<ExternalPaths>, _, cx| {
+                    if root.drag_origin.is_none() {
+                        root.drag_origin = Some(
+                            if root.can_open_files() && !event.drag(cx).paths().is_empty() {
+                                DropContext::Eligible(InputDialogOrigin::capture(&root.core))
+                            } else {
+                                DropContext::Blocked
+                            },
+                        );
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_drop(cx.listener(|root, paths: &ExternalPaths, window, cx| {
+                root.accept_drop(paths, window, cx)
+            }));
+        let valid_drag = match self.drag_origin {
+            Some(DropContext::Eligible(origin)) => origin.is_current(&self.core),
+            Some(DropContext::Blocked) => false,
+            None => true,
+        };
+        if self.can_open_files() && valid_drag {
+            root.drag_over::<ExternalPaths>(move |style, paths, _, _| {
+                if paths.paths().is_empty() {
+                    style
+                } else {
+                    style.border_color(rgba(palette.border()))
+                }
+            })
+        } else {
+            root
+        }
     }
 }
 
 fn open_root(cx: &mut App) -> Result<(), String> {
     let fonts = cx.text_system();
     fonts
-        .add_fonts(vec![Cow::Borrowed(include_bytes!(
-            "../../assets/fonts/Geist-Variable.ttf"
-        ))])
-        .map_err(|error| format!("Could not register Apollo's Geist font: {error:#}"))?;
-    if !fonts
-        .all_font_names()
-        .iter()
-        .any(|name| name == FONT_FAMILY)
-    {
-        return Err("The bundled Geist font family could not be resolved.".into());
+        .add_fonts(vec![
+            Cow::Borrowed(include_bytes!("../../assets/fonts/Geist-Variable.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../../assets/fonts/FiraCode-Regular.ttf").as_slice()),
+        ])
+        .map_err(|error| format!("Could not register Apollo's fonts: {error:#}"))?;
+    let names = fonts.all_font_names();
+    for family in [FONT_FAMILY, file_intake::WORDMARK_FAMILY] {
+        if !names.iter().any(|name| name == family) {
+            return Err(format!(
+                "The bundled {family} font family could not be resolved."
+            ));
+        }
     }
     let (width, height) = REFERENCE_CONTENT_DIMENSIONS;
     let (min_width, min_height) = MINIMUM_CONTENT_DIMENSIONS;

@@ -234,10 +234,7 @@ impl Application {
         completion: FileDialogCompletion,
         wake: impl Fn() + Clone + Send + 'static,
     ) {
-        use crate::{
-            app::NavigationState,
-            media::{error::MediaError, intake::MediaLoadStart},
-        };
+        use crate::{app::NavigationState, media::error::MediaError};
         if self.is_closing() {
             return;
         }
@@ -272,39 +269,14 @@ impl Application {
                 return;
             }
         };
-        let Some(path) = paths.first() else {
-            return;
-        };
-        if target != DialogTarget::BatchAppend
-            && (self.source.is_inspecting()
-                || self.frame_work.copy_active()
-                || self.batch_origin().is_none())
-        {
-            return;
-        }
-        self.settings.remember_source(path);
         if target == DialogTarget::BatchAppend {
-            self.append_batch_paths(paths, wake);
-            return;
-        }
-        if paths.len() > 1 {
-            self.start_batch_paths(paths, wake);
-            return;
-        }
-        let Some(tools) = self.discovery.ready().cloned() else {
-            return;
-        };
-        self.queue_confirmation = None;
-        self.operation_action_error = None;
-        match self.source.begin_load(path) {
-            Some(MediaLoadStart::Reused) => {
-                self.enter_workspace(self.active_operation().unwrap_or(Operation::AudioMix))
+            if let Some(path) = paths.first() {
+                self.settings.remember_source(path);
+                self.append_batch_paths(paths, wake);
             }
-            Some(MediaLoadStart::Probe(request)) => {
-                self.source.start_inspection(tools, request, wake)
-            }
-            None => {}
+            return;
         }
+        self.accept_source_paths(origin, paths, wake);
     }
 
     /// Shared output settlement for fixed-source queue and batch editors.

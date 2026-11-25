@@ -8,7 +8,7 @@ use super::{
     ApolloApp, completion_wake,
     state::{FrameCaptureEditor, FrameCaptureToolState},
 };
-use crate::app::dialogs::{DialogTarget, FileDialogRequest};
+use crate::app::dialogs::FileDialogRequest;
 use crate::app::{Operation, QueueEditOrigin, source::SourceSettlement};
 use crate::media::intake::{MediaIntakeRequest, MediaLoadStart};
 #[cfg(test)]
@@ -16,15 +16,13 @@ use crate::media::{model::MediaFile, probe::MediaProbeError};
 use crate::queue::QueuedOperation;
 use crate::ui::frame_capture::{FrameCopyStatus, PositionSettle};
 use crate::ui::{
-    SourceAction, file_intake::FileIntakeAction, source_presentation::SourcePresentation,
-    workspace::WorkspaceAction,
+    SourceAction, source_presentation::SourcePresentation, workspace::WorkspaceAction,
 };
 use crate::{
     audio_extract::draft::AudioExtractDraft, audio_mix::draft::AudioMixDraft,
     frame_capture::draft::FrameCaptureDraft, remux::draft::RemuxDraft,
     upscale::draft::UpscaleDraft,
 };
-use egui::Context;
 use std::{path::Path, sync::Arc, time::Instant};
 
 impl ApolloApp {
@@ -192,17 +190,6 @@ impl ApolloApp {
         true
     }
 
-    pub(super) fn handle_file_intake_action(&mut self, action: FileIntakeAction) {
-        match action {
-            FileIntakeAction::OpenFile => self.start_file_dialog(FileDialogRequest::OpenSources {
-                initial_directory: None,
-                target: DialogTarget::BatchInput,
-            }),
-            FileIntakeAction::OpenQueue => self.enter_queue(),
-            FileIntakeAction::None => {}
-        }
-    }
-
     pub(super) fn load_media_path(&mut self, path: &Path) {
         let Some(tools) = self.ready_media_tools().cloned() else {
             return;
@@ -274,27 +261,6 @@ impl ApolloApp {
         };
         let result = probe(request.path());
         self.complete_media_probe(request, result);
-    }
-
-    pub(super) fn handle_window_file_drop(&mut self, context: &Context) {
-        if !self.file_intake_enabled() {
-            return;
-        }
-        let paths = context.input(|input| {
-            input
-                .raw
-                .dropped_files
-                .iter()
-                .map(|file| file.path().to_path_buf())
-                .collect::<Vec<_>>()
-        });
-        if !paths.is_empty() {
-            self.start_batch_paths(paths);
-        }
-    }
-
-    pub(super) fn drag_hovered(&self, context: &Context) -> bool {
-        self.file_intake_enabled() && context.input(|input| !input.raw.hovered_files.is_empty())
     }
 
     pub(super) fn file_intake_enabled(&self) -> bool {

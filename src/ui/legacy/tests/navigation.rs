@@ -15,36 +15,6 @@ fn initialization_has_no_source_without_starting_an_executor() {
 }
 
 #[test]
-fn fresh_application_state_renders_unified_file_intake() {
-    let mut app = app();
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-
-    let mut output = context.run_ui(Default::default(), |ui| {
-        app.show_navigation(ui);
-    });
-
-    assert!(output_contains_text(&output, "Open files"));
-    assert!(!output_contains_text(&output, "Audio Mix"));
-    assert!(!output_contains_text(&output, "Upscale"));
-    output.textures_delta.clear();
-}
-
-#[test]
-fn idle_no_source_surface_schedules_no_application_repaint() {
-    let mut app = app();
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-    theme::set_motion_durations(&context, theme::MotionDurations::DISABLED);
-
-    let repaint_delay = settled_navigation_repaint_delay(&context, &mut app);
-
-    assert_eq!(repaint_delay, Duration::MAX);
-}
-
-#[test]
 fn idle_source_workspace_schedules_no_application_repaint() {
     let (directory, path) = temp_file("idle-workspace-repaint");
     let mut app = app();
@@ -65,23 +35,9 @@ fn inspecting_state_is_sparse_and_blocks_source_replacement() {
     let (directory, path) = temp_file("inspecting-state");
     let mut app = app();
     let _sender = begin_pending_inspection(&mut app, &path);
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-
     assert_eq!(app.core.navigation(), NavigationState::NoSource);
     assert!(app.core.source.is_inspecting());
-    assert!(!app.file_intake_enabled());
-
-    let mut output = context.run_ui(Default::default(), |ui| {
-        app.show_navigation(ui);
-    });
-
-    assert!(output_contains_text(&output, "Inspecting media…"));
-    assert!(!output_contains_text(&output, "Audio Mix"));
-    assert!(!output_contains_text(&output, "Open files"));
-    assert!(!output_contains_text(&output, "or drop a video anywhere"));
-    output.textures_delta.clear();
+    assert!(!app.core.can_accept_source_paths());
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -153,7 +109,7 @@ fn intake_queue_navigation_and_back_preserve_jobs() {
     assert_no_source(&app.core);
     assert!(app.state.source_presentation.is_none());
 
-    app.handle_file_intake_action(FileIntakeAction::OpenQueue);
+    app.enter_queue();
     assert_eq!(
         app.core.navigation(),
         NavigationState::Queue {
@@ -405,22 +361,6 @@ fn switching_operations_does_not_revalidate_or_clear_the_source() {
         Some(&path)
     );
     fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn drag_hover_accepts_single_and_multiple_files_when_intake_is_available() {
-    let (first_directory, first) = temp_file("hover-first");
-    let (second_directory, second) = temp_file("hover-second");
-    let mut app = app();
-
-    assert!(drag_hovered(&app, &[&first]));
-    assert!(drag_hovered(&app, &[&first, &second]));
-
-    let _sender = begin_pending_inspection(&mut app, &first);
-    assert!(!drag_hovered(&app, &[&second]));
-
-    fs::remove_dir_all(first_directory).unwrap();
-    fs::remove_dir_all(second_directory).unwrap();
 }
 
 #[test]

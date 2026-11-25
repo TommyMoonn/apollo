@@ -50,18 +50,6 @@ fn failed_inspection_returns_to_intake_without_current_metadata() {
         Some(MediaErrorKind::ProbeFailure)
     );
 
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-    let mut output = context.run_ui(Default::default(), |ui| {
-        app.show_navigation(ui);
-    });
-    output.textures_delta.clear();
-    assert!(output_contains_text(
-        &output,
-        "This file could not be inspected."
-    ));
-    assert!(output_contains_text(&output, "Open files"));
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -198,96 +186,6 @@ fn open_valid_file_routes_audio_mix_to_ready_state() {
         Some(&path)
     );
     fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn dropped_valid_file_enters_default_workspace() {
-    let (directory, path) = temp_file("drop");
-    let mut app = app();
-    assert!(app.file_intake_enabled());
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-
-    assert_workspace(&app.core, Operation::AudioMix);
-    assert_eq!(
-        app.state.audio_mix.as_ref().map(|s| &s.media.path),
-        Some(&path)
-    );
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn one_file_drop_starts_normal_media_inspection() {
-    let (directory, path) = temp_file("single-drop");
-    let mut app = app();
-
-    handle_drop(&mut app, &[&path]);
-
-    assert_eq!(app.core.source.inspection_path(), Some(path.as_path()));
-    assert!(app.core.source.error().is_none());
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn multiple_file_drop_enters_batch_setup_in_source_order() {
-    let (first_directory, first) = temp_file("multi-drop-first");
-    let (second_directory, second) = temp_file("multi-drop-second");
-    let mut app = app();
-
-    handle_drop(&mut app, &[&first, &second]);
-
-    assert!(!app.core.source.is_inspecting());
-    assert!(app.core.source.current().is_none());
-    assert_eq!(app.core.navigation(), NavigationState::BatchSetup);
-    let batch = app.core.batch_setup.as_ref().unwrap();
-    assert_eq!(
-        batch
-            .items
-            .iter()
-            .map(|item| &item.path)
-            .collect::<Vec<_>>(),
-        vec![&first, &second]
-    );
-    fs::remove_dir_all(first_directory).unwrap();
-    fs::remove_dir_all(second_directory).unwrap();
-}
-
-#[test]
-fn directory_drop_uses_shared_intake_error_path() {
-    let directory = std::env::temp_dir().join(format!(
-        "apollo-phase49-directory-drop-{}-{}",
-        std::process::id(),
-        NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&directory).unwrap();
-    let mut app = app();
-
-    handle_drop(&mut app, &[&directory]);
-
-    assert!(!app.core.source.is_inspecting());
-    assert_eq!(
-        app.core.source.error().map(MediaError::kind),
-        Some(MediaErrorKind::SourceUnavailable)
-    );
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn missing_path_drop_uses_shared_intake_error_path() {
-    let directory = std::env::temp_dir().join(format!(
-        "apollo-phase49-missing-drop-{}-{}",
-        std::process::id(),
-        NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-    ));
-    let missing = directory.join("missing.mkv");
-    let mut app = app();
-
-    handle_drop(&mut app, &[&missing]);
-
-    assert!(!app.core.source.is_inspecting());
-    assert_eq!(
-        app.core.source.error().map(MediaError::kind),
-        Some(MediaErrorKind::SourceUnavailable)
-    );
 }
 
 #[test]

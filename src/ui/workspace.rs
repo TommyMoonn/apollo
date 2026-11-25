@@ -63,8 +63,8 @@ pub enum WorkspaceAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspacePresentation {
-    file_name: String,
-    metadata: Option<String>,
+    pub(crate) file_name: String,
+    pub(crate) metadata: Option<String>,
 }
 
 impl WorkspacePresentation {

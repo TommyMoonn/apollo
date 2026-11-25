@@ -19,8 +19,8 @@ use crate::ui::upscale::UpscaleSelectionAction;
 use crate::ui::workspace::{EditableQueuedJob, WorkspaceAction, WorkspaceMode};
 use crate::ui::{
     OperationSurfaceMode, audio_extract as audio_extract_ui, audio_mix as audio_mix_ui,
-    file_intake, frame_capture as frame_capture_ui, layout, media_error, queue as queue_ui,
-    remux as remux_ui, theme, upscale as upscale_ui, widgets, workspace,
+    frame_capture as frame_capture_ui, layout, media_error, queue as queue_ui, remux as remux_ui,
+    theme, upscale as upscale_ui, widgets, workspace,
 };
 
 use super::ApolloApp;
@@ -49,12 +49,6 @@ impl ApolloApp {
                         return;
                     }
                     MediaToolsState::Ready(_) => {}
-                }
-                if !self.confirm_cancel_queue && self.queue_frame_preview.is_none() {
-                    self.handle_window_file_drop(ui.ctx());
-                    if self.drag_hovered(ui.ctx()) {
-                        file_intake::show_drag_hover(ui);
-                    }
                 }
                 self.show_navigation(ui);
             });
@@ -163,7 +157,6 @@ impl ApolloApp {
                 return;
             }
             NavigationState::NoSource => {
-                layout::padded_content(ui, |ui| self.show_file_intake(ui));
                 return;
             }
             NavigationState::SourceWorkspace { active_operation } => active_operation,
@@ -229,9 +222,7 @@ impl ApolloApp {
             Operation::FrameCapture if app.state.frame_capture.is_some() => {
                 app.show_frame_capture_tool(ui)
             }
-            _ => {
-                layout::padded_content(ui, |ui| app.show_file_intake(ui));
-            }
+            _ => {}
         };
         layout::surface_fade(ui, surface_key, |ui| {
             if ready_surface {
@@ -240,17 +231,6 @@ impl ApolloApp {
                 layout::padded_content(ui, |ui| show_operation(self, ui));
             }
         });
-    }
-
-    fn show_file_intake(&mut self, ui: &mut Ui) {
-        let action = file_intake::show(
-            ui,
-            self.core.source.is_inspecting(),
-            self.core.queue.scheduler().pending_count(),
-            self.core.source.error(),
-            &mut self.state.intake_error_details_open,
-        );
-        self.handle_file_intake_action(action);
     }
 
     pub(super) fn show_queue(&mut self, ui: &mut Ui) {

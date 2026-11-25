@@ -251,6 +251,9 @@ impl Application {
     pub(crate) fn close_source(&mut self) {
         self.show_no_source();
         self.source.close();
+        self.frame_work.cancel_copy();
+        self.frame_work.cancel_preview();
+        self.frame_work.cancel_index();
         self.queue_confirmation = None;
         self.operation_action_error = None;
     }

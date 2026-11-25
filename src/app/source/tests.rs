@@ -196,3 +196,153 @@ fn unchanged_source_reuses_session_and_changed_source_requires_new_inspection() 
     );
     assert_ne!(owner.session_id(), original);
 }
+
+fn ready_application(fixture: &Fixture) -> crate::app::Application {
+    use crate::app::discovery::{MediaToolsDiscovery, MediaToolsState};
+    crate::app::Application {
+        discovery: MediaToolsDiscovery::with_state(MediaToolsState::Ready(MediaTools::new(
+            fixture.0.join("absent-ffmpeg.exe"),
+            fixture.0.join("absent-ffprobe.exe"),
+        ))),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn external_paths_share_transactional_source_admission_and_preserve_queued_jobs() {
+    use crate::{
+        app::{NavigationState, Operation, dialogs::InputDialogOrigin},
+        queue::QueuedOperation,
+        remux::draft::RemuxDraft,
+    };
+    let fixture = Fixture::new();
+    let original = fixture.file("first.mkv");
+    let next = fixture.file("next.mkv");
+    let mut app = ready_application(&fixture);
+    let inspected = parse_ffprobe_json(
+        &original,
+        include_bytes!("../../../tests/fixtures/ffprobe/one_audio.json"),
+    )
+    .unwrap();
+    app.source
+        .restore(SourceIdentity::read(&original).unwrap(), inspected);
+    app.enter_workspace(Operation::Remux);
+    let (identity, source) = app.source.current_with_identity().unwrap();
+    let job = app
+        .queue
+        .enqueue(
+            identity,
+            source,
+            QueuedOperation::Remux(RemuxDraft::new(source).request(source)),
+        )
+        .unwrap();
+    let origin = InputDialogOrigin::capture(&app);
+    let id = app.source.session_id();
+    app.accept_source_paths(origin, vec![original.clone()], || {
+        panic!("unchanged source must not probe")
+    });
+    assert_eq!(app.source.session_id(), id);
+    assert_eq!(
+        app.settings.source_directory().as_deref(),
+        Some(fixture.0.as_path())
+    );
+    app.accept_source_paths(origin, vec![fixture.0.clone()], || {
+        panic!("directory must not probe")
+    });
+    assert_eq!(
+        app.source.error().unwrap().kind(),
+        MediaErrorKind::SourceUnavailable
+    );
+    assert_eq!(app.source.current().unwrap().path, original);
+    let (sender, receiver) = mpsc::channel();
+    app.accept_source_paths(origin, vec![next.clone()], move || {
+        let _ = sender.send(());
+    });
+    assert!(app.source.is_inspecting());
+    assert_eq!(app.source.current().unwrap().path, original);
+    assert!(!app.can_accept_source_paths());
+    receiver.recv_timeout(TIMEOUT).unwrap();
+    assert!(app.poll_background(|| panic!("intake must not launch queue work")));
+    assert_eq!(
+        app.source.error().unwrap().kind(),
+        MediaErrorKind::FfprobeUnavailable
+    );
+    assert_eq!(app.source.session_id(), id);
+    assert_eq!(
+        app.navigation(),
+        NavigationState::SourceWorkspace {
+            active_operation: Operation::Remux
+        }
+    );
+    app.close_source();
+    app.accept_source_paths(origin, vec![next], || {
+        panic!("stale context must not probe")
+    });
+    assert_eq!(app.navigation(), NavigationState::NoSource);
+    assert!(app.source.current().is_none());
+    assert!(!app.source.is_inspecting());
+    assert_eq!(app.queue.scheduler().jobs()[0].id(), job);
+    assert_eq!(app.queue.scheduler().pending_count(), 1);
+}
+
+#[test]
+fn multiple_external_paths_retain_batch_order_and_restore_previous_source_on_back() {
+    use crate::app::{NavigationState, Operation, dialogs::InputDialogOrigin};
+    let fixture = Fixture::new();
+    let original = fixture.file("accepted.mkv");
+    let paths = vec![fixture.file("first.mkv"), fixture.file("second.mp4")];
+    let mut app = ready_application(&fixture);
+    accept(&mut app.source, &original);
+    app.enter_workspace(Operation::AudioExtract);
+    let id = app.source.session_id();
+    app.accept_source_paths(InputDialogOrigin::capture(&app), paths.clone(), || {});
+    assert_eq!(app.navigation(), NavigationState::BatchSetup);
+    let batch = app.batch_setup.as_ref().unwrap();
+    assert_eq!(
+        batch
+            .items
+            .iter()
+            .map(|item| &item.path)
+            .collect::<Vec<_>>(),
+        paths.iter().collect::<Vec<_>>()
+    );
+    let origin = batch.origin;
+    assert!(!app.can_accept_source_paths());
+    app.return_from_batch(origin);
+    assert_eq!(app.active_operation(), Some(Operation::AudioExtract));
+    assert_eq!(app.source.current().unwrap().path, original);
+    assert_eq!(app.source.session_id(), id);
+    assert!(app.batch_setup.is_none());
+    assert!(!app.batch_inspecting());
+    assert!(app.queue.scheduler().jobs().is_empty());
+}
+
+#[test]
+fn empty_or_invalid_external_selection_does_not_start_inspection() {
+    use crate::app::dialogs::InputDialogOrigin;
+    let fixture = Fixture::new();
+    let missing = fixture.0.join("missing.mkv");
+    let mut app = ready_application(&fixture);
+    let origin = InputDialogOrigin::capture(&app);
+    let no_probe = || panic!("invalid input must not start a worker");
+    app.accept_source_paths(origin, vec![], no_probe);
+    assert!(app.source.error().is_none());
+    assert!(app.settings.source_directory().is_none());
+    app.accept_source_paths(origin, vec![missing], no_probe);
+    assert_eq!(
+        app.source.error().unwrap().kind(),
+        MediaErrorKind::SourceUnavailable
+    );
+    assert!(app.source.current().is_none());
+    assert!(!app.source.is_inspecting());
+    let path = fixture.file("valid.mkv");
+    let mut unavailable = crate::app::Application::default();
+    assert!(!unavailable.can_accept_source_paths());
+    unavailable.accept_source_paths(
+        InputDialogOrigin::capture(&unavailable),
+        vec![path],
+        no_probe,
+    );
+    assert!(unavailable.settings.source_directory().is_none());
+    assert!(!unavailable.source.is_inspecting());
+}

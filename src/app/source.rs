@@ -193,6 +193,55 @@ impl SourceSession {
     }
 }
 
+impl super::Application {
+    /// One admission gate for native selection and external file drops.
+    #[cfg(any(windows, test))]
+    pub(crate) fn can_accept_source_paths(&self) -> bool {
+        !self.is_closing()
+            && self.discovery.ready().is_some()
+            && self.batch_origin().is_some()
+            && !self.source.is_inspecting()
+            && !self.frame_work.copy_active()
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn accept_source_paths(
+        &mut self,
+        origin: super::dialogs::InputDialogOrigin,
+        paths: Vec<std::path::PathBuf>,
+        wake: impl Fn() + Clone + Send + 'static,
+    ) {
+        if !origin.is_current(self) || !self.can_accept_source_paths() {
+            return;
+        }
+        let Some(path) = paths.first() else {
+            return;
+        };
+        let Some(tools) = self.discovery.ready().cloned() else {
+            return;
+        };
+        self.settings.remember_source(path);
+        if paths.len() > 1 {
+            self.start_batch_paths(paths, wake);
+            return;
+        }
+        self.queue_confirmation = None;
+        self.operation_action_error = None;
+        match self.source.begin_load(path) {
+            Some(MediaLoadStart::Reused) => {
+                self.enter_workspace(
+                    self.active_operation()
+                        .unwrap_or(super::Operation::AudioMix),
+                );
+            }
+            Some(MediaLoadStart::Probe(request)) => {
+                self.source.start_inspection(tools, request, wake)
+            }
+            None => {}
+        }
+    }
+}
+
 struct MediaInspection {
     request: MediaIntakeRequest,
     receiver: Receiver<Result<MediaFile, MediaProbeError>>,

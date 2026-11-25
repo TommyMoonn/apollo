@@ -60,9 +60,8 @@ use crate::{
     queue::{QueueJobFailure, QueueJobState, QueueRunState, QueuedOperation},
     ui::{
         SourceAction, audio_extract::AudioExtractSelectionAction,
-        audio_mix::AudioMixSelectionAction, file_intake::FileIntakeAction, fonts,
-        frame_capture::FrameCaptureSelectionAction, layout, remux::RemuxSelectionAction, theme,
-        upscale::UpscaleSelectionAction,
+        audio_mix::AudioMixSelectionAction, fonts, frame_capture::FrameCaptureSelectionAction,
+        layout, remux::RemuxSelectionAction, theme, upscale::UpscaleSelectionAction,
     },
     upscale::model::{UpscaleTarget, VideoCodec},
 };
@@ -345,21 +344,6 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
     fs::remove_dir_all(directory).unwrap();
 }
 
-#[derive(Debug)]
-struct TestDroppedFile {
-    path: PathBuf,
-}
-
-impl egui::DroppedFile for TestDroppedFile {
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn bytes(&self) -> Result<Vec<u8>, String> {
-        fs::read(&self.path).map_err(|error| error.to_string())
-    }
-}
-
 fn temp_file(label: &str) -> (PathBuf, PathBuf) {
     let directory = std::env::temp_dir().join(format!(
         "apollo-phase35-app-{label}-{}-{}",
@@ -490,40 +474,6 @@ fn assert_workspace(state: &Application, operation: Operation) {
         }
     );
     assert!(state.source.current().is_some());
-}
-
-fn dropped_file(path: &Path) -> egui::DroppedFileHandle {
-    Arc::new(TestDroppedFile {
-        path: path.to_path_buf(),
-    })
-}
-
-fn handle_drop(app: &mut ApolloApp, paths: &[&Path]) {
-    let context = egui::Context::default();
-    let input = egui::RawInput {
-        dropped_files: paths.iter().map(|path| dropped_file(path)).collect(),
-        ..Default::default()
-    };
-    let output = context.run_ui(input, |ui| app.handle_window_file_drop(ui.ctx()));
-    output.drop_without_applying_deltas();
-}
-
-fn drag_hovered(app: &ApolloApp, paths: &[&Path]) -> bool {
-    let context = egui::Context::default();
-    let input = egui::RawInput {
-        hovered_files: paths
-            .iter()
-            .map(|path| egui::HoveredFile {
-                path: Some((*path).to_path_buf()),
-                ..Default::default()
-            })
-            .collect(),
-        ..Default::default()
-    };
-    let mut hovered = false;
-    let output = context.run_ui(input, |ui| hovered = app.drag_hovered(ui.ctx()));
-    output.drop_without_applying_deltas();
-    hovered
 }
 
 fn begin_pending_inspection(

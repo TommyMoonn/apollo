@@ -43,18 +43,6 @@ pub(super) fn secondary_copy(ui: &mut Ui, text: &str) {
     );
 }
 
-pub(super) fn secondary_copy_height(ui: &Ui, text: &str, wrap_width: f32) -> f32 {
-    ui.painter()
-        .layout(
-            text.to_owned(),
-            secondary_copy_text_style().resolve(ui.style()),
-            theme::SECONDARY,
-            wrap_width.max(0.0),
-        )
-        .size()
-        .y
-}
-
 fn secondary_copy_text_style() -> TextStyle {
     TextStyle::Small
 }
@@ -77,19 +65,6 @@ pub(super) fn diagnostic_viewport(ui: &mut Ui, text: &str) {
         .min_scrolled_height(0.0)
         .auto_shrink([false, true])
         .show(ui, |ui| diagnostic_text(ui, text));
-}
-
-pub(super) fn diagnostic_height(ui: &Ui, text: &str, wrap_width: f32) -> f32 {
-    ui.painter()
-        .layout(
-            text.to_owned(),
-            fonts::technical_text_style().resolve(ui.style()),
-            theme::SECONDARY_FAINT,
-            wrap_width.max(0.0),
-        )
-        .size()
-        .y
-        .min(layout::DIAGNOSTIC_MAX_HEIGHT)
 }
 
 pub(super) fn right_aligned_actions<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
