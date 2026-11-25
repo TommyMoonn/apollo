@@ -222,10 +222,6 @@ impl QueueJobState {
             Self::Completed { .. } | Self::Failed(_) | Self::Cancelled
         )
     }
-
-    pub fn is_disposable_history(&self) -> bool {
-        matches!(self, Self::Completed { .. } | Self::Cancelled)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

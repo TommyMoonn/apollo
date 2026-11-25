@@ -62,6 +62,7 @@ pub enum NavigationState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueOrigin {
     NoSource,
+    BatchSetup,
     SourceWorkspace { active_operation: Operation },
 }
 
@@ -78,6 +79,22 @@ pub enum BatchOrigin {
     SourceWorkspace { active_operation: Operation },
 }
 
+impl NavigationState {
+    fn retains_batch(self) -> bool {
+        matches!(
+            self,
+            Self::BatchSetup
+                | Self::BatchEdit
+                | Self::Queue {
+                    origin: QueueOrigin::BatchSetup
+                }
+                | Self::QueueEdit {
+                    origin: QueueEditOrigin::Queue(QueueOrigin::BatchSetup)
+                }
+        )
+    }
+}
+
 impl Application {
     pub fn navigation(&self) -> NavigationState {
         self.navigation
@@ -89,13 +106,7 @@ impl Application {
 
     fn set_navigation(&mut self, navigation: NavigationState) {
         if self.navigation != navigation {
-            if matches!(
-                self.navigation,
-                NavigationState::BatchSetup | NavigationState::BatchEdit
-            ) && !matches!(
-                navigation,
-                NavigationState::BatchSetup | NavigationState::BatchEdit
-            ) {
+            if self.navigation.retains_batch() && !navigation.retains_batch() {
                 self.retire_batch();
             }
             self.navigation_revision = self
@@ -126,26 +137,22 @@ impl Application {
         self.set_navigation(NavigationState::NoSource);
     }
 
-    pub(crate) fn enter_queue(&mut self) {
+    pub(crate) fn enter_queue(&mut self) -> bool {
         let origin = match self.navigation {
             NavigationState::SourceWorkspace { active_operation } => {
                 QueueOrigin::SourceWorkspace { active_operation }
             }
-            NavigationState::Queue { origin }
-            | NavigationState::QueueEdit {
-                origin: QueueEditOrigin::Queue(origin),
-            } => origin,
-            NavigationState::NoSource
-            | NavigationState::QueueEdit {
-                origin: QueueEditOrigin::SourceWorkspace,
-            }
-            | NavigationState::BatchSetup
-            | NavigationState::BatchEdit => QueueOrigin::NoSource,
+            NavigationState::BatchSetup => QueueOrigin::BatchSetup,
+            NavigationState::NoSource => QueueOrigin::NoSource,
+            NavigationState::Queue { .. }
+            | NavigationState::QueueEdit { .. }
+            | NavigationState::BatchEdit => return false,
         };
         self.show_queue(origin);
         self.source.clear_error();
         self.queue_confirmation = None;
         self.operation_action_error = None;
+        true
     }
 
     pub(crate) fn show_queue(&mut self, origin: QueueOrigin) {
@@ -163,6 +170,7 @@ impl Application {
         if let Some(origin) = self.queue_origin() {
             match origin {
                 QueueOrigin::NoSource => self.show_no_source(),
+                QueueOrigin::BatchSetup => self.show_batch_setup(),
                 QueueOrigin::SourceWorkspace { active_operation } => {
                     self.show_workspace(active_operation)
                 }
@@ -189,6 +197,12 @@ impl Application {
     pub(crate) fn batch_origin(&self) -> Option<BatchOrigin> {
         match self.navigation {
             NavigationState::NoSource => Some(BatchOrigin::NoSource),
+            NavigationState::Queue {
+                origin: QueueOrigin::BatchSetup,
+            }
+            | NavigationState::QueueEdit {
+                origin: QueueEditOrigin::Queue(QueueOrigin::BatchSetup),
+            } => None,
             NavigationState::Queue { origin }
             | NavigationState::QueueEdit {
                 origin: QueueEditOrigin::Queue(origin),

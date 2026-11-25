@@ -57,6 +57,8 @@ pub fn show(
     operation: Operation,
     items: &[BatchItemView<'_>],
     availability: BatchAvailability,
+    pending_queue_count: usize,
+    queue_enabled: bool,
     feedback: BatchFeedback<'_>,
 ) -> BatchAction {
     let action = Cell::new(BatchAction::None);
@@ -68,6 +70,8 @@ pub fn show(
                 items,
                 availability.can_configure,
                 availability.can_add_files,
+                &super::queue_count_label(pending_queue_count),
+                queue_enabled,
                 &action,
             );
             ui.add_space(theme::SPACING.related);
@@ -114,6 +118,8 @@ fn show_header(
     items: &[BatchItemView<'_>],
     can_configure: bool,
     can_add_files: bool,
+    queue_label: &str,
+    queue_enabled: bool,
     action: &Cell<BatchAction>,
 ) {
     let included = items.iter().filter(|item| item.included).count();
@@ -129,14 +135,24 @@ fn show_header(
         .x;
     let action_width = widgets::compact_secondary_button_intrinsic_size(ui, DEFAULTS_LABEL).x
         + widgets::compact_secondary_button_intrinsic_size(ui, ADD_FILES_LABEL).x
-        + theme::SPACING.related;
+        + widgets::compact_secondary_button_intrinsic_size(ui, queue_label).x
+        + theme::SPACING.related * 2.0;
     if heading_width + action_width + theme::SPACING.related > ui.available_width() {
         let _ = layout::collection_heading(ui, TITLE, &summary);
         ui.add_space(theme::SPACING.compact);
         ui.allocate_ui_with_layout(
             vec2(ui.available_width(), theme::COMPACT_CONTROL_HEIGHT),
             Layout::right_to_left(Align::Center),
-            |ui| show_header_actions(ui, can_configure, can_add_files, action),
+            |ui| {
+                show_header_actions(
+                    ui,
+                    can_configure,
+                    can_add_files,
+                    queue_label,
+                    queue_enabled,
+                    action,
+                )
+            },
         );
         return;
     }
@@ -145,7 +161,16 @@ fn show_header(
         |ui| {
             let _ = layout::collection_heading(ui, TITLE, &summary);
         },
-        |ui| show_header_actions(ui, can_configure, can_add_files, action),
+        |ui| {
+            show_header_actions(
+                ui,
+                can_configure,
+                can_add_files,
+                queue_label,
+                queue_enabled,
+                action,
+            )
+        },
     );
 }
 
@@ -153,8 +178,13 @@ fn show_header_actions(
     ui: &mut Ui,
     can_configure: bool,
     can_add_files: bool,
+    queue_label: &str,
+    queue_enabled: bool,
     action: &Cell<BatchAction>,
 ) {
+    if widgets::compact_secondary_button_enabled(ui, queue_label, queue_enabled).clicked() {
+        action.set(BatchAction::OpenQueue);
+    }
     if widgets::compact_secondary_button_enabled(ui, ADD_FILES_LABEL, can_add_files).clicked() {
         action.set(BatchAction::AddFiles);
     }
@@ -450,6 +480,8 @@ mod tests {
                     can_add_files: true,
                     can_enqueue: true,
                 },
+                0,
+                true,
                 BatchFeedback {
                     status: None,
                     append_error: None,
@@ -504,6 +536,8 @@ mod tests {
                     can_add_files: true,
                     can_enqueue: true,
                 },
+                0,
+                true,
                 BatchFeedback {
                     status: None,
                     append_error: None,

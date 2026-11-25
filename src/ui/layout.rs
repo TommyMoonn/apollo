@@ -55,10 +55,6 @@ pub const TRACK_TEXT_MIN_INLINE_WIDTH: f32 = 240.0;
 /// Minimum useful width retained for the flexible source/output identity region.
 pub const QUEUE_IDENTITY_MIN_WIDTH: f32 = 180.0;
 
-/// Bounded queue operation and state widths keep the shared wide-row rhythm stable.
-pub const QUEUE_OPERATION_WIDTH: f32 = 104.0;
-pub const QUEUE_STATE_WIDTH: f32 = 78.0;
-
 /// Shared wide-row height vertically centers bounded cells while identity uses two lines.
 pub const QUEUE_ROW_HEIGHT: f32 = 44.0;
 
@@ -822,14 +818,18 @@ pub fn field_pair_layout(available_width: f32) -> FieldPairLayout {
     }
 }
 
-pub fn queue_row_plan(available_width: f32, action_width: f32) -> QueueRowPlan {
+pub fn queue_row_plan(
+    available_width: f32,
+    operation_width: f32,
+    state_width: f32,
+    action_width: f32,
+    row_height: f32,
+) -> QueueRowPlan {
     let available_width = safe_dimension(available_width);
     let action_width = safe_dimension(action_width);
     let gap_count = if action_width > 0.0 { 3.0 } else { 2.0 };
-    let fixed_width = QUEUE_OPERATION_WIDTH
-        + QUEUE_STATE_WIDTH
-        + action_width
-        + gap_count * theme::SPACING.related;
+    let fixed_width =
+        operation_width + state_width + action_width + gap_count * theme::SPACING.related;
     let identity_width = (available_width - fixed_width).max(0.0);
     let layout = if identity_width >= QUEUE_IDENTITY_MIN_WIDTH {
         QueueRowLayout::Inline
@@ -839,10 +839,10 @@ pub fn queue_row_plan(available_width: f32, action_width: f32) -> QueueRowPlan {
 
     QueueRowPlan {
         layout,
-        row_height: QUEUE_ROW_HEIGHT,
+        row_height: row_height.max(QUEUE_ROW_HEIGHT),
         identity_width,
-        operation_width: QUEUE_OPERATION_WIDTH,
-        state_width: QUEUE_STATE_WIDTH,
+        operation_width,
+        state_width,
         action_width,
     }
 }
@@ -1060,16 +1060,16 @@ mod tests {
     #[test]
     fn queue_rows_keep_bounded_cells_and_reflow_before_identity_becomes_unreadable() {
         let action_width = 72.0;
-        let wide = queue_row_plan(620.0, action_width);
+        let wide = queue_row_plan(620.0, 104.0, 110.0, action_width, 44.0);
         assert_eq!(wide.layout, QueueRowLayout::Inline);
         assert_eq!(wide.action_width, action_width);
         assert!(wide.identity_width >= QUEUE_IDENTITY_MIN_WIDTH);
 
-        let narrow = queue_row_plan(420.0, action_width);
+        let narrow = queue_row_plan(420.0, 104.0, 110.0, action_width, 44.0);
         assert_eq!(narrow.layout, QueueRowLayout::Stacked);
         assert!(narrow.identity_width < QUEUE_IDENTITY_MIN_WIDTH);
         assert_eq!(
-            queue_row_plan(f32::NAN, action_width).layout,
+            queue_row_plan(f32::NAN, 104.0, 110.0, action_width, 44.0).layout,
             QueueRowLayout::Stacked
         );
     }
@@ -1106,9 +1106,12 @@ mod tests {
     fn inline_queue_columns_stay_ordered_and_inside_row() {
         let row = Rect::from_min_size(
             pos2(17.0, 23.0),
-            Vec2::new(620.0, queue_row_plan(620.0, 144.0).row_height),
+            Vec2::new(
+                620.0,
+                queue_row_plan(620.0, 104.0, 110.0, 144.0, 44.0).row_height,
+            ),
         );
-        let plan = queue_row_plan(row.width(), 144.0);
+        let plan = queue_row_plan(row.width(), 104.0, 110.0, 144.0, 44.0);
         assert_eq!(plan.layout, QueueRowLayout::Inline);
         let columns = plan.columns(row);
         let actions = columns.actions.unwrap();

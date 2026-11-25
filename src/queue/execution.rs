@@ -264,12 +264,6 @@ impl MediaQueue {
         previous_len - self.jobs.len()
     }
 
-    pub fn clear_disposable_history(&mut self) -> usize {
-        let previous_len = self.jobs.len();
-        self.jobs.retain(|job| !job.state().is_disposable_history());
-        previous_len - self.jobs.len()
-    }
-
     fn start_with_launcher<F, P>(&mut self, tools: &MediaTools, launcher: &mut F) -> bool
     where
         F: FnMut(JobId, MediaProcessCommand) -> Result<P, MediaProcessStartError>,
@@ -1721,8 +1715,8 @@ mod tests {
     }
 
     #[test]
-    fn disposable_history_cleanup_preserves_failed_and_pending_jobs() {
-        let directory = TestDirectory::new("disposable-history");
+    fn explicit_history_cleanup_preserves_pending_jobs_and_published_files() {
+        let directory = TestDirectory::new("explicit-history");
         let (media_identity, media) = media(&directory, "source.mkv");
         let mut queue = MediaQueue::new();
         for index in 0..5 {
@@ -1743,23 +1737,19 @@ mod tests {
             output: directory.path().join("output-3.mkv"),
         });
 
+        let published = directory.path().join("output-0.mkv");
+        fs::write(&published, b"published").unwrap();
         assert_eq!(queue.pending_count(), 2);
-        assert_eq!(queue.clear_disposable_history(), 2);
-        assert_eq!(queue.jobs().len(), 3);
+        assert_eq!(queue.clear_finished(), 3);
+        assert_eq!(queue.jobs().len(), 2);
         assert!(matches!(
             queue.jobs()[0].state(),
-            QueueJobState::Failed(QueueJobFailure::SourceChanged)
-        ));
-        assert!(matches!(
-            queue.jobs()[1].state(),
             QueueJobState::Running { .. }
         ));
-        assert!(matches!(queue.jobs()[2].state(), QueueJobState::Waiting));
+        assert!(matches!(queue.jobs()[1].state(), QueueJobState::Waiting));
         assert_eq!(queue.pending_count(), 2);
-
-        assert_eq!(queue.clear_finished(), 1);
-        assert_eq!(queue.jobs().len(), 2);
-        assert!(queue.jobs().iter().all(|job| job.state().is_pending()));
+        assert_eq!(fs::read(&published).unwrap(), b"published");
+        assert_eq!(queue.clear_finished(), 0);
     }
 
     #[test]

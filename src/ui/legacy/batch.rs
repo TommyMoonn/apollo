@@ -131,11 +131,14 @@ impl ApolloApp {
                 can_toggle_included: item.can_toggle_included(),
             })
             .collect::<Vec<_>>();
+        let queue_enabled = self.file_intake_enabled();
         let action = batch_ui::show(
             ui,
             batch.operation,
             &views,
             availability,
+            self.core.queue.scheduler().pending_count(),
+            queue_enabled,
             batch_ui::BatchFeedback {
                 status: batch.error.as_deref(),
                 append_error: batch.append_error.as_ref(),
@@ -143,6 +146,7 @@ impl ApolloApp {
             },
         );
         match action {
+            BatchAction::OpenQueue => self.enter_queue(),
             BatchAction::SelectOperation(operation) => self.core.select_batch_operation(operation),
             BatchAction::ConfigureDefaults => {
                 self.begin_batch_edit(BatchEditTarget::Defaults);

@@ -341,6 +341,52 @@ fn settle_inspections(app: &mut Application, wakes: &mpsc::Receiver<()>) {
 }
 
 #[test]
+fn queue_round_trip_preserves_batch_inspection_and_return_origin() {
+    let (first_dir, first) = temp_file("queue-batch-first");
+    let (second_dir, second) = temp_file("queue-batch-second");
+    let mut app = app();
+    app.enter_workspace(Operation::Remux);
+    let (wake_tx, wake_rx) = mpsc::channel();
+    assert!(
+        app.start_batch_paths_with(vec![first.clone(), second.clone()], |paths| {
+            BatchInspectionOwner::spawn_with(
+                paths,
+                move || {
+                    let _ = wake_tx.send(());
+                },
+                inspected,
+            )
+        })
+    );
+    app.enter_queue();
+    assert_eq!(
+        app.queue_origin(),
+        Some(crate::app::QueueOrigin::BatchSetup)
+    );
+    assert!(app.batch_inspecting());
+    assert!(app.batch_setup.is_some());
+    assert!(!app.start_batch_paths_with(vec![first, second], |_| panic!(
+        "must retain the existing batch"
+    )));
+    settle_inspections(&mut app, &wake_rx);
+    let retained = app.batch_setup.clone().unwrap();
+    assert!(
+        retained
+            .items
+            .iter()
+            .all(|item| matches!(item.source, BatchSourceState::Ready { .. }))
+    );
+    app.return_from_queue();
+    assert_eq!(app.navigation(), crate::app::NavigationState::BatchSetup);
+    assert_eq!(app.batch_setup.as_ref(), Some(&retained));
+    assert!(app.finish_batch_setup());
+    assert_eq!(app.active_operation(), Some(Operation::Remux));
+    assert!(app.batch_setup.is_none());
+    fs::remove_dir_all(first_dir).unwrap();
+    fs::remove_dir_all(second_dir).unwrap();
+}
+
+#[test]
 fn inspection_append_and_atomic_enqueue_preserve_item_identity() {
     let (first_dir, first) = temp_file("inspection-first");
     let (failed_dir, failed) = temp_file("inspection-failed");

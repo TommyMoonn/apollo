@@ -784,8 +784,10 @@ fn late_input_completion_cannot_change_a_returned_route_or_directory_history() {
         initial_directory: None,
     });
     assert!(app.file_dialog.is_pending());
-    // Even returning to the same route cannot revive a retired input target.
+    // The UI blocks navigation during a picker; a forced core route change still retires it.
     app.enter_queue();
+    assert_eq!(app.core.navigation(), NavigationState::NoSource);
+    app.core.enter_queue();
     app.core.return_from_queue();
     release_tx.send(()).unwrap();
     wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();

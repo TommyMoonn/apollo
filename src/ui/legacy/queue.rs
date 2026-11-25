@@ -12,9 +12,15 @@ use crate::{
 
 impl ApolloApp {
     pub(super) fn enter_queue(&mut self) {
-        self.suspend_frame_capture_support();
-        self.core.enter_queue();
-        self.state.intake_error_details_open = false;
+        if !self.file_intake_enabled() {
+            return;
+        }
+        let previous = self.core.navigation();
+        if self.core.enter_queue() {
+            self.suspend_frame_capture_support_from(previous);
+            self.state.intake_error_details_open = false;
+            self.egui_context.request_repaint();
+        }
     }
 
     pub(super) fn handle_queue_view_action(&mut self, action: QueueAction) {
@@ -42,6 +48,11 @@ impl ApolloApp {
     }
 
     pub(super) fn handle_queue_action(&mut self, action: QueueAction) -> bool {
+        if action == QueueAction::AddFiles
+            && (!self.file_intake_enabled() || self.ready_media_tools().is_none())
+        {
+            return false;
+        }
         let progress = &mut self.progress_repaint;
         match self.core.queue_action(action, || progress.begin()) {
             QueueEffect::Handled(changed) => {
@@ -72,6 +83,9 @@ impl ApolloApp {
     }
 
     pub(super) fn begin_queue_edit(&mut self, id: JobId, origin: QueueEditOrigin) -> bool {
+        if self.ready_media_tools().is_none() {
+            return false;
+        }
         let Some(edit) = self.core.prepare_queue_edit(id, origin) else {
             return false;
         };

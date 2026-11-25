@@ -19,7 +19,14 @@ fn queue_round_trip_preserves_the_origin_including_reentry() {
     assert!(!app.can_enter_queue_edit(QueueEditOrigin::Queue(QueueOrigin::NoSource)));
     assert!(!app.can_enter_queue_edit(QueueEditOrigin::SourceWorkspace));
     app.enter_queue_edit(QueueEditOrigin::Queue(origin));
-    app.enter_queue();
+    assert!(!app.enter_queue());
+    assert_eq!(
+        app.navigation(),
+        NavigationState::QueueEdit {
+            origin: QueueEditOrigin::Queue(origin)
+        }
+    );
+    app.show_queue(origin);
     app.return_from_queue();
     assert_eq!(app.active_operation(), Some(Operation::Remux));
 }

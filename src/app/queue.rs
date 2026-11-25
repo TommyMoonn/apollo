@@ -184,10 +184,12 @@ impl Application {
     ) -> QueueEffect {
         use QueueEffect::*;
         match action {
-            QueueAction::AddFiles => {
-                self.queue.scheduler.clear_disposable_history();
+            QueueAction::AddFiles
+                if self.queue_origin().is_some() && self.batch_origin().is_some() =>
+            {
                 AddFiles
             }
+            QueueAction::AddFiles => Handled(false),
             QueueAction::Start => {
                 if !self.execution_arbitration().queue_start_allowed() {
                     return Handled(false);
@@ -229,7 +231,6 @@ impl Application {
                 if self.queue_origin().is_none() {
                     return Handled(false);
                 }
-                self.queue.scheduler.clear_disposable_history();
                 self.return_from_queue();
                 Returned
             }

@@ -41,6 +41,7 @@ pub struct BatchAvailability {
 pub enum BatchAction {
     SelectOperation(Operation),
     ConfigureDefaults,
+    OpenQueue,
     AddFiles,
     EditItem(BatchItemId),
     ToggleIncluded(BatchItemId),

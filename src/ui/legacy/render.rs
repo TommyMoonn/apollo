@@ -35,6 +35,12 @@ impl ApolloApp {
             .frame(layout::root_frame(ui.style()))
             .show(ui, |ui| {
                 self.poll_background_work();
+                if matches!(self.core.navigation(), NavigationState::Queue { .. })
+                    && !matches!(self.core.discovery.state(), MediaToolsState::Ready(_))
+                {
+                    self.show_navigation(ui);
+                    return;
+                }
                 match self.core.discovery.state() {
                     MediaToolsState::Checking => {
                         layout::padded_content(ui, |ui| self.show_media_tools_checking(ui));
@@ -69,16 +75,40 @@ impl ApolloApp {
             ui.add_space(theme::SPACING.compact);
             media_error::show_inline(ui, &error, &mut self.tools_error_details_open);
             ui.add_space(theme::SPACING.related);
-            if widgets::secondary_button(ui, "Retry").clicked() {
-                self.retry_media_tools();
-            }
+            ui.horizontal(|ui| {
+                if widgets::secondary_button(ui, "Retry").clicked() {
+                    self.retry_media_tools();
+                }
+                self.show_unavailable_queue_entry(ui);
+            });
         });
     }
 
-    fn show_media_tools_checking(&self, ui: &mut Ui) {
+    fn show_media_tools_checking(&mut self, ui: &mut Ui) {
         layout::centered_content(ui, |ui| {
             ui.label("Checking media tools…");
+            self.show_unavailable_queue_entry(ui);
         });
+    }
+
+    fn show_unavailable_queue_entry(&mut self, ui: &mut Ui) {
+        let scheduler = self.core.queue.scheduler();
+        if !scheduler.jobs().is_empty()
+            && matches!(
+                self.core.navigation(),
+                NavigationState::NoSource
+                    | NavigationState::SourceWorkspace { .. }
+                    | NavigationState::BatchSetup
+            )
+            && widgets::secondary_button_enabled(
+                ui,
+                &crate::ui::queue_count_label(scheduler.pending_count()),
+                self.file_intake_enabled(),
+            )
+            .clicked()
+        {
+            self.enter_queue();
+        }
     }
 
     fn operation_ready_surface(&self, active_operation: Operation) -> bool {
@@ -179,7 +209,7 @@ impl ApolloApp {
                     active_operation,
                     WorkspaceMode::Source {
                         pending_queue_count: self.core.queue.scheduler().pending_count(),
-                        enabled: !self.core.source.is_inspecting() && self.core.executors_idle(),
+                        enabled: self.file_intake_enabled(),
                         editable_jobs: &editable_jobs,
                         queue_editing_allowed: self.core.queue.scheduler().run_state()
                             == QueueRunState::Stopped
@@ -192,7 +222,7 @@ impl ApolloApp {
         }
 
         let Some(active_operation) = self.core.active_operation() else {
-            layout::padded_content(ui, |ui| self.show_file_intake(ui));
+            ui.ctx().request_repaint();
             return;
         };
         let surface_key = egui::Id::new((active_operation.label(), source_surface_key));
@@ -245,7 +275,11 @@ impl ApolloApp {
             self.core.queue.scheduler().active_job(),
             self.core.queue.scheduler().active_progress(),
             self.core.queue.scheduler().run_state(),
-            arbitration.queue_start_allowed(),
+            queue_ui::QueueAvailability {
+                can_start: arbitration.queue_start_allowed() && self.ready_media_tools().is_some(),
+                can_add_files: self.file_intake_enabled() && self.ready_media_tools().is_some(),
+                can_edit: self.ready_media_tools().is_some(),
+            },
             self.core.queue.scheduler().cancellation_pending(),
         );
         self.handle_queue_view_action(action);

@@ -301,7 +301,14 @@ impl ApolloApp {
     }
 
     pub(super) fn file_intake_enabled(&self) -> bool {
-        !self.core.source.is_inspecting()
+        !matches!(
+            self.core.navigation(),
+            crate::app::NavigationState::Queue {
+                origin: crate::app::QueueOrigin::BatchSetup
+            } | crate::app::NavigationState::QueueEdit {
+                origin: QueueEditOrigin::Queue(crate::app::QueueOrigin::BatchSetup)
+            }
+        ) && !self.core.source.is_inspecting()
             && !self.file_dialog.is_pending()
             && self.core.executors_idle()
             && !self.copy_frame_active()

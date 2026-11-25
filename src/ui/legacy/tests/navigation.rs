@@ -202,7 +202,12 @@ fn workspace_queue_navigation_restores_the_same_source_and_operation() {
     let mut app = app();
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
     app.select_tool(Operation::Remux);
-    let session_id = app.state.remux.as_ref().unwrap().session_id;
+    let draft = app.state.remux.as_mut().unwrap();
+    draft
+        .selection
+        .set_custom_output_path(directory.join("custom.mkv"));
+    let session_id = draft.session_id;
+    let selection = draft.selection.clone();
 
     app.enter_queue();
     assert_eq!(
@@ -218,6 +223,7 @@ fn workspace_queue_navigation_restores_the_same_source_and_operation() {
     assert_workspace(&app.core, Operation::Remux);
     assert_eq!(app.core.source.current().unwrap().path, path);
     assert_eq!(app.state.remux.as_ref().unwrap().session_id, session_id);
+    assert_eq!(app.state.remux.as_ref().unwrap().selection, selection);
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -358,6 +364,12 @@ fn workspace_queue_edit_is_blocked_during_automatic_advancement() {
         app.core.queue.scheduler().run_state(),
         QueueRunState::Stopped
     );
+    app.enter_queue();
+    assert_eq!(app.core.queue.scheduler().active_job(), Some(job_id));
+    assert_eq!(app.core.queue.scheduler().pending_count(), 2);
+    assert!(app.handle_queue_action(QueueAction::Back));
+    assert_workspace(&app.core, Operation::Remux);
+    assert_eq!(app.core.queue.scheduler().active_job(), Some(job_id));
     assert!(!app.begin_queue_edit(job_id, QueueEditOrigin::SourceWorkspace));
     assert!(app.core.queue_edit().is_none());
     assert!(

@@ -100,7 +100,7 @@ Queue controls:
 - `Stop after current` lets the active job finish, stops advancement, and preserves Waiting jobs.
 - `Cancel queue` requires confirmation, stops advancement, marks all Waiting jobs Cancelled and requests active cancellation. An already claimed terminal result is not replaced by cancellation.
 - `Clear finished` removes every terminal job, including failures.
-- Leaving Queue through Back or starting Add files removes only disposable Completed and Cancelled history. Failed jobs remain available with diagnostic Details.
+- Queue history is application-scoped for the current session. Back, Add files, source replacement and tool changes retain all jobs. Clear finished removes terminal records only, never output files. Opening Queue from batch setup suspends the view without retiring the batch; Back restores it. New file intake is disabled while that batch is suspended to avoid replacing the retained draft.
 
 ## Upscale sizing and encoding
 

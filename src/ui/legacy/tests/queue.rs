@@ -227,34 +227,60 @@ fn queue_terminal_failure_does_not_replace_the_ready_source_session() {
 }
 
 #[test]
-fn queue_back_clears_disposable_history_and_retains_failures() {
+fn queue_back_retains_terminal_history_across_source_changes() {
     let (directory, path) = temp_file("queue-back-history");
     let mut app = app();
     populate_cancelled_and_failed_queue_history(&mut app, &path, &directory);
     app.enter_queue();
 
     assert!(app.handle_queue_action(QueueAction::Back));
+    app.select_tool(Operation::AudioMix);
+    app.close_source();
+    let replacement = directory.join("replacement.mkv");
+    fs::write(&replacement, b"replacement").unwrap();
+    app.load_media_path_with_probe(&replacement, |path| Ok(media(path)));
+    app.enter_queue();
 
-    assert_eq!(app.core.queue.scheduler().jobs().len(), 1);
+    assert_eq!(app.core.queue.scheduler().jobs().len(), 2);
     assert!(matches!(
         app.core.queue.scheduler().jobs()[0].state(),
+        QueueJobState::Cancelled
+    ));
+    assert!(matches!(
+        app.core.queue.scheduler().jobs()[1].state(),
         QueueJobState::Failed(_)
     ));
     fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
-fn queue_add_files_clears_disposable_history_before_opening_intake() {
+fn queue_add_files_preserves_terminal_history_until_explicit_clear() {
     let (directory, path) = temp_file("queue-add-files-history");
     let mut app = app();
     populate_cancelled_and_failed_queue_history(&mut app, &path, &directory);
     app.enter_queue();
 
+    let (wake_tx, wake_rx) = mpsc::channel();
+    app.file_dialog = FileDialogOwner::new_for_test(
+        move || {
+            let _ = wake_tx.send(());
+        },
+        || Ok(|_: &FileDialogRequest| Ok(None)),
+    );
+    let origin = app.core.navigation();
     assert!(app.handle_queue_action(QueueAction::AddFiles));
+    wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    app.poll_file_dialog();
+    assert!(!app.file_dialog.is_pending());
+    assert_eq!(app.core.navigation(), origin);
 
-    assert_eq!(app.core.queue.scheduler().jobs().len(), 1);
+    assert_eq!(app.core.queue.scheduler().jobs().len(), 2);
     assert!(matches!(
         app.core.queue.scheduler().jobs()[0].state(),
+        QueueJobState::Cancelled
+    ));
+    assert!(matches!(
+        app.core.queue.scheduler().jobs()[1].state(),
         QueueJobState::Failed(_)
     ));
     assert!(app.handle_queue_action(QueueAction::ClearFinished));
