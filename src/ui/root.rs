@@ -1262,14 +1262,14 @@ impl Render for ApolloRoot {
                 shell::navigation_actions(queue, settings, palette, window),
             ),
             NavigationState::SourceWorkspace { active_operation } => {
-                let mut close = Button::new("close-source", "Close source", Tone::Standard);
+                let mut close = Button::new("close-source", "Back to file selection", Tone::Quiet);
                 if self.exit == ExitState::Open && !self.file_dialog.is_pending() {
                     close.state =
                         ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
                             root.close_source(window, cx);
                         })));
                 }
-                let close = close.render(palette, window);
+                let close = close.render_icon(components::ActionIcon::Back, palette, window);
                 let selector = components::selector(Operation::ALL.map(|operation| {
                     let mut button =
                         Button::new(operation.label(), operation.label(), Tone::Standard);
@@ -1293,13 +1293,13 @@ impl Render for ApolloRoot {
                     .children(self.core.source.current().map(|media| {
                         file_intake::summary(
                             super::workspace::WorkspacePresentation::new(media),
-                            media.path.to_string_lossy().into_owned(),
+                            Some(close),
                             div()
                                 .flex()
                                 .flex_wrap()
                                 .justify_end()
                                 .gap(px(M.action_gap))
-                                .child(components::selector([open, close]).flex_nowrap())
+                                .child(open)
                                 .child(shell::navigation_actions(queue, settings, palette, window)),
                             palette,
                         )
@@ -1572,7 +1572,7 @@ impl Render for ApolloRoot {
                     .children(edit.map(|edit| {
                         file_intake::summary(
                             super::workspace::WorkspacePresentation::new(&edit.media),
-                            edit.media.path.to_string_lossy().into_owned(),
+                            None,
                             div(),
                             palette,
                         )

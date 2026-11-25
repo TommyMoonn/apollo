@@ -834,7 +834,6 @@ mod view {
             QueueJobState::Cancelled => "– Cancelled",
             _ => state,
         };
-        let source_path = source.to_string_lossy().into_owned();
         let output_path = output.to_string_lossy().into_owned();
         let destination_label = if matches!(
             job.state(),
@@ -848,7 +847,7 @@ mod view {
             .id(("queue-job", job.id().get()))
             .role(Role::Group)
             .aria_label(format!("{source_name}, {operation}, {state}"))
-            .aria_description(format!("Source: {source_path}. {destination_label}"))
+            .aria_description(destination_label.clone())
             .flex()
             .items_center()
             .gap(px(M.related))
@@ -867,11 +866,8 @@ mod view {
                             .apply(div())
                             .id("source-name")
                             .truncate()
-                            .child(source_name)
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| components::PathTooltip(source_path.clone(), palette))
-                                    .into()
-                            }),
+                            .child(source_name.clone())
+                            .tooltip(components::tooltip(source_name, palette)),
                     )
                     .child(
                         TextRole::Secondary
@@ -882,10 +878,7 @@ mod view {
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .child(destination_label)
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| components::PathTooltip(output_path.clone(), palette))
-                                    .into()
-                            }),
+                            .tooltip(components::tooltip(output_path, palette)),
                     ),
             )
             .child(

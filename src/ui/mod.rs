@@ -33,7 +33,7 @@ pub mod workspace;
 use crate::media::error::MediaError;
 
 /// Default and minimum drawable window dimensions in logical pixels.
-pub const REFERENCE_CONTENT_DIMENSIONS: (f32, f32) = (730.0, 489.0);
+pub const REFERENCE_CONTENT_DIMENSIONS: (f32, f32) = (820.0, 540.0);
 pub const MINIMUM_CONTENT_DIMENSIONS: (f32, f32) = (400.0, 260.0);
 
 pub const PROCESS_NOW_LABEL: &str = "Process now";

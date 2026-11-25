@@ -27,10 +27,7 @@ impl OutputRow<'_> {
         let browse = self
             .browse
             .aria_description(destination.clone())
-            .tooltip(move |_, cx| {
-                cx.new(|_| components::PathTooltip(destination.clone(), palette))
-                    .into()
-            });
+            .tooltip(components::tooltip(destination, palette));
         let extension_width = self
             .extensions
             .iter()

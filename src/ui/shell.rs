@@ -5,7 +5,7 @@ use std::{cell::Cell, rc::Rc};
 use gpui::{Div, Stateful, Window, div, prelude::*, px};
 
 use super::{
-    components::Button,
+    components::{ActionIcon, Button},
     design::{METRICS as M, Palette},
 };
 
@@ -15,17 +15,14 @@ pub fn navigation_actions(
     palette: Palette,
     window: &Window,
 ) -> Div {
-    let width = queue
-        .measured_width(window)
-        .max(settings.measured_width(window));
     div()
         .flex()
         .flex_wrap()
         .justify_center()
         .items_center()
         .gap(px(M.action_gap))
-        .child(queue.render(palette, window).w(width))
-        .child(settings.render(palette, window).w(width))
+        .child(queue.render(palette, window))
+        .child(settings.render_icon(ActionIcon::Settings, palette, window))
 }
 
 /// Keep the actual measured chrome, not estimates based on filename lengths or

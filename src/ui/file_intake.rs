@@ -36,62 +36,48 @@ pub fn landing(open: Stateful<Div>, palette: Palette) -> Div {
 
 pub fn summary(
     presentation: WorkspacePresentation,
-    path: String,
+    back: Option<Stateful<Div>>,
     actions: Div,
     palette: Palette,
 ) -> Div {
-    div()
+    let name = presentation.file_name;
+    let identity = div()
         .flex()
-        .flex_col()
-        .min_w_0()
-        .w_full()
-        .gap(px(M.tight))
+        .items_center()
+        .gap(px(M.compact))
+        .flex_1()
+        .min_w(px(160.))
+        .children(back)
         .child(
             div()
                 .flex()
-                .items_center()
-                .flex_wrap()
-                .gap(px(M.related))
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(px(M.tight))
                 .child(
                     TextRole::SectionHeading
                         .apply(div())
                         .id("source-name")
-                        .flex_1()
-                        .min_w(px(120.))
                         .truncate()
-                        .child(presentation.file_name.clone())
-                        .tooltip(move |_, cx| {
-                            cx.new(|_| {
-                                super::components::PathTooltip(
-                                    presentation.file_name.clone(),
-                                    palette,
-                                )
-                            })
-                            .into()
-                        }),
+                        .child(name.clone())
+                        .tooltip(super::components::tooltip(name, palette)),
                 )
-                .child(actions.flex_shrink_0().max_w_full().ml_auto()),
-        )
-        .children(presentation.metadata.map(|metadata| {
-            TextRole::Secondary
-                .apply(div())
-                .text_color(rgba(palette.secondary()))
-                .truncate()
-                .child(metadata)
-        }))
-        .child(
-            TextRole::Secondary
-                .apply(div())
-                .id("source-path")
-                .w_full()
-                .text_ellipsis_middle()
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .text_color(rgba(palette.secondary()))
-                .child(path.clone())
-                .tooltip(move |_, cx| {
-                    cx.new(|_| super::components::PathTooltip(path.clone(), palette))
-                        .into()
-                }),
-        )
+                .children(presentation.metadata.map(|metadata| {
+                    TextRole::Secondary
+                        .apply(div())
+                        .text_color(rgba(palette.secondary()))
+                        .truncate()
+                        .child(metadata)
+                })),
+        );
+    div()
+        .flex()
+        .items_center()
+        .flex_wrap()
+        .min_w_0()
+        .w_full()
+        .gap(px(M.related))
+        .child(identity)
+        .child(actions.flex_shrink_0().max_w_full().ml_auto())
 }

@@ -17,6 +17,22 @@ pub enum Tone {
     Destructive,
 }
 
+/// Bundled glyphs for icon-only actions.
+#[derive(Clone, Copy)]
+pub enum ActionIcon {
+    Back,
+    Settings,
+}
+
+impl ActionIcon {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Back => "icons/arrow-left.svg",
+            Self::Settings => "icons/settings.svg",
+        }
+    }
+}
+
 type Click = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 /// Disabled and busy controls cannot carry an activation callback.
@@ -86,7 +102,14 @@ impl<'a> Button<'a> {
     }
 
     pub fn render(self, palette: Palette, window: &Window) -> Stateful<Div> {
-        self.render_with_icon(palette, window, None)
+        self.render_with_icon(palette, window, None, None)
+    }
+
+    /// Icon-only actions retain the same semantics and focus treatment as text buttons.
+    pub fn render_icon(self, icon: ActionIcon, palette: Palette, window: &Window) -> Stateful<Div> {
+        let label = self.label.to_owned();
+        self.render_with_icon(palette, window, None, Some(icon))
+            .tooltip(tooltip(label, palette))
     }
 
     fn render_with_icon(
@@ -94,12 +117,22 @@ impl<'a> Button<'a> {
         palette: Palette,
         window: &Window,
         icon: Option<&str>,
+        icon_only: Option<ActionIcon>,
     ) -> Stateful<Div> {
         let busy = matches!(&self.state, ActionState::Busy);
         let width = (busy || !self.alternate_labels.is_empty())
             .then(|| self.measured_width_with(window.text_system(), icon));
         let height = self.minimum_height();
-        let padding = self.horizontal_padding();
+        let width = if icon_only.is_some() {
+            Some(height)
+        } else {
+            width
+        };
+        let padding = if icon_only.is_some() {
+            M.tight
+        } else {
+            self.horizontal_padding()
+        };
         let selected = matches!(&self.state, ActionState::Selected(_));
         let click = match self.state {
             ActionState::Enabled(click) | ActionState::Selected(click) => Some(click),
@@ -157,16 +190,26 @@ impl<'a> Button<'a> {
                 true,
             ));
         }
-        let element = element
-            .child(self.label.to_owned())
-            .children(icon.map(|icon| {
-                div()
-                    .ml(px(M.tight))
-                    .w(px(M.icon_size))
+        let element = if let Some(icon) = icon_only {
+            element.w(height).child(
+                svg()
+                    .path(icon.path())
+                    .size(px(16.))
                     .flex_shrink_0()
-                    .text_center()
-                    .child(icon.to_owned())
-            }));
+                    .text_color(rgba(foreground)),
+            )
+        } else {
+            element
+                .child(self.label.to_owned())
+                .children(icon.map(|icon| {
+                    div()
+                        .ml(px(M.tight))
+                        .w(px(M.icon_size))
+                        .flex_shrink_0()
+                        .text_center()
+                        .child(icon.to_owned())
+                }))
+        };
         let Some(click) = click else {
             return element;
         };
@@ -193,7 +236,11 @@ impl<'a> Button<'a> {
                 } else {
                     style
                 };
-                if quiet { style.underline() } else { style }
+                if quiet && icon_only.is_none() {
+                    style.underline()
+                } else {
+                    style
+                }
             })
             .active(move |style| {
                 let style = style.bg(rgba(pressed));
@@ -271,7 +318,7 @@ pub fn icon_action(
     palette: Palette,
     window: &Window,
 ) -> Stateful<Div> {
-    button.render_with_icon(palette, window, Some(icon))
+    button.render_with_icon(palette, window, Some(icon), None)
 }
 
 pub fn selector(items: impl IntoIterator<Item = Stateful<Div>>) -> Div {
@@ -346,20 +393,36 @@ pub fn empty_state(title: &str, message: &str, palette: Palette) -> Div {
 
 const SPINNER_PATH: &str = "icons/spinner.svg";
 
-/// Keep the one bundled icon in the executable, rather than relying on the current directory.
+/// Keep bundled glyphs in the executable, independent of the working directory.
 pub struct Assets;
+const ICON_ASSETS: &[(&str, &[u8])] = &[
+    (
+        SPINNER_PATH,
+        include_bytes!("../../assets/icons/spinner.svg"),
+    ),
+    (
+        "icons/arrow-left.svg",
+        include_bytes!("../../assets/icons/arrow-left.svg"),
+    ),
+    (
+        "icons/settings.svg",
+        include_bytes!("../../assets/icons/settings.svg"),
+    ),
+];
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        Ok((path == SPINNER_PATH)
-            .then(|| Cow::Borrowed(include_bytes!("../../assets/icons/spinner.svg").as_slice())))
+        Ok(ICON_ASSETS
+            .iter()
+            .find(|(name, _)| *name == path)
+            .map(|(_, bytes)| Cow::Borrowed(*bytes)))
     }
 
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
-        Ok(if SPINNER_PATH.starts_with(path) {
-            vec![SPINNER_PATH.into()]
-        } else {
-            vec![]
-        })
+        Ok(ICON_ASSETS
+            .iter()
+            .filter(|(name, _)| name.starts_with(path))
+            .map(|(name, _)| (*name).into())
+            .collect())
     }
 }
 
@@ -515,9 +578,18 @@ pub fn action_bar(palette: Palette, actions: impl IntoIterator<Item = Stateful<D
         )
 }
 
-pub(super) struct PathTooltip(pub String, pub Palette);
+/// Shared GPUI tooltip builder for concise action labels and truncated content.
+pub(super) fn tooltip(
+    text: impl Into<String>,
+    palette: Palette,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let text = text.into();
+    move |_, cx| cx.new(|_| Tooltip(text.clone(), palette)).into()
+}
 
-impl gpui::Render for PathTooltip {
+struct Tooltip(String, Palette);
+
+impl gpui::Render for Tooltip {
     fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
         div()
             .max_w(px(340.))
@@ -529,7 +601,7 @@ impl gpui::Render for PathTooltip {
             .child(
                 TextRole::Secondary
                     .apply(div())
-                    .text_color(rgba(self.1.secondary()))
+                    .text_color(rgba(self.1.foreground))
                     .whitespace_normal()
                     .child(self.0.clone()),
             )
