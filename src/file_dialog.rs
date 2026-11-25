@@ -385,9 +385,6 @@ mod native_windows {
 
         pub(super) fn run(&mut self, request: &FileDialogRequest) -> Result<Option<PathBuf>> {
             match request {
-                FileDialogRequest::OpenSource { initial_directory } => {
-                    open_source(initial_directory.as_deref(), self.owner)
-                }
                 FileDialogRequest::OpenSources {
                     initial_directory, ..
                 } => open_sources(initial_directory.as_deref(), self.owner)
@@ -407,27 +404,6 @@ mod native_windows {
                 _ => self.run(request).map(|path| path.map(|path| vec![path])),
             }
         }
-    }
-
-    fn open_source(
-        initial_directory: Option<&std::path::Path>,
-        owner: WindowOwner,
-    ) -> Result<Option<PathBuf>> {
-        let dialog: IFileDialog =
-            unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)? };
-        unsafe {
-            dialog.SetTitle(&HSTRING::from("Open media file"))?;
-            dialog.SetOptions(FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST)?;
-            set_filters(
-                &dialog,
-                &[
-                    (MEDIA_FILTER_NAME, MEDIA_FILTER_PATTERN),
-                    (ALL_FILES_FILTER_NAME, ALL_FILES_FILTER_PATTERN),
-                ],
-            )?;
-            set_initial_folder_if_available(&dialog, initial_directory);
-        }
-        show(dialog, owner)
     }
 
     fn open_sources(
@@ -594,8 +570,9 @@ mod tests {
     }
 
     fn open_request() -> FileDialogRequest {
-        FileDialogRequest::OpenSource {
+        FileDialogRequest::OpenSources {
             initial_directory: Some(PathBuf::from(r"C:\media")),
+            target: DialogTarget::BatchInput,
         }
     }
 
@@ -613,8 +590,11 @@ mod tests {
         owner.request(open_request()).unwrap();
 
         let completion = wait_for_completion(&mut owner, &wake);
-        assert_eq!(completion.target, DialogTarget::MediaInput);
-        assert_eq!(completion.outcome, DialogOutcome::Selected(expected));
+        assert_eq!(completion.target, DialogTarget::BatchInput);
+        assert_eq!(
+            completion.outcome,
+            DialogOutcome::SelectedMany(vec![expected])
+        );
     }
 
     #[test]

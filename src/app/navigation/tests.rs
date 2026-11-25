@@ -4,19 +4,19 @@ use super::*;
 fn queue_round_trip_preserves_the_origin_including_reentry() {
     let mut app = Application::default();
     app.enter_queue();
-    assert_eq!(app.queue_origin(), Some(QueueOrigin::NoSource));
+    assert_eq!(app.queue_origin(), Some(ShellOrigin::NoSource));
     app.return_from_queue();
     assert_eq!(app.navigation(), NavigationState::NoSource);
 
     app.enter_workspace(Operation::Remux);
     app.enter_queue();
     app.enter_queue();
-    let origin = QueueOrigin::SourceWorkspace {
+    let origin = ShellOrigin::SourceWorkspace {
         active_operation: Operation::Remux,
     };
     assert_eq!(app.queue_origin(), Some(origin));
     assert!(app.can_enter_queue_edit(QueueEditOrigin::Queue(origin)));
-    assert!(!app.can_enter_queue_edit(QueueEditOrigin::Queue(QueueOrigin::NoSource)));
+    assert!(!app.can_enter_queue_edit(QueueEditOrigin::Queue(ShellOrigin::NoSource)));
     assert!(!app.can_enter_queue_edit(QueueEditOrigin::SourceWorkspace));
     app.enter_queue_edit(QueueEditOrigin::Queue(origin));
     assert!(!app.enter_queue());
@@ -38,7 +38,7 @@ fn batch_cancel_and_enqueue_use_the_captured_return_origin() {
         (
             NavigationState::NoSource,
             BatchOrigin::NoSource,
-            QueueOrigin::NoSource,
+            ShellOrigin::NoSource,
         ),
         (
             NavigationState::SourceWorkspace {
@@ -47,7 +47,7 @@ fn batch_cancel_and_enqueue_use_the_captured_return_origin() {
             BatchOrigin::SourceWorkspace {
                 active_operation: Operation::AudioExtract,
             },
-            QueueOrigin::SourceWorkspace {
+            ShellOrigin::SourceWorkspace {
                 active_operation: Operation::AudioExtract,
             },
         ),
@@ -93,10 +93,35 @@ fn source_queue_editor_does_not_admit_a_batch_or_queue_origin() {
     assert!(!app.can_enter_queue_edit(QueueEditOrigin::SourceWorkspace));
     app.enter_workspace(Operation::FrameCapture);
     assert!(app.can_enter_queue_edit(QueueEditOrigin::SourceWorkspace));
-    assert!(!app.can_enter_queue_edit(QueueEditOrigin::Queue(QueueOrigin::NoSource)));
+    assert!(!app.can_enter_queue_edit(QueueEditOrigin::Queue(ShellOrigin::NoSource)));
     app.enter_queue_edit(QueueEditOrigin::SourceWorkspace);
     assert_eq!(app.batch_origin(), None);
     assert_eq!(app.active_operation(), None);
     app.close_source();
     assert_eq!(app.navigation(), NavigationState::NoSource);
+}
+
+#[test]
+fn settings_round_trip_preserves_origin_and_refuses_nested_routes() {
+    let mut app = Application::default();
+    for route in [
+        NavigationState::NoSource,
+        NavigationState::SourceWorkspace {
+            active_operation: Operation::AudioExtract,
+        },
+        NavigationState::BatchSetup,
+    ] {
+        app.set_navigation(route);
+        assert!(app.enter_settings());
+        let settings = app.navigation();
+        assert!(!app.enter_settings());
+        assert!(!app.enter_queue());
+        assert_eq!(app.batch_origin(), None);
+        assert_eq!(app.navigation(), settings);
+        app.return_from_settings();
+        assert_eq!(app.navigation(), route);
+    }
+    app.begin_shutdown();
+    assert!(!app.enter_settings());
+    assert!(!app.enter_queue());
 }

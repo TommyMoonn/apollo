@@ -47,7 +47,10 @@ pub enum NavigationState {
     #[default]
     NoSource,
     Queue {
-        origin: QueueOrigin,
+        origin: ShellOrigin,
+    },
+    Settings {
+        origin: ShellOrigin,
     },
     QueueEdit {
         origin: QueueEditOrigin,
@@ -60,7 +63,7 @@ pub enum NavigationState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueOrigin {
+pub enum ShellOrigin {
     NoSource,
     BatchSetup,
     SourceWorkspace { active_operation: Operation },
@@ -68,14 +71,14 @@ pub enum QueueOrigin {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueEditOrigin {
-    Queue(QueueOrigin),
+    Queue(ShellOrigin),
     SourceWorkspace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchOrigin {
     NoSource,
-    Queue { origin: QueueOrigin },
+    Queue { origin: ShellOrigin },
     SourceWorkspace { active_operation: Operation },
 }
 
@@ -86,10 +89,13 @@ impl NavigationState {
             Self::BatchSetup
                 | Self::BatchEdit
                 | Self::Queue {
-                    origin: QueueOrigin::BatchSetup
+                    origin: ShellOrigin::BatchSetup
+                }
+                | Self::Settings {
+                    origin: ShellOrigin::BatchSetup
                 }
                 | Self::QueueEdit {
-                    origin: QueueEditOrigin::Queue(QueueOrigin::BatchSetup)
+                    origin: QueueEditOrigin::Queue(ShellOrigin::BatchSetup)
                 }
         )
     }
@@ -137,30 +143,39 @@ impl Application {
         self.set_navigation(NavigationState::NoSource);
     }
 
-    pub(crate) fn enter_queue(&mut self) -> bool {
-        let origin = match self.navigation {
+    fn shell_origin(&self) -> Option<ShellOrigin> {
+        if self.is_closing() {
+            return None;
+        }
+        match self.navigation {
             NavigationState::SourceWorkspace { active_operation } => {
-                QueueOrigin::SourceWorkspace { active_operation }
+                Some(ShellOrigin::SourceWorkspace { active_operation })
             }
-            NavigationState::BatchSetup => QueueOrigin::BatchSetup,
-            NavigationState::NoSource => QueueOrigin::NoSource,
+            NavigationState::BatchSetup => Some(ShellOrigin::BatchSetup),
+            NavigationState::NoSource => Some(ShellOrigin::NoSource),
             NavigationState::Queue { .. }
             | NavigationState::QueueEdit { .. }
-            | NavigationState::BatchEdit => return false,
+            | NavigationState::Settings { .. }
+            | NavigationState::BatchEdit => None,
+        }
+    }
+
+    pub(crate) fn enter_queue(&mut self) -> bool {
+        let Some(origin) = self.shell_origin() else {
+            return false;
         };
         self.show_queue(origin);
         self.queue_action_error = None;
-        self.source.clear_error();
         self.queue_confirmation = None;
         self.operation_action_error = None;
         true
     }
 
-    pub(crate) fn show_queue(&mut self, origin: QueueOrigin) {
+    pub(crate) fn show_queue(&mut self, origin: ShellOrigin) {
         self.set_navigation(NavigationState::Queue { origin });
     }
 
-    pub(crate) fn queue_origin(&self) -> Option<QueueOrigin> {
+    pub(crate) fn queue_origin(&self) -> Option<ShellOrigin> {
         match self.navigation {
             NavigationState::Queue { origin } => Some(origin),
             _ => None,
@@ -169,13 +184,72 @@ impl Application {
 
     pub(crate) fn return_from_queue(&mut self) {
         if let Some(origin) = self.queue_origin() {
-            match origin {
-                QueueOrigin::NoSource => self.show_no_source(),
-                QueueOrigin::BatchSetup => self.show_batch_setup(),
-                QueueOrigin::SourceWorkspace { active_operation } => {
-                    self.show_workspace(active_operation)
-                }
+            self.restore_shell_origin(origin);
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn enter_settings(&mut self) -> bool {
+        let Some(origin) = self.shell_origin() else {
+            return false;
+        };
+        self.set_navigation(NavigationState::Settings { origin });
+        true
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn return_from_settings(&mut self) {
+        if let NavigationState::Settings { origin } = self.navigation {
+            self.restore_shell_origin(origin);
+        }
+    }
+
+    fn restore_shell_origin(&mut self, origin: ShellOrigin) {
+        match origin {
+            ShellOrigin::NoSource => self.show_no_source(),
+            ShellOrigin::BatchSetup => self.show_batch_setup(),
+            ShellOrigin::SourceWorkspace { active_operation } => {
+                self.show_workspace(active_operation)
             }
+        }
+    }
+
+    /// Switching operations changes navigation, not the accepted source or its drafts.
+    #[cfg(any(windows, test))]
+    pub(crate) fn select_operation(&mut self, operation: Operation) -> bool {
+        let Some(previous) = self.active_operation() else {
+            return false;
+        };
+        if self.is_closing() || previous == operation || self.source.current().is_none() {
+            return false;
+        }
+        self.queue_confirmation = None;
+        self.operation_action_error = None;
+        self.show_workspace(operation);
+        true
+    }
+
+    /// An inspection can finish while Queue or Settings is visible. Update the
+    /// return origin instead of taking the user away from that route.
+    #[cfg(any(windows, test))]
+    pub(crate) fn source_published(&mut self) {
+        let workspace = |origin| match origin {
+            ShellOrigin::NoSource => ShellOrigin::SourceWorkspace {
+                active_operation: Operation::AudioMix,
+            },
+            other => other,
+        };
+        match self.navigation {
+            NavigationState::Queue { origin } => self.show_queue(workspace(origin)),
+            NavigationState::Settings { origin } => {
+                self.set_navigation(NavigationState::Settings {
+                    origin: workspace(origin),
+                })
+            }
+            NavigationState::NoSource | NavigationState::SourceWorkspace { .. } => {
+                self.enter_workspace(self.active_operation().unwrap_or(Operation::AudioMix));
+            }
+            _ => {}
         }
     }
 
@@ -199,10 +273,10 @@ impl Application {
         match self.navigation {
             NavigationState::NoSource => Some(BatchOrigin::NoSource),
             NavigationState::Queue {
-                origin: QueueOrigin::BatchSetup,
+                origin: ShellOrigin::BatchSetup,
             }
             | NavigationState::QueueEdit {
-                origin: QueueEditOrigin::Queue(QueueOrigin::BatchSetup),
+                origin: QueueEditOrigin::Queue(ShellOrigin::BatchSetup),
             } => None,
             NavigationState::Queue { origin }
             | NavigationState::QueueEdit {
@@ -214,6 +288,7 @@ impl Application {
             NavigationState::QueueEdit {
                 origin: QueueEditOrigin::SourceWorkspace,
             }
+            | NavigationState::Settings { .. }
             | NavigationState::BatchSetup
             | NavigationState::BatchEdit => None,
         }
@@ -240,10 +315,10 @@ impl Application {
 
     pub(crate) fn complete_batch(&mut self, origin: BatchOrigin) {
         self.show_queue(match origin {
-            BatchOrigin::NoSource => QueueOrigin::NoSource,
+            BatchOrigin::NoSource => ShellOrigin::NoSource,
             BatchOrigin::Queue { origin } => origin,
             BatchOrigin::SourceWorkspace { active_operation } => {
-                QueueOrigin::SourceWorkspace { active_operation }
+                ShellOrigin::SourceWorkspace { active_operation }
             }
         });
     }

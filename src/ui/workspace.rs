@@ -1,65 +1,8 @@
+//! Shared source identity, plus the fixed-source egui editors retained for U02/U06.
+use super::{fonts, layout, media_lifecycle, theme, widgets};
+use crate::{app::Operation, media::model::MediaFile};
+use egui::{Label, RichText, TextStyle, Ui};
 use std::{cell::Cell, path::Path};
-
-use egui::{Label, RichText, Sides, TextStyle, Ui};
-
-use crate::{app::Operation, media::model::MediaFile, queue::JobId};
-
-use super::{SourceAction, fonts, layout, media_lifecycle, queue_count_label, theme, widgets};
-
-const CHANGE_FILE_LABEL: &str = "Change file";
-const CLOSE_SOURCE_LABEL: &str = "Close source";
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceMode<'a> {
-    Source {
-        pending_queue_count: usize,
-        enabled: bool,
-        editable_jobs: &'a [EditableQueuedJob<'a>],
-        queue_editing_allowed: bool,
-    },
-    FixedSourceEdit {
-        context: &'static str,
-        enabled: bool,
-        operation_switching: bool,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EditableQueuedJob<'a> {
-    pub id: JobId,
-    pub source: &'a Path,
-    pub operation: &'static str,
-    pub output: &'a Path,
-}
-
-impl EditableQueuedJob<'_> {
-    fn label(self) -> String {
-        format!(
-            "{} · {} · {}",
-            source_file_name(self.source),
-            self.operation,
-            source_file_name(self.output)
-        )
-    }
-
-    fn hover_text(self) -> String {
-        format!(
-            "Job {}\nSource: {}\nOperation: {}\nOutput: {}",
-            self.id,
-            self.source.display(),
-            self.operation,
-            self.output.display()
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceAction {
-    None,
-    Source(SourceAction),
-    SelectOperation(Operation),
-    EditQueuedJob(JobId),
-    OpenQueue,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspacePresentation {
@@ -76,75 +19,23 @@ impl WorkspacePresentation {
     }
 }
 
-pub fn show(
+pub fn show_fixed_editor(
     ui: &mut Ui,
     presentation: &WorkspacePresentation,
     active_operation: Operation,
-    mode: WorkspaceMode<'_>,
-) -> WorkspaceAction {
-    let action = Cell::new(WorkspaceAction::None);
-    let enabled = match mode {
-        WorkspaceMode::Source { enabled, .. } | WorkspaceMode::FixedSourceEdit { enabled, .. } => {
-            enabled
-        }
-    };
-
+    context: &str,
+    enabled: bool,
+    operation_switching: bool,
+) -> Option<Operation> {
+    let action = Cell::new(None);
     ui.add_enabled_ui(enabled, |ui| {
-        match mode {
-            WorkspaceMode::Source {
-                pending_queue_count,
-                editable_jobs,
-                queue_editing_allowed,
-                ..
-            } => {
-                show_source_header(ui, presentation, pending_queue_count, &action);
-                if !editable_jobs.is_empty() {
-                    ui.add_space(theme::SPACING.related);
-                    ui.add_enabled_ui(queue_editing_allowed, |ui| {
-                        show_queued_job_selector(ui, editable_jobs, &action);
-                    });
-                    if !queue_editing_allowed {
-                        ui.label("Stop after current to edit queued jobs.");
-                    }
-                }
-            }
-            WorkspaceMode::FixedSourceEdit { context, .. } => {
-                show_fixed_source_header(ui, presentation, context)
-            }
-        }
+        show_fixed_source_header(ui, presentation, context);
         ui.add_space(theme::SPACING.related);
-        let operation_switching = match mode {
-            WorkspaceMode::Source { .. } => true,
-            WorkspaceMode::FixedSourceEdit {
-                operation_switching,
-                ..
-            } => operation_switching,
-        };
         ui.add_enabled_ui(operation_switching, |ui| {
             show_operation_switcher(ui, active_operation, &action);
         });
     });
-
     action.get()
-}
-
-fn show_queued_job_selector(
-    ui: &mut Ui,
-    jobs: &[EditableQueuedJob<'_>],
-    action: &Cell<WorkspaceAction>,
-) {
-    let trigger = format!("Edit queued item ({})", jobs.len());
-    let _ = widgets::bounded_select_menu(ui, &trigger, |ui| {
-        for &job in jobs {
-            let label = job.label();
-            let response =
-                widgets::bounded_select_menu_option(ui, &label).on_hover_text(job.hover_text());
-            if response.clicked() {
-                action.set(WorkspaceAction::EditQueuedJob(job.id));
-                egui::Popup::close_all(ui.ctx());
-            }
-        }
-    });
 }
 
 fn show_fixed_source_header(ui: &mut Ui, presentation: &WorkspacePresentation, context: &str) {
@@ -175,78 +66,10 @@ fn show_fixed_source_header(ui: &mut Ui, presentation: &WorkspacePresentation, c
     }
 }
 
-fn show_source_header(
-    ui: &mut Ui,
-    presentation: &WorkspacePresentation,
-    pending_queue_count: usize,
-    action: &Cell<WorkspaceAction>,
-) {
-    let queue_label = queue_count_label(pending_queue_count);
-    let action_sizes = [
-        widgets::plain_button_intrinsic_size(ui, &queue_label),
-        widgets::plain_button_intrinsic_size(ui, CHANGE_FILE_LABEL),
-        widgets::plain_button_intrinsic_size(ui, CLOSE_SOURCE_LABEL),
-    ];
-    let action_widths = action_sizes.map(|size| size.x);
-    let show_metadata = presentation.metadata.is_some()
-        && layout::workspace_header_shows_metadata(ui.available_width(), &action_widths);
-    let header_height = source_header_height(ui, show_metadata);
-
-    Sides::new()
-        .height(header_height)
-        .spacing(theme::SOURCE_HEADER_GAP)
-        .shrink_left()
-        .truncate()
-        .show(
-            ui,
-            |ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = if show_metadata {
-                        theme::SPACING.tight
-                    } else {
-                        0.0
-                    };
-                    ui.add(
-                        Label::new(
-                            RichText::new(&presentation.file_name).text_style(TextStyle::Body),
-                        )
-                        .truncate()
-                        .selectable(false),
-                    );
-                    if show_metadata && let Some(metadata) = presentation.metadata.as_deref() {
-                        ui.add(
-                            Label::new(
-                                RichText::new(metadata)
-                                    .text_style(fonts::technical_text_style())
-                                    .color(theme::SECONDARY_FAINT),
-                            )
-                            .truncate()
-                            .selectable(false),
-                        );
-                    }
-                });
-            },
-            |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = theme::INLINE_ACTION_GAP;
-                    if widgets::plain_button(ui, &queue_label).clicked() {
-                        action.set(WorkspaceAction::OpenQueue);
-                    }
-                    if widgets::plain_button(ui, CHANGE_FILE_LABEL).clicked() {
-                        action.set(WorkspaceAction::Source(SourceAction::ChangeFile));
-                    }
-                    if widgets::plain_button(ui, CLOSE_SOURCE_LABEL).clicked() {
-                        action.set(WorkspaceAction::Source(SourceAction::CloseSource));
-                    }
-                });
-            },
-        );
-}
-
 fn show_operation_switcher(
     ui: &mut Ui,
     active_operation: Operation,
-    action: &Cell<WorkspaceAction>,
+    action: &Cell<Option<Operation>>,
 ) {
     let widths = Operation::ALL
         .map(|operation| widgets::mode_button_intrinsic_size(ui, operation.label()).x);
@@ -263,26 +86,17 @@ fn show_operation_row(
     ui: &mut Ui,
     operations: &[Operation],
     active_operation: Operation,
-    action: &Cell<WorkspaceAction>,
+    action: &Cell<Option<Operation>>,
 ) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = theme::SPACING.related;
         for &operation in operations {
             if widgets::mode_button(ui, operation.label(), operation == active_operation).clicked()
             {
-                action.set(WorkspaceAction::SelectOperation(operation));
+                action.set(Some(operation));
             }
         }
     });
-}
-
-fn source_header_height(ui: &Ui, has_metadata: bool) -> f32 {
-    let metadata_height = if has_metadata {
-        theme::SPACING.tight + ui.text_style_height(&fonts::technical_text_style())
-    } else {
-        0.0
-    };
-    (ui.text_style_height(&TextStyle::Body) + metadata_height).max(theme::COMPACT_CONTROL_HEIGHT)
 }
 
 fn source_file_name(path: &Path) -> String {
@@ -321,108 +135,9 @@ fn source_metadata(media: &MediaFile) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::media::model::{AudioStream, MediaStream, StreamKind, VideoStream};
     use std::{path::PathBuf, time::Duration};
-
-    use crate::{
-        media::model::{AudioStream, MediaFile, MediaStream, StreamKind, VideoStream},
-        ui::{fonts, theme, widgets},
-    };
-
-    use super::{
-        EditableQueuedJob, Operation, WorkspaceAction, WorkspaceMode, WorkspacePresentation, show,
-        source_metadata,
-    };
-
-    fn shape_text_rect(shape: &egui::Shape, text: &str) -> Option<egui::Rect> {
-        match shape {
-            egui::Shape::Text(shape) if shape.galley.job.text == text => {
-                Some(egui::Rect::from_min_size(shape.pos, shape.galley.size()))
-            }
-            egui::Shape::Vec(shapes) => {
-                shapes.iter().find_map(|shape| shape_text_rect(shape, text))
-            }
-            _ => None,
-        }
-    }
-
-    fn output_text_rect(output: &egui::FullOutput, text: &str) -> egui::Rect {
-        output
-            .shapes
-            .iter()
-            .find_map(|shape| shape_text_rect(&shape.shape, text))
-            .unwrap_or_else(|| panic!("missing text {text:?}"))
-    }
-
-    fn pointer_button_input(position: egui::Pos2, pressed: bool) -> egui::RawInput {
-        egui::RawInput {
-            events: vec![
-                egui::Event::PointerMoved(position),
-                egui::Event::PointerButton {
-                    pos: position,
-                    button: egui::PointerButton::Primary,
-                    pressed,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
-            ..Default::default()
-        }
-    }
-
-    fn click_disabled_workspace_control(label: &str) -> WorkspaceAction {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let mut initial = context.run_ui(Default::default(), |ui| {
-            let _ = show(
-                ui,
-                &presentation(),
-                Operation::AudioMix,
-                WorkspaceMode::Source {
-                    pending_queue_count: 3,
-                    enabled: false,
-                    editable_jobs: &[],
-                    queue_editing_allowed: true,
-                },
-            );
-        });
-        let position = output_text_rect(&initial, label).center();
-        initial.textures_delta.clear();
-
-        let mut pressed_action = WorkspaceAction::None;
-        let mut pressed = context.run_ui(pointer_button_input(position, true), |ui| {
-            pressed_action = show(
-                ui,
-                &presentation(),
-                Operation::AudioMix,
-                WorkspaceMode::Source {
-                    pending_queue_count: 3,
-                    enabled: false,
-                    editable_jobs: &[],
-                    queue_editing_allowed: true,
-                },
-            );
-        });
-        pressed.textures_delta.clear();
-        assert_eq!(pressed_action, WorkspaceAction::None);
-
-        let mut released_action = WorkspaceAction::None;
-        let mut released = context.run_ui(pointer_button_input(position, false), |ui| {
-            released_action = show(
-                ui,
-                &presentation(),
-                Operation::AudioMix,
-                WorkspaceMode::Source {
-                    pending_queue_count: 3,
-                    enabled: false,
-                    editable_jobs: &[],
-                    queue_editing_allowed: true,
-                },
-            );
-        });
-        released.textures_delta.clear();
-        released_action
-    }
-
     fn media() -> MediaFile {
         MediaFile {
             path: PathBuf::from("recording.mkv"),
@@ -458,206 +173,11 @@ mod tests {
         }
     }
 
-    fn presentation() -> WorkspacePresentation {
-        WorkspacePresentation::new(&media())
-    }
-
-    #[test]
-    fn queued_item_identity_keeps_duplicate_source_operations_separately_addressable() {
-        let source = PathBuf::from("media/recording.mkv");
-        let first_output = PathBuf::from("exports/recording-4k.mp4");
-        let second_output = PathBuf::from("exports/recording-8k.mp4");
-        let first = EditableQueuedJob {
-            id: crate::queue::JobId::new(41),
-            source: &source,
-            operation: "Upscale",
-            output: &first_output,
-        };
-        let second = EditableQueuedJob {
-            id: crate::queue::JobId::new(42),
-            source: &source,
-            operation: "Upscale",
-            output: &second_output,
-        };
-
-        assert_eq!(first.label(), "recording.mkv · Upscale · recording-4k.mp4");
-        assert_eq!(second.label(), "recording.mkv · Upscale · recording-8k.mp4");
-        assert_ne!(first.id, second.id);
-        assert!(
-            first
-                .hover_text()
-                .contains(source.to_string_lossy().as_ref())
-        );
-        assert!(
-            first
-                .hover_text()
-                .contains(first_output.to_string_lossy().as_ref())
-        );
-    }
-
-    #[test]
-    fn queued_item_option_truncates_inside_its_bounded_popup_width() {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let label = "an exceptionally long source filename that must not expand the workspace · Frame Capture · another exceptionally long output filename.png";
-        let width = 260.0;
-        let mut output = context.run_ui(Default::default(), |ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 80.0), egui::Sense::hover());
-            let mut child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
-            );
-            let response = widgets::bounded_select_menu_option(&mut child, label);
-            assert!(response.rect.right() <= rect.right() + 0.5);
-        });
-        let text_rect = output_text_rect(&output, label);
-        output.textures_delta.clear();
-        assert!(
-            text_rect.right() <= width + 0.5,
-            "overflowed: {text_rect:?}"
-        );
-    }
-
     #[test]
     fn shared_metadata_uses_source_dimensions_and_duration() {
         assert_eq!(
             source_metadata(&media()).as_deref(),
             Some("1920×1080 · 02:31")
         );
-    }
-
-    #[test]
-    fn workspace_chrome_renders_all_operations_and_source_actions() {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let mut output = context.run_ui(Default::default(), |ui| {
-            assert_eq!(
-                show(
-                    ui,
-                    &presentation(),
-                    Operation::Remux,
-                    WorkspaceMode::Source {
-                        pending_queue_count: 3,
-                        enabled: true,
-                        editable_jobs: &[],
-                        queue_editing_allowed: true,
-                    },
-                ),
-                WorkspaceAction::None
-            );
-        });
-        output.textures_delta.clear();
-        for label in [
-            "recording.mkv",
-            "Queue (3)",
-            "Change file",
-            "Close source",
-            "Audio Mix",
-            "Upscale",
-            "Remux",
-            "Audio Extract",
-            "Frame Capture",
-        ] {
-            assert!(
-                output_text_rect(&output, label).is_positive(),
-                "missing {label:?}"
-            );
-        }
-        output.drop_without_applying_deltas();
-    }
-
-    #[test]
-    fn disabled_workspace_rejects_operation_and_source_actions() {
-        assert_eq!(
-            click_disabled_workspace_control("Upscale"),
-            WorkspaceAction::None
-        );
-        assert_eq!(
-            click_disabled_workspace_control("Change file"),
-            WorkspaceAction::None
-        );
-    }
-
-    #[test]
-    fn narrow_workspace_keeps_actions_usable_and_reflows_operations_without_overflow() {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let width = 344.0;
-        let mut output = context.run_ui(Default::default(), |ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 260.0), egui::Sense::hover());
-            let mut child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
-            );
-            let _ = show(
-                &mut child,
-                &presentation(),
-                Operation::AudioMix,
-                WorkspaceMode::Source {
-                    pending_queue_count: 3,
-                    enabled: true,
-                    editable_jobs: &[],
-                    queue_editing_allowed: true,
-                },
-            );
-        });
-
-        assert!(
-            output
-                .shapes
-                .iter()
-                .all(|shape| shape_text_rect(&shape.shape, "1920×1080 · 02:31").is_none())
-        );
-        let first = output_text_rect(&output, "Audio Mix");
-        let last = output_text_rect(&output, "Frame Capture");
-        output.textures_delta.clear();
-        assert!(
-            last.top() > first.top(),
-            "operation rows did not reflow: first={first:?}, last={last:?}"
-        );
-        for label in Operation::ALL.map(Operation::label) {
-            let rect = output_text_rect(&output, label);
-            assert!(rect.left() >= 0.0);
-            assert!(rect.right() <= width + 0.5, "{label} overflowed: {rect:?}");
-        }
-        for label in ["Queue (3)", "Change file", "Close source"] {
-            assert!(output_text_rect(&output, label).right() <= width + 0.5);
-        }
-    }
-
-    #[test]
-    fn wide_workspace_keeps_all_operations_on_one_line() {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let mut output = context.run_ui(Default::default(), |ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(564.0, 180.0), egui::Sense::hover());
-            let mut child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
-            );
-            let _ = show(
-                &mut child,
-                &presentation(),
-                Operation::AudioMix,
-                WorkspaceMode::Source {
-                    pending_queue_count: 3,
-                    enabled: true,
-                    editable_jobs: &[],
-                    queue_editing_allowed: true,
-                },
-            );
-        });
-
-        let first = output_text_rect(&output, "Audio Mix");
-        let last = output_text_rect(&output, "Frame Capture");
-        output.textures_delta.clear();
-        assert_eq!(first.top(), last.top());
     }
 }

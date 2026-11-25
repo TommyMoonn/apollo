@@ -12,7 +12,7 @@ pub use queue::QueueAction;
 pub(crate) mod frame_capture;
 mod navigation;
 pub(crate) mod source;
-pub use navigation::{BatchOrigin, NavigationState, Operation, QueueEditOrigin, QueueOrigin};
+pub use navigation::{BatchOrigin, NavigationState, Operation, QueueEditOrigin, ShellOrigin};
 
 #[derive(Default)]
 pub struct Application {

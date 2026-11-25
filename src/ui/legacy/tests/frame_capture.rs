@@ -604,8 +604,6 @@ fn opening_frame_capture_source_renders_ready_surface() {
     });
     output.textures_delta.clear();
     for text in [
-        "recording.mkv",
-        "1920×1080",
         "00:00:00.000",
         "1 frame",
         "PNG",

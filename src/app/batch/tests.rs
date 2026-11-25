@@ -358,10 +358,17 @@ fn queue_round_trip_preserves_batch_inspection_and_return_origin() {
             )
         })
     );
+    let before_settings = app.batch_setup.clone();
+    assert!(app.enter_settings());
+    assert!(app.batch_inspecting());
+    assert_eq!(app.batch_setup, before_settings);
+    app.return_from_settings();
+    assert_eq!(app.navigation(), crate::app::NavigationState::BatchSetup);
+    assert_eq!(app.batch_setup, before_settings);
     app.enter_queue();
     assert_eq!(
         app.queue_origin(),
-        Some(crate::app::QueueOrigin::BatchSetup)
+        Some(crate::app::ShellOrigin::BatchSetup)
     );
     assert!(app.batch_inspecting());
     assert!(app.batch_setup.is_some());

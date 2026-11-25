@@ -57,6 +57,7 @@ pub const SPINNER_CYCLE_MS: u64 = 900;
 #[derive(Clone, Copy, Debug)]
 pub struct Metrics {
     pub inset: f32,
+    pub source_identity_min_width: f32,
     pub tight: f32,
     pub compact: f32,
     pub related: f32,
@@ -79,6 +80,7 @@ pub struct Metrics {
 
 pub const METRICS: Metrics = Metrics {
     inset: 28.,
+    source_identity_min_width: 220.,
     tight: 4.,
     compact: 7.,
     related: 11.,

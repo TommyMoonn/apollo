@@ -17,7 +17,6 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DialogTarget {
-    MediaInput,
     BatchInput,
     BatchAppend,
     AudioMixOutput { session_id: u64 },
@@ -47,9 +46,6 @@ pub(crate) struct SaveDialogOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileDialogRequest {
-    OpenSource {
-        initial_directory: Option<PathBuf>,
-    },
     OpenSources {
         initial_directory: Option<PathBuf>,
         target: DialogTarget,
@@ -63,7 +59,6 @@ pub(crate) enum FileDialogRequest {
 impl FileDialogRequest {
     pub(crate) fn target(&self) -> DialogTarget {
         match self {
-            Self::OpenSource { .. } => DialogTarget::MediaInput,
             Self::OpenSources { target, .. } => *target,
             Self::SaveOutput { target, .. } => *target,
         }
@@ -116,7 +111,7 @@ impl DialogTarget {
             Self::RemuxOutput { session_id } => (Operation::Remux, session_id),
             Self::AudioExtractOutput { session_id } => (Operation::AudioExtract, session_id),
             Self::FrameCaptureOutput { session_id } => (Operation::FrameCapture, session_id),
-            Self::MediaInput | Self::BatchInput | Self::BatchAppend => return None,
+            Self::BatchInput | Self::BatchAppend => return None,
         })
     }
 }
@@ -126,31 +121,30 @@ impl Application {
         &self,
         mut request: FileDialogRequest,
     ) -> FileDialogRequest {
-        match &mut request {
-            FileDialogRequest::OpenSource { initial_directory }
-            | FileDialogRequest::OpenSources {
+        let initial_directory = match &mut request {
+            FileDialogRequest::OpenSources {
                 initial_directory, ..
-            } => {
-                *initial_directory = self
-                    .settings
-                    .source_directory()
-                    .or_else(|| initial_directory.take().filter(|path| path.is_dir()))
-                    .or_else(|| {
-                        self.source
-                            .current()
-                            .and_then(|media| media.path.parent())
-                            .filter(|path| path.is_dir())
-                            .map(Path::to_path_buf)
-                    });
-            }
+            } => initial_directory,
             FileDialogRequest::SaveOutput { options, .. } => {
                 let fallback = options
                     .initial_directory
                     .as_deref()
                     .unwrap_or(Path::new("."));
                 options.initial_directory = self.settings.output_directory(fallback);
+                return request;
             }
-        }
+        };
+        *initial_directory = self
+            .settings
+            .source_directory()
+            .or_else(|| initial_directory.take().filter(|path| path.is_dir()))
+            .or_else(|| {
+                self.source
+                    .current()
+                    .and_then(|media| media.path.parent())
+                    .filter(|path| path.is_dir())
+                    .map(Path::to_path_buf)
+            });
         request
     }
 }

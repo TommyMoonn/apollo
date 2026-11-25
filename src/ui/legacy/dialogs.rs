@@ -73,10 +73,6 @@ impl ApolloApp {
             return;
         }
         match (target, outcome) {
-            (DialogTarget::MediaInput, DialogOutcome::Selected(path)) => {
-                self.core.settings.remember_source(&path);
-                self.load_media_path(&path);
-            }
             (
                 DialogTarget::BatchInput | DialogTarget::BatchAppend,
                 DialogOutcome::Selected(path),
@@ -94,10 +90,7 @@ impl ApolloApp {
                     .set_batch_append_error(MediaError::file_picker_unavailable(diagnostic));
                 self.batch_append_error_details_open = false;
             }
-            (
-                DialogTarget::MediaInput | DialogTarget::BatchInput,
-                DialogOutcome::Failed(diagnostic),
-            ) => {
+            (DialogTarget::BatchInput, DialogOutcome::Failed(diagnostic)) => {
                 self.core
                     .source
                     .set_error(MediaError::file_picker_unavailable(diagnostic));

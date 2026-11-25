@@ -133,7 +133,7 @@ fn upscale_save_request_preserves_custom_directory_and_authoritative_extension()
 fn native_input_results_preserve_the_accepted_source_and_directory_on_cancel_failure_or_stale() {
     use crate::{
         app::{
-            QueueOrigin,
+            ShellOrigin,
             discovery::{MediaToolsDiscovery, MediaToolsState},
         },
         media::{error::MediaErrorKind, intake::SourceIdentity, tools::MediaTools},
@@ -185,7 +185,7 @@ fn native_input_results_preserve_the_accepted_source_and_directory_on_cancel_fai
         app.settings.source_directory().as_deref(),
         Some(root.path())
     );
-    app.show_queue(QueueOrigin::SourceWorkspace {
+    app.show_queue(ShellOrigin::SourceWorkspace {
         active_operation: Operation::Remux,
     });
     app.return_from_queue();

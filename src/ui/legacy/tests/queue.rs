@@ -546,7 +546,7 @@ fn migrated_form_actions_admit_equivalent_requests_and_keep_terminal_history() {
         assert_eq!(
             app.core.navigation(),
             NavigationState::Queue {
-                origin: QueueOrigin::SourceWorkspace {
+                origin: ShellOrigin::SourceWorkspace {
                     active_operation: operation
                 }
             }

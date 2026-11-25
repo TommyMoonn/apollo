@@ -56,7 +56,17 @@ impl<'a> Button<'a> {
         }
     }
 
+    pub fn measured_width(&self, window: &Window) -> Pixels {
+        let padding = if self.tone == Tone::Quiet {
+            M.tight
+        } else {
+            M.related
+        };
+        label_width(window, self.label, self.alternate_labels, padding)
+    }
+
     pub fn render(self, palette: Palette, window: &Window) -> Stateful<Div> {
+        let width = (!self.alternate_labels.is_empty()).then(|| self.measured_width(window));
         let selected = matches!(&self.state, ActionState::Selected(_));
         let busy = matches!(&self.state, ActionState::Busy);
         let click = match self.state {
@@ -112,13 +122,8 @@ impl<'a> Button<'a> {
             .font(ui_font())
             .text_size(px(M.body))
             .whitespace_nowrap();
-        if !self.alternate_labels.is_empty() {
-            element = element.min_w(label_width(
-                window,
-                self.label,
-                self.alternate_labels,
-                padding,
-            ));
+        if let Some(width) = width {
+            element = element.min_w(width);
         }
         let element = element.child(self.label.to_owned());
         let Some(click) = click else {

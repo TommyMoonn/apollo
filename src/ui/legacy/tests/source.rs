@@ -123,7 +123,7 @@ fn change_file_cancel_preserves_complete_workspace() {
     let before = app.state.clone();
 
     app.settle_file_dialog(FileDialogCompletion {
-        target: DialogTarget::MediaInput,
+        target: DialogTarget::BatchInput,
         outcome: DialogOutcome::Cancelled,
     });
 
@@ -201,8 +201,9 @@ fn open_dialog_selected_path_starts_the_shared_intake_route() {
         },
         move || Ok(move |_: &FileDialogRequest| Ok(Some(selected.clone()))),
     );
-    app.start_file_dialog(FileDialogRequest::OpenSource {
+    app.start_file_dialog(FileDialogRequest::OpenSources {
         initial_directory: None,
+        target: DialogTarget::BatchInput,
     });
     wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
     app.poll_file_dialog();
@@ -220,7 +221,7 @@ fn open_dialog_failure_surfaces_bounded_intake_feedback() {
     let mut app = app();
 
     app.settle_file_dialog(FileDialogCompletion {
-        target: DialogTarget::MediaInput,
+        target: DialogTarget::BatchInput,
         outcome: DialogOutcome::Failed("native open diagnostic marker".to_owned()),
     });
 
@@ -277,8 +278,6 @@ fn change_file_probe_failure_is_rendered_and_survives_operation_switching() {
         "Check that the source is a readable media file and try again."
     ));
     assert!(output_contains_text(&output, "Upscale to"));
-    assert!(output_contains_text(&output, "Change file"));
-    assert!(output_contains_text(&output, "Audio Mix"));
 
     app.select_tool(Operation::Remux);
 
@@ -296,8 +295,7 @@ fn change_file_probe_failure_is_rendered_and_survives_operation_switching() {
         &output,
         "This file could not be inspected."
     ));
-    assert!(output_contains_text(&output, "Remux"));
-    assert!(output_contains_text(&output, "Change file"));
+    assert!(output_contains_text(&output, "MKV"));
     fs::remove_dir_all(directory).unwrap();
 }
 

@@ -18,13 +18,15 @@ fn dialog_requests_prefer_independent_remembered_directories() {
 
     let open = app
         .core
-        .prepare_file_dialog_request(FileDialogRequest::OpenSource {
+        .prepare_file_dialog_request(FileDialogRequest::OpenSources {
             initial_directory: None,
+            target: DialogTarget::BatchInput,
         });
     assert_eq!(
         open,
-        FileDialogRequest::OpenSource {
+        FileDialogRequest::OpenSources {
             initial_directory: Some(source_directory.clone()),
+            target: DialogTarget::BatchInput,
         }
     );
 
@@ -51,7 +53,7 @@ fn dialog_cancel_does_not_change_directory_memory() {
     let before = app.core.settings.clone();
 
     app.settle_file_dialog(FileDialogCompletion {
-        target: DialogTarget::MediaInput,
+        target: DialogTarget::BatchInput,
         outcome: DialogOutcome::Cancelled,
     });
     app.settle_file_dialog(FileDialogCompletion {
@@ -73,7 +75,7 @@ fn successful_dialog_selections_update_only_their_directory_history() {
         MediaToolsDiscovery::with_state(MediaToolsState::Unavailable(MediaToolsError::MissingBoth));
 
     app.settle_file_dialog(FileDialogCompletion {
-        target: DialogTarget::MediaInput,
+        target: DialogTarget::BatchInput,
         outcome: DialogOutcome::Selected(source_path),
     });
     assert_eq!(
@@ -341,16 +343,18 @@ fn pending_dialog_blocks_conflicting_app_actions_and_a_second_request() {
         })
     });
     app.file_dialog
-        .request(FileDialogRequest::OpenSource {
+        .request(FileDialogRequest::OpenSources {
             initial_directory: None,
+            target: DialogTarget::BatchInput,
         })
         .unwrap();
 
     assert!(!app.file_intake_enabled());
     assert_workspace(&app.core, Operation::AudioMix);
     assert_eq!(
-        app.file_dialog.request(FileDialogRequest::OpenSource {
+        app.file_dialog.request(FileDialogRequest::OpenSources {
             initial_directory: None,
+            target: DialogTarget::BatchInput,
         }),
         Err(FileDialogStartError::AlreadyPending)
     );
@@ -640,8 +644,9 @@ fn late_input_completion_cannot_change_a_returned_route_or_directory_history() {
             })
         },
     );
-    app.start_file_dialog(FileDialogRequest::OpenSource {
+    app.start_file_dialog(FileDialogRequest::OpenSources {
         initial_directory: None,
+        target: DialogTarget::BatchInput,
     });
     assert!(app.file_dialog.is_pending());
     // The UI blocks navigation during a picker; a forced core route change still retires it.

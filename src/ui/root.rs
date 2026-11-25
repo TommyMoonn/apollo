@@ -8,7 +8,7 @@ use gpui::{
     size,
 };
 
-use crate::app::{Application, NavigationState, background, discovery::MediaToolsState};
+use crate::app::{Application, NavigationState, Operation, background, discovery::MediaToolsState};
 use crate::progress_wake::MediaProgressWakeOwner;
 use crate::{
     app::dialogs::{
@@ -23,7 +23,7 @@ use super::{
     MINIMUM_CONTENT_DIMENSIONS, REFERENCE_CONTENT_DIMENSIONS,
     components::{self, ActionState, Button, Tone},
     design::{FONT_FAMILY, METRICS as M, Palette},
-    file_intake,
+    file_intake, shell,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,6 +43,7 @@ enum DropContext {
 struct ApolloRoot {
     core: Application,
     focus: FocusHandle,
+    whole_page_scroll: Rc<Cell<bool>>,
     dialog_focus: FocusHandle,
     retry_focus: FocusHandle,
     previous_focus: Option<FocusHandle>,
@@ -101,6 +102,7 @@ impl ApolloRoot {
             settings_error,
             settings_dirty: false,
             focus,
+            whole_page_scroll: Rc::new(Cell::new(true)),
             dialog_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             retry_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             previous_focus: None,
@@ -179,6 +181,51 @@ impl ApolloRoot {
         self.invalidate_drag();
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    fn can_navigate(&self) -> bool {
+        self.exit == ExitState::Open && !self.file_dialog.is_pending()
+    }
+
+    fn navigate(
+        &mut self,
+        enter: fn(&mut Application) -> bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_navigate() {
+            return;
+        }
+        if enter(&mut self.core) {
+            self.invalidate_drag();
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_navigate() {
+            return;
+        }
+        match self.core.navigation() {
+            NavigationState::Queue { .. } => self.core.return_from_queue(),
+            NavigationState::Settings { .. } => self.core.return_from_settings(),
+            NavigationState::BatchSetup => {
+                self.core.finish_batch_setup();
+            }
+            _ => return,
+        }
+        self.invalidate_drag();
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn select_operation(&mut self, operation: Operation, cx: &mut Context<Self>) {
+        if self.can_navigate() && self.core.select_operation(operation) {
+            self.invalidate_drag();
+            // The selector keeps its stable element ID and focus across operation switches.
+            cx.notify();
+        }
     }
 
     fn invalidate_drag(&mut self) {
@@ -462,10 +509,6 @@ impl Render for ApolloRoot {
             NavigationState::SourceWorkspace { .. }
         );
         let inspecting = self.core.source.is_inspecting();
-        let batch = matches!(
-            self.core.navigation(),
-            NavigationState::BatchSetup | NavigationState::BatchEdit
-        );
         let mut open = Button::new(
             "open-files",
             if has_source {
@@ -475,7 +518,12 @@ impl Render for ApolloRoot {
             },
             Tone::Standard,
         );
-        open.alternate_labels = &["Opening files…", "Checking file…"];
+        open.alternate_labels = &[
+            "Open files",
+            "Change file",
+            "Opening files…",
+            "Checking file…",
+        ];
         if self.file_dialog.is_pending() {
             open.label = "Opening files…";
             open.state = ActionState::Busy;
@@ -524,79 +572,131 @@ impl Render for ApolloRoot {
         }
         let close = close.render(palette, window);
         let queue_label = super::queue_count_label(self.core.queue.scheduler().pending_count());
-        let queue = Button::new("queue", &queue_label, Tone::Standard).render(palette, window);
-        let surface = if batch {
-            let mut back = Button::new("batch-back", "Back", Tone::Standard);
-            back.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
-                if root.exit != ExitState::Open || root.file_dialog.is_pending() {
-                    return;
-                }
-                if let Some(origin) = root.core.batch_setup.as_ref().map(|batch| batch.origin) {
-                    root.invalidate_drag();
-                    root.core.return_from_batch(origin);
-                    window.focus(&root.focus, cx);
-                    cx.notify();
-                }
+        let mut queue = Button::new("queue", &queue_label, Tone::Standard);
+        queue.alternate_labels = &["Queue", "Queue (99)"];
+        let mut settings = Button::new("settings", "Settings", Tone::Standard);
+        if self.can_navigate() {
+            queue.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                root.navigate(Application::enter_queue, window, cx)
             })));
-            let count = self
-                .core
-                .batch_setup
-                .as_ref()
-                .map_or(0, |batch| batch.items.len());
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(M.related))
-                .child(components::heading(format!("{count} files selected")))
-                .children(
-                    self.core
-                        .batch_inspecting()
-                        .then(|| components::pending("Checking files", palette)),
-                )
-                .child(components::inline_message(
-                    "Batch configuration and submission are unavailable during the UI migration.",
-                    palette,
-                ))
-                .child(div().child(back.render(palette, window)))
-        } else if has_source {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(M.related))
-                .w_full()
-                .children(self.core.source.current().map(|media| {
-                    file_intake::summary(
-                        super::workspace::WorkspacePresentation::new(media),
-                        media.path.to_string_lossy().into_owned(),
-                        palette,
+            settings.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                root.navigate(Application::enter_settings, window, cx)
+            })));
+        }
+        let mut back = Button::new("shell-back", "Back", Tone::Standard);
+        if self.can_navigate() {
+            back.state = ActionState::Enabled(Box::new(
+                cx.listener(|root, _, window, cx| root.back(window, cx)),
+            ));
+        }
+        let route = self.core.navigation();
+        let landing = route == NavigationState::NoSource;
+        let (header, surface, footer) = match route {
+            NavigationState::NoSource => (
+                div().flex().justify_center().child(file_intake::wordmark()),
+                file_intake::landing(open, inspecting.then_some(close), inspecting, palette),
+                shell::navigation_actions(queue, settings, palette, window),
+            ),
+            NavigationState::SourceWorkspace { active_operation } => {
+                let selector = components::selector(Operation::ALL.map(|operation| {
+                    let mut button =
+                        Button::new(operation.label(), operation.label(), Tone::Standard);
+                    if self.can_navigate() {
+                        let select =
+                            Box::new(cx.listener(move |root, _, _, cx| {
+                                root.select_operation(operation, cx)
+                            }));
+                        button.state = if operation == active_operation {
+                            ActionState::Selected(select)
+                        } else {
+                            ActionState::Enabled(select)
+                        };
+                    }
+                    button.render(palette, window)
+                }));
+                let header = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(M.related))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(M.related))
+                            .children(self.core.source.current().map(|media| {
+                                div().flex_1().min_w(px(M.source_identity_min_width)).child(
+                                    file_intake::summary(
+                                        super::workspace::WorkspacePresentation::new(media),
+                                        media.path.to_string_lossy().into_owned(),
+                                        palette,
+                                    ),
+                                )
+                            }))
+                            .child(components::selector([open, close])),
                     )
-                }))
-                .child(components::selector([open, close]))
-                .child(components::separator(palette))
-                .child(components::inline_message(
-                    "Operation controls are unavailable during the UI migration.",
+                    .child(selector)
+                    .child(components::separator(palette));
+                let surface = components::empty_state(
+                    active_operation.label(),
+                    "This operation is unavailable during the UI migration.",
                     palette,
-                ))
-        } else if self.core.navigation() == NavigationState::NoSource {
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .flex_1()
-                .w_full()
-                .child(file_intake::landing(
-                    open,
-                    inspecting.then_some(close),
-                    inspecting,
+                );
+                (
+                    header,
+                    surface,
+                    shell::navigation_actions(queue, settings, palette, window),
+                )
+            }
+            NavigationState::BatchSetup => {
+                let count = self
+                    .core
+                    .batch_setup
+                    .as_ref()
+                    .map_or(0, |batch| batch.items.len());
+                let surface = div().flex().flex_col().gap(px(M.related))
+                    .children(self.core.batch_inspecting().then(|| components::pending("Checking files", palette)))
+                    .child(components::inline_message("Batch configuration and submission are unavailable during the UI migration.", palette));
+                let footer = div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(M.action_gap))
+                    .child(back.render(palette, window))
+                    .child(shell::navigation_actions(queue, settings, palette, window));
+                (
+                    components::heading(format!("{count} files selected")),
+                    surface,
+                    footer,
+                )
+            }
+            NavigationState::Queue { .. } | NavigationState::Settings { .. } => {
+                let (title, message) = if matches!(route, NavigationState::Queue { .. }) {
+                    (
+                        "Queue",
+                        "Queue controls are unavailable during the UI migration.",
+                    )
+                } else {
+                    (
+                        "Settings",
+                        "Appearance and settings controls are unavailable during the UI migration.",
+                    )
+                };
+                (
+                    components::heading(title),
+                    components::inline_message(message, palette),
+                    components::action_bar(palette, [back.render(palette, window)]),
+                )
+            }
+            NavigationState::QueueEdit { .. } | NavigationState::BatchEdit => (
+                components::heading("Editor"),
+                components::inline_message(
+                    "This editor is unavailable during the UI migration.",
                     palette,
-                ))
-        } else {
-            components::empty_state(
-                "Unavailable",
-                "This view is unavailable during the UI migration.",
-                palette,
-            )
+                ),
+                div(),
+            ),
         };
         let scheduler = self.core.queue.scheduler();
         let work = scheduler.is_started().then(|| {
@@ -615,13 +715,14 @@ impl Render for ApolloRoot {
             }
         });
         let body = if self.exit == ExitState::Open {
-            div()
+            let surface = div()
                 .flex()
                 .flex_col()
-                .min_h_full()
-                .p(px(M.inset))
-                .gap(px(M.section))
-                .child(div().flex().justify_center().child(file_intake::wordmark()))
+                .w_full()
+                .min_w_0()
+                .gap(px(M.related))
+                .when(landing, |surface| surface.items_center().justify_center())
+                .child(surface)
                 .children(
                     self.core
                         .discovery
@@ -629,15 +730,19 @@ impl Render for ApolloRoot {
                         .is_none()
                         .then(|| self.discovery_view(palette, window, cx)),
                 )
-                .child(surface)
-                .children(self.core.source.error().map(|error| {
-                    let message = format!(
-                        "{} {}",
-                        error.message(),
-                        error.guidance().unwrap_or_default()
-                    );
-                    components::inline_message(message, palette)
-                }))
+                .children(
+                    (landing || has_source)
+                        .then(|| self.core.source.error())
+                        .flatten()
+                        .map(|error| {
+                            let message = format!(
+                                "{} {}",
+                                error.message(),
+                                error.guidance().unwrap_or_default()
+                            );
+                            components::inline_message(message, palette)
+                        }),
+                )
                 .children(self.settings_error.as_ref().map(|error| {
                     let mut feedback = div()
                         .flex()
@@ -659,16 +764,18 @@ impl Render for ApolloRoot {
                     }
                     feedback
                 }))
-                .children(work)
-                .child(components::action_bar(palette, [queue]))
+                .children(work);
+            shell::page(header, surface, footer, self.whole_page_scroll.clone())
         } else {
-            div()
-                .flex()
-                .flex_col()
-                .min_h_full()
-                .justify_center()
-                .p(px(M.inset))
-                .child(self.exit_view(palette, window, cx))
+            div().id("exit-page").size_full().overflow_y_scroll().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_h_full()
+                    .justify_center()
+                    .p(px(M.inset))
+                    .child(self.exit_view(palette, window, cx)),
+            )
         };
 
         let root = div()
@@ -684,6 +791,15 @@ impl Render for ApolloRoot {
                 if event.keystroke.key == "escape" && root.exit == ExitState::Confirming {
                     root.dismiss_close(window, cx);
                     cx.stop_propagation();
+                } else if event.keystroke.key == "escape"
+                    && matches!(
+                        root.core.navigation(),
+                        NavigationState::Queue { .. } | NavigationState::Settings { .. }
+                    )
+                    && root.can_navigate()
+                {
+                    root.back(window, cx);
+                    cx.stop_propagation();
                 } else if event.keystroke.key == "tab"
                     && !event.keystroke.modifiers.control
                     && !event.keystroke.modifiers.alt
@@ -697,7 +813,6 @@ impl Render for ApolloRoot {
                     cx.stop_propagation();
                 }
             }))
-            .overflow_y_scroll()
             .child(body)
             .border(px(M.rule))
             .border_color(rgba(palette.background))

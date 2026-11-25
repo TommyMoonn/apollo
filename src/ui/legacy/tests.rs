@@ -37,7 +37,7 @@ use crate::frame_capture::frame_index::{
 use crate::settings::AppSettings;
 use crate::ui::frame_capture::PositionSettle;
 
-use crate::app::QueueOrigin;
+use crate::app::ShellOrigin;
 use crate::app::dialogs::{DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogRequest};
 use crate::file_dialog::FileDialogOwner;
 use crate::{
@@ -59,9 +59,9 @@ use crate::{
     },
     queue::{QueueJobFailure, QueueJobState, QueueRunState, QueuedOperation},
     ui::{
-        SourceAction, audio_extract::AudioExtractSelectionAction,
-        audio_mix::AudioMixSelectionAction, fonts, frame_capture::FrameCaptureSelectionAction,
-        layout, remux::RemuxSelectionAction, theme, upscale::UpscaleSelectionAction,
+        audio_extract::AudioExtractSelectionAction, audio_mix::AudioMixSelectionAction, fonts,
+        frame_capture::FrameCaptureSelectionAction, layout, remux::RemuxSelectionAction, theme,
+        upscale::UpscaleSelectionAction,
     },
     upscale::model::{UpscaleTarget, VideoCodec},
 };
@@ -519,27 +519,6 @@ fn settled_navigation_repaint_delay(context: &egui::Context, app: &mut ApolloApp
     Duration::ZERO
 }
 
-fn shape_text_count(shape: &egui::Shape, needle: &str) -> usize {
-    let mut count = 0;
-    let mut pending = vec![shape];
-    while let Some(shape) = pending.pop() {
-        match shape {
-            egui::Shape::Text(text) => count += usize::from(text.galley.job.text == needle),
-            egui::Shape::Vec(shapes) => pending.extend(shapes),
-            _ => {}
-        }
-    }
-    count
-}
-
-fn output_text_count(output: &egui::FullOutput, needle: &str) -> usize {
-    output
-        .shapes
-        .iter()
-        .map(|shape| shape_text_count(&shape.shape, needle))
-        .sum()
-}
-
 fn shape_text_rect(shape: &egui::Shape, text: &str) -> Option<egui::Rect> {
     let mut pending = vec![shape];
     while let Some(shape) = pending.pop() {
@@ -604,8 +583,6 @@ fn opening_upscale_source_renders_ready_surface() {
     assert!(!output_contains_text(&output, "Video codec"));
     assert!(!output_contains_text(&output, "Actual output"));
     assert!(!output_contains_text(&output, "← Back"));
-    assert!(output_contains_text(&output, "Change file"));
-    assert!(output_contains_text(&output, "Close source"));
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -624,14 +601,7 @@ fn opening_remux_source_renders_ready_surface() {
     });
     output.textures_delta.clear();
 
-    for text in [
-        "recording.mkv",
-        "1920×1080",
-        "MKV",
-        "Output",
-        "Browse",
-        "Remux",
-    ] {
+    for text in ["MKV", "Output", "Browse"] {
         assert!(output_contains_text(&output, text), "missing {text:?}");
     }
     assert!(!output_contains_text(&output, "Container"));
@@ -653,8 +623,6 @@ fn opening_audio_extract_source_renders_ready_surface() {
     });
     output.textures_delta.clear();
     for text in [
-        "recording.mkv",
-        "1920×1080",
         "Audio track",
         "Desktop Audio",
         "stream 1",
@@ -693,7 +661,6 @@ fn opening_audio_mix_source_renders_ready_surface() {
     assert!(!output_contains_text(&output, "Integrated loudness"));
     assert!(output_contains_text(&output, "Process now"));
     assert!(!output_contains_text(&output, "← Back"));
-    assert!(output_contains_text(&output, "Change file"));
     let audio_tracks = output_text_rect(&output, "Audio tracks");
     let select_all = output_text_rect(&output, "Select all");
     let clear = output_text_rect(&output, "Clear");
@@ -724,43 +691,6 @@ fn opening_audio_mix_source_renders_ready_surface() {
     ] {
         assert!(output_contains_text(&output, label), "missing {label}");
     }
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn shared_workspace_chrome_is_identical_across_all_ready_operations() {
-    let (directory, path) = temp_file("shared-workspace-chrome");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-
-    for operation in Operation::ALL {
-        let mut output = context.run_ui(Default::default(), |ui| {
-            show_tool(&mut app, ui, operation);
-        });
-        output.textures_delta.clear();
-
-        assert_eq!(output_text_count(&output, "recording.mkv"), 1);
-        for label in [
-            "1920×1080",
-            "Change file",
-            "Close source",
-            "Audio Mix",
-            "Upscale",
-            "Remux",
-            "Audio Extract",
-            "Frame Capture",
-        ] {
-            assert!(
-                output_contains_text(&output, label),
-                "{operation:?} missing workspace label {label:?}"
-            );
-        }
-        assert!(!output_contains_text(&output, "← Back"));
-    }
-
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -835,14 +765,11 @@ fn every_ready_operation_keeps_its_primary_action_bottom_owned_at_all_heights() 
             });
             output.textures_delta.clear();
             let action = output_bottom_text_rect(&output, label);
-            let source = output_text_rect(&output, "recording.mkv");
 
             assert!(
                 (action.center().y - (viewport.bottom() - action_height * 0.5)).abs() <= 1.0,
                 "{operation:?} at {width}x{height}: action={action:?}, viewport={viewport:?}"
             );
-            assert!(source.top() >= viewport.top() + f32::from(layout::CONTENT_PADDING));
-            assert!(source.bottom() < action.top());
         }
     }
 
@@ -1183,7 +1110,7 @@ fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_othe
 
         app.core.batch_setup = Some(BatchSetupState {
             origin: BatchOrigin::Queue {
-                origin: QueueOrigin::SourceWorkspace {
+                origin: ShellOrigin::SourceWorkspace {
                     active_operation: Operation::FrameCapture,
                 },
             },

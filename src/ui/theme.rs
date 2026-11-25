@@ -69,7 +69,6 @@ pub const TOGGLE_SWITCH_WIDTH: f32 = 34.0;
 pub const TOGGLE_SWITCH_HEIGHT: f32 = 18.0;
 pub const TOGGLE_SWITCH_KNOB_SIZE: f32 = 12.0;
 pub const MODE_BUTTON_HORIZONTAL_PADDING: f32 = 13.0;
-pub const SOURCE_HEADER_GAP: f32 = 14.0;
 pub const INLINE_ACTION_GAP: f32 = 10.0;
 pub const STATUS_COPY_GAP: f32 = 6.0;
 pub const FOOTER_ACTION_GAP: f32 = 8.0;

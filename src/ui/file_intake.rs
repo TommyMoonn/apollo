@@ -29,10 +29,10 @@ pub fn landing(
         .justify_center()
         .gap(px(M.compact))
         .w_full()
-        .min_h(px(M.primary_height
-            + M.compact_height
-            + M.secondary
-            + M.compact * 2.))
+        .max_w(px(super::REFERENCE_CONTENT_DIMENSIONS.0 - 2. * M.inset))
+        // Balance the reserved cancellation row so the focal action does not
+        // shift when inspection starts or finishes.
+        .child(div().h(px(M.compact_height)).flex_shrink_0())
         .child(open)
         .child(
             div()
@@ -41,7 +41,7 @@ pub fn landing(
                 .child(if inspecting {
                     "Checking file…"
                 } else {
-                    "or drop media files anywhere"
+                    "or drop videos anywhere"
                 }),
         )
         .child(
@@ -63,14 +63,20 @@ pub fn summary(presentation: WorkspacePresentation, path: String, palette: Palet
         .child(
             div()
                 .font_weight(FontWeight::SEMIBOLD)
+                .id("source-name")
                 .w_full()
                 .truncate()
-                .child(presentation.file_name),
+                .child(presentation.file_name.clone())
+                .tooltip(move |_, cx| {
+                    cx.new(|_| SourcePath(presentation.file_name.clone(), palette))
+                        .into()
+                }),
         )
         .children(presentation.metadata.map(|metadata| {
             div()
                 .text_size(px(M.secondary))
                 .text_color(rgba(palette.secondary()))
+                .truncate()
                 .child(metadata)
         }))
         .child(

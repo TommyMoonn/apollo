@@ -16,7 +16,6 @@ use crate::ui::frame_capture::{
 };
 use crate::ui::remux::RemuxSelectionAction;
 use crate::ui::upscale::UpscaleSelectionAction;
-use crate::ui::workspace::{EditableQueuedJob, WorkspaceAction, WorkspaceMode};
 use crate::ui::{
     OperationSurfaceMode, audio_extract as audio_extract_ui, audio_mix as audio_mix_ui,
     frame_capture as frame_capture_ui, layout, media_error, queue as queue_ui, remux as remux_ui,
@@ -156,7 +155,7 @@ impl ApolloApp {
                 });
                 return;
             }
-            NavigationState::NoSource => {
+            NavigationState::NoSource | NavigationState::Settings { .. } => {
                 return;
             }
             NavigationState::SourceWorkspace { active_operation } => active_operation,
@@ -166,44 +165,7 @@ impl ApolloApp {
             return;
         };
         let source_surface_key = egui::Id::new(media.path.as_path());
-        let Some(source_presentation) = self.state.source_presentation.clone() else {
-            return;
-        };
 
-        if self.operation_ready_surface(active_operation) {
-            let editable_jobs = self
-                .core
-                .queue
-                .scheduler()
-                .waiting_jobs()
-                .map(|job| EditableQueuedJob {
-                    id: job.id(),
-                    source: &job.media().path,
-                    operation: job.operation().display_name(),
-                    output: job.operation().output(),
-                })
-                .collect::<Vec<_>>();
-            let workspace_action = layout::workspace_chrome(ui, |ui| {
-                workspace::show(
-                    ui,
-                    &source_presentation.workspace,
-                    active_operation,
-                    WorkspaceMode::Source {
-                        pending_queue_count: self.core.queue.scheduler().pending_count(),
-                        enabled: self.file_intake_enabled(),
-                        editable_jobs: &editable_jobs,
-                        queue_editing_allowed: self.core.queue.scheduler().can_edit(),
-                    },
-                )
-            })
-            .inner;
-            self.handle_workspace_action(workspace_action);
-        }
-
-        let Some(active_operation) = self.core.active_operation() else {
-            ui.ctx().request_repaint();
-            return;
-        };
         let surface_key = egui::Id::new((active_operation.label(), source_surface_key));
         let ready_surface = self.operation_ready_surface(active_operation);
         if ready_surface && let Some(error) = self.core.source.error() {
@@ -281,19 +243,17 @@ impl ApolloApp {
         let active_operation = edit.active_operation;
         let enabled = !self.file_dialog.is_pending();
         let workspace_action = layout::workspace_chrome(ui, |ui| {
-            workspace::show(
+            workspace::show_fixed_editor(
                 ui,
                 &presentation.workspace,
                 active_operation,
-                WorkspaceMode::FixedSourceEdit {
-                    context: "Editing queued item",
-                    enabled,
-                    operation_switching: true,
-                },
+                "Editing queued item",
+                enabled,
+                true,
             )
         })
         .inner;
-        if let WorkspaceAction::SelectOperation(operation) = workspace_action {
+        if let Some(operation) = workspace_action {
             self.select_queue_edit_tool(operation);
         }
 

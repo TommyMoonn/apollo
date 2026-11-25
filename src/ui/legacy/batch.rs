@@ -14,8 +14,7 @@ use crate::{
     ui::{
         OperationSurfaceMode,
         batch::{self as batch_ui, BatchItemView},
-        layout, media_error, theme,
-        workspace::{self, WorkspaceMode},
+        layout, media_error, theme, workspace,
     },
 };
 use egui::Ui;
@@ -186,18 +185,16 @@ impl ApolloApp {
         let operation = edit.active_operation;
         let enabled = !self.file_dialog.is_pending();
         layout::workspace_chrome(ui, |ui| {
-            workspace::show(
+            workspace::show_fixed_editor(
                 ui,
                 &presentation.workspace,
                 operation,
-                WorkspaceMode::FixedSourceEdit {
-                    context: match target {
-                        BatchEditTarget::Defaults => "Edit shared settings",
-                        BatchEditTarget::Item(_) => "Edit settings",
-                    },
-                    enabled,
-                    operation_switching: false,
+                match target {
+                    BatchEditTarget::Defaults => "Edit shared settings",
+                    BatchEditTarget::Item(_) => "Edit settings",
                 },
+                enabled,
+                false,
             )
         });
         let capabilities = self.core.discovery.settled_capabilities().map_or(

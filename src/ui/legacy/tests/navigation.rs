@@ -81,7 +81,7 @@ fn close_source_returns_to_true_empty_intake() {
         app.select_tool(operation);
     }
 
-    app.handle_source_action(SourceAction::CloseSource);
+    app.close_source();
 
     assert_no_source(&app.core);
     assert!(app.state.audio_mix.is_none());
@@ -113,7 +113,7 @@ fn intake_queue_navigation_and_back_preserve_jobs() {
     assert_eq!(
         app.core.navigation(),
         NavigationState::Queue {
-            origin: QueueOrigin::NoSource
+            origin: ShellOrigin::NoSource
         }
     );
     assert!(app.handle_queue_action(QueueAction::Back));
@@ -140,7 +140,7 @@ fn workspace_queue_navigation_restores_the_same_source_and_operation() {
     assert_eq!(
         app.core.navigation(),
         NavigationState::Queue {
-            origin: QueueOrigin::SourceWorkspace {
+            origin: ShellOrigin::SourceWorkspace {
                 active_operation: Operation::Remux
             }
         }

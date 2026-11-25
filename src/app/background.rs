@@ -1,5 +1,5 @@
 //! Foreground settlement of renderer-independent workers. Workers publish before waking.
-use super::{Application, Operation, source::SourceSettlement};
+use super::{Application, source::SourceSettlement};
 use crate::media::process::MediaProcessWake;
 
 impl Application {
@@ -18,7 +18,7 @@ impl Application {
             self.frame_work.cancel_copy();
             self.frame_work.cancel_preview();
             self.frame_work.cancel_index();
-            self.enter_workspace(self.active_operation().unwrap_or(Operation::AudioMix));
+            self.source_published();
         }
         let batch_changed = self.poll_batch_inspection();
         tools_changed || queue_changed || settlement != SourceSettlement::Unchanged || batch_changed

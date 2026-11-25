@@ -346,3 +346,58 @@ fn empty_or_invalid_external_selection_does_not_start_inspection() {
     assert!(unavailable.settings.source_directory().is_none());
     assert!(!unavailable.source.is_inspecting());
 }
+
+#[test]
+fn source_completion_updates_the_return_origin_without_leaving_temporary_routes() {
+    use crate::app::{NavigationState, Operation, ShellOrigin};
+    let fixture = Fixture::new();
+    let first = fixture.file("first.mkv");
+    let second = fixture.file("second.mkv");
+    for settings in [false, true] {
+        for replacement in [false, true] {
+            let mut app = ready_application(&fixture);
+            let expected = if replacement {
+                accept(&mut app.source, &first);
+                app.enter_workspace(Operation::Remux);
+                Operation::Remux
+            } else {
+                Operation::AudioMix
+            };
+            let pending = request(&mut app.source, &second);
+            let (sender, receiver) = mpsc::channel();
+            app.source.attach_inspection(pending, receiver);
+            assert!(if settings {
+                app.enter_settings()
+            } else {
+                app.enter_queue()
+            });
+            sender.send(Ok(media(&second))).unwrap();
+            assert!(app.poll_background(|| panic!("navigation must not launch jobs")));
+            let origin = ShellOrigin::SourceWorkspace {
+                active_operation: expected,
+            };
+            assert_eq!(
+                app.navigation(),
+                if settings {
+                    NavigationState::Settings { origin }
+                } else {
+                    NavigationState::Queue { origin }
+                }
+            );
+            if settings {
+                app.return_from_settings();
+            } else {
+                app.return_from_queue();
+            }
+            assert_eq!(app.active_operation(), Some(expected));
+            assert_eq!(app.source.current().unwrap().path, second);
+            let id = app.source.session_id();
+            for operation in Operation::ALL {
+                app.select_operation(operation);
+                assert_eq!(app.active_operation(), Some(operation));
+                assert_eq!(app.source.session_id(), id);
+                assert_eq!(app.source.current().unwrap().path, second);
+            }
+        }
+    }
+}

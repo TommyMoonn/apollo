@@ -16,6 +16,8 @@ pub mod queue;
 pub mod remux;
 #[cfg(windows)]
 pub mod root;
+#[cfg(windows)]
+mod shell;
 pub mod source_presentation;
 pub mod theme;
 pub mod upscale;
@@ -117,11 +119,24 @@ pub(crate) fn show_queue_confirmation(ui: &mut egui::Ui, visible: bool) {
 }
 
 pub fn queue_count_label(count: usize) -> String {
-    format!("Queue ({count})")
+    if count == 0 {
+        "Queue".to_owned()
+    } else {
+        format!("Queue ({count})")
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceAction {
-    ChangeFile,
-    CloseSource,
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn queue_label_shows_only_unfinished_count() {
+        for (count, expected) in [
+            (0, "Queue"),
+            (1, "Queue (1)"),
+            (99, "Queue (99)"),
+            (1000, "Queue (1000)"),
+        ] {
+            assert_eq!(super::queue_count_label(count), expected);
+        }
+    }
 }

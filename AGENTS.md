@@ -43,7 +43,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 
 ## Keep ownership clear
 
-`Application` owns the route, media-tool discovery, source intake, queue and interactive frame work. The GPUI root owns one core. The legacy `ApolloApp` retains the existing behavior contracts while the GPUI background and feature integration is completed. Keep route transitions in the core and renderer-dependent presentation and worker state in the adapter. Each operation owns its typed draft and request construction in `draft.rs`. Normal forms and independent editors reuse these drafts; the adapter retains presentation, lifecycle feedback and action routing. Keep execution validation in the operation validators and preparation functions.
+`Application` owns the route, media-tool discovery, source intake, queue and interactive frame work. The GPUI root owns one core. The legacy `ApolloApp` retains the existing behavior contracts while the GPUI background and feature integration is completed. Keep route transitions and typed return origins in `src/app/navigation.rs`; keep renderer-dependent presentation and worker state in the adapter. Each operation owns its typed draft and request construction in `draft.rs`. Normal forms and independent editors reuse these drafts; the adapter retains presentation, lifecycle feedback and action routing. Keep execution validation in the operation validators and preparation functions.
 
 `SourceSession` in `src/app/source.rs` owns source acceptance, worker settlement and session retirement. `MediaIntake` remains responsible for source identity, retained probe results and pending requests. Keep accepted source presentation and drafts intact until replacement succeeds. `src/app/batch.rs` owns batch setup, stable item identity, defaults, overrides, inspection settlement and atomic submission. `BatchInspectionOwner` manages probing and limits each active inspection session to two concurrent probes. Preserve request identity checks so results from an earlier request cannot replace the current source or batch state.
 
@@ -67,7 +67,7 @@ Prefer early returns and readable control flow. Write comments for invariants an
 
 ## Build a consistent, accessible interface
 
-Follow [the UI design guide](docs/DESIGN.md). New GPUI views use `src/ui/design.rs` and `src/ui/components.rs`; the egui `widgets`, `layout`, `theme` and `fonts` modules serve only retained views and tests.
+Follow [the UI design guide](docs/DESIGN.md). New GPUI views use `src/ui/design.rs`, `src/ui/components.rs` and the shared page layout in `src/ui/shell.rs`; the egui `widgets`, `layout`, `theme` and `fonts` modules serve only retained views and tests.
 
 Handle applicable loading, empty, error, success and cancellation states. Keep dimensions stable when feedback changes. Preserve keyboard access, visible focus, readable labels and appropriate hit areas. Follow the shared motion policy and keep animations restrained.
 

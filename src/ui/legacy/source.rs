@@ -8,16 +8,15 @@ use super::{
     ApolloApp, completion_wake,
     state::{FrameCaptureEditor, FrameCaptureToolState},
 };
-use crate::app::dialogs::FileDialogRequest;
 use crate::app::{Operation, QueueEditOrigin, source::SourceSettlement};
 use crate::media::intake::{MediaIntakeRequest, MediaLoadStart};
 #[cfg(test)]
 use crate::media::{model::MediaFile, probe::MediaProbeError};
 use crate::queue::QueuedOperation;
-use crate::ui::frame_capture::{FrameCopyStatus, PositionSettle};
-use crate::ui::{
-    SourceAction, source_presentation::SourcePresentation, workspace::WorkspaceAction,
-};
+#[cfg(test)]
+use crate::ui::frame_capture::FrameCopyStatus;
+use crate::ui::frame_capture::PositionSettle;
+use crate::ui::source_presentation::SourcePresentation;
 use crate::{
     audio_extract::draft::AudioExtractDraft, audio_mix::draft::AudioMixDraft,
     frame_capture::draft::FrameCaptureDraft, remux::draft::RemuxDraft,
@@ -31,20 +30,6 @@ impl ApolloApp {
         self.batch_editor_presentation = None;
         self.batch_append_error_details_open = false;
         self.state.intake_error_details_open = false;
-    }
-
-    pub(super) fn handle_source_action(&mut self, action: SourceAction) {
-        if !self.file_intake_enabled() {
-            return;
-        }
-        self.core.queue_confirmation = None;
-        self.core.operation_action_error = None;
-        match action {
-            SourceAction::ChangeFile => self.start_file_dialog(FileDialogRequest::OpenSource {
-                initial_directory: None,
-            }),
-            SourceAction::CloseSource => self.close_source(),
-        }
     }
 
     pub(super) fn close_source(&mut self) {
@@ -72,6 +57,7 @@ impl ApolloApp {
         self.activate_cached_source(operation)
     }
 
+    #[cfg(test)]
     pub(super) fn select_tool(&mut self, tool: Operation) {
         if !self.file_intake_enabled() {
             return;
@@ -92,7 +78,7 @@ impl ApolloApp {
             }
         }
         if self.activate_cached_source(tool) {
-            self.core.show_workspace(tool);
+            self.core.select_operation(tool);
             if tool == Operation::FrameCapture {
                 self.schedule_active_frame_capture_support();
             }
@@ -268,26 +254,14 @@ impl ApolloApp {
             && !matches!(
                 self.core.navigation(),
                 crate::app::NavigationState::Queue {
-                    origin: crate::app::QueueOrigin::BatchSetup
+                    origin: crate::app::ShellOrigin::BatchSetup
                 } | crate::app::NavigationState::QueueEdit {
-                    origin: QueueEditOrigin::Queue(crate::app::QueueOrigin::BatchSetup)
+                    origin: QueueEditOrigin::Queue(crate::app::ShellOrigin::BatchSetup)
                 }
             )
             && !self.core.source.is_inspecting()
             && !self.file_dialog.is_pending()
             && !self.copy_frame_active()
-    }
-
-    pub(super) fn handle_workspace_action(&mut self, action: WorkspaceAction) {
-        match action {
-            WorkspaceAction::Source(action) => self.handle_source_action(action),
-            WorkspaceAction::SelectOperation(operation) => self.select_tool(operation),
-            WorkspaceAction::EditQueuedJob(job_id) => {
-                self.begin_queue_edit(job_id, QueueEditOrigin::SourceWorkspace);
-            }
-            WorkspaceAction::OpenQueue => self.enter_queue(),
-            WorkspaceAction::None => {}
-        }
     }
 
     pub(super) fn restore_queued_job_workspace(&mut self, request: &QueuedOperation) -> bool {

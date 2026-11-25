@@ -59,10 +59,6 @@ pub const QUEUE_ROW_HEIGHT: f32 = 44.0;
 pub const BATCH_IDENTITY_MIN_WIDTH: f32 = 180.0;
 pub const BATCH_ROW_HEIGHT: f32 = 44.0;
 
-/// Useful source identity width retained beside workspace source actions before compact metadata
-/// is omitted at narrow widths.
-pub const WORKSPACE_METADATA_MIN_WIDTH: f32 = 220.0;
-
 /// Narrow focal width used by Audio Mix running and terminal surfaces.
 pub const FOCUS_CONTENT_MAX_WIDTH: f32 = 470.0;
 
@@ -700,17 +696,6 @@ pub fn action_layout(available_width: f32, action_widths: &[f32]) -> ActionLayou
     }
 }
 
-pub fn workspace_header_shows_metadata(available_width: f32, source_action_widths: &[f32]) -> bool {
-    let action_width = source_action_widths
-        .iter()
-        .copied()
-        .map(safe_dimension)
-        .sum::<f32>()
-        + source_action_widths.len().saturating_sub(1) as f32 * theme::INLINE_ACTION_GAP;
-    safe_dimension(available_width)
-        >= action_width + theme::SOURCE_HEADER_GAP + WORKSPACE_METADATA_MIN_WIDTH
-}
-
 pub fn workspace_switcher_fits_one_line(available_width: f32, control_widths: &[f32]) -> bool {
     matches!(
         action_layout(available_width, control_widths),
@@ -937,8 +922,7 @@ mod tests {
         MINIMUM_CONTENT_SIZE, OutputRowLayout, QUEUE_IDENTITY_MIN_WIDTH, QueueRowLayout,
         action_layout, batch_row_plan, bounded_content_width, centered_action_group,
         field_pair_layout, focus_content, live_preview_size, operation_surface, output_row_plan,
-        queue_row_plan, surface_fade, workspace_header_shows_metadata,
-        workspace_switcher_fits_one_line,
+        queue_row_plan, surface_fade, workspace_switcher_fits_one_line,
     };
     use crate::ui::theme;
 
@@ -1042,20 +1026,6 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].right() <= pair[1].left())
         );
-    }
-
-    #[test]
-    fn workspace_header_drops_metadata_before_source_actions_cramp() {
-        let source_action_widths = [72.0, 85.0];
-
-        assert!(workspace_header_shows_metadata(
-            564.0,
-            &source_action_widths
-        ));
-        assert!(!workspace_header_shows_metadata(
-            344.0,
-            &source_action_widths
-        ));
     }
 
     #[test]
