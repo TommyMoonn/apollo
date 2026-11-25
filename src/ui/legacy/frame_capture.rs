@@ -1,11 +1,8 @@
 //! Frame Capture presentation and routing to the current editor.
-use super::{
-    ApolloApp, completion_wake,
-    state::{BatchEditTarget, FramePreviewTexture},
-};
-use crate::app::editor::OperationEditorState;
+use super::{ApolloApp, completion_wake, state::FramePreviewTexture};
 use crate::app::frame_capture::{FrameCaptureEditorState, FrameCopyStatus, PositionSettle};
 use crate::app::{NavigationState, Operation, dialogs::OutputDraft};
+use crate::app::{batch::BatchEditTarget, editor::OperationEditorState};
 use crate::frame_capture::{
     clipboard::{CopyFrameError, CopyFrameRequest},
     execution::FrameCaptureStartError,
@@ -44,6 +41,7 @@ impl ApolloApp {
                 .filter(|edit| edit.active_operation == Operation::FrameCapture)
                 .map(|edit| (&edit.media, &edit.frame_capture)),
             NavigationState::BatchEdit => self
+                .core
                 .batch_edit
                 .as_ref()
                 .filter(|edit| {
@@ -69,7 +67,18 @@ impl ApolloApp {
         &mut FrameCaptureEditorState,
         &mut Option<FramePreviewTexture>,
     )> {
-        match self.core.navigation() {
+        self.frame_capture_parts_mut(self.core.navigation())
+    }
+
+    fn frame_capture_parts_mut(
+        &mut self,
+        route: NavigationState,
+    ) -> Option<(
+        &MediaFile,
+        &mut FrameCaptureEditorState,
+        &mut Option<FramePreviewTexture>,
+    )> {
+        match route {
             NavigationState::SourceWorkspace {
                 active_operation: Operation::FrameCapture,
             } => self.state.frame_capture.as_mut().map(|session| {
@@ -93,7 +102,7 @@ impl ApolloApp {
                 Some((media, frame_capture, &mut presentation.preview_texture))
             }
             NavigationState::BatchEdit => {
-                let edit = self.batch_edit.as_mut().filter(|edit| {
+                let edit = self.core.batch_edit.as_mut().filter(|edit| {
                     matches!(edit.target, BatchEditTarget::Item(_))
                         && edit.active_operation == Operation::FrameCapture
                 })?;
@@ -102,7 +111,11 @@ impl ApolloApp {
                     frame_capture,
                     ..
                 } = &mut edit.editor;
-                Some((media, frame_capture, &mut edit.presentation.preview_texture))
+                Some((
+                    media,
+                    frame_capture,
+                    &mut self.batch_editor_presentation.as_mut()?.preview_texture,
+                ))
             }
             _ => None,
         }
@@ -383,9 +396,13 @@ impl ApolloApp {
     }
 
     pub(super) fn suspend_frame_capture_support(&mut self) {
+        self.suspend_frame_capture_support_from(self.core.navigation());
+    }
+
+    pub(super) fn suspend_frame_capture_support_from(&mut self, route: NavigationState) {
         self.core.frame_work.cancel_preview();
         self.core.frame_work.cancel_index();
-        if let Some((_, editor)) = self.active_frame_capture_editor_mut() {
+        if let Some((_, editor, _)) = self.frame_capture_parts_mut(route) {
             editor.suspend_support();
         }
     }

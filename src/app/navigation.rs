@@ -89,6 +89,15 @@ impl Application {
 
     fn set_navigation(&mut self, navigation: NavigationState) {
         if self.navigation != navigation {
+            if matches!(
+                self.navigation,
+                NavigationState::BatchSetup | NavigationState::BatchEdit
+            ) && !matches!(
+                navigation,
+                NavigationState::BatchSetup | NavigationState::BatchEdit
+            ) {
+                self.retire_batch();
+            }
             self.navigation_revision = self
                 .navigation_revision
                 .checked_add(1)

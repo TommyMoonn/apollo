@@ -5,6 +5,7 @@ mod audio_mix;
 mod remux;
 mod upscale;
 
+mod batch;
 mod dialogs;
 mod frame_capture;
 mod preferences;
@@ -24,17 +25,14 @@ use crate::progress_repaint::MediaProgressRepaintOwner;
 use crate::settings::AppSettings;
 use crate::ui::{fonts, theme};
 
-use state::{
-    BatchEditState, BatchInspectionSession, BatchSetupState, EditorPresentation, LegacyEditorState,
-};
+use state::{EditorPresentation, LegacyEditorState};
 
 pub struct ApolloApp {
     core: Application,
     state: LegacyEditorState,
     queue_editor_presentation: Option<EditorPresentation>,
-    batch_setup: Option<BatchSetupState>,
-    batch_edit: Option<BatchEditState>,
-    batch_inspection: Option<BatchInspectionSession>,
+    batch_editor_presentation: Option<EditorPresentation>,
+    batch_append_error_details_open: bool,
     progress_repaint: MediaProgressRepaintOwner,
     file_dialog: FileDialogOwner,
     clipboard_owner: Option<isize>,
@@ -81,9 +79,8 @@ impl ApolloApp {
             core: Application::with_settings(settings),
             state: LegacyEditorState::default(),
             queue_editor_presentation: None,
-            batch_setup: None,
-            batch_edit: None,
-            batch_inspection: None,
+            batch_editor_presentation: None,
+            batch_append_error_details_open: false,
             progress_repaint: MediaProgressRepaintOwner::new(completion_wake(&egui_context)),
             file_dialog,
             clipboard_owner,
@@ -96,12 +93,7 @@ impl ApolloApp {
     fn poll_background_work(&mut self) {
         if self.core.discovery.poll() {
             self.tools_error_details_open = false;
-            // Batch defaults prepared while capabilities were pending must be reconsidered on settlement.
-            if let Some(batch) = self.batch_setup.as_mut()
-                && batch.operation == crate::app::Operation::VideoUpscale
-            {
-                workflows::refresh_batch_items(batch, self.core.discovery.upscale_capabilities());
-            }
+            self.core.refresh_batch_capabilities();
         }
         let progress = &mut self.progress_repaint;
         self.core.poll_media_queue(|| progress.begin());
@@ -110,7 +102,7 @@ impl ApolloApp {
         }
         self.poll_file_dialog();
         self.poll_media_inspection();
-        self.poll_batch_inspection();
+        self.core.poll_batch_inspection();
         self.poll_frame_capture_preview();
         self.poll_frame_capture_index();
         self.poll_copy_frame();
@@ -121,6 +113,7 @@ impl ApolloApp {
         self.cancel_copy_frame_work();
         self.cancel_frame_capture_support();
         self.core.frame_work.cancel_thumbnail();
+        self.core.retire_batch();
         self.core.queue.cancel();
     }
 }

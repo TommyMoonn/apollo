@@ -61,7 +61,9 @@ impl ApolloApp {
                 NavigationState::QueueEdit { .. } => {
                     self.core.queue_edit_mut().map(|edit| &mut edit.editor)
                 }
-                NavigationState::BatchEdit => self.batch_edit.as_mut().map(|edit| &mut edit.editor),
+                NavigationState::BatchEdit => {
+                    self.core.batch_edit.as_mut().map(|edit| &mut edit.editor)
+                }
                 _ => None,
             }
             .filter(|edit| edit.session_id == session_id);
@@ -88,7 +90,8 @@ impl ApolloApp {
         }
         // A batch append is valid only while the original batch setup is active.
         if target == DialogTarget::BatchAppend
-            && (self.core.navigation() != NavigationState::BatchSetup || self.batch_setup.is_none())
+            && (self.core.navigation() != NavigationState::BatchSetup
+                || self.core.batch_setup.is_none())
         {
             return;
         }
@@ -110,11 +113,9 @@ impl ApolloApp {
                 self.settle_batch_paths(target, paths);
             }
             (DialogTarget::BatchAppend, DialogOutcome::Failed(diagnostic)) => {
-                if let Some(batch) = self.batch_setup.as_mut() {
-                    batch.error = None;
-                    batch.append_error = Some(MediaError::file_picker_unavailable(diagnostic));
-                    batch.append_error_details_open = false;
-                }
+                self.core
+                    .set_batch_append_error(MediaError::file_picker_unavailable(diagnostic));
+                self.batch_append_error_details_open = false;
             }
             (
                 DialogTarget::MediaInput | DialogTarget::BatchInput,

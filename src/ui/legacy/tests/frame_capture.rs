@@ -568,80 +568,12 @@ fn missing_video_preview_request_schedules_no_delayed_repaint() {
 }
 
 #[test]
-fn frame_capture_defaults_apply_before_per_source_timestamp_validation() {
-    let (first_directory, first_path) = temp_file("batch-short-video-first");
-    let (second_directory, second_path) = temp_file("batch-long-video-second");
-    let mut first_media = media(&first_path);
-    first_media.duration = Some(Duration::from_secs(5));
-    let mut second_media = media(&second_path);
-    second_media.duration = Some(Duration::from_secs(20));
-    let mut app = app();
-    app.batch_setup = Some(BatchSetupState {
-        origin: BatchOrigin::NoSource,
-        operation: Operation::FrameCapture,
-        defaults: Some(BatchDefaults::FrameCapture {
-            timestamp: FrameTimestamp::ZERO,
-            format: FrameCaptureFormat::Png,
-        }),
-        items: vec![
-            BatchItem {
-                path: first_path,
-                included: true,
-                source: ready_batch_source(first_media),
-                operation: None,
-                readiness: BatchReadiness::Inspecting,
-                reason: None,
-                overridden: false,
-            },
-            BatchItem {
-                path: second_path,
-                included: true,
-                source: ready_batch_source(second_media),
-                operation: None,
-                readiness: BatchReadiness::Inspecting,
-                reason: None,
-                overridden: false,
-            },
-        ],
-        error: None,
-        append_error: None,
-        append_error_details_open: false,
-    });
-    app.core.show_batch_setup();
-
-    assert!(app.begin_batch_edit(BatchEditTarget::Defaults));
-    let edit = app.batch_edit.as_mut().unwrap();
-    let representative = edit.media.clone();
-    edit.frame_capture
-        .set_timestamp_text(&representative, "00:00:10.000".to_owned());
-    edit.frame_capture.set_format(FrameCaptureFormat::Jpeg);
-    assert!(app.save_batch_edit());
-
-    let batch = app.batch_setup.as_ref().unwrap();
-    assert_eq!(batch.items[0].readiness, BatchReadiness::NeedsAttention);
-    assert_eq!(
-        batch.items[0].reason.as_deref(),
-        Some("Timestamp is outside this source's duration.")
-    );
-    assert_eq!(batch.items[1].readiness, BatchReadiness::Ready);
-    assert!(matches!(
-        batch.items[1].operation.as_ref(),
-        Some(QueuedOperation::FrameCapture(request))
-            if request.position.to_string() == "00:00:10.000"
-                && request.format == FrameCaptureFormat::Jpeg
-    ));
-    assert_no_batch_execution(&app);
-    fs::remove_dir_all(first_directory).unwrap();
-    fs::remove_dir_all(second_directory).unwrap();
-}
-
-#[test]
 fn batch_frame_capture_defaults_stay_simple_while_item_override_owns_precision_support() {
     let (directory, path) = temp_file("batch-frame-capture-preview");
     let source = media(&path);
     let request = FrameCaptureDraft::new(&source).request(&source).unwrap();
     let mut app = app();
-    app.batch_setup = Some(BatchSetupState {
+    app.core.batch_setup = Some(BatchSetupState {
         origin: BatchOrigin::NoSource,
         operation: Operation::FrameCapture,
         defaults: Some(BatchDefaults::FrameCapture {
@@ -649,6 +581,7 @@ fn batch_frame_capture_defaults_stay_simple_while_item_override_owns_precision_s
             format: FrameCaptureFormat::Png,
         }),
         items: vec![BatchItem {
+            id: BatchItemId(0),
             path: path.clone(),
             included: true,
             source: ready_batch_source(source),
@@ -659,7 +592,6 @@ fn batch_frame_capture_defaults_stay_simple_while_item_override_owns_precision_s
         }],
         error: None,
         append_error: None,
-        append_error_details_open: false,
     });
     app.core.show_batch_setup();
     let context = egui::Context::default();
@@ -667,7 +599,7 @@ fn batch_frame_capture_defaults_stay_simple_while_item_override_owns_precision_s
     theme::install(&context);
 
     assert!(app.begin_batch_edit(BatchEditTarget::Defaults));
-    let defaults = app.batch_edit.as_ref().unwrap();
+    let defaults = app.core.batch_edit.as_ref().unwrap();
     assert!(defaults.frame_capture.source_identity.is_none());
     assert!(matches!(
         defaults.frame_capture.preview.state(),
@@ -679,8 +611,8 @@ fn batch_frame_capture_defaults_stay_simple_while_item_override_owns_precision_s
     output.textures_delta.clear();
     assert!(app.finish_batch_edit());
 
-    assert!(app.begin_batch_edit(BatchEditTarget::Item(0)));
-    let item_edit = app.batch_edit.as_ref().unwrap();
+    assert!(app.begin_batch_edit(BatchEditTarget::Item(BatchItemId(0))));
+    let item_edit = app.core.batch_edit.as_ref().unwrap();
     assert!(item_edit.frame_capture.source_identity.is_some());
     assert!(matches!(
         item_edit.frame_capture.preview.state(),
@@ -697,17 +629,18 @@ fn batch_frame_capture_defaults_stay_simple_while_item_override_owns_precision_s
     );
     app.request_frame_step(FrameDirection::Next);
     let selected = app
+        .core
         .batch_edit
         .as_ref()
         .unwrap()
         .frame_capture
-        .valid_position(&app.batch_edit.as_ref().unwrap().media)
+        .valid_position(&app.core.batch_edit.as_ref().unwrap().media)
         .unwrap();
     assert!(app.save_batch_edit());
-    let Some(QueuedOperation::FrameCapture(saved)) = app.batch_setup.as_ref().unwrap().items[0]
-        .operation
-        .as_ref()
-    else {
+    let Some(QueuedOperation::FrameCapture(saved)) = app.core.batch_setup.as_ref().unwrap().items
+        [0]
+    .operation
+    .as_ref() else {
         panic!("batch item must save a Frame Capture request");
     };
     assert_eq!(saved.position, selected);

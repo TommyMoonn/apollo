@@ -49,7 +49,7 @@ impl BatchInspectionOwner {
         })
     }
 
-    fn spawn_with<F>(
+    pub(crate) fn spawn_with<F>(
         paths: Vec<PathBuf>,
         wake: impl Fn() + Clone + Send + 'static,
         inspect: F,
@@ -69,27 +69,30 @@ impl BatchInspectionOwner {
         for worker_index in 0..worker_count {
             let work = Arc::clone(&work);
             let inspect = Arc::clone(&inspect);
-            let cancellation = Arc::clone(&cancellation);
+            let worker_cancellation = Arc::clone(&cancellation);
             let sender = sender.clone();
             let wake = wake.clone();
-            thread::Builder::new()
+            let spawned = thread::Builder::new()
                 .name(format!("apollo-batch-inspection-{worker_index}"))
                 .spawn(move || {
                     loop {
-                        if cancellation.load(Ordering::Acquire) {
+                        if worker_cancellation.load(Ordering::Acquire) {
                             break;
                         }
                         let next = work.lock().ok().and_then(|mut work| work.pop_front());
                         let Some((index, path)) = next else {
                             break;
                         };
+                        if worker_cancellation.load(Ordering::Acquire) {
+                            break;
+                        }
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             inspect(&path)
                         }))
                         .unwrap_or_else(|_| {
                             Err("Media inspection worker stopped unexpectedly.".to_owned())
                         });
-                        if cancellation.load(Ordering::Acquire) {
+                        if worker_cancellation.load(Ordering::Acquire) {
                             break;
                         }
                         if sender
@@ -100,7 +103,11 @@ impl BatchInspectionOwner {
                         }
                         wake();
                     }
-                })?;
+                });
+            if let Err(error) = spawned {
+                cancellation.store(true, Ordering::Release);
+                return Err(error);
+            }
         }
         drop(sender);
         Ok(Self {
@@ -112,9 +119,18 @@ impl BatchInspectionOwner {
 
     pub fn poll(&mut self) -> Vec<BatchInspectionResult> {
         let mut results = Vec::new();
-        while let Ok(result) = self.receiver.try_recv() {
-            self.remaining = self.remaining.saturating_sub(1);
-            results.push(result);
+        loop {
+            match self.receiver.try_recv() {
+                Ok(result) => {
+                    self.remaining = self.remaining.saturating_sub(1);
+                    results.push(result);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.remaining = 0;
+                    break;
+                }
+            }
         }
         results
     }

@@ -19,15 +19,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::state::{
-    BatchDefaults, BatchEditTarget, BatchItem, BatchSetupState, BatchSourceState,
-    FrameCaptureToolState,
-};
+use super::state::FrameCaptureToolState;
 use super::workflows::{
-    refresh_batch_items, shows_audio_extract_lifecycle, shows_audio_mix_lifecycle,
-    shows_frame_capture_lifecycle, shows_remux_lifecycle, shows_upscale_lifecycle,
+    shows_audio_extract_lifecycle, shows_audio_mix_lifecycle, shows_frame_capture_lifecycle,
+    shows_remux_lifecycle, shows_upscale_lifecycle,
 };
 use super::{ApolloApp, completion_wake};
+use crate::app::batch::{
+    BatchDefaults, BatchEditTarget, BatchItem, BatchItemId, BatchReadiness, BatchSetupState,
+    BatchSourceState, refresh_batch_items,
+};
 use crate::app::discovery::{MediaToolsDiscovery, MediaToolsState};
 use crate::app::{
     Application, BatchOrigin, NavigationState, Operation, QueueAction, QueueEditOrigin,
@@ -71,8 +72,8 @@ use crate::{
     remux::execution::RemuxExecutionState,
     ui::{
         SourceAction, audio_extract::AudioExtractSelectionAction,
-        audio_mix::AudioMixSelectionAction, batch::BatchReadiness, file_intake::FileIntakeAction,
-        fonts, frame_capture::FrameCaptureSelectionAction,
+        audio_mix::AudioMixSelectionAction, file_intake::FileIntakeAction, fonts,
+        frame_capture::FrameCaptureSelectionAction,
         frame_capture_progress::FrameCaptureThumbnailState, layout, media_error,
         remux::RemuxSelectionAction, theme, upscale::UpscaleSelectionAction,
     },
@@ -215,13 +216,14 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
         Duration::MAX
     );
     // Batch defaults and overrides cannot bypass the pending capability gate.
-    app.batch_setup = Some(BatchSetupState {
+    app.core.batch_setup = Some(BatchSetupState {
         origin: BatchOrigin::SourceWorkspace {
             active_operation: Operation::VideoUpscale,
         },
         operation: Operation::VideoUpscale,
         defaults: None,
         items: vec![BatchItem {
+            id: BatchItemId(0),
             path: path.clone(),
             included: true,
             source: ready_batch_source(media(&path)),
@@ -232,17 +234,16 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
         }],
         error: None,
         append_error: None,
-        append_error_details_open: false,
     });
     app.core.show_batch_setup();
     refresh_batch_items(
-        app.batch_setup.as_mut().unwrap(),
+        app.core.batch_setup.as_mut().unwrap(),
         app.core.discovery.upscale_capabilities(),
     );
-    let item = &app.batch_setup.as_ref().unwrap().items[0];
+    let item = &app.core.batch_setup.as_ref().unwrap().items[0];
     assert_eq!(item.readiness, BatchReadiness::NeedsAttention);
     assert!(item.operation.is_none());
-    assert!(app.begin_batch_edit(BatchEditTarget::Item(0)));
+    assert!(app.begin_batch_edit(BatchEditTarget::Item(BatchItemId(0))));
     assert!(!app.save_batch_edit());
     assert!(app.finish_batch_edit());
     while wake_rx.try_recv().is_ok() {}
@@ -254,7 +255,7 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
     app.poll_background_work();
     assert!(!app.core.discovery.is_pending());
     assert!(!app.tools_error_details_open);
-    let item = &app.batch_setup.as_ref().unwrap().items[0];
+    let item = &app.core.batch_setup.as_ref().unwrap().items[0];
     assert_eq!(item.readiness, BatchReadiness::Ready);
     assert!(
         matches!(item.operation.as_ref(), Some(QueuedOperation::Upscale(request)) if request.nvenc_capability == VideoEncoderCapability::Available)
@@ -387,15 +388,6 @@ fn ready_batch_source(media: MediaFile) -> BatchSourceState {
         source_identity: intake.current_with_identity().unwrap().0.clone(),
         media,
     }
-}
-
-fn assert_no_batch_execution(app: &ApolloApp) {
-    assert!(app.core.queue.scheduler().jobs().is_empty());
-    assert!(!app.core.audio_mix_executor.is_running());
-    assert!(!app.core.upscale_executor.is_running());
-    assert!(!app.core.remux_executor.is_running());
-    assert!(!app.core.audio_extract_executor.is_running());
-    assert!(!app.core.frame_capture_executor.is_running());
 }
 
 fn populate_cancelled_and_failed_queue_history(app: &mut ApolloApp, path: &Path, directory: &Path) {
@@ -597,214 +589,6 @@ fn terminal_execution_states() -> [AudioMixExecutionState; 3] {
         }),
         AudioMixExecutionState::Cancelled,
     ]
-}
-
-#[test]
-fn audio_extract_batch_requires_explicit_selection_for_multi_track_sources() {
-    let (first_directory, first_path) = temp_file("batch-audio-first");
-    let (second_directory, second_path) = temp_file("batch-audio-second");
-    let first_media = media(&first_path);
-    let mut second_media = media(&second_path);
-    second_media.streams.push(MediaStream {
-        stream_index: 2,
-        kind: StreamKind::Audio,
-        codec: Some("aac".to_owned()),
-    });
-    second_media.audio_streams.push(AudioStream {
-        stream_index: 2,
-        codec: Some("aac".to_owned()),
-        channels: Some(2),
-        channel_layout: Some("stereo".to_owned()),
-        title: Some("Commentary".to_owned()),
-        language: Some("eng".to_owned()),
-    });
-    let mut batch = BatchSetupState {
-        origin: BatchOrigin::NoSource,
-        operation: Operation::AudioExtract,
-        defaults: Some(BatchDefaults::AudioExtract {
-            format: AudioExtractFormat::Original,
-        }),
-        items: vec![
-            BatchItem {
-                path: first_path,
-                included: true,
-                source: ready_batch_source(first_media),
-                operation: None,
-                readiness: BatchReadiness::Inspecting,
-                reason: None,
-                overridden: false,
-            },
-            BatchItem {
-                path: second_path,
-                included: true,
-                source: ready_batch_source(second_media),
-                operation: None,
-                readiness: BatchReadiness::Inspecting,
-                reason: None,
-                overridden: false,
-            },
-        ],
-        error: None,
-        append_error: None,
-        append_error_details_open: false,
-    };
-
-    refresh_batch_items(&mut batch, None);
-
-    assert_eq!(batch.items[0].readiness, BatchReadiness::Ready);
-    assert_eq!(batch.items[1].readiness, BatchReadiness::NeedsAttention);
-    assert_eq!(
-        batch.items[1].reason.as_deref(),
-        Some("Select one audio track.")
-    );
-    assert_ne!(
-        batch.items[0]
-            .operation
-            .as_ref()
-            .map(QueuedOperation::output),
-        batch.items[1]
-            .operation
-            .as_ref()
-            .map(QueuedOperation::output)
-    );
-    fs::remove_dir_all(first_directory).unwrap();
-    fs::remove_dir_all(second_directory).unwrap();
-}
-
-#[test]
-fn excluded_video_only_first_source_does_not_block_audio_extract_defaults() {
-    let (first_directory, first_path) = temp_file("batch-video-only-first");
-    let (second_directory, second_path) = temp_file("batch-audio-valid-second");
-    let mut first_media = media(&first_path);
-    first_media
-        .streams
-        .retain(|stream| stream.kind != StreamKind::Audio);
-    first_media.audio_streams.clear();
-    let second_media = media(&second_path);
-    let mut app = app();
-    app.batch_setup = Some(BatchSetupState {
-        origin: BatchOrigin::NoSource,
-        operation: Operation::AudioExtract,
-        defaults: Some(BatchDefaults::AudioExtract {
-            format: AudioExtractFormat::Original,
-        }),
-        items: vec![
-            BatchItem {
-                path: first_path,
-                included: false,
-                source: ready_batch_source(first_media),
-                operation: None,
-                readiness: BatchReadiness::Inspecting,
-                reason: None,
-                overridden: false,
-            },
-            BatchItem {
-                path: second_path.clone(),
-                included: true,
-                source: ready_batch_source(second_media),
-                operation: None,
-                readiness: BatchReadiness::Inspecting,
-                reason: None,
-                overridden: false,
-            },
-        ],
-        error: None,
-        append_error: None,
-        append_error_details_open: false,
-    });
-    app.core.show_batch_setup();
-    refresh_batch_items(app.batch_setup.as_mut().unwrap(), None);
-
-    assert!(app.begin_batch_edit(BatchEditTarget::Defaults));
-    app.batch_edit
-        .as_mut()
-        .unwrap()
-        .audio_extract
-        .set_format(AudioExtractFormat::Flac);
-    assert!(app.save_batch_edit());
-
-    let batch = app.batch_setup.as_ref().unwrap();
-    assert_eq!(batch.items[0].readiness, BatchReadiness::Incompatible);
-    assert_eq!(batch.items[0].reason.as_deref(), Some("No audio tracks."));
-    assert_eq!(batch.items[1].readiness, BatchReadiness::Ready);
-    assert!(matches!(
-        batch.items[1].operation.as_ref(),
-        Some(QueuedOperation::AudioExtract(request))
-            if request.input == second_path && request.format == AudioExtractFormat::Flac
-    ));
-    assert_no_batch_execution(&app);
-    fs::remove_dir_all(first_directory).unwrap();
-    fs::remove_dir_all(second_directory).unwrap();
-}
-
-#[test]
-fn batch_override_cancel_is_non_mutating_and_save_updates_only_the_item() {
-    let (directory, path) = temp_file("batch-override");
-    let source = media(&path);
-    let mut app = app();
-    let selection = crate::remux::draft::RemuxDraft::new(&source);
-    let original = QueuedOperation::Remux(selection.request(&source));
-    app.batch_setup = Some(BatchSetupState {
-        origin: BatchOrigin::NoSource,
-        operation: Operation::Remux,
-        defaults: Some(BatchDefaults::Remux {
-            container: MediaContainer::Matroska,
-        }),
-        items: vec![BatchItem {
-            path: path.clone(),
-            included: true,
-            source: ready_batch_source(source),
-            operation: Some(original.clone()),
-            readiness: BatchReadiness::Ready,
-            reason: None,
-            overridden: false,
-        }],
-        error: None,
-        append_error: None,
-        append_error_details_open: false,
-    });
-    app.core.show_batch_setup();
-
-    assert!(app.begin_batch_edit(BatchEditTarget::Item(0)));
-    app.batch_edit
-        .as_mut()
-        .unwrap()
-        .remux
-        .set_custom_output_path(directory.join("cancelled.mkv"));
-    assert!(app.finish_batch_edit());
-    assert_eq!(
-        app.batch_setup.as_ref().unwrap().items[0].operation,
-        Some(original.clone())
-    );
-
-    assert!(app.begin_batch_edit(BatchEditTarget::Item(0)));
-    let saved_output = directory.join("saved.mkv");
-    app.batch_edit
-        .as_mut()
-        .unwrap()
-        .remux
-        .set_custom_output_path(saved_output.clone());
-    assert!(app.save_batch_edit());
-    assert_eq!(
-        app.batch_setup.as_ref().unwrap().items[0]
-            .operation
-            .as_ref()
-            .map(QueuedOperation::output),
-        Some(saved_output.as_path())
-    );
-    let saved_operation = app.batch_setup.as_ref().unwrap().items[0].operation.clone();
-    assert!(app.begin_batch_edit(BatchEditTarget::Defaults));
-    app.batch_edit
-        .as_mut()
-        .unwrap()
-        .remux
-        .set_container(MediaContainer::Mp4);
-    assert!(app.save_batch_edit());
-    let item = &app.batch_setup.as_ref().unwrap().items[0];
-    assert!(item.overridden);
-    assert_eq!(item.operation, saved_operation);
-    assert_no_batch_execution(&app);
-    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -1340,47 +1124,6 @@ fn genuine_existing_output_keeps_filesystem_output_exists_feedback() {
 }
 
 #[test]
-fn batch_append_ignores_duplicates_without_mutating_existing_configuration() {
-    let (directory, path) = temp_file("batch-append-duplicate");
-    let source = media(&path);
-    let operation =
-        QueuedOperation::Remux(crate::remux::draft::RemuxDraft::new(&source).request(&source));
-    let mut app = app();
-    app.batch_setup = Some(BatchSetupState {
-        origin: BatchOrigin::NoSource,
-        operation: Operation::Remux,
-        defaults: Some(BatchDefaults::Remux {
-            container: MediaContainer::Matroska,
-        }),
-        items: vec![BatchItem {
-            path: path.clone(),
-            included: true,
-            source: ready_batch_source(source),
-            operation: Some(operation.clone()),
-            readiness: BatchReadiness::Ready,
-            reason: None,
-            overridden: true,
-        }],
-        error: None,
-        append_error: None,
-        append_error_details_open: false,
-    });
-
-    assert!(!app.append_batch_paths(vec![path.clone(), path.clone()]));
-    let batch = app.batch_setup.as_ref().unwrap();
-    assert_eq!(batch.items.len(), 1);
-    assert_eq!(batch.items[0].operation, Some(operation));
-    assert!(batch.items[0].overridden);
-    assert_eq!(
-        batch.error.as_deref(),
-        Some("Ignored 2 files that are already in this batch.")
-    );
-    assert!(app.batch_inspection.is_none());
-    assert!(app.core.queue.scheduler().jobs().is_empty());
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn relevant_workspace_actions_clear_enqueue_confirmation() {
     let (directory, path) = temp_file("queue-confirmation-clear");
     let mut app = app();
@@ -1536,7 +1279,7 @@ fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_othe
             original
         );
 
-        app.batch_setup = Some(BatchSetupState {
+        app.core.batch_setup = Some(BatchSetupState {
             origin: BatchOrigin::Queue {
                 origin: QueueOrigin::SourceWorkspace {
                     active_operation: Operation::FrameCapture,
@@ -1545,6 +1288,7 @@ fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_othe
             operation: Operation::from(original),
             defaults: None,
             items: vec![BatchItem {
+                id: BatchItemId(0),
                 path: path.clone(),
                 included: true,
                 source: ready_batch_source(media(&path)),
@@ -1555,22 +1299,24 @@ fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_othe
             }],
             error: None,
             append_error: None,
-            append_error_details_open: false,
         });
         app.core.show_batch_setup();
-        assert!(app.begin_batch_edit(BatchEditTarget::Item(0)));
-        set_editor_stem(&mut app.batch_edit.as_mut().unwrap().editor, OsStr::new(""));
+        assert!(app.begin_batch_edit(BatchEditTarget::Item(BatchItemId(0))));
+        set_editor_stem(
+            &mut app.core.batch_edit.as_mut().unwrap().editor,
+            OsStr::new(""),
+        );
         assert!(!app.save_batch_edit());
         assert_eq!(
-            app.batch_setup.as_ref().unwrap().items[0]
+            app.core.batch_setup.as_ref().unwrap().items[0]
                 .operation
                 .as_ref(),
             Some(original)
         );
-        set_editor_stem(&mut app.batch_edit.as_mut().unwrap().editor, stem);
+        set_editor_stem(&mut app.core.batch_edit.as_mut().unwrap().editor, stem);
         assert!(app.save_batch_edit());
         assert_eq!(
-            app.batch_setup.as_ref().unwrap().items[0]
+            app.core.batch_setup.as_ref().unwrap().items[0]
                 .operation
                 .as_ref(),
             Some(original)

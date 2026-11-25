@@ -16,13 +16,7 @@ const INCLUDE_LABEL: &str = "Include";
 const ENQUEUE_LABEL: &str = "Add batch to queue";
 const BACK_LABEL: &str = "Back";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BatchReadiness {
-    Inspecting,
-    Ready,
-    NeedsAttention,
-    Incompatible,
-}
+use crate::app::{BatchAction, BatchAvailability, BatchItemId, BatchReadiness};
 
 impl BatchReadiness {
     const fn label(self) -> &'static str {
@@ -36,6 +30,7 @@ impl BatchReadiness {
 }
 
 pub struct BatchItemView<'a> {
+    pub id: BatchItemId,
     pub source: &'a Path,
     pub output: Option<&'a Path>,
     pub readiness: BatchReadiness,
@@ -51,19 +46,6 @@ pub enum BatchItemEditAction {
     Review,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BatchAction {
-    SelectOperation(Operation),
-    ConfigureDefaults,
-    AddFiles,
-    EditItem(usize),
-    ToggleIncluded(usize),
-    Enqueue,
-    Back,
-    #[default]
-    None,
-}
-
 pub struct BatchFeedback<'a> {
     pub status: Option<&'a str>,
     pub append_error: Option<&'a MediaError>,
@@ -74,16 +56,20 @@ pub fn show(
     ui: &mut Ui,
     operation: Operation,
     items: &[BatchItemView<'_>],
-    can_configure: bool,
-    can_add_files: bool,
-    can_enqueue: bool,
+    availability: BatchAvailability,
     feedback: BatchFeedback<'_>,
 ) -> BatchAction {
     let action = Cell::new(BatchAction::None);
     layout::operation_surface(
         ui,
         |ui| {
-            show_header(ui, items, can_configure, can_add_files, &action);
+            show_header(
+                ui,
+                items,
+                availability.can_configure,
+                availability.can_add_files,
+                &action,
+            );
             ui.add_space(theme::SPACING.related);
             show_operation_switcher(ui, operation, &action);
             ui.add_space(theme::SPACING.related);
@@ -93,10 +79,10 @@ pub fn show(
                 show_column_guide(ui, row_plan);
                 ui.add_space(theme::SPACING.tight);
             }
-            for (index, item) in items.iter().enumerate() {
+            for item in items {
                 widgets::separator(ui);
                 ui.add_space(theme::SPACING.compact);
-                show_item(ui, index, item, row_plan, &action);
+                show_item(ui, item.id, item, row_plan, &action);
                 ui.add_space(theme::SPACING.compact);
             }
             widgets::separator(ui);
@@ -110,7 +96,9 @@ pub fn show(
             }
         },
         |ui| {
-            if widgets::primary_button_enabled(ui, ENQUEUE_LABEL, can_enqueue).clicked() {
+            if widgets::primary_button_enabled(ui, ENQUEUE_LABEL, availability.can_enqueue)
+                .clicked()
+            {
                 action.set(BatchAction::Enqueue);
             }
             if widgets::secondary_button(ui, BACK_LABEL).clicked() {
@@ -213,7 +201,7 @@ fn show_operation_row(
 
 fn show_item(
     ui: &mut Ui,
-    index: usize,
+    index: BatchItemId,
     item: &BatchItemView<'_>,
     plan: layout::BatchRowPlan,
     action: &Cell<BatchAction>,
@@ -226,7 +214,7 @@ fn show_item(
 
 fn show_inline_item(
     ui: &mut Ui,
-    index: usize,
+    index: BatchItemId,
     item: &BatchItemView<'_>,
     plan: layout::BatchRowPlan,
     action: &Cell<BatchAction>,
@@ -256,7 +244,7 @@ fn show_inline_item(
 
 fn show_stacked_item(
     ui: &mut Ui,
-    index: usize,
+    index: BatchItemId,
     item: &BatchItemView<'_>,
     action: &Cell<BatchAction>,
 ) {
@@ -319,7 +307,7 @@ fn show_status(ui: &mut Ui, item: &BatchItemView<'_>) {
 
 fn show_item_actions(
     ui: &mut Ui,
-    index: usize,
+    index: BatchItemId,
     item: &BatchItemView<'_>,
     action: &Cell<BatchAction>,
 ) {
@@ -437,7 +425,9 @@ mod tests {
     #[test]
     fn batch_collection_header_aligns_title_and_summary_on_one_glyph_baseline() {
         let paths = ["first.mp4", "second.mp4", "third.mp4"];
+        let mut ids = 0..;
         let items = paths.map(|path| BatchItemView {
+            id: crate::app::batch::BatchItemId(ids.next().unwrap()),
             source: Path::new(path),
             output: None,
             readiness: BatchReadiness::Ready,
@@ -455,9 +445,11 @@ mod tests {
                 ui,
                 Operation::Remux,
                 &items,
-                true,
-                true,
-                true,
+                crate::app::BatchAvailability {
+                    can_configure: true,
+                    can_add_files: true,
+                    can_enqueue: true,
+                },
                 BatchFeedback {
                     status: None,
                     append_error: None,
@@ -485,7 +477,9 @@ mod tests {
             "a-medium-length-source-name.mp4",
             "an-extremely-long-source-name-that-must-truncate-inside-the-flexible-identity-column.mp4",
         ];
+        let mut ids = 0..;
         let items = paths.map(|path| BatchItemView {
+            id: crate::app::batch::BatchItemId(ids.next().unwrap()),
             source: Path::new(path),
             output: Some(Path::new(
                 "equally-long-output-name-that-must-also-truncate.mkv",
@@ -505,9 +499,11 @@ mod tests {
                 ui,
                 Operation::Remux,
                 &items,
-                true,
-                true,
-                true,
+                crate::app::BatchAvailability {
+                    can_configure: true,
+                    can_add_files: true,
+                    can_enqueue: true,
+                },
                 BatchFeedback {
                     status: None,
                     append_error: None,

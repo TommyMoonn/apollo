@@ -618,13 +618,14 @@ fn batch_append_picker_failure_is_visible_and_never_leaks_to_intake() {
     let operation =
         QueuedOperation::Remux(crate::remux::draft::RemuxDraft::new(&source).request(&source));
     let mut app = app();
-    app.batch_setup = Some(BatchSetupState {
+    app.core.batch_setup = Some(BatchSetupState {
         origin: BatchOrigin::NoSource,
         operation: Operation::Remux,
         defaults: Some(BatchDefaults::Remux {
             container: MediaContainer::Matroska,
         }),
         items: vec![BatchItem {
+            id: BatchItemId(0),
             path,
             included: true,
             source: ready_batch_source(source),
@@ -635,7 +636,6 @@ fn batch_append_picker_failure_is_visible_and_never_leaks_to_intake() {
         }],
         error: None,
         append_error: None,
-        append_error_details_open: false,
     });
     app.core.show_batch_setup();
 
@@ -645,7 +645,7 @@ fn batch_append_picker_failure_is_visible_and_never_leaks_to_intake() {
     });
 
     assert!(app.core.source.error().is_none());
-    let batch = app.batch_setup.as_ref().unwrap();
+    let batch = app.core.batch_setup.as_ref().unwrap();
     assert!(matches!(
         batch.append_error,
         Some(ref error)
@@ -680,13 +680,14 @@ fn batch_append_picker_respects_cancellation_and_original_batch_identity() {
     let operation =
         QueuedOperation::Remux(crate::remux::draft::RemuxDraft::new(&source).request(&source));
     let mut app = app();
-    app.batch_setup = Some(BatchSetupState {
+    app.core.batch_setup = Some(BatchSetupState {
         origin: BatchOrigin::NoSource,
         operation: Operation::Remux,
         defaults: Some(BatchDefaults::Remux {
             container: MediaContainer::Matroska,
         }),
         items: vec![BatchItem {
+            id: BatchItemId(0),
             path,
             included: false,
             source: ready_batch_source(source),
@@ -699,17 +700,18 @@ fn batch_append_picker_respects_cancellation_and_original_batch_identity() {
         append_error: Some(MediaError::file_picker_unavailable(
             "existing append diagnostic",
         )),
-        append_error_details_open: true,
     });
     app.core.show_batch_setup();
-    let before = app.batch_setup.clone();
+    app.batch_append_error_details_open = true;
+    let before = app.core.batch_setup.clone();
 
     app.settle_file_dialog(FileDialogCompletion {
         target: DialogTarget::BatchAppend,
         outcome: DialogOutcome::Cancelled,
     });
 
-    assert_eq!(app.batch_setup, before);
+    assert_eq!(app.core.batch_setup, before);
+    assert!(app.batch_append_error_details_open);
     assert!(app.core.source.error().is_none());
     assert!(app.core.queue.scheduler().jobs().is_empty());
     let selected_directory = directory.join("additional");
@@ -730,17 +732,17 @@ fn batch_append_picker_respects_cancellation_and_original_batch_identity() {
     };
     app.start_file_dialog(request.clone());
     assert!(app.finish_batch_setup());
-    app.batch_setup = before.clone();
+    app.core.batch_setup = before.clone();
     app.core.show_batch_setup();
     wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
     app.poll_file_dialog();
-    assert_eq!(app.batch_setup, before);
+    assert_eq!(app.core.batch_setup, before);
     assert!(app.core.settings.source_directory().is_none());
 
     app.start_file_dialog(request);
     wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
     app.poll_file_dialog();
-    let batch = app.batch_setup.as_ref().unwrap();
+    let batch = app.core.batch_setup.as_ref().unwrap();
     assert_eq!(batch.items.len(), 2);
     assert_eq!(batch.items[0], before.as_ref().unwrap().items[0]);
     assert_eq!(batch.items[1].path, selected);
@@ -828,13 +830,14 @@ fn output_dialogs_are_isolated_between_queue_batch_and_normal_drafts() {
     );
     assert!(app.finish_queue_edit());
     let source = media(&path);
-    app.batch_setup = Some(BatchSetupState {
+    app.core.batch_setup = Some(BatchSetupState {
         origin: BatchOrigin::SourceWorkspace {
             active_operation: Operation::AudioMix,
         },
         operation: Operation::AudioMix,
         defaults: None,
         items: vec![BatchItem {
+            id: BatchItemId(0),
             path: path.clone(),
             included: true,
             source: ready_batch_source(source),
@@ -845,20 +848,30 @@ fn output_dialogs_are_isolated_between_queue_batch_and_normal_drafts() {
         }],
         error: None,
         append_error: None,
-        append_error_details_open: false,
     });
     app.core.show_batch_setup();
-    assert!(app.begin_batch_edit(BatchEditTarget::Item(0)));
-    let batch_request = editor_output_dialog_request(&app.batch_edit.as_ref().unwrap().editor);
+    assert!(app.begin_batch_edit(BatchEditTarget::Item(BatchItemId(0))));
+    let batch_request = editor_output_dialog_request(&app.core.batch_edit.as_ref().unwrap().editor);
     let batch_target = batch_request.target();
-    let batch_before = app.batch_edit.as_ref().unwrap().audio_mix.output_path();
+    let batch_before = app
+        .core
+        .batch_edit
+        .as_ref()
+        .unwrap()
+        .audio_mix
+        .output_path();
     // A late result from the retired queue editor must not affect the batch or directory memory.
     app.settle_file_dialog(FileDialogCompletion {
         target: queue_target,
         outcome: DialogOutcome::Selected(directory.join("stale.mp4")),
     });
     assert_eq!(
-        app.batch_edit.as_ref().unwrap().audio_mix.output_path(),
+        app.core
+            .batch_edit
+            .as_ref()
+            .unwrap()
+            .audio_mix
+            .output_path(),
         batch_before
     );
     assert_eq!(
@@ -871,19 +884,35 @@ fn output_dialogs_are_isolated_between_queue_batch_and_normal_drafts() {
         outcome: DialogOutcome::Selected(batch_path.clone()),
     });
     assert_eq!(
-        app.batch_edit.as_ref().unwrap().audio_mix.output_path(),
+        app.core
+            .batch_edit
+            .as_ref()
+            .unwrap()
+            .audio_mix
+            .output_path(),
         batch_path
     );
     assert!(app.finish_batch_edit());
-    assert!(app.begin_batch_edit(BatchEditTarget::Item(0)));
-    let before = app.batch_edit.as_ref().unwrap().audio_mix.output_path();
+    assert!(app.begin_batch_edit(BatchEditTarget::Item(BatchItemId(0))));
+    let before = app
+        .core
+        .batch_edit
+        .as_ref()
+        .unwrap()
+        .audio_mix
+        .output_path();
     app.settle_file_dialog(FileDialogCompletion {
         target: batch_target,
         outcome: DialogOutcome::Failed("late failure".to_owned()),
     });
-    assert!(app.batch_edit.as_ref().unwrap().error.is_none());
+    assert!(app.core.batch_edit.as_ref().unwrap().error.is_none());
     assert_eq!(
-        app.batch_edit.as_ref().unwrap().audio_mix.output_path(),
+        app.core
+            .batch_edit
+            .as_ref()
+            .unwrap()
+            .audio_mix
+            .output_path(),
         before
     );
     assert_eq!(

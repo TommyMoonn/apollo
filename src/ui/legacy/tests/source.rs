@@ -315,7 +315,7 @@ fn multiple_file_drop_enters_batch_setup_in_source_order() {
     assert!(!app.core.source.is_inspecting());
     assert!(app.core.source.current().is_none());
     assert_eq!(app.core.navigation(), NavigationState::BatchSetup);
-    let batch = app.batch_setup.as_ref().unwrap();
+    let batch = app.core.batch_setup.as_ref().unwrap();
     assert_eq!(
         batch
             .items

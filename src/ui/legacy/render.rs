@@ -6,14 +6,12 @@ use std::time::Instant;
 
 use egui::{CentralPanel, Ui};
 
-use crate::app::dialogs::{DialogTarget, FileDialogRequest};
 use crate::app::{NavigationState, Operation, operation_workspace_visible};
 use crate::frame_capture::clipboard::copy_frame_action_eligible;
 use crate::media::error::{MediaError, MediaErrorKind};
-use crate::queue::{QueueRunState, QueuedOperation};
+use crate::queue::QueueRunState;
 use crate::ui::audio_extract::AudioExtractSelectionAction;
 use crate::ui::audio_mix::AudioMixSelectionAction;
-use crate::ui::batch::{BatchAction, BatchItemEditAction, BatchItemView, BatchReadiness};
 use crate::ui::frame_capture::{
     FrameCapturePositionSurface, FrameCaptureSelectionAction, FrameCopyActionState,
 };
@@ -22,18 +20,13 @@ use crate::ui::upscale::UpscaleSelectionAction;
 use crate::ui::workspace::{EditableQueuedJob, WorkspaceAction, WorkspaceMode};
 use crate::ui::{
     OperationSurfaceMode, audio_extract as audio_extract_ui, audio_mix as audio_mix_ui,
-    batch as batch_ui, file_intake, frame_capture as frame_capture_ui, frame_capture_progress,
-    layout, media_error, queue as queue_ui, remux as remux_ui, theme, upscale as upscale_ui,
-    widgets, workspace,
+    file_intake, frame_capture as frame_capture_ui, frame_capture_progress, layout, media_error,
+    queue as queue_ui, remux as remux_ui, theme, upscale as upscale_ui, widgets, workspace,
 };
 
 use super::ApolloApp;
-use super::state::{
-    BatchEditTarget, BatchSourceState, EditorPresentation, FrameCaptureToolState, QueueEditAction,
-};
-use super::workflows::{
-    batch_defaults_from_editor, refresh_batch_items, shows_frame_capture_lifecycle,
-};
+use super::state::{EditorPresentation, FrameCaptureToolState, QueueEditAction};
+use super::workflows::shows_frame_capture_lifecycle;
 use crate::app::{discovery::MediaToolsState, editor::OperationEditorState};
 
 impl ApolloApp {
@@ -254,186 +247,6 @@ impl ApolloApp {
         self.handle_queue_action(action);
     }
 
-    pub(super) fn show_batch_setup(&mut self, ui: &mut Ui) {
-        let Some(batch) = self.batch_setup.as_mut() else {
-            return;
-        };
-        let views = batch
-            .items
-            .iter()
-            .map(|item| BatchItemView {
-                source: &item.path,
-                output: item.operation.as_ref().map(QueuedOperation::output),
-                readiness: item.readiness,
-                reason: item.reason.as_deref(),
-                included: item.included,
-                edit_action: match (&item.source, item.readiness) {
-                    (BatchSourceState::Ready { .. }, BatchReadiness::Ready) => {
-                        Some(BatchItemEditAction::Override)
-                    }
-                    (BatchSourceState::Ready { .. }, BatchReadiness::NeedsAttention) => {
-                        Some(BatchItemEditAction::Review)
-                    }
-                    _ => None,
-                },
-                can_toggle_included: matches!(item.source, BatchSourceState::Ready { .. }),
-            })
-            .collect::<Vec<_>>();
-        let included = batch.items.iter().filter(|item| item.included).count();
-        let can_enqueue =
-            included > 0
-                && batch.items.iter().filter(|item| item.included).all(|item| {
-                    item.readiness == BatchReadiness::Ready && item.operation.is_some()
-                });
-        let action = batch_ui::show(
-            ui,
-            batch.operation,
-            &views,
-            batch
-                .items
-                .iter()
-                .any(|item| matches!(item.source, BatchSourceState::Ready { .. })),
-            can_enqueue,
-            self.batch_inspection.is_none(),
-            batch_ui::BatchFeedback {
-                status: batch.error.as_deref(),
-                append_error: batch.append_error.as_ref(),
-                append_error_details_open: &mut batch.append_error_details_open,
-            },
-        );
-        match action {
-            BatchAction::SelectOperation(operation) => {
-                let capabilities = self.core.discovery.upscale_capabilities();
-                if let Some(batch) = self.batch_setup.as_mut()
-                    && batch.operation != operation
-                {
-                    batch.operation = operation;
-                    batch.defaults = None;
-                    batch.error = None;
-                    for item in &mut batch.items {
-                        item.overridden = false;
-                    }
-                    if let Some(media) = batch.items.iter().find_map(|item| match &item.source {
-                        BatchSourceState::Ready { media, .. } => Some(media.clone()),
-                        BatchSourceState::Inspecting | BatchSourceState::Failed => None,
-                    }) {
-                        let editor = OperationEditorState::new(0, None, media, operation);
-                        batch.defaults = batch_defaults_from_editor(&editor);
-                    }
-                    refresh_batch_items(batch, capabilities);
-                }
-            }
-            BatchAction::ConfigureDefaults => {
-                self.begin_batch_edit(BatchEditTarget::Defaults);
-            }
-            BatchAction::AddFiles => {
-                self.start_file_dialog(FileDialogRequest::OpenSources {
-                    initial_directory: None,
-                    target: DialogTarget::BatchAppend,
-                });
-            }
-            BatchAction::EditItem(index) => {
-                self.begin_batch_edit(BatchEditTarget::Item(index));
-            }
-            BatchAction::ToggleIncluded(index) => {
-                if let Some(item) = self
-                    .batch_setup
-                    .as_mut()
-                    .and_then(|batch| batch.items.get_mut(index))
-                {
-                    item.included = !item.included;
-                }
-            }
-            BatchAction::Enqueue => {
-                self.enqueue_batch();
-            }
-            BatchAction::Back => {
-                self.finish_batch_setup();
-            }
-            BatchAction::None => {}
-        }
-    }
-
-    pub(super) fn show_batch_edit(&mut self, ui: &mut Ui) {
-        let Some(edit) = self.batch_edit.as_ref() else {
-            return;
-        };
-        let target = edit.target;
-        let presentation = &edit.presentation.source;
-        let operation = edit.active_operation;
-        let enabled = !self.file_dialog.is_pending();
-        layout::workspace_chrome(ui, |ui| {
-            workspace::show(
-                ui,
-                &presentation.workspace,
-                operation,
-                WorkspaceMode::FixedSourceEdit {
-                    context: match target {
-                        BatchEditTarget::Defaults => "Configuring batch defaults",
-                        BatchEditTarget::Item(_) => "Overriding batch item",
-                    },
-                    enabled,
-                    operation_switching: false,
-                },
-            )
-        });
-        let capabilities = self.core.discovery.settled_capabilities().map_or(
-            crate::upscale::draft::UpscaleEncoderCapabilities::Checking,
-            crate::upscale::draft::UpscaleEncoderCapabilities::Ready,
-        );
-        let Some(edit) = self.batch_edit.as_mut() else {
-            return;
-        };
-        if let Some(error) = edit.error.clone() {
-            layout::content_gutter(ui, |ui| {
-                media_error::show_inline(ui, &error, &mut edit.error_details_open);
-                ui.add_space(theme::SPACING.related);
-            });
-        }
-        let defaults_save_allowed = batch_defaults_from_editor(&edit.editor).is_some();
-        let action = show_operation_editor(
-            ui,
-            &mut edit.editor,
-            &edit.presentation,
-            capabilities,
-            match target {
-                BatchEditTarget::Defaults => OperationSurfaceMode::BatchDefaults {
-                    save_allowed: defaults_save_allowed,
-                },
-                BatchEditTarget::Item(_) => OperationSurfaceMode::BatchOverride,
-            },
-            enabled,
-            match target {
-                BatchEditTarget::Defaults => ("batch-defaults", 0),
-                BatchEditTarget::Item(index) => ("batch-item", index),
-            },
-        );
-        match action {
-            QueueEditAction::BrowseOutput => {
-                if let Some(edit) = self.batch_edit.as_ref() {
-                    self.start_file_dialog(editor_output_dialog_request(&edit.editor));
-                }
-            }
-            QueueEditAction::Save => {
-                self.save_batch_edit();
-            }
-            QueueEditAction::Cancel => {
-                self.finish_batch_edit();
-            }
-            QueueEditAction::FramePositionEdited(settle) => {
-                let position = self
-                    .batch_edit
-                    .as_ref()
-                    .and_then(|edit| edit.frame_capture.valid_position(&edit.media));
-                self.update_frame_capture_position(position, settle, Instant::now());
-            }
-            QueueEditAction::FrameStepRequested(direction) => {
-                self.request_frame_step(direction);
-            }
-            QueueEditAction::None => {}
-        }
-    }
-
     fn show_queue_edit(&mut self, ui: &mut Ui) {
         let Some(edit) = self.core.queue_edit() else {
             return;
@@ -648,7 +461,7 @@ impl ApolloApp {
     }
 }
 
-fn show_operation_editor(
+pub(super) fn show_operation_editor(
     ui: &mut Ui,
     edit: &mut OperationEditorState,
     presentation: &EditorPresentation,

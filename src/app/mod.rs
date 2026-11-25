@@ -1,6 +1,8 @@
 //! Renderer-independent application state. Native adapters coordinate the existing
 //! feature workflows until their dedicated owners are extracted.
 
+pub(crate) mod batch;
+pub use batch::{BatchAction, BatchAvailability, BatchItemId, BatchReadiness};
 pub(crate) mod dialogs;
 pub(crate) mod discovery;
 pub(crate) mod editor;
@@ -35,6 +37,9 @@ pub struct Application {
     pub(crate) frame_capture_executor: FrameCaptureExecutor,
     pub(crate) queue: queue::QueueWorkflow,
     queue_edit: Option<queue::QueueEditState>,
+    pub(crate) batch_setup: Option<batch::BatchSetupState>,
+    pub(crate) batch_edit: Option<batch::BatchEditState>,
+    batch_inspection: Option<batch::BatchInspectionSession>,
     pub(crate) queue_confirmation: Option<Operation>,
     pub(crate) operation_action_error: Option<(Operation, MediaError)>,
 }

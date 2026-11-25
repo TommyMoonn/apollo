@@ -31,6 +31,8 @@ use std::{path::Path, sync::Arc, time::Instant};
 impl ApolloApp {
     fn enter_workspace(&mut self, operation: Operation) {
         self.core.enter_workspace(operation);
+        self.batch_editor_presentation = None;
+        self.batch_append_error_details_open = false;
         self.state.intake_error_details_open = false;
     }
 
@@ -51,6 +53,8 @@ impl ApolloApp {
     pub(super) fn close_source(&mut self) {
         self.retire_source_presentation();
         self.core.close_source();
+        self.batch_editor_presentation = None;
+        self.batch_append_error_details_open = false;
     }
 
     fn retire_source_presentation(&mut self) {
