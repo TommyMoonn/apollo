@@ -76,7 +76,8 @@ pub(crate) fn set_application_icon(window: &impl HasWindowHandle) -> Result<(), 
                 io::Error::last_os_error()
             ));
         }
-        let icon = LoadIconW(module, 1usize as *const u16);
+        // Win32 interprets this value as a resource ID, not a memory address.
+        let icon = LoadIconW(module, ptr::without_provenance::<u16>(1));
         if icon.is_null() {
             return Err(format!(
                 "Could not load Apollo's window icon: {}",
