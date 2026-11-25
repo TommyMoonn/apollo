@@ -26,6 +26,7 @@ pub struct Application {
     pub(crate) batch_edit: Option<batch::BatchEditState>,
     batch_inspection: Option<batch::BatchInspectionSession>,
     pub(crate) queue_confirmation: Option<Operation>,
+    pub(crate) queue_action_error: Option<String>,
     pub(crate) operation_action_error: Option<(Operation, crate::media::error::MediaError)>,
 }
 

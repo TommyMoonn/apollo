@@ -255,10 +255,12 @@ impl MediaError {
     pub fn from_output_error(error: &MediaOutputError) -> Self {
         let kind = match error {
             MediaOutputError::OutputParentUnavailable { .. }
+            | MediaOutputError::DestinationUnavailable { .. }
             | MediaOutputError::TemporaryDirectoryCreationFailed { .. }
             | MediaOutputError::PublishFailed { .. }
             | MediaOutputError::CleanupFailed { .. } => MediaErrorKind::OutputNotWritable,
             MediaOutputError::InvalidOutputPath(_)
+            | MediaOutputError::DestinationOccupied(_)
             | MediaOutputError::OutputParentNotDirectory(_)
             | MediaOutputError::TemporaryOutputMissing(_)
             | MediaOutputError::TemporaryOutputNotFile(_)

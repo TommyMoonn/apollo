@@ -2,10 +2,13 @@ use crate::media::{
     execution::{MediaExecution, MediaExecutionStartError, MediaExecutionState, ProcessControl},
     intake::SourceIdentity,
     model::MediaFile,
-    output::preflight_output_destination,
+    output::{
+        OutputCollisionPolicy, normalized_output_destination, preflight_output_destination,
+        require_vacant_destination,
+    },
     process::{MediaProcess, MediaProcessCommand, MediaProcessStartError, MediaProcessWake},
     progress::MediaProgress,
-    tools::MediaTools,
+    tools::{MediaTools, VideoEncoderCapabilities},
 };
 
 use super::model::{
@@ -94,16 +97,28 @@ impl MediaQueue {
         media: &MediaFile,
         operation: QueuedOperation,
     ) -> Result<JobId, QueueEnqueueError> {
-        let raw_id = self.next_job_id.ok_or(QueueEnqueueError::JobIdExhausted)?;
         Self::validate_admission(source_identity, media, &operation)?;
-
-        let id = JobId::new(raw_id);
-        self.jobs.push(QueuedJob::new(
-            id,
+        Self::validate_unreserved_destination(operation.output(), self.exact_reservations())?;
+        self.append_validated(
             source_identity.clone(),
             media.clone(),
             operation,
-        ));
+            OutputCollisionPolicy::Numbered,
+        )
+    }
+
+    fn append_validated(
+        &mut self,
+        source_identity: SourceIdentity,
+        media: MediaFile,
+        operation: QueuedOperation,
+        policy: OutputCollisionPolicy,
+    ) -> Result<JobId, QueueEnqueueError> {
+        let raw_id = self.next_job_id.ok_or(QueueEnqueueError::JobIdExhausted)?;
+        let id = JobId::new(raw_id);
+        self.jobs.push(
+            QueuedJob::new(id, source_identity, media, operation).with_collision_policy(policy),
+        );
         self.next_job_id = raw_id.checked_add(1);
         Ok(id)
     }
@@ -124,6 +139,12 @@ impl MediaQueue {
             .ok_or(BatchEnqueueError::JobIdExhausted)?;
         for (index, (identity, media, operation)) in items.iter().enumerate() {
             Self::validate_admission(identity, media, operation)
+                .and_then(|()| {
+                    Self::validate_unreserved_destination(
+                        operation.output(),
+                        self.exact_reservations(),
+                    )
+                })
                 .map_err(|error| BatchEnqueueError::Item { index, error })?;
         }
 
@@ -219,22 +240,76 @@ impl MediaQueue {
         let index = self.waiting_job_index(id)?;
         let job = &self.jobs[index];
 
-        Self::validate_admission(job.source_identity(), job.media(), &operation).map_err(
-            |error| match error {
-                QueueEnqueueError::Source(error) => QueueMutationError::SourceUnavailable(error),
-                QueueEnqueueError::SourceChanged | QueueEnqueueError::SourceDoesNotMatchMedia => {
-                    QueueMutationError::SourceChanged
-                }
-                QueueEnqueueError::InvalidRequest(error) => {
-                    QueueMutationError::InvalidRequest(error)
-                }
-                QueueEnqueueError::Output(error) => QueueMutationError::Output(error),
-                QueueEnqueueError::JobIdExhausted => {
-                    unreachable!("admission validation does not allocate IDs")
-                }
-            },
+        Self::validate_admission(job.source_identity(), job.media(), &operation)?;
+        Self::validate_unreserved_destination(
+            operation.output(),
+            self.pending_jobs().filter(|job| job.id() != id),
         )?;
+        if job.collision_policy() == OutputCollisionPolicy::Exact {
+            require_vacant_destination(operation.output()).map_err(QueueMutationError::Output)?;
+        }
         self.jobs[index].replace_operation(operation);
+        Ok(())
+    }
+
+    pub fn retry(
+        &mut self,
+        id: JobId,
+        capabilities: Option<&VideoEncoderCapabilities>,
+    ) -> Result<JobId, QueueMutationError> {
+        let job = self
+            .jobs
+            .iter()
+            .find(|job| job.id() == id)
+            .ok_or(QueueMutationError::JobNotFound(id))?;
+        if !matches!(
+            job.state(),
+            QueueJobState::Failed(_) | QueueJobState::Cancelled
+        ) {
+            return Err(QueueMutationError::JobNotRetryable(id));
+        }
+        let identity = job.source_identity().clone();
+        let media = job.media().clone();
+        let mut operation = job.operation().clone();
+        operation.refresh_encoder_capabilities(capabilities)?;
+        Self::validate_admission(&identity, &media, &operation)?;
+        Self::validate_unreserved_destination(operation.output(), self.pending_jobs())?;
+        require_vacant_destination(operation.output()).map_err(QueueMutationError::Output)?;
+        Ok(self.append_validated(identity, media, operation, OutputCollisionPolicy::Exact)?)
+    }
+
+    fn pending_jobs(&self) -> impl Iterator<Item = &QueuedJob> {
+        self.jobs.iter().filter(|job| job.state().is_pending())
+    }
+
+    fn exact_reservations(&self) -> impl Iterator<Item = &QueuedJob> {
+        self.pending_jobs()
+            .filter(|job| job.collision_policy() == OutputCollisionPolicy::Exact)
+    }
+
+    /// Derive reservations from retained pending jobs, including the active selected name.
+    /// Normal submissions can share numbered destinations, but not an exact retry reservation.
+    fn validate_unreserved_destination<'a>(
+        output: &std::path::Path,
+        jobs: impl Iterator<Item = &'a QueuedJob>,
+    ) -> Result<(), QueueEnqueueError> {
+        let mut jobs = jobs.peekable();
+        if jobs.peek().is_none() {
+            return Ok(());
+        }
+        let destination =
+            normalized_output_destination(output).map_err(QueueEnqueueError::Output)?;
+        for job in jobs {
+            let matches = |path| {
+                normalized_output_destination(path)
+                    .is_ok_and(|other| same_destination(&destination, &other))
+            };
+            if matches(job.operation().output())
+                || matches!(job.state(), QueueJobState::Running { output } if matches(output))
+            {
+                return Err(QueueEnqueueError::DestinationReserved(job.id()));
+            }
+        }
         Ok(())
     }
 
@@ -243,7 +318,6 @@ impl MediaQueue {
         id: JobId,
         direction: WaitingJobMove,
     ) -> Result<bool, QueueMutationError> {
-        self.require_mutation_stopped()?;
         let index = self.waiting_job_index(id)?;
         let adjacent = match direction {
             WaitingJobMove::Earlier => self.jobs[..index]
@@ -388,7 +462,10 @@ impl MediaQueue {
                 continue;
             }
 
-            let prepared = match job.operation().prepare(tools, job.media()) {
+            let prepared = match job
+                .operation()
+                .prepare(tools, job.media(), job.collision_policy())
+            {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     self.jobs[index]
@@ -423,8 +500,12 @@ impl MediaQueue {
         self.run_state = QueueRunState::Stopped;
     }
 
+    pub fn can_edit(&self) -> bool {
+        self.run_state == QueueRunState::Stopped && self.active_job.is_none()
+    }
+
     fn require_mutation_stopped(&self) -> Result<(), QueueMutationError> {
-        if self.run_state == QueueRunState::Stopped && self.active_job.is_none() {
+        if self.can_edit() {
             Ok(())
         } else {
             Err(QueueMutationError::AutomaticAdvancementActive)
@@ -480,6 +561,17 @@ impl MediaQueue {
     #[cfg(test)]
     fn temporary_output_path(&self) -> Option<&std::path::Path> {
         self.execution.temporary_output_path()
+    }
+}
+
+fn same_destination(left: &std::path::Path, right: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
     }
 }
 
@@ -871,10 +963,14 @@ mod tests {
             Err(QueueMutationError::InvalidRequest(_))
         ));
         assert_eq!(queue.jobs()[0].operation(), &original_operation);
-        queue
-            .replace_waiting_operation(first, remux(&source_media, second_output.clone()))
-            .unwrap();
-        assert_eq!(queue.jobs()[0].operation().output(), second_output);
+        assert_eq!(
+            queue.replace_waiting_operation(
+                first,
+                remux(&source_media, directory.path().join(".").join("second.mkv"))
+            ),
+            Err(QueueMutationError::DestinationReserved(second))
+        );
+        assert_eq!(queue.jobs()[0].operation(), &original_operation);
         assert_eq!(queue.jobs()[1].id(), second);
 
         queue
@@ -1257,7 +1353,9 @@ mod tests {
                 remux(&media, directory.path().join("waiting.mkv")),
             )
             .unwrap();
-        let mut launcher = |_, _| Ok(FakeProcessControl::running());
+        let first = FakeProcessControl::running();
+        let mut processes = VecDeque::from([first.clone(), FakeProcessControl::running()]);
+        let mut launcher = |_, _| Ok(processes.pop_front().expect("two launches"));
         assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
 
         let appended = queue
@@ -1289,9 +1387,31 @@ mod tests {
         );
         assert_eq!(
             queue.move_waiting(waiting, WaitingJobMove::Earlier),
-            Err(QueueMutationError::AutomaticAdvancementActive)
+            Ok(false)
+        );
+        assert_eq!(
+            queue.move_waiting(running, WaitingJobMove::Later),
+            Err(QueueMutationError::JobNotWaiting(running))
+        );
+        assert!(!queue.remove_waiting(running));
+        assert_eq!(
+            queue.move_waiting(batched[0], WaitingJobMove::Earlier),
+            Ok(true)
+        );
+        assert_eq!(
+            queue.waiting_jobs().map(|job| job.id()).collect::<Vec<_>>(),
+            vec![waiting, batched[0], appended]
         );
 
+        assert!(queue.remove_waiting(waiting));
+        fs::write(queue.temporary_output_path().unwrap(), b"result").unwrap();
+        first.set_state(MediaProcessState::Completed);
+        queue.poll_with_launcher(Some(&tools(&directory)), true, &mut launcher);
+        assert_eq!(queue.active_job(), Some(batched[0]));
+        assert!(matches!(
+            queue.jobs()[0].state(),
+            QueueJobState::Completed { .. }
+        ));
         assert!(queue.cancel_queue());
         queue.poll_with_launcher(Some(&tools(&directory)), true, &mut launcher);
         assert_eq!(
@@ -1302,8 +1422,8 @@ mod tests {
             Err(QueueMutationError::JobNotWaiting(running))
         );
         assert_eq!(
-            queue.move_waiting(waiting, WaitingJobMove::Earlier),
-            Err(QueueMutationError::JobNotWaiting(waiting))
+            queue.move_waiting(appended, WaitingJobMove::Earlier),
+            Err(QueueMutationError::JobNotWaiting(appended))
         );
     }
 
@@ -1584,11 +1704,20 @@ mod tests {
         queue.poll_with_launcher(Some(&tools), true, &mut launcher);
         assert_eq!(queue.active_job(), active);
         assert!(!queue.start_with_launcher(&tools, true, &mut launcher));
+        let waiting = queue.jobs()[1].id();
+        assert_eq!(
+            queue.replace_waiting_operation(
+                waiting,
+                remux(&media, directory.path().join("edit.mkv"))
+            ),
+            Err(QueueMutationError::AutomaticAdvancementActive)
+        );
         handle.set_state(MediaProcessState::Cancelled);
         queue.poll_with_launcher(Some(&tools), true, &mut launcher);
         assert_eq!(queue.run_state(), QueueRunState::Stopped);
         assert_eq!(queue.jobs()[0].state(), &QueueJobState::Cancelled);
         assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
+        assert!(queue.can_edit());
         assert!(queue.start_with_launcher(&tools, true, &mut launcher));
         assert_eq!(queue.active_job(), Some(queue.jobs()[1].id()));
         assert!(!queue.cancellation_pending());
@@ -2128,6 +2257,261 @@ mod tests {
         drop(queue);
 
         assert_eq!(handle.state(), MediaProcessState::Cancelled);
+    }
+
+    #[test]
+    fn retry_retains_history_and_reserves_destination_until_removed_or_settled() {
+        use crate::queue::BatchEnqueueError;
+        let directory = TestDirectory::new("retry-reservations");
+        let (identity, source) = media(&directory, "source.mkv");
+        let output = directory.path().join("retry.mkv");
+        let request = remux(&source, output.clone());
+        let mut queue = MediaQueue::new();
+        let original = queue.enqueue(&identity, &source, request.clone()).unwrap();
+        assert!(queue.cancel_queue());
+        let history = queue.jobs()[0].clone();
+        let retry = queue.retry(original, None).unwrap();
+        assert_eq!(retry.get(), original.get() + 1);
+        assert_eq!(queue.jobs()[0], history);
+        assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
+        assert_eq!(queue.jobs()[1].source_identity(), &identity);
+        assert_eq!(queue.jobs()[1].operation(), &request);
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        let snapshot = queue.jobs().to_vec();
+        let next = queue.next_job_id;
+        assert_eq!(
+            queue.retry(original, None),
+            Err(QueueMutationError::DestinationReserved(retry))
+        );
+        assert_eq!(
+            queue.retry(retry, None),
+            Err(QueueMutationError::JobNotRetryable(retry))
+        );
+        assert_eq!(
+            queue.retry(JobId::new(999), None),
+            Err(QueueMutationError::JobNotFound(JobId::new(999)))
+        );
+        assert_eq!(
+            queue.enqueue(&identity, &source, request.clone()),
+            Err(QueueEnqueueError::DestinationReserved(retry))
+        );
+        let other = remux(&source, directory.path().join("other.mkv"));
+        assert_eq!(
+            queue.enqueue_batch(&[(&identity, &source, &other), (&identity, &source, &request)]),
+            Err(BatchEnqueueError::Item {
+                index: 1,
+                error: QueueEnqueueError::DestinationReserved(retry)
+            })
+        );
+        assert_eq!(queue.jobs(), snapshot);
+        assert_eq!(queue.next_job_id, next);
+        assert!(queue.remove_waiting(retry));
+        let retry = queue.retry(original, None).unwrap();
+        assert_eq!(Some(retry.get()), next);
+        let process = FakeProcessControl::running();
+        let mut launcher = |_, _| Ok(process.clone());
+        let tools = tools(&directory);
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
+        assert_eq!(queue.active_job(), Some(retry));
+        fs::write(queue.temporary_output_path().unwrap(), b"result").unwrap();
+        process.set_state(MediaProcessState::Completed);
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+        assert_eq!(queue.jobs()[0], history);
+        assert_eq!(
+            queue.jobs()[1].state(),
+            &QueueJobState::Completed {
+                output: output.clone()
+            }
+        );
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(fs::read(&output).unwrap(), b"result");
+        assert!(matches!(
+            queue.retry(original, None),
+            Err(QueueMutationError::Output(
+                crate::media::output::MediaOutputError::DestinationOccupied(_)
+            ))
+        ));
+        assert_eq!(
+            queue.retry(retry, None),
+            Err(QueueMutationError::JobNotRetryable(retry))
+        );
+        assert_eq!(queue.next_job_id, retry.get().checked_add(1));
+    }
+
+    #[test]
+    fn retry_revalidates_source_and_current_encoder_without_allocating_on_rejection() {
+        let directory = TestDirectory::new("retry-source-encoder");
+        let (identity, source) = video_media(&directory);
+        let output = directory.path().join("upscale.mp4");
+        let mut queue = MediaQueue::new();
+        let original = queue
+            .enqueue(
+                &identity,
+                &source,
+                upscale(
+                    &source,
+                    output,
+                    VideoEncoderSelection::NvidiaNvenc,
+                    VideoEncoderCapability::Available,
+                ),
+            )
+            .unwrap();
+        assert!(queue.cancel_queue());
+        let before = queue.jobs().to_vec();
+        let next = queue.next_job_id;
+        let unavailable = tools(&directory).video_encoders;
+        assert_eq!(
+            queue.retry(original, None),
+            Err(QueueMutationError::CapabilitiesPending)
+        );
+        assert!(matches!(
+            queue.retry(original, Some(&unavailable)),
+            Err(QueueMutationError::InvalidRequest(_))
+        ));
+        let mut available = unavailable;
+        available.h264_nvenc = VideoEncoderCapability::Available;
+        fs::write(&source.path, b"different source bytes").unwrap();
+        assert_eq!(
+            queue.retry(original, Some(&available)),
+            Err(QueueMutationError::SourceChanged)
+        );
+        fs::remove_file(&source.path).unwrap();
+        assert!(matches!(
+            queue.retry(original, Some(&available)),
+            Err(QueueMutationError::SourceUnavailable(_))
+        ));
+        assert_eq!(queue.jobs(), before);
+        assert_eq!(queue.next_job_id, next);
+    }
+
+    #[test]
+    fn retry_failed_preparation_and_execution_without_changing_run_state() {
+        let directory = TestDirectory::new("retry-failed");
+        let (identity, source) = media(&directory, "source.mkv");
+        let parent = directory.path().join("outputs");
+        fs::create_dir(&parent).unwrap();
+        let mut queue = MediaQueue::new();
+        let prep = queue
+            .enqueue(&identity, &source, remux(&source, parent.join("prep.mkv")))
+            .unwrap();
+        let exec = queue
+            .enqueue(
+                &identity,
+                &source,
+                remux(&source, directory.path().join("exec.mkv")),
+            )
+            .unwrap();
+        let active = queue
+            .enqueue(
+                &identity,
+                &source,
+                remux(&source, directory.path().join("active.mkv")),
+            )
+            .unwrap();
+        fs::remove_dir(&parent).unwrap();
+        let process = FakeProcessControl::running();
+        let mut processes = VecDeque::from([process.clone(), FakeProcessControl::running()]);
+        let mut launcher = |_, _| Ok(processes.pop_front().expect("exactly two launches"));
+        let tools = tools(&directory);
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
+        assert!(matches!(
+            queue.jobs()[0].state(),
+            QueueJobState::Failed(QueueJobFailure::Preparation(_))
+        ));
+        assert_eq!(queue.active_job(), Some(exec));
+        process.set_state(MediaProcessState::Failed(MediaProcessFailure::Exit(Some(
+            2,
+        ))));
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+        assert!(matches!(
+            queue.jobs()[1].state(),
+            QueueJobState::Failed(QueueJobFailure::Execution(_))
+        ));
+        assert_eq!(queue.active_job(), Some(active));
+        let history = queue.jobs()[..2].to_vec();
+        let next = queue.next_job_id;
+        assert!(matches!(
+            queue.retry(prep, None),
+            Err(QueueMutationError::Output(_))
+        ));
+        assert_eq!(queue.next_job_id, next);
+        fs::create_dir(&parent).unwrap();
+        let retried_prep = queue.retry(prep, None).unwrap();
+        assert_eq!(queue.run_state(), QueueRunState::Running);
+        assert_eq!(queue.active_job(), Some(active));
+        assert!(queue.stop_after_current());
+        let retried_exec = queue.retry(exec, None).unwrap();
+        assert_eq!(queue.run_state(), QueueRunState::StoppingAfterCurrent);
+        assert_eq!(queue.active_job(), Some(active));
+        assert_eq!(&queue.jobs()[..2], history);
+        assert_eq!(
+            queue.waiting_jobs().map(|job| job.id()).collect::<Vec<_>>(),
+            vec![retried_prep, retried_exec]
+        );
+        assert_eq!(
+            queue.move_waiting(retried_exec, WaitingJobMove::Earlier),
+            Ok(true)
+        );
+        assert!(queue.remove_waiting(retried_prep));
+        assert_eq!(
+            queue.waiting_jobs().map(|job| job.id()).collect::<Vec<_>>(),
+            vec![retried_exec]
+        );
+    }
+
+    #[test]
+    fn retry_never_renames_or_replaces_output_claimed_after_admission() {
+        use crate::media::output::MediaOutputError;
+        for after_launch in [false, true] {
+            let directory = TestDirectory::new("retry-race");
+            let (identity, source) = media(&directory, "source.mkv");
+            let output = directory.path().join("result.mkv");
+            let mut queue = MediaQueue::new();
+            let original = queue
+                .enqueue(&identity, &source, remux(&source, output.clone()))
+                .unwrap();
+            assert!(queue.cancel_queue());
+            let retry = queue.retry(original, None).unwrap();
+            let process = FakeProcessControl::running();
+            let mut launches = 0;
+            let mut launcher = |_, _| {
+                launches += 1;
+                Ok(process.clone())
+            };
+            let tools = tools(&directory);
+            if after_launch {
+                assert!(queue.start_with_launcher(&tools, true, &mut launcher));
+                let staged = queue.temporary_output_path().unwrap().to_path_buf();
+                fs::write(&staged, b"retry output").unwrap();
+                fs::write(&output, b"external file").unwrap();
+                process.set_state(MediaProcessState::Completed);
+                queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+                assert!(!staged.parent().unwrap().exists());
+                assert!(matches!(
+                    queue.jobs()[1].state(),
+                    QueueJobState::Failed(QueueJobFailure::Execution(
+                        MediaExecutionFailure::Output {
+                            reason: MediaOutputError::DestinationOccupied(_),
+                            ..
+                        }
+                    ))
+                ));
+            } else {
+                fs::write(&output, b"external file").unwrap();
+                assert!(queue.start_with_launcher(&tools, true, &mut launcher));
+                assert!(matches!(
+                    queue.jobs()[1].state(),
+                    QueueJobState::Failed(QueueJobFailure::Preparation(_))
+                ));
+            }
+            assert_eq!(launches, usize::from(after_launch));
+            assert_eq!(queue.jobs()[1].id(), retry);
+            assert_eq!(queue.jobs()[0].state(), &QueueJobState::Cancelled);
+            assert_eq!(queue.run_state(), QueueRunState::Stopped);
+            assert_eq!(fs::read(&output).unwrap(), b"external file");
+            assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+        }
     }
 
     fn media(directory: &TestDirectory, file_name: &str) -> (SourceIdentity, MediaFile) {

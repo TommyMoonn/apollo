@@ -29,6 +29,7 @@ pub enum QueueAction {
     MoveEarlier(JobId),
     MoveLater(JobId),
     Remove(JobId),
+    Retry(JobId),
     OpenFolder(JobId),
     PreviewFrame(JobId),
     ClearFinished,
@@ -214,6 +215,9 @@ impl Application {
         wake: impl FnMut() -> MediaProcessWake,
     ) -> QueueEffect {
         use QueueEffect::*;
+        if action != QueueAction::None {
+            self.queue_action_error = None;
+        }
         match action {
             QueueAction::AddFiles
                 if self.queue_origin().is_some() && self.batch_origin().is_some() =>
@@ -222,7 +226,9 @@ impl Application {
             }
             QueueAction::AddFiles => Handled(false),
             QueueAction::Start => {
-                if !self.queue_start_allowed() {
+                if !self.queue_start_allowed()
+                    || matches!(self.navigation(), NavigationState::QueueEdit { .. })
+                {
                     return Handled(false);
                 }
                 let Some(tools) = self.discovery.ready() else {
@@ -237,22 +243,60 @@ impl Application {
             QueueAction::CancelCurrent => Handled(self.queue.scheduler.cancel_current()),
             QueueAction::StopAfterCurrent => Handled(self.queue.scheduler.stop_after_current()),
             QueueAction::CancelQueue => Handled(self.queue.cancel()),
-            QueueAction::Edit(id) => self.queue_origin().map_or(Handled(false), |origin| {
+            QueueAction::Edit(id) => {
+                let Some(origin) = self.queue_origin() else {
+                    return Handled(false);
+                };
+                if !self.queue.scheduler.can_edit() {
+                    self.queue_action_error =
+                        Some(QueueMutationError::AutomaticAdvancementActive.to_string());
+                    return Handled(false);
+                }
+                if !self
+                    .queue
+                    .scheduler
+                    .waiting_jobs()
+                    .any(|job| job.id() == id)
+                {
+                    self.queue_action_error =
+                        Some("This job is no longer waiting. Choose a waiting job to edit.".into());
+                    return Handled(false);
+                }
                 Edit(id, QueueEditOrigin::Queue(origin))
-            }),
-            QueueAction::MoveEarlier(id) => Handled(
-                self.queue
+            }
+            QueueAction::MoveEarlier(id) | QueueAction::MoveLater(id) => {
+                let direction = if matches!(action, QueueAction::MoveEarlier(_)) {
+                    WaitingJobMove::Earlier
+                } else {
+                    WaitingJobMove::Later
+                };
+                let result = self.queue.scheduler.move_waiting(id, direction);
+                Handled(self.record_queue_mutation(result))
+            }
+            QueueAction::Remove(id) => {
+                let removed = self.queue.scheduler.remove_waiting(id);
+                if !removed {
+                    self.queue_action_error =
+                        Some("This job is no longer waiting and cannot be removed.".into());
+                }
+                Handled(removed)
+            }
+            QueueAction::Retry(id) => {
+                if self.queue_origin().is_none() {
+                    return Handled(false);
+                }
+                if self.discovery.ready().is_none() {
+                    self.queue_action_error =
+                        Some("Media tools are unavailable. Restore them before retrying.".into());
+                    return Handled(false);
+                }
+                let result = self
+                    .queue
                     .scheduler
-                    .move_waiting(id, WaitingJobMove::Earlier)
-                    .is_ok(),
-            ),
-            QueueAction::MoveLater(id) => Handled(
-                self.queue
-                    .scheduler
-                    .move_waiting(id, WaitingJobMove::Later)
-                    .is_ok(),
-            ),
-            QueueAction::Remove(id) => Handled(self.queue.scheduler.remove_waiting(id)),
+                    .retry(id, self.discovery.settled_capabilities())
+                    .map(|_| true);
+                Handled(self.record_queue_mutation(result))
+            }
             QueueAction::ClearFinished => Handled(self.queue.scheduler.clear_finished() > 0),
             QueueAction::OpenFolder(id) => self
                 .queue
@@ -290,6 +334,16 @@ impl Application {
         }
     }
 
+    fn record_queue_mutation(&mut self, result: Result<bool, QueueMutationError>) -> bool {
+        match result {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.queue_action_error = Some(error.to_string());
+                false
+            }
+        }
+    }
+
     pub(crate) fn queue_edit(&self) -> Option<&QueueEditState> {
         self.queue_edit.as_ref()
     }
@@ -316,10 +370,7 @@ impl Application {
         id: JobId,
         origin: QueueEditOrigin,
     ) -> Option<QueueEditState> {
-        if self.queue.scheduler.run_state() != QueueRunState::Stopped
-            || self.queue.scheduler.is_running()
-            || !self.can_enter_queue_edit(origin)
-        {
+        if !self.queue.scheduler.can_edit() || !self.can_enter_queue_edit(origin) {
             return None;
         }
         let job = self
@@ -379,10 +430,20 @@ impl Application {
     }
 
     pub(crate) fn save_queue_edit(&mut self) -> bool {
+        if !matches!(self.navigation(), NavigationState::QueueEdit { .. }) {
+            return false;
+        }
         let capabilities = self.discovery.upscale_capabilities();
         let Some(edit) = self.queue_edit.as_mut() else {
             return false;
         };
+        if !self.queue.scheduler.can_edit() {
+            edit.error = Some(MediaError::invalid_request(
+                QueueMutationError::AutomaticAdvancementActive.to_string(),
+            ));
+            edit.error_details_open = true;
+            return false;
+        }
         let Some(operation) = edit.validated_request(capabilities) else {
             return false;
         };
@@ -406,7 +467,7 @@ impl Application {
                         "Could not save queue changes: {error}"
                     )),
                 });
-                edit.error_details_open = false;
+                edit.error_details_open = true;
                 false
             }
         }
@@ -439,7 +500,9 @@ fn media_error_from_queue_enqueue(error: &QueueEnqueueError) -> MediaError {
         QueueEnqueueError::Output(error) => MediaError::from_output_error(error),
         QueueEnqueueError::SourceChanged => MediaError::source_changed(error.to_string()),
         QueueEnqueueError::InvalidRequest(error) => error.user_error(),
-        QueueEnqueueError::JobIdExhausted => MediaError::invalid_request(error.to_string()),
+        QueueEnqueueError::JobIdExhausted | QueueEnqueueError::DestinationReserved(_) => {
+            MediaError::invalid_request(error.to_string())
+        }
     }
 }
 

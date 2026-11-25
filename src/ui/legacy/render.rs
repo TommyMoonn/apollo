@@ -9,7 +9,6 @@ use egui::{CentralPanel, Ui};
 use crate::app::{NavigationState, Operation};
 use crate::frame_capture::clipboard::copy_frame_action_eligible;
 use crate::media::error::MediaError;
-use crate::queue::QueueRunState;
 use crate::ui::audio_extract::AudioExtractSelectionAction;
 use crate::ui::audio_mix::AudioMixSelectionAction;
 use crate::ui::frame_capture::{
@@ -200,9 +199,7 @@ impl ApolloApp {
                         pending_queue_count: self.core.queue.scheduler().pending_count(),
                         enabled: self.file_intake_enabled(),
                         editable_jobs: &editable_jobs,
-                        queue_editing_allowed: self.core.queue.scheduler().run_state()
-                            == QueueRunState::Stopped
-                            && !self.core.queue.scheduler().is_running(),
+                        queue_editing_allowed: self.core.queue.scheduler().can_edit(),
                     },
                 )
             })
@@ -275,6 +272,7 @@ impl ApolloApp {
                 waiting_for_encoder_discovery,
                 can_add_files: self.file_intake_enabled() && self.ready_media_tools().is_some(),
                 can_edit: self.ready_media_tools().is_some(),
+                action_error: self.core.queue_action_error.as_deref(),
             },
             self.core.queue.scheduler().cancellation_pending(),
         );

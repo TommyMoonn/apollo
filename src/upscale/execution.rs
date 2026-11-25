@@ -4,7 +4,7 @@ use crate::media::{
     error::MediaError,
     model::MediaFile,
     operation::PreparedMediaOperation,
-    output::{MediaOutput, MediaOutputError},
+    output::{MediaOutput, MediaOutputError, OutputCollisionPolicy},
     tools::MediaTools,
 };
 
@@ -57,6 +57,7 @@ pub(crate) fn prepare_upscale_operation(
     tools: &MediaTools,
     media: &MediaFile,
     request: &UpscaleRequest,
+    collision_policy: OutputCollisionPolicy,
 ) -> Result<PreparedMediaOperation, UpscalePreparationError> {
     let mut request = request.clone();
     request.nvenc_capability =
@@ -64,7 +65,8 @@ pub(crate) fn prepare_upscale_operation(
     let (dimensions, encoder, pixel_format) = validate_upscale_parameters(&request, media)
         .map_err(UpscalePreparationError::Validation)?;
 
-    let output = MediaOutput::prepare(&request.output).map_err(UpscalePreparationError::Output)?;
+    let output = MediaOutput::prepare_with_policy(&request.output, collision_policy)
+        .map_err(UpscalePreparationError::Output)?;
     let invocation = build_upscale_invocation_to(
         &request,
         media,

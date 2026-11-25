@@ -18,11 +18,12 @@ const STOP_AFTER_CURRENT_LABEL: &str = "Stop after current";
 const STOP_QUEUE_LABEL: &str = "Stop queue";
 const CANCEL_QUEUE_LABEL: &str = "Cancel queue";
 const STOPPING_LABEL: &str = "Stopping after current";
-const EDIT_LABEL: &str = "Edit";
+const EDIT_LABEL: &str = "Edit settings";
 const MOVE_EARLIER_LABEL: &str = "↑";
 const MOVE_LATER_LABEL: &str = "↓";
-const MOVE_EARLIER_HELP: &str = "Move earlier";
-const MOVE_LATER_HELP: &str = "Move later";
+const MOVE_EARLIER_HELP: &str = "Move up";
+const MOVE_LATER_HELP: &str = "Move down";
+const RETRY_LABEL: &str = "Retry";
 const REMOVE_LABEL: &str = "Remove";
 const CLEAR_LABEL: &str = "Clear finished";
 const BACK_LABEL: &str = "Back";
@@ -31,11 +32,12 @@ const PREVIEW_LABEL: &str = "Preview";
 const DETAILS_LABEL: &str = "Details";
 
 #[derive(Debug, Clone, Copy)]
-pub struct QueueAvailability {
+pub struct QueueAvailability<'a> {
     pub can_start: bool,
     pub waiting_for_encoder_discovery: bool,
     pub can_add_files: bool,
     pub can_edit: bool,
+    pub action_error: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,7 +61,6 @@ struct QueueRowContext<'a> {
     active_progress: Option<&'a MediaProgress>,
     cancellation_pending: bool,
     plan: layout::QueueRowPlan,
-    waiting_mutation_allowed: bool,
     can_edit: bool,
     action: &'a Cell<QueueAction>,
 }
@@ -127,7 +128,7 @@ pub fn show(
     active_job: Option<JobId>,
     active_progress: Option<&MediaProgress>,
     run_state: QueueRunState,
-    availability: QueueAvailability,
+    availability: QueueAvailability<'_>,
     cancellation_pending: bool,
 ) -> QueueAction {
     let queue_start_allowed = availability.can_start;
@@ -135,7 +136,8 @@ pub fn show(
     let capabilities = QueueCapabilities::from_jobs(jobs);
     let summary = QueueSummary::from_jobs(jobs);
     let action_rows = queue_action_rows(ui, active_job, capabilities.has_waiting, run_state);
-    let waiting_mutation_allowed = run_state == QueueRunState::Stopped && active_job.is_none();
+    let edit_allowed =
+        availability.can_edit && run_state == QueueRunState::Stopped && active_job.is_none();
     let action_width = row_action_width(ui);
     let operation_width = crate::app::Operation::ALL
         .into_iter()
@@ -161,6 +163,20 @@ pub fn show(
                 &action,
             );
             ui.add_space(theme::SPACING.related);
+            if let Some(error) = availability.action_error {
+                ui.label(error);
+                ui.add_space(theme::SPACING.compact);
+            }
+            if capabilities.has_waiting && !edit_allowed {
+                let guidance = match run_state {
+                    QueueRunState::Running => "Stop after current to edit waiting jobs.",
+                    QueueRunState::StoppingAfterCurrent | QueueRunState::Stopped => {
+                        "Wait for the active job to finish before editing settings."
+                    }
+                };
+                ui.label(guidance);
+                ui.add_space(theme::SPACING.compact);
+            }
             if active_job.is_none() && availability.waiting_for_encoder_discovery {
                 ui.label("Checking NVIDIA NVENC…");
                 ui.add_space(theme::SPACING.compact);
@@ -181,8 +197,7 @@ pub fn show(
                     active_progress,
                     cancellation_pending,
                     plan: row_plan,
-                    waiting_mutation_allowed,
-                    can_edit: availability.can_edit,
+                    can_edit: edit_allowed,
                     action: &action,
                 };
                 if matches!(row_plan.layout, layout::QueueRowLayout::Inline) {
@@ -579,34 +594,40 @@ fn show_row_actions(
             if widgets::plain_button(ui, REMOVE_LABEL).clicked() {
                 action.set(QueueAction::Remove(job.id()));
             }
-            if context.waiting_mutation_allowed {
-                if ui
-                    .add_enabled_ui(context.can_edit, |ui| widgets::plain_button(ui, EDIT_LABEL))
-                    .inner
-                    .clicked()
-                {
-                    action.set(QueueAction::Edit(job.id()));
-                }
-                if widgets::compact_secondary_button_enabled(
-                    ui,
+            if ui
+                .add_enabled_ui(context.can_edit, |ui| widgets::plain_button(ui, EDIT_LABEL))
+                .inner
+                .clicked()
+            {
+                action.set(QueueAction::Edit(job.id()));
+            }
+            for (label, name, enabled, command) in [
+                (
                     MOVE_LATER_LABEL,
+                    MOVE_LATER_HELP,
                     move_capability.later,
-                )
-                .on_hover_text(MOVE_LATER_HELP)
-                .clicked()
-                {
-                    action.set(QueueAction::MoveLater(job.id()));
-                }
-                if widgets::compact_secondary_button_enabled(
-                    ui,
+                    QueueAction::MoveLater(job.id()),
+                ),
+                (
                     MOVE_EARLIER_LABEL,
+                    MOVE_EARLIER_HELP,
                     move_capability.earlier,
-                )
-                .on_hover_text(MOVE_EARLIER_HELP)
-                .clicked()
-                {
-                    action.set(QueueAction::MoveEarlier(job.id()));
+                    QueueAction::MoveEarlier(job.id()),
+                ),
+            ] {
+                let response = widgets::compact_secondary_button_enabled(ui, label, enabled)
+                    .on_hover_text(name);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), name)
+                });
+                if response.clicked() {
+                    action.set(command);
                 }
+            }
+        }
+        QueueJobState::Failed(_) | QueueJobState::Cancelled => {
+            if widgets::plain_button(ui, RETRY_LABEL).clicked() {
+                action.set(QueueAction::Retry(job.id()));
             }
         }
         QueueJobState::Completed { .. } => {
@@ -626,7 +647,10 @@ fn show_row_actions(
 fn has_row_actions(state: &QueueJobState) -> bool {
     matches!(
         state,
-        QueueJobState::Waiting | QueueJobState::Completed { .. }
+        QueueJobState::Waiting
+            | QueueJobState::Completed { .. }
+            | QueueJobState::Failed(_)
+            | QueueJobState::Cancelled
     )
 }
 
@@ -784,8 +808,8 @@ mod tests {
     use super::{
         ADD_FILES_LABEL, BACK_LABEL, CANCEL_LABEL, CANCEL_QUEUE_LABEL, DETAILS_LABEL,
         MOVE_EARLIER_LABEL, MOVE_LATER_LABEL, QueueAvailability, QueueSummary, REMOVE_LABEL,
-        STOP_AFTER_CURRENT_LABEL, STOPPING_LABEL, bound_active_progress, failure_details,
-        file_name, has_row_actions, show, waiting_move_capabilities,
+        RETRY_LABEL, STOP_AFTER_CURRENT_LABEL, STOPPING_LABEL, bound_active_progress,
+        failure_details, file_name, has_row_actions, show, waiting_move_capabilities,
     };
 
     static NEXT_QUEUE_UI_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
@@ -1014,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn row_actions_are_owned_only_by_waiting_and_completed_states() {
+    fn row_actions_are_available_for_waiting_and_terminal_jobs() {
         assert!(has_row_actions(&QueueJobState::Waiting));
         assert!(has_row_actions(&QueueJobState::Completed {
             output: PathBuf::from("output.mkv")
@@ -1022,10 +1046,10 @@ mod tests {
         assert!(!has_row_actions(&QueueJobState::Running {
             output: PathBuf::from("output.mkv")
         }));
-        assert!(!has_row_actions(&QueueJobState::Failed(
+        assert!(has_row_actions(&QueueJobState::Failed(
             QueueJobFailure::SourceChanged
         )));
-        assert!(!has_row_actions(&QueueJobState::Cancelled));
+        assert!(has_row_actions(&QueueJobState::Cancelled));
     }
 
     #[test]
@@ -1082,6 +1106,7 @@ mod tests {
                         waiting_for_encoder_discovery: false,
                         can_add_files: true,
                         can_edit: true,
+                        action_error: None,
                     },
                     false,
                 );
@@ -1089,6 +1114,12 @@ mod tests {
             output.textures_delta.clear();
             let status = output_text_rect(&output, "Failed").unwrap();
             let details = output_text_rect(&output, DETAILS_LABEL).unwrap();
+            let retry = output_text_rect(&output, RETRY_LABEL).unwrap();
+            assert!(retry.center().y >= status.top());
+            assert!(output.shapes.iter().any(|shape| {
+                shape_text_rect(&shape.shape, RETRY_LABEL)
+                    .is_some_and(|rect| shape.clip_rect.expand(1.0).contains_rect(rect))
+            }));
             assert!(
                 details.left() >= status.right(),
                 "width {width}: status {status:?}, details {details:?}"
@@ -1124,6 +1155,7 @@ mod tests {
                     waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
+                    action_error: None,
                 },
                 false,
             );
@@ -1189,6 +1221,7 @@ mod tests {
                     waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
+                    action_error: None,
                 },
                 false,
             );
@@ -1244,6 +1277,7 @@ mod tests {
                     waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
+                    action_error: None,
                 },
                 false,
             );
@@ -1281,6 +1315,7 @@ mod tests {
                     waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
+                    action_error: None,
                 },
                 false,
             );
@@ -1328,6 +1363,7 @@ mod tests {
                     waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
+                    action_error: None,
                 },
                 false,
             );
@@ -1370,6 +1406,7 @@ mod tests {
                     waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
+                    action_error: None,
                 },
                 false,
             );
@@ -1403,6 +1440,7 @@ mod tests {
                     waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
+                    action_error: None,
                 },
                 false,
             );

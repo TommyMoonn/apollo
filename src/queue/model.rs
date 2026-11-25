@@ -22,9 +22,9 @@ use crate::{
         intake::{MediaIntake, MediaIntakeError, SourceIdentity},
         model::MediaFile,
         operation::PreparedMediaOperation,
-        output::MediaOutputError,
+        output::{MediaOutputError, OutputCollisionPolicy},
         process::MediaProcessStartError,
-        tools::MediaTools,
+        tools::{MediaTools, VideoEncoderCapabilities},
     },
     remux::{
         execution::{RemuxPreparationError, prepare_remux_operation},
@@ -132,23 +132,48 @@ impl QueuedOperation {
         matches!(self, Self::Upscale(request) if request.encoder_settings.selection() != VideoEncoderSelection::Cpu)
     }
 
+    /// Refresh only the discovery snapshot; preserve the selected encoder policy.
+    pub(crate) fn refresh_encoder_capabilities(
+        &mut self,
+        capabilities: Option<&VideoEncoderCapabilities>,
+    ) -> Result<(), QueueMutationError> {
+        if let Self::Upscale(request) = self
+            && request.encoder_settings.selection() != VideoEncoderSelection::Cpu
+        {
+            let capabilities = capabilities.ok_or(QueueMutationError::CapabilitiesPending)?;
+            request.nvenc_capability =
+                crate::upscale::model::capability_for_codec(capabilities, request.codec).clone();
+        }
+        Ok(())
+    }
+
     pub(crate) fn prepare(
         &self,
         tools: &MediaTools,
         media: &MediaFile,
+        collision_policy: OutputCollisionPolicy,
     ) -> Result<PreparedMediaOperation, QueuePreparationError> {
         match self {
-            Self::AudioMix(request) => prepare_audio_mix_operation(tools, media, request)
-                .map_err(QueuePreparationError::AudioMix),
-            Self::Upscale(request) => prepare_upscale_operation(tools, media, request)
-                .map_err(QueuePreparationError::Upscale),
-            Self::Remux(request) => {
-                prepare_remux_operation(tools, media, request).map_err(QueuePreparationError::Remux)
+            Self::AudioMix(request) => {
+                prepare_audio_mix_operation(tools, media, request, collision_policy)
+                    .map_err(QueuePreparationError::AudioMix)
             }
-            Self::AudioExtract(request) => prepare_audio_extract_operation(tools, media, request)
-                .map_err(QueuePreparationError::AudioExtract),
-            Self::FrameCapture(request) => prepare_frame_capture_operation(tools, media, request)
-                .map_err(QueuePreparationError::FrameCapture),
+            Self::Upscale(request) => {
+                prepare_upscale_operation(tools, media, request, collision_policy)
+                    .map_err(QueuePreparationError::Upscale)
+            }
+            Self::Remux(request) => {
+                prepare_remux_operation(tools, media, request, collision_policy)
+                    .map_err(QueuePreparationError::Remux)
+            }
+            Self::AudioExtract(request) => {
+                prepare_audio_extract_operation(tools, media, request, collision_policy)
+                    .map_err(QueuePreparationError::AudioExtract)
+            }
+            Self::FrameCapture(request) => {
+                prepare_frame_capture_operation(tools, media, request, collision_policy)
+                    .map_err(QueuePreparationError::FrameCapture)
+            }
         }
     }
 }
@@ -236,6 +261,7 @@ impl QueueJobState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueEnqueueError {
     JobIdExhausted,
+    DestinationReserved(JobId),
     Source(MediaIntakeError),
     SourceDoesNotMatchMedia,
     SourceChanged,
@@ -267,6 +293,10 @@ impl fmt::Display for QueueEnqueueError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::JobIdExhausted => write!(formatter, "queue job identifiers are exhausted"),
+            Self::DestinationReserved(id) => write!(
+                formatter,
+                "output is reserved by pending job {id}; choose another destination or wait for that job"
+            ),
             Self::Source(error) => {
                 write!(formatter, "source unavailable: {error}")
             }
@@ -292,6 +322,10 @@ pub enum QueueMutationError {
     AutomaticAdvancementActive,
     JobNotFound(JobId),
     JobNotWaiting(JobId),
+    JobNotRetryable(JobId),
+    DestinationReserved(JobId),
+    CapabilitiesPending,
+    JobIdExhausted,
     SourceUnavailable(MediaIntakeError),
     SourceChanged,
     InvalidRequest(QueuePreparationError),
@@ -302,23 +336,42 @@ impl fmt::Display for QueueMutationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AutomaticAdvancementActive => {
-                formatter.write_str("queue mutation is unavailable during automatic advancement")
+                formatter.write_str("Editing requires a stopped queue. Use Stop after current and wait for the active job to finish.")
             }
             Self::JobNotFound(id) => write!(formatter, "queue job {id} was not found"),
             Self::JobNotWaiting(id) => write!(formatter, "queue job {id} is not waiting"),
+            Self::JobNotRetryable(id) => write!(formatter, "job {id} is not failed or cancelled"),
+            Self::DestinationReserved(id) => write!(formatter, "output is reserved by pending job {id}; choose another destination or wait for that job"),
+            Self::CapabilitiesPending => formatter.write_str("Wait for NVIDIA NVENC discovery to finish, then retry."),
+            Self::JobIdExhausted => formatter.write_str("queue job identifiers are exhausted"),
             Self::SourceUnavailable(error) => {
-                write!(formatter, "queued source is unavailable: {error}")
+                write!(formatter, "queued source is unavailable: {error}; reopen the source before submitting a new job")
             }
-            Self::SourceChanged => formatter.write_str("queued source changed"),
+            Self::SourceChanged => formatter.write_str("queued source changed or cannot be verified; reopen the source before submitting a new job"),
             Self::InvalidRequest(error) => {
-                write!(formatter, "invalid replacement operation: {error}")
+                write!(formatter, "invalid queued operation: {error}")
             }
-            Self::Output(error) => write!(formatter, "replacement output is invalid: {error}"),
+            Self::Output(error) => write!(formatter, "queue output is invalid: {error}"),
         }
     }
 }
 
 impl std::error::Error for QueueMutationError {}
+
+impl From<QueueEnqueueError> for QueueMutationError {
+    fn from(error: QueueEnqueueError) -> Self {
+        match error {
+            QueueEnqueueError::JobIdExhausted => Self::JobIdExhausted,
+            QueueEnqueueError::DestinationReserved(id) => Self::DestinationReserved(id),
+            QueueEnqueueError::Source(error) => Self::SourceUnavailable(error),
+            QueueEnqueueError::SourceChanged | QueueEnqueueError::SourceDoesNotMatchMedia => {
+                Self::SourceChanged
+            }
+            QueueEnqueueError::InvalidRequest(error) => Self::InvalidRequest(error),
+            QueueEnqueueError::Output(error) => Self::Output(error),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitingJobMove {
@@ -341,6 +394,7 @@ pub struct QueuedJob {
     media: MediaFile,
     operation: QueuedOperation,
     state: QueueJobState,
+    collision_policy: OutputCollisionPolicy,
 }
 
 impl QueuedJob {
@@ -356,6 +410,7 @@ impl QueuedJob {
             media,
             operation,
             state: QueueJobState::Waiting,
+            collision_policy: OutputCollisionPolicy::Numbered,
         }
     }
 
@@ -387,6 +442,15 @@ impl QueuedJob {
 
     pub(crate) fn set_state(&mut self, state: QueueJobState) {
         self.state = state;
+    }
+
+    pub(crate) fn collision_policy(&self) -> OutputCollisionPolicy {
+        self.collision_policy
+    }
+
+    pub(crate) fn with_collision_policy(mut self, policy: OutputCollisionPolicy) -> Self {
+        self.collision_policy = policy;
+        self
     }
 
     pub(crate) fn replace_operation(&mut self, operation: QueuedOperation) {

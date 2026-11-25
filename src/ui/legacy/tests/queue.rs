@@ -57,7 +57,7 @@ fn stopped_queue_surface_exposes_edit_remove_and_bounded_reorder_controls() {
     let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
 
     for label in [
-        "Edit",
+        "Edit settings",
         "Remove",
         "↑",
         "↓",
@@ -106,7 +106,44 @@ fn queue_cancel_requires_confirmation_and_dismissal_keeps_waiting_jobs() {
 }
 
 #[test]
-fn queue_edit_accepts_shared_destination_and_keeps_job_identity() {
+fn queue_retry_action_retains_history_and_exposes_rejection() {
+    let (directory, path) = temp_file("queue-retry-action");
+    let mut app = app();
+    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+    app.select_tool(Operation::Remux);
+    let original = app
+        .enqueue_current_operation(Operation::Remux)
+        .unwrap()
+        .unwrap();
+    app.enter_queue();
+    assert!(app.handle_queue_action(QueueAction::CancelQueue));
+    let history = app.core.queue.scheduler().jobs()[0].clone();
+    assert!(app.handle_queue_action(QueueAction::Retry(original)));
+    let jobs = app.core.queue.scheduler().jobs().to_vec();
+    assert_eq!(jobs[0], history);
+    assert_ne!(jobs[1].id(), original);
+    assert_eq!(jobs[1].state(), &QueueJobState::Waiting);
+    assert!(!app.core.queue.scheduler().is_started());
+    assert!(!app.handle_queue_action(QueueAction::Retry(original)));
+    let error = app
+        .core
+        .queue_action_error
+        .clone()
+        .expect("retry rejection");
+    assert_eq!(app.core.queue.scheduler().jobs(), jobs);
+    assert!(!app.handle_queue_action(QueueAction::None));
+    assert_eq!(app.core.queue_action_error.as_deref(), Some(error.as_str()));
+    let context = egui::Context::default();
+    fonts::install(&context);
+    theme::install(&context);
+    let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
+    assert!(output_contains_text(&output, &error));
+    output.textures_delta.clear();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn queue_edit_rejects_reserved_destination_and_retains_draft() {
     let (directory, path) = temp_file("queue-edit-failure");
     let mut app = app();
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
@@ -136,12 +173,24 @@ fn queue_edit_accepts_shared_destination_and_keeps_job_identity() {
         .unwrap()
         .remux
         .set_custom_output_path(duplicate_output.clone());
-    assert!(app.save_queue_edit());
-    assert_eq!(app.core.queue.scheduler().jobs()[0].id(), first);
+    let before = app.core.queue.scheduler().jobs().to_vec();
+    assert!(!app.save_queue_edit());
+    assert_eq!(app.core.queue.scheduler().jobs(), before);
+    let edit = app.core.queue_edit().unwrap();
+    assert!(
+        edit.error
+            .as_ref()
+            .unwrap()
+            .diagnostic()
+            .unwrap()
+            .contains("reserved")
+    );
     assert_eq!(
-        app.core.queue.scheduler().jobs()[0].operation().output(),
+        edit.remux.validated_request(&edit.media).unwrap().output,
         duplicate_output
     );
+    assert!(app.finish_queue_edit());
+    assert_eq!(app.core.queue.scheduler().jobs(), before);
     assert_eq!(app.core.queue.scheduler().jobs()[1].id(), second);
     assert!(app.core.queue_edit().is_none());
     fs::remove_dir_all(directory).unwrap();

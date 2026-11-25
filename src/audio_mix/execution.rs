@@ -4,7 +4,7 @@ use crate::media::{
     error::MediaError,
     model::MediaFile,
     operation::PreparedMediaOperation,
-    output::{MediaOutput, MediaOutputError},
+    output::{MediaOutput, MediaOutputError, OutputCollisionPolicy},
     tools::MediaTools,
 };
 
@@ -60,11 +60,13 @@ pub(crate) fn prepare_audio_mix_operation(
     tools: &MediaTools,
     media: &MediaFile,
     request: &AudioMixRequest,
+    collision_policy: OutputCollisionPolicy,
 ) -> Result<PreparedMediaOperation, AudioMixPreparationError> {
     let layout =
         validate_audio_mix_layout(request, media).map_err(AudioMixPreparationError::Validation)?;
 
-    let output = MediaOutput::prepare(&request.output).map_err(AudioMixPreparationError::Output)?;
+    let output = MediaOutput::prepare_with_policy(&request.output, collision_policy)
+        .map_err(AudioMixPreparationError::Output)?;
     let invocation = build_audio_mix_invocation_to(
         request,
         media.video_streams[0].stream_index,
@@ -116,9 +118,10 @@ mod tests {
         let directory = TestDirectory::new("prepare");
         let (request, media) = valid_request_and_media(&directory);
         let tools = fake_tools(&directory);
-        let (output, command, duration) = prepare_audio_mix_operation(&tools, &media, &request)
-            .unwrap()
-            .into_parts();
+        let (output, command, duration) =
+            prepare_audio_mix_operation(&tools, &media, &request, OutputCollisionPolicy::Numbered)
+                .unwrap()
+                .into_parts();
         assert_eq!(command.program(), tools.ffmpeg);
         assert_eq!(duration, media.duration);
         let expected =
@@ -139,7 +142,12 @@ mod tests {
         let (mut request, media) = valid_request_and_media(&directory);
         request.selected_tracks.clear();
         assert!(matches!(
-            prepare_audio_mix_operation(&fake_tools(&directory), &media, &request),
+            prepare_audio_mix_operation(
+                &fake_tools(&directory),
+                &media,
+                &request,
+                OutputCollisionPolicy::Numbered
+            ),
             Err(AudioMixPreparationError::Validation(_))
         ));
         assert!(!request.output.exists());

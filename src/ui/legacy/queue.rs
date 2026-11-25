@@ -51,6 +51,9 @@ impl ApolloApp {
     }
 
     pub(super) fn handle_queue_action(&mut self, action: QueueAction) -> bool {
+        if action == QueueAction::None {
+            return false;
+        }
         if action == QueueAction::AddFiles
             && (!self.file_intake_enabled() || self.ready_media_tools().is_none())
         {
@@ -59,7 +62,7 @@ impl ApolloApp {
         let progress = &mut self.progress_repaint;
         match self.core.queue_action(action, || progress.begin()) {
             QueueEffect::Handled(changed) => {
-                if changed {
+                if changed || self.core.queue_action_error.is_some() {
                     self.egui_context.request_repaint();
                 }
                 changed

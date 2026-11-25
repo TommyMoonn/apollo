@@ -25,6 +25,11 @@ pub enum MediaOutputError {
         kind: io::ErrorKind,
     },
     OutputParentNotDirectory(PathBuf),
+    DestinationOccupied(PathBuf),
+    DestinationUnavailable {
+        path: PathBuf,
+        kind: io::ErrorKind,
+    },
     TemporaryDirectoryCreationFailed {
         path: PathBuf,
         kind: io::ErrorKind,
@@ -60,6 +65,16 @@ impl fmt::Display for MediaOutputError {
             Self::OutputParentNotDirectory(path) => {
                 write!(f, "output parent is not a directory: {}", path.display())
             }
+            Self::DestinationOccupied(path) => write!(
+                f,
+                "output already exists: {}; choose another destination",
+                path.display()
+            ),
+            Self::DestinationUnavailable { path, kind } => write!(
+                f,
+                "output destination could not be checked ({}): {kind:?}",
+                path.display()
+            ),
             Self::TemporaryDirectoryCreationFailed { path, kind } => write!(
                 f,
                 "temporary output directory could not be created ({}): {kind:?}",
@@ -92,10 +107,17 @@ impl fmt::Display for MediaOutputError {
 
 impl std::error::Error for MediaOutputError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputCollisionPolicy {
+    Numbered,
+    Exact,
+}
+
 #[derive(Debug)]
 pub struct MediaOutput {
     requested_path: PathBuf,
     suffix: u64,
+    collision_policy: OutputCollisionPolicy,
     final_path: PathBuf,
     temporary_path: PathBuf,
     staging_directory: PathBuf,
@@ -140,6 +162,29 @@ pub fn preflight_output_destination(output: &Path) -> Result<(), MediaOutputErro
     validated_output_destination(output).map(|_| ())
 }
 
+/// Resolve parent aliases without requiring the output itself to exist.
+pub(crate) fn normalized_output_destination(output: &Path) -> Result<PathBuf, MediaOutputError> {
+    validate_output_path(output)?;
+    let parent = output_parent(output);
+    let parent =
+        fs::canonicalize(&parent).map_err(|error| MediaOutputError::OutputParentUnavailable {
+            path: parent,
+            kind: error.kind(),
+        })?;
+    Ok(parent.join(output.file_name().expect("validated file name")))
+}
+
+pub(crate) fn require_vacant_destination(output: &Path) -> Result<(), MediaOutputError> {
+    match fs::symlink_metadata(output) {
+        Ok(_) => Err(MediaOutputError::DestinationOccupied(output.to_path_buf())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(MediaOutputError::DestinationUnavailable {
+            path: output.to_path_buf(),
+            kind: error.kind(),
+        }),
+    }
+}
+
 fn validated_output_destination(
     output: &Path,
 ) -> Result<ValidatedOutputDestination, MediaOutputError> {
@@ -176,15 +221,27 @@ fn validated_output_destination(
 
 impl MediaOutput {
     pub fn prepare(output: &Path) -> Result<Self, MediaOutputError> {
+        Self::prepare_with_policy(output, OutputCollisionPolicy::Numbered)
+    }
+
+    pub(crate) fn prepare_with_policy(
+        output: &Path,
+        collision_policy: OutputCollisionPolicy,
+    ) -> Result<Self, MediaOutputError> {
         let destination = validated_output_destination(output)?;
         // Choose the name once at execution start for progress presentation. This is advisory:
         // if inspection fails or another writer claims the name, publication remains authoritative.
         let requested_path = destination.final_path;
         let mut final_path = requested_path.clone();
         let mut suffix = 0;
-        while fs::symlink_metadata(&final_path).is_ok() {
-            suffix += 1;
-            final_path = numbered_output_path(&requested_path, suffix);
+        match collision_policy {
+            OutputCollisionPolicy::Numbered => {
+                while fs::symlink_metadata(&final_path).is_ok() {
+                    suffix += 1;
+                    final_path = numbered_output_path(&requested_path, suffix);
+                }
+            }
+            OutputCollisionPolicy::Exact => require_vacant_destination(&final_path)?,
         }
         let staging_directory = create_staging_directory(&destination.parent)?;
         let temporary_path = staging_directory.join(&destination.file_name);
@@ -192,6 +249,7 @@ impl MediaOutput {
         Ok(Self {
             requested_path,
             suffix,
+            collision_policy,
             final_path,
             temporary_path,
             staging_directory,
@@ -275,8 +333,14 @@ impl MediaOutput {
         for index in self.suffix + 1.. {
             match publish_file_no_replace(&self.temporary_path, &candidate) {
                 Ok(()) => break,
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                Err(error)
+                    if error.kind() == io::ErrorKind::AlreadyExists
+                        && self.collision_policy == OutputCollisionPolicy::Numbered =>
+                {
                     candidate = numbered_output_path(&self.requested_path, index);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    return Err(MediaOutputError::DestinationOccupied(candidate));
                 }
                 Err(error) => {
                     return Err(MediaOutputError::PublishFailed {

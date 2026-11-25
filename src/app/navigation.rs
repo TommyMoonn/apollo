@@ -149,6 +149,7 @@ impl Application {
             | NavigationState::BatchEdit => return false,
         };
         self.show_queue(origin);
+        self.queue_action_error = None;
         self.source.clear_error();
         self.queue_confirmation = None;
         self.operation_action_error = None;

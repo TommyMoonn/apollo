@@ -103,6 +103,9 @@ pub fn show(
                     ui.add_enabled_ui(queue_editing_allowed, |ui| {
                         show_queued_job_selector(ui, editable_jobs, &action);
                     });
+                    if !queue_editing_allowed {
+                        ui.label("Stop after current to edit queued jobs.");
+                    }
                 }
             }
             WorkspaceMode::FixedSourceEdit { context, .. } => {

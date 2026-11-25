@@ -5,7 +5,7 @@ use crate::media::{
     error::MediaError,
     model::MediaFile,
     operation::PreparedMediaOperation,
-    output::{MediaOutput, MediaOutputError},
+    output::{MediaOutput, MediaOutputError, OutputCollisionPolicy},
     tools::MediaTools,
 };
 
@@ -56,10 +56,12 @@ pub(crate) fn prepare_remux_operation(
     tools: &MediaTools,
     media: &MediaFile,
     request: &RemuxRequest,
+    collision_policy: OutputCollisionPolicy,
 ) -> Result<PreparedMediaOperation, RemuxPreparationError> {
     validate_remux_request(request, media).map_err(RemuxPreparationError::Validation)?;
 
-    let output = MediaOutput::prepare(&request.output).map_err(RemuxPreparationError::Output)?;
+    let output = MediaOutput::prepare_with_policy(&request.output, collision_policy)
+        .map_err(RemuxPreparationError::Output)?;
     let invocation = build_remux_invocation_to(request, output.temporary_path());
     Ok(PreparedMediaOperation::new(
         output,
@@ -105,9 +107,10 @@ mod tests {
         let directory = TestDirectory::new("prepare");
         let (request, media) = valid_request_and_media(&directory);
         let tools = fake_tools(&directory);
-        let (output, command, duration) = prepare_remux_operation(&tools, &media, &request)
-            .unwrap()
-            .into_parts();
+        let (output, command, duration) =
+            prepare_remux_operation(&tools, &media, &request, OutputCollisionPolicy::Numbered)
+                .unwrap()
+                .into_parts();
         assert_eq!(command.program(), tools.ffmpeg);
         assert_eq!(duration, media.duration);
         let expected = crate::remux::command::build_remux_invocation(&request);
@@ -127,7 +130,12 @@ mod tests {
         let (request, mut media) = valid_request_and_media(&directory);
         media.streams[1].codec = Some("wmav2".to_owned());
         assert!(matches!(
-            prepare_remux_operation(&fake_tools(&directory), &media, &request),
+            prepare_remux_operation(
+                &fake_tools(&directory),
+                &media,
+                &request,
+                OutputCollisionPolicy::Numbered
+            ),
             Err(RemuxPreparationError::Validation(_))
         ));
         assert!(!request.output.exists());

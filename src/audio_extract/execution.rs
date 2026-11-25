@@ -4,7 +4,7 @@ use crate::media::{
     error::MediaError,
     model::MediaFile,
     operation::PreparedMediaOperation,
-    output::{MediaOutput, MediaOutputError},
+    output::{MediaOutput, MediaOutputError, OutputCollisionPolicy},
     tools::MediaTools,
 };
 
@@ -55,6 +55,7 @@ pub(crate) fn prepare_audio_extract_operation(
     tools: &MediaTools,
     media: &MediaFile,
     request: &AudioExtractRequest,
+    collision_policy: OutputCollisionPolicy,
 ) -> Result<PreparedMediaOperation, AudioExtractPreparationError> {
     validate_audio_extract_request(request, media)
         .map_err(AudioExtractPreparationError::Validation)?;
@@ -66,8 +67,8 @@ pub(crate) fn prepare_audio_extract_operation(
         .map(AudioExtractMetadata::from)
         .unwrap_or_default();
 
-    let output =
-        MediaOutput::prepare(&request.output).map_err(AudioExtractPreparationError::Output)?;
+    let output = MediaOutput::prepare_with_policy(&request.output, collision_policy)
+        .map_err(AudioExtractPreparationError::Output)?;
     let invocation = build_audio_extract_invocation_to(request, &metadata, output.temporary_path());
     Ok(PreparedMediaOperation::new(
         output,

@@ -4,7 +4,7 @@ use crate::media::{
     error::MediaError,
     model::MediaFile,
     operation::PreparedMediaOperation,
-    output::{MediaOutput, MediaOutputError},
+    output::{MediaOutput, MediaOutputError, OutputCollisionPolicy},
     tools::MediaTools,
 };
 
@@ -59,6 +59,7 @@ pub(crate) fn prepare_frame_capture_operation(
     tools: &MediaTools,
     media: &MediaFile,
     request: &FrameCaptureRequest,
+    collision_policy: OutputCollisionPolicy,
 ) -> Result<PreparedMediaOperation, FrameCapturePreparationError> {
     validate_frame_capture_request(request, media)
         .map_err(FrameCapturePreparationError::Validation)?;
@@ -68,8 +69,8 @@ pub(crate) fn prepare_frame_capture_operation(
         .expect("validated frame capture media owns a video stream")
         .stream_index;
 
-    let output =
-        MediaOutput::prepare(&request.output).map_err(FrameCapturePreparationError::Output)?;
+    let output = MediaOutput::prepare_with_policy(&request.output, collision_policy)
+        .map_err(FrameCapturePreparationError::Output)?;
     let invocation = build_frame_capture_invocation_to(
         request,
         primary_video_stream_index,
