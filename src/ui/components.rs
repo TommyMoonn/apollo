@@ -17,11 +17,12 @@ pub enum Tone {
     Destructive,
 }
 
-/// Bundled glyphs for icon-only actions.
+/// Bundled glyphs for button icons.
 #[derive(Clone, Copy)]
 pub enum ActionIcon {
     Back,
     Settings,
+    ChevronDown,
 }
 
 impl ActionIcon {
@@ -29,6 +30,7 @@ impl ActionIcon {
         match self {
             Self::Back => "icons/arrow-left.svg",
             Self::Settings => "icons/settings.svg",
+            Self::ChevronDown => "icons/chevron-down.svg",
         }
     }
 }
@@ -67,9 +69,11 @@ impl<'a> Button<'a> {
         self.measured_width_with(window.text_system(), None)
     }
 
-    fn horizontal_padding(&self) -> f32 {
+    fn horizontal_padding(&self, trailing_icon: bool) -> f32 {
         if self.tone == Tone::Quiet {
             M.tight
+        } else if trailing_icon {
+            M.compact
         } else {
             M.related
         }
@@ -84,7 +88,7 @@ impl<'a> Button<'a> {
         px(minimum.max(TextRole::Control.resolve().line_height + 2. * (M.tight + M.rule)))
     }
 
-    fn measured_width_with(&self, text: &WindowTextSystem, icon: Option<&str>) -> Pixels {
+    fn measured_width_with(&self, text: &WindowTextSystem, icon: Option<ActionIcon>) -> Pixels {
         let icon_width = if icon.is_some() {
             M.icon_size + M.tight
         } else {
@@ -94,10 +98,10 @@ impl<'a> Button<'a> {
             text,
             self.label,
             self.alternate_labels,
-            self.horizontal_padding(),
+            self.horizontal_padding(icon.is_some()),
         ) + px(icon_width))
         .max(px(
-            M.spinner_size + 2. * (self.horizontal_padding() + M.rule)
+            M.spinner_size + 2. * (self.horizontal_padding(icon.is_some()) + M.rule)
         ))
     }
 
@@ -116,7 +120,7 @@ impl<'a> Button<'a> {
         self,
         palette: Palette,
         window: &Window,
-        icon: Option<&str>,
+        icon: Option<ActionIcon>,
         icon_only: Option<ActionIcon>,
     ) -> Stateful<Div> {
         let busy = matches!(&self.state, ActionState::Busy);
@@ -131,7 +135,7 @@ impl<'a> Button<'a> {
         let padding = if icon_only.is_some() {
             M.tight
         } else {
-            self.horizontal_padding()
+            self.horizontal_padding(icon.is_some())
         };
         let selected = matches!(&self.state, ActionState::Selected(_));
         let click = match self.state {
@@ -202,12 +206,12 @@ impl<'a> Button<'a> {
             element
                 .child(self.label.to_owned())
                 .children(icon.map(|icon| {
-                    div()
+                    svg()
+                        .path(icon.path())
                         .ml(px(M.tight))
-                        .w(px(M.icon_size))
+                        .size(px(M.icon_size))
                         .flex_shrink_0()
-                        .text_center()
-                        .child(icon.to_owned())
+                        .text_color(rgba(foreground))
                 }))
         };
         let Some(click) = click else {
@@ -249,24 +253,29 @@ impl<'a> Button<'a> {
                 } else {
                     style
                 }
-            })
-            .focus(move |style| {
-                // The underline remains visible even if a destructive hover overrides the border color.
-                let style = if destructive {
-                    style.underline()
-                } else {
-                    style
-                };
-                style
-                    .border(px(M.focus_width))
-                    .px(px(padding - (M.focus_width - M.rule)))
-                    .py(px(M.tight - (M.focus_width - M.rule)))
-                    .border_color(rgba(if primary {
-                        palette.background
-                    } else {
-                        palette.foreground
-                    }))
             });
+        let focus_style = move |style: gpui::StyleRefinement| {
+            // The underline remains visible even if a destructive hover overrides the border color.
+            let style = if destructive {
+                style.underline()
+            } else {
+                style
+            };
+            style
+                .border(px(M.focus_width))
+                .px(px(padding - (M.focus_width - M.rule)))
+                .py(px(M.tight - (M.focus_width - M.rule)))
+                .border_color(rgba(if primary {
+                    palette.background
+                } else {
+                    palette.foreground
+                }))
+        };
+        let element = if icon.is_some() {
+            element.focus_visible(focus_style)
+        } else {
+            element.focus(focus_style)
+        };
         element.on_click(click)
     }
 }
@@ -314,7 +323,7 @@ fn reserve_label_width(
 /// Icon and visible label share the regular action contract. Keep the label for keyboard and assistive access.
 pub fn icon_action(
     button: Button<'_>,
-    icon: &str,
+    icon: ActionIcon,
     palette: Palette,
     window: &Window,
 ) -> Stateful<Div> {
@@ -407,6 +416,10 @@ const ICON_ASSETS: &[(&str, &[u8])] = &[
     (
         "icons/settings.svg",
         include_bytes!("../../assets/icons/settings.svg"),
+    ),
+    (
+        "icons/chevron-down.svg",
+        include_bytes!("../../assets/icons/chevron-down.svg"),
     ),
 ];
 impl AssetSource for Assets {

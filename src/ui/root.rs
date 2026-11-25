@@ -721,7 +721,7 @@ impl ApolloRoot {
             browse.state = ActionState::Busy;
         } else if actions_enabled {
             browse.state =
-                ActionState::Enabled(Box::new(cx.listener(move |root, _, window, cx| {
+                ActionState::Enabled(Box::new(cx.listener(move |root, event, window, cx| {
                     if !root.can_navigate() || root.core.source.is_inspecting() {
                         return;
                     }
@@ -732,7 +732,14 @@ impl ApolloRoot {
                         return;
                     }
                     let request = OutputDraft::Remux(draft).request(id);
-                    window.focus(&root.browse_focus, cx);
+                    // Keep keyboard traversal intact, but do not restore a mouse
+                    // activation to a focused Browse button after the native dialog.
+                    let focus = if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                        &root.browse_focus
+                    } else {
+                        &root.focus
+                    };
+                    window.focus(focus, cx);
                     root.start_file_dialog(request, window, cx);
                 })));
         }

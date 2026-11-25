@@ -7,8 +7,8 @@ use gpui::{
 };
 
 use super::{
-    components::{self, ActionState, Button, Tone},
-    design::{METRICS as M, Palette},
+    components::{self, ActionIcon, ActionState, Button, Tone},
+    design::{METRICS as M, Palette, TextRole},
 };
 
 /// The consuming form owns the selected value; this event requests a change.
@@ -149,7 +149,7 @@ impl Render for Dropdown {
                 cx.listener(|view, _, window, cx| view.toggle(window, cx)),
             ));
         }
-        let trigger = components::icon_action(trigger, "⌄", palette, window)
+        let trigger = components::icon_action(trigger, ActionIcon::ChevronDown, palette, window)
             .role(Role::ComboBox)
             .aria_label(format!("Output format: {}", self.labels[self.selected]))
             .aria_expanded(open)
@@ -178,11 +178,10 @@ impl Render for Dropdown {
             .id("format-menu")
             .role(Role::ListBox)
             .aria_label("Output formats")
-            // The popup needs room for its own padding in addition to the widest option.
-            .min_w(target.size.width)
+            // The trigger already reserves enough space for the widest label and chevron.
+            .w(target.size.width)
             .flex()
             .flex_col()
-            .gap(px(M.tight))
             .p(px(M.tight))
             .rounded(px(M.radius))
             .border(px(M.rule))
@@ -204,22 +203,40 @@ impl Render for Dropdown {
             ))
             .children(self.labels.iter().zip(&self.options).enumerate().map(
                 |(index, (&label, focus))| {
-                    let mut option = Button::new(("format-option", index), label, Tone::Standard);
-                    let select = Box::new(
-                        cx.listener(move |view, _, window, cx| view.choose(index, window, cx)),
-                    );
-                    option.state = if self.selected == index {
-                        ActionState::Selected(select)
+                    let selected = self.selected == index;
+                    let hover = if selected {
+                        palette.pressed()
                     } else {
-                        ActionState::Enabled(select)
+                        palette.hover()
                     };
-                    option
-                        .render(palette, window)
-                        .role(Role::ListBoxOption)
-                        .aria_selected(self.selected == index)
-                        .w_full()
-                        .track_focus(focus)
-                        .tab_stop(false)
+                    TextRole::Control.apply(
+                        div()
+                            .id(("format-option", index))
+                            .role(Role::ListBoxOption)
+                            .aria_label(label)
+                            .aria_selected(selected)
+                            .track_focus(focus)
+                            .tab_stop(false)
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .px(px(M.compact))
+                            .py(px(M.tight))
+                            .rounded(px(M.radius))
+                            .bg(rgba(if selected { palette.pressed() } else { 0 }))
+                            .text_color(rgba(palette.foreground))
+                            .whitespace_nowrap()
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(rgba(hover)))
+                            .active(move |style| style.bg(rgba(palette.pressed())))
+                            // A keyboard-only underline distinguishes focus from selection
+                            // without adding an outline or changing the row geometry.
+                            .focus_visible(|style| style.underline())
+                            .child(label)
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.choose(index, window, cx);
+                            })),
+                    )
                 },
             ));
         selector.child(

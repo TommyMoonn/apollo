@@ -168,7 +168,7 @@ pub const METRICS: Metrics = Metrics {
     rule: 1.,
     focus_width: 2.,
     focus_offset: 2.,
-    icon_size: 14.,
+    icon_size: 12.,
     spinner_size: 16.,
     progress_height: 30.,
 };
