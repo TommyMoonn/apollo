@@ -4,19 +4,24 @@ use crate::queue::QueueJobFailure;
 use std::sync::Mutex;
 
 #[test]
-fn completed_queue_output_resolves_its_parent_folder_only_for_success() {
+fn completed_queue_output_resolves_published_file_only_for_success() {
     let completed = QueueJobState::Completed {
-        output: PathBuf::from("exports/output.mkv"),
+        output: PathBuf::from("exports/output (1).mkv"),
     };
     assert_eq!(
-        completed_output_folder(&completed),
-        Some(Path::new("exports"))
+        completed_output(&completed),
+        Some(Path::new("exports/output (1).mkv"))
     );
-    assert_eq!(completed_output_folder(&QueueJobState::Waiting), None);
-    assert_eq!(
-        completed_output_folder(&QueueJobState::Failed(QueueJobFailure::SourceChanged)),
-        None
-    );
+    for state in [
+        QueueJobState::Waiting,
+        QueueJobState::Running {
+            output: PathBuf::from("exports/staging.mkv"),
+        },
+        QueueJobState::Cancelled,
+        QueueJobState::Failed(QueueJobFailure::SourceChanged),
+    ] {
+        assert!(completed_output(&state).is_none());
+    }
 }
 
 #[test]
@@ -49,11 +54,17 @@ fn queue_wakes_are_observable_before_notification_and_retired_events_are_drained
 }
 
 #[test]
-fn output_folder_failure_is_reported_as_queue_action_feedback() {
-    let root = tempfile::tempdir().unwrap();
-    let missing = root.path().join("missing output");
+fn output_action_failure_preserves_the_recorded_path_in_feedback() {
+    use crate::native::OutputAction;
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("numbered (1).mkv");
     let mut app = Application::default();
-    assert!(!app.settle_open_folder(&missing, crate::native::open_folder(&missing)));
-    let message = app.queue_action_error.as_deref().unwrap();
-    assert!(message.contains(&missing.to_string_lossy().to_string()));
+    for action in [OutputAction::Open, OutputAction::Reveal] {
+        assert!(!app.settle_output_action(action, &output, action.run(&output)));
+        let message = app.queue_action_error.take().unwrap();
+        assert!(message.contains(action.label()));
+        assert!(message.contains(output.to_string_lossy().as_ref()));
+        assert!(app.settle_output_action(action, &output, Ok(())));
+        assert!(app.queue_action_error.is_none());
+    }
 }

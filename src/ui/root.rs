@@ -35,7 +35,7 @@ use super::{
     components::{self, ActionState, Button, ProgressState, Tone},
     design::{FONT_FAMILY, METRICS as M, Palette, TextRole, WORDMARK_FAMILY},
     file_intake,
-    queue::{self, WaitingAction, WaitingControls},
+    queue::{self, FinishedAction, WaitingAction, WaitingControls},
     shell,
 };
 
@@ -108,6 +108,9 @@ struct ApolloRoot {
     queue_cancel_focus: FocusHandle,
     queue_back_focus: FocusHandle,
     waiting_focus: HashMap<(JobId, WaitingAction), FocusHandle>,
+    finished_focus: HashMap<(JobId, FinishedAction), FocusHandle>,
+    expanded_failure: Option<JobId>,
+    finished_error: Option<(JobId, String)>,
     open_focus: FocusHandle,
     picker_focus: Option<FocusHandle>,
     drag_origin: Option<DropContext>,
@@ -171,6 +174,9 @@ impl ApolloRoot {
             queue_cancel_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             queue_back_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             waiting_focus: HashMap::new(),
+            finished_focus: HashMap::new(),
+            expanded_failure: None,
+            finished_error: None,
             exit: ExitState::Open,
             wake,
             progress_wake,
@@ -322,6 +328,85 @@ impl ApolloRoot {
                     "The waiting job could not be changed. Check the queue and try again.".into()
                 });
             }
+        }
+        cx.notify();
+    }
+
+    fn dispatch_finished_action(
+        &mut self,
+        id: JobId,
+        action: FinishedAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_navigate() || self.core.queue_origin().is_none() {
+            return;
+        }
+        let Some(job) = self
+            .core
+            .queue
+            .scheduler()
+            .jobs()
+            .iter()
+            .find(|job| job.id() == id)
+        else {
+            window.focus(&self.queue_back_focus, cx);
+            cx.notify();
+            return;
+        };
+        if !action.allows(job)
+            || (action == FinishedAction::CopyDetails && self.expanded_failure != Some(id))
+        {
+            return;
+        }
+        if let Some(focus) = self.finished_focus.get(&(id, action)) {
+            window.focus(focus, cx);
+        }
+        match action {
+            FinishedAction::Details => {
+                self.expanded_failure = (self.expanded_failure != Some(id)).then_some(id);
+            }
+            FinishedAction::CopyDetails => {
+                if let Some(details) = queue::failure_details(job) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(details));
+                }
+            }
+            _ => {
+                let Some(command) = action.command(id) else {
+                    return;
+                };
+                self.finished_error = None;
+                let progress = &mut self.progress_wake;
+                match self.core.queue_action(command, || progress.begin()) {
+                    QueueEffect::Handled(true) => {}
+                    QueueEffect::Output(action, output) => {
+                        self.core
+                            .settle_output_action(action, &output, action.run(&output));
+                    }
+                    _ => {
+                        self.core.queue_action_error.get_or_insert_with(|| "The job action is no longer available. Check the queue and try again.".into());
+                    }
+                }
+                self.finished_error = self.core.queue_action_error.take().map(|error| (id, error));
+            }
+        }
+        cx.notify();
+    }
+
+    fn clear_finished(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_navigate() || self.core.queue_origin().is_none() {
+            return;
+        }
+        let progress = &mut self.progress_wake;
+        if matches!(
+            self.core
+                .queue_action(QueueAction::ClearFinished, || progress.begin()),
+            QueueEffect::Handled(true)
+        ) {
+            self.expanded_failure = None;
+            self.finished_error = None;
+            self.finished_focus.clear();
+            window.focus(&self.queue_back_focus, cx);
         }
         cx.notify();
     }
@@ -997,6 +1082,34 @@ impl Render for ApolloRoot {
                             .or_insert_with(|| cx.focus_handle().tab_stop(true).tab_index(0));
                     }
                 }
+                let finished_ids: HashSet<_> = self
+                    .core
+                    .queue
+                    .scheduler()
+                    .jobs()
+                    .iter()
+                    .filter(|job| job.state().is_terminal())
+                    .map(|job| job.id())
+                    .collect();
+                self.finished_focus
+                    .retain(|(id, _), _| finished_ids.contains(id));
+                for job in self
+                    .core
+                    .queue
+                    .scheduler()
+                    .jobs()
+                    .iter()
+                    .filter(|job| job.state().is_terminal())
+                {
+                    for action in FinishedAction::ALL
+                        .into_iter()
+                        .filter(|action| action.allows(job))
+                    {
+                        self.finished_focus
+                            .entry((job.id(), action))
+                            .or_insert_with(|| cx.focus_handle().tab_stop(true).tab_index(0));
+                    }
+                }
                 let mut add = Button::new("queue-add-files", "Add files", Tone::Standard);
                 if self.file_dialog.is_pending() || self.core.source.is_inspecting() {
                     add.state = ActionState::Busy;
@@ -1070,6 +1183,16 @@ impl Render for ApolloRoot {
                 } else {
                     cancel_queue
                 };
+                let mut clear = Button::new("clear-finished", "Clear finished", Tone::Standard);
+                if !finished_ids.is_empty() && self.can_navigate() {
+                    clear.state =
+                        ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                            root.clear_finished(window, cx);
+                        })));
+                }
+                let clear = clear
+                    .render(palette, window)
+                    .aria_description("Remove finished job records only. Output files are kept.");
                 let start_guidance = if scheduler.waiting_jobs().next().is_some()
                     && !scheduler.is_started()
                     && !scheduler.is_running()
@@ -1100,8 +1223,19 @@ impl Render for ApolloRoot {
                     ),
                     queue::body(
                         scheduler,
-                        active_cancel,
-                        self.core.queue_action_error.as_deref().or(start_guidance),
+                        queue::BodyState {
+                            active_cancel,
+                            action_error: self
+                                .core
+                                .queue_action_error
+                                .as_deref()
+                                .or(start_guidance),
+                            expanded: self.expanded_failure,
+                            row_error: self
+                                .finished_error
+                                .as_ref()
+                                .map(|(id, error)| (*id, error.as_str())),
+                        },
                         palette,
                         window,
                         animate,
@@ -1116,8 +1250,19 @@ impl Render for ApolloRoot {
                             )));
                             (state, self.waiting_focus.get(&(id, action)).cloned())
                         },
+                        |id, action| {
+                            if !self.can_navigate() {
+                                return (ActionState::Disabled, None);
+                            }
+                            let state = ActionState::Enabled(Box::new(cx.listener(
+                                move |root, _, window, cx| {
+                                    root.dispatch_finished_action(id, action, window, cx);
+                                },
+                            )));
+                            (state, self.finished_focus.get(&(id, action)).cloned())
+                        },
                     ),
-                    components::action_bar(palette, [cancel_queue]),
+                    components::action_bar(palette, [clear, cancel_queue]),
                 )
             }
             NavigationState::Settings { .. } => (

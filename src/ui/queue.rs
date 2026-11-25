@@ -308,7 +308,7 @@ pub(crate) fn job_progress(queue: &MediaQueue, job_id: JobId) -> Option<&MediaPr
 }
 
 #[cfg(any(windows, test))]
-fn failure_copy(job: &QueuedJob) -> Option<String> {
+pub(crate) fn failure_error(job: &QueuedJob) -> Option<MediaError> {
     let QueueJobState::Failed(failure) = job.state() else {
         return None;
     };
@@ -331,15 +331,75 @@ fn failure_copy(job: &QueuedJob) -> Option<String> {
             MediaError::from_execution_failure(error, container)
         }
     };
-    Some(
-        format!(
-            "{} {}",
-            error.message(),
-            error.guidance().unwrap_or_default()
-        )
-        .trim()
-        .to_owned(),
-    )
+    Some(error)
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum FinishedAction {
+    Open,
+    Reveal,
+    Retry,
+    Details,
+    CopyDetails,
+}
+
+#[cfg(any(windows, test))]
+impl FinishedAction {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Open,
+        Self::Reveal,
+        Self::Retry,
+        Self::Details,
+        Self::CopyDetails,
+    ];
+
+    pub(crate) fn allows(self, job: &QueuedJob) -> bool {
+        match job.state() {
+            QueueJobState::Completed { .. } => matches!(self, Self::Open | Self::Reveal),
+            QueueJobState::Failed(_) => {
+                matches!(self, Self::Retry | Self::Details | Self::CopyDetails)
+            }
+            QueueJobState::Cancelled => self == Self::Retry,
+            _ => false,
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Open => crate::native::OutputAction::Open.label(),
+            Self::Reveal => crate::native::OutputAction::Reveal.label(),
+            Self::Retry => "Retry",
+            Self::Details => "Details",
+            Self::CopyDetails => "Copy details",
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn command(self, id: JobId) -> Option<QueueAction> {
+        match self {
+            Self::Open => Some(QueueAction::OpenOutput(id)),
+            Self::Reveal => Some(QueueAction::ShowInFolder(id)),
+            Self::Retry => Some(QueueAction::Retry(id)),
+            Self::Details | Self::CopyDetails => None,
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn failure_details(job: &QueuedJob) -> Option<String> {
+    let error = failure_error(job)?;
+    let mut details = error.message().to_owned();
+    if let Some(guidance) = error.guidance() {
+        details.push_str("\n\n");
+        details.push_str(guidance);
+    }
+    if let Some(diagnostic) = error.diagnostic() {
+        details.push_str("\n\n");
+        details.push_str(diagnostic);
+    }
+    Some(details)
 }
 
 #[cfg(windows)]
@@ -395,15 +455,34 @@ mod view {
             )
             .child(components::separator(palette))
     }
+    pub(crate) struct BodyState<'a> {
+        pub active_cancel: Option<Stateful<Div>>,
+        pub action_error: Option<&'a str>,
+        pub expanded: Option<JobId>,
+        pub row_error: Option<(JobId, &'a str)>,
+    }
+
+    struct RowWidths {
+        operation: Pixels,
+        status: Pixels,
+        stacked: bool,
+    }
+
     pub(crate) fn body(
         queue: &MediaQueue,
-        active_cancel: Option<Stateful<Div>>,
-        action_error: Option<&str>,
+        state: BodyState<'_>,
         palette: Palette,
         window: &Window,
         animate: bool,
         mut waiting_action: impl FnMut(JobId, WaitingAction) -> (ActionState, Option<FocusHandle>),
+        mut finished_action: impl FnMut(JobId, FinishedAction) -> (ActionState, Option<FocusHandle>),
     ) -> Div {
+        let BodyState {
+            active_cancel,
+            action_error,
+            expanded,
+            row_error,
+        } = state;
         let jobs = queue.jobs();
         if jobs.is_empty() && action_error.is_none() {
             return div()
@@ -427,13 +506,24 @@ mod view {
             "Processing",
             "Cancelling",
             "Waiting",
-            "Completed",
-            "Failed",
-            "Cancelled",
+            "✓ Completed",
+            "× Failed",
+            "– Cancelled",
         ]
         .into_iter()
         .map(|label| components::text_width(text, TextRole::Status, label))
         .fold(px(0.), Pixels::max);
+        let status_width = status_width.max(
+            components::text_width(text, TextRole::Status, "× Failed")
+                + px(M.compact)
+                + Button::new("measure-details", "Details", Tone::Standard).measured_width(window),
+        );
+        let widths = RowWidths {
+            operation: operation_width,
+            status: status_width,
+            stacked: window.viewport_size().width
+                < operation_width + status_width + px(2. * M.inset + 3. * M.related + 140.),
+        };
         let mut active_cancel = active_cancel;
         div()
             .flex()
@@ -473,8 +563,17 @@ mod view {
                         .children(section.jobs(jobs).enumerate().map(|(index, job)| {
                             let active = queue.active_job() == Some(job.id());
                             let cancelling = active && queue.cancellation_pending();
-                            let details =
-                                row(job, cancelling, palette, operation_width, status_width);
+                            let details = FinishedAction::Details.allows(job).then(|| {
+                                finished_button(
+                                    job,
+                                    FinishedAction::Details,
+                                    expanded,
+                                    palette,
+                                    window,
+                                    &mut finished_action,
+                                )
+                            });
+                            let details = row(job, cancelling, palette, &widths, details);
                             let mut content =
                                 div().flex().flex_col().gap(px(M.compact)).child(details);
                             if active {
@@ -545,6 +644,52 @@ mod view {
                                     &mut waiting_action,
                                 ));
                             }
+                            if section == Section::Finished {
+                                let buttons = [
+                                    FinishedAction::Open,
+                                    FinishedAction::Reveal,
+                                    FinishedAction::Retry,
+                                ]
+                                .into_iter()
+                                .filter(|action| action.allows(job))
+                                .map(|action| {
+                                    finished_button(
+                                        job,
+                                        action,
+                                        expanded,
+                                        palette,
+                                        window,
+                                        &mut finished_action,
+                                    )
+                                });
+                                content =
+                                    content.child(components::selector(buttons).justify_end());
+                                if expanded == Some(job.id())
+                                    && let Some(error) = failure_error(job)
+                                {
+                                    content = content.child(failure_panel(
+                                        job,
+                                        &error,
+                                        palette,
+                                        finished_button(
+                                            job,
+                                            FinishedAction::CopyDetails,
+                                            expanded,
+                                            palette,
+                                            window,
+                                            &mut finished_action,
+                                        ),
+                                    ));
+                                }
+                                if let Some((id, error)) = row_error
+                                    && id == job.id()
+                                {
+                                    content = content.child(components::inline_message(
+                                        error.to_owned(),
+                                        palette,
+                                    ));
+                                }
+                            }
                             content.child(components::separator(palette))
                         })),
                 )
@@ -593,89 +738,180 @@ mod view {
         components::selector(buttons).justify_end()
     }
 
+    fn finished_button(
+        job: &QueuedJob,
+        action: FinishedAction,
+        expanded: Option<JobId>,
+        palette: Palette,
+        window: &Window,
+        action_state: &mut impl FnMut(JobId, FinishedAction) -> (ActionState, Option<FocusHandle>),
+    ) -> Stateful<Div> {
+        let (state, focus) = action_state(job.id(), action);
+        let mut button = Button::new(
+            (action.label(), job.id().get()),
+            action.label(),
+            Tone::Standard,
+        );
+        button.state = match state {
+            ActionState::Enabled(callback)
+                if action == FinishedAction::Details && expanded == Some(job.id()) =>
+            {
+                ActionState::Selected(callback)
+            }
+            state => state,
+        };
+        let mut element = button.render(palette, window).aria_label(format!(
+            "{} for {} ({})",
+            action.label(),
+            file_name(job.operation().input()),
+            job.operation().display_name()
+        ));
+        if action == FinishedAction::Details {
+            element = element.aria_description(if expanded == Some(job.id()) {
+                "Collapse failure details"
+            } else {
+                "Expand failure details"
+            });
+        }
+        if let Some(focus) = focus {
+            element = element.track_focus(&focus);
+        }
+        element
+    }
+
+    fn failure_panel(
+        job: &QueuedJob,
+        error: &MediaError,
+        palette: Palette,
+        copy: Stateful<Div>,
+    ) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(M.tight))
+            .min_w_0()
+            .child(components::inline_message(error.message(), palette))
+            .children(
+                error
+                    .guidance()
+                    .map(|guidance| components::inline_message(guidance, palette)),
+            )
+            .children(error.diagnostic().map(|diagnostic| {
+                div()
+                    .id(("queue-diagnostic", job.id().get()))
+                    .w_full()
+                    .min_w_0()
+                    .max_h(px(crate::ui::layout::DIAGNOSTIC_MAX_HEIGHT))
+                    .overflow_scroll()
+                    .border(px(M.rule))
+                    .border_color(rgba(palette.border()))
+                    .p(px(M.compact))
+                    .child(
+                        TextRole::Secondary
+                            .apply(div())
+                            .whitespace_normal()
+                            .child(diagnostic.to_owned()),
+                    )
+            }))
+            .child(components::selector([copy]).justify_end())
+    }
+
     fn row(
         job: &QueuedJob,
         cancelling: bool,
         palette: Palette,
-        operation_width: Pixels,
-        status_width: Pixels,
-    ) -> Div {
+        widths: &RowWidths,
+        details: Option<Stateful<Div>>,
+    ) -> Stateful<Div> {
         let source = job.operation().input();
         let output = destination(job);
         let source_name = file_name(source);
         let operation = job.operation().display_name();
         let state = status(job, cancelling);
+        let displayed_status = match job.state() {
+            QueueJobState::Completed { .. } => "✓ Completed",
+            QueueJobState::Failed(_) => "× Failed",
+            QueueJobState::Cancelled => "– Cancelled",
+            _ => state,
+        };
         let source_path = source.to_string_lossy().into_owned();
         let output_path = output.to_string_lossy().into_owned();
+        let destination_label = if matches!(
+            job.state(),
+            QueueJobState::Failed(_) | QueueJobState::Cancelled
+        ) {
+            format!("Requested: {output_path}")
+        } else {
+            format!("→ {output_path}")
+        };
         div()
+            .id(("queue-job", job.id().get()))
+            .role(Role::Group)
+            .aria_label(format!("{source_name}, {operation}, {state}"))
+            .aria_description(format!("Source: {source_path}. {destination_label}"))
             .flex()
-            .flex_col()
-            .w_full()
+            .items_center()
+            .gap(px(M.related))
             .min_w_0()
-            .gap(px(M.tight))
+            .when(widths.stacked, |row| row.flex_col().items_start().w_full())
             .child(
                 div()
-                    .id(("queue-job", job.id().get()))
-                    .role(Role::Group)
-                    .aria_label(format!("{source_name}, {operation}, {state}"))
-                    .aria_description(format!("Source: {source_path}. Destination: {output_path}"))
                     .flex()
-                    .items_center()
-                    .gap(px(M.related))
+                    .flex_col()
                     .min_w_0()
+                    .gap(px(M.tight))
+                    .when(widths.stacked, |identity| identity.w_full())
+                    .when(!widths.stacked, |identity| identity.flex_1())
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(M.tight))
-                            .child(
-                                TextRole::Body
-                                    .apply(div())
-                                    .id("source-name")
-                                    .truncate()
-                                    .child(source_name)
-                                    .tooltip(move |_, cx| {
-                                        cx.new(|_| {
-                                            components::PathTooltip(source_path.clone(), palette)
-                                        })
-                                        .into()
-                                    }),
-                            )
-                            .child(
-                                TextRole::Secondary
-                                    .apply(div())
-                                    .id("destination")
-                                    .text_color(rgba(palette.secondary()))
-                                    .text_ellipsis_middle()
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .child(format!("→ {output_path}"))
-                                    .tooltip(move |_, cx| {
-                                        cx.new(|_| {
-                                            components::PathTooltip(output_path.clone(), palette)
-                                        })
-                                        .into()
-                                    }),
-                            ),
+                        TextRole::Body
+                            .apply(div())
+                            .id("source-name")
+                            .truncate()
+                            .child(source_name)
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| components::PathTooltip(source_path.clone(), palette))
+                                    .into()
+                            }),
                     )
                     .child(
                         TextRole::Secondary
                             .apply(div())
-                            .w(operation_width)
+                            .id("destination")
+                            .text_color(rgba(palette.secondary()))
+                            .text_ellipsis_middle()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(destination_label)
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| components::PathTooltip(output_path.clone(), palette))
+                                    .into()
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(M.related))
+                    .flex_shrink_0()
+                    .when(widths.stacked, |metadata| {
+                        metadata.w_full().justify_between()
+                    })
+                    .child(
+                        TextRole::Secondary
+                            .apply(div())
+                            .w(widths.operation)
                             .flex_shrink_0()
                             .whitespace_nowrap()
                             .text_color(rgba(palette.secondary()))
                             .child(operation),
                     )
-                    .child(components::status(state, palette, None).w(status_width)),
+                    .child(components::status(displayed_status, palette, details).w(widths.status)),
             )
-            .children(failure_copy(job).map(|message| components::inline_message(message, palette)))
     }
 }
 #[cfg(windows)]
-pub(crate) use view::{body, header};
+pub(crate) use view::{BodyState, body, header};
 
 #[cfg(test)]
 mod tests {
@@ -722,6 +958,38 @@ mod tests {
         }
         assert_eq!(unsettled_fraction(Some(0.)), Some(0.));
         assert_eq!(unsettled_fraction(Some(0.999)), Some(0.999));
+    }
+
+    #[test]
+    fn failure_details_use_the_bounded_diagnostic_and_actionable_reason() {
+        use crate::media::{
+            execution::MediaExecutionFailure,
+            process::{DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES, MediaProcessFailure},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mkv");
+        std::fs::write(&source, b"media").unwrap();
+        let output = dir.path().join("out.mkv");
+        let diagnostic = format!(
+            "{}\nfinal error marker",
+            "x".repeat(DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES * 2)
+        );
+        let failed = job(
+            1,
+            &source,
+            &output,
+            QueueJobState::Failed(QueueJobFailure::Execution(MediaExecutionFailure::Process {
+                reason: MediaProcessFailure::Exit(Some(1)),
+                diagnostic,
+            })),
+        );
+        let error = failure_error(&failed).unwrap();
+        let retained = error.diagnostic().unwrap();
+        assert!(retained.len() <= DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES);
+        let details = failure_details(&failed).unwrap();
+        assert!(details.starts_with(error.message()));
+        assert!(details.contains(error.guidance().unwrap()));
+        assert!(details.ends_with("final error marker"));
     }
 
     #[test]
@@ -776,11 +1044,32 @@ mod tests {
         assert_eq!(ids(Section::Finished), [1, 5, 6]);
         assert_eq!(summary(&jobs), "1 processing · 2 waiting · 3 finished");
         assert!(
-            failure_copy(&jobs[4])
+            failure_details(&jobs[4])
                 .unwrap()
                 .contains("source has changed")
         );
-        assert!(failure_copy(&jobs[0]).is_none());
+        let allowed = |job: &QueuedJob| {
+            FinishedAction::ALL
+                .into_iter()
+                .filter(|action| action.allows(job))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            allowed(&jobs[0]),
+            [FinishedAction::Open, FinishedAction::Reveal]
+        );
+        assert_eq!(
+            allowed(&jobs[4]),
+            [
+                FinishedAction::Retry,
+                FinishedAction::Details,
+                FinishedAction::CopyDetails
+            ]
+        );
+        assert_eq!(allowed(&jobs[5]), [FinishedAction::Retry]);
+        assert!(allowed(&jobs[1]).is_empty());
+        assert!(allowed(&jobs[2]).is_empty());
+        assert!(failure_details(&jobs[0]).is_none());
         assert_eq!(summary(&[]), "0 processing · 0 waiting · 0 finished");
         assert_eq!(
             summary(&jobs[0..1]),

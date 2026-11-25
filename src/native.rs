@@ -2,7 +2,9 @@
 use raw_window_handle::HasWindowHandle;
 #[cfg(target_os = "windows")]
 use raw_window_handle::RawWindowHandle;
-use std::{io, path::Path, process::Command};
+#[cfg(not(windows))]
+use std::process::Command;
+use std::{io, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WindowOwner {
@@ -32,33 +34,115 @@ impl WindowOwner {
     }
 }
 
-pub(crate) fn open_folder(path: &Path) -> io::Result<()> {
-    if !path.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "The output directory is unavailable",
-        ));
+/// Outcome actions operate on the recorded published file, never the requested destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutputAction {
+    Open,
+    Reveal,
+}
+
+impl OutputAction {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open output",
+            Self::Reveal => "Show in folder",
+        }
     }
-    #[cfg(target_os = "windows")]
-    let mut command = Command::new("explorer");
+
+    pub(crate) fn run(self, path: &Path) -> io::Result<()> {
+        self.run_with(path, launch_output)
+    }
+
+    fn run_with(
+        self,
+        path: &Path,
+        launch: impl FnOnce(Self, &Path) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if !path.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "The output file is unavailable",
+            ));
+        }
+        launch(self, path)
+    }
+}
+
+#[cfg(windows)]
+fn launch_output(action: OutputAction, path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::{
+            System::Com::{
+                COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+            },
+            UI::{
+                Shell::{SHOpenFolderAndSelectItems, SHParseDisplayName, ShellExecuteW},
+                WindowsAndMessaging::SW_SHOWNORMAL,
+            },
+        },
+        core::{PCWSTR, w},
+    };
+
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // Shell extensions require COM. GPUI already initializes OLE on this thread;
+    // a successful initialization (including S_FALSE) must still be balanced.
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() }.map_err(io::Error::other)?;
+    let result = match action {
+        OutputAction::Open => {
+            let result = unsafe {
+                ShellExecuteW(
+                    None,
+                    w!("open"),
+                    PCWSTR(path.as_ptr()),
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    SW_SHOWNORMAL,
+                )
+            };
+            if result.0 as isize <= 32 {
+                Err(io::Error::other(format!(
+                    "Windows shell returned error {}",
+                    result.0 as isize
+                )))
+            } else {
+                Ok(())
+            }
+        }
+        OutputAction::Reveal => {
+            let mut item = std::ptr::null_mut();
+            match unsafe { SHParseDisplayName(PCWSTR(path.as_ptr()), None, &mut item, 0, None) } {
+                Ok(()) => {
+                    // With no child list, the absolute item ID selects the file in its parent.
+                    let result = unsafe { SHOpenFolderAndSelectItems(item, None, 0) };
+                    unsafe { CoTaskMemFree(Some(item.cast())) };
+                    result.map_err(io::Error::other)
+                }
+                Err(error) => Err(io::Error::other(error)),
+            }
+        }
+    };
+    unsafe { CoUninitialize() };
+    result
+}
+
+#[cfg(not(windows))]
+fn launch_output(action: OutputAction, path: &Path) -> io::Result<()> {
+    // The retained non-Windows adapter opens the containing folder; Explorer selects the actual file.
+    let path = match action {
+        OutputAction::Open => path,
+        OutputAction::Reveal => path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "The output directory is unavailable",
+            )
+        })?,
+    };
     #[cfg(target_os = "macos")]
     let mut command = Command::new("open");
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(not(target_os = "macos"))]
     let mut command = Command::new("xdg-open");
-
-    #[cfg(any(target_os = "windows", target_os = "macos", unix))]
-    {
-        command.arg(path).spawn().map(|_| ())
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
-    {
-        let _ = path;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "opening folders is not supported on this platform",
-        ))
-    }
+    command.arg(path).spawn().map(|_| ())
 }
 
 /// Use the executable's existing icon resource for the native GPUI window.
@@ -134,15 +218,37 @@ pub(crate) fn report_startup_error(message: &str) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn folder_open_rejects_missing_paths_and_regular_files_before_launch() {
+    fn output_actions_validate_at_activation_and_keep_the_published_file() {
+        use super::OutputAction;
+        use std::io;
+
         let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("video file.mkv");
-        std::fs::write(&file, b"fixture").unwrap();
-        for path in [file, root.path().join("missing folder")] {
-            assert_eq!(
-                super::open_folder(&path).unwrap_err().kind(),
-                std::io::ErrorKind::NotFound
-            );
+        let output = root.path().join("export (1).mkv");
+        std::fs::write(&output, b"published").unwrap();
+        for action in [OutputAction::Open, OutputAction::Reveal] {
+            action
+                .run_with(&output, |received, path| {
+                    assert_eq!(received, action);
+                    assert_eq!(path, output);
+                    Ok(())
+                })
+                .unwrap();
+            let failure = action
+                .run_with(&output, |_, _| {
+                    Err(io::Error::other("shell rejected the action"))
+                })
+                .unwrap_err();
+            assert_eq!(failure.to_string(), "shell rejected the action");
+            assert_eq!(std::fs::read(&output).unwrap(), b"published");
+            for missing in [root.path().join("missing.mkv"), root.path().to_path_buf()] {
+                assert_eq!(
+                    action
+                        .run_with(&missing, |_, _| panic!("must not launch without a file"))
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::NotFound
+                );
+            }
         }
     }
 }

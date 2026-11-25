@@ -8,7 +8,6 @@ use crate::{
         dialogs::{DialogTarget, FileDialogRequest},
         queue::{QueueEditReturn, QueueEffect, QueueSubmission},
     },
-    native::open_folder,
     queue::{JobId, QueueEnqueueError, QueueJobState, QueuedOperation},
 };
 use std::{path::PathBuf, sync::mpsc, thread};
@@ -76,10 +75,10 @@ impl ApolloApp {
                 true
             }
             QueueEffect::Edit(id, origin) => self.begin_queue_edit(id, origin),
-            QueueEffect::OpenFolder(directory) => {
+            QueueEffect::Output(action, output) => {
                 let opened = self
                     .core
-                    .settle_open_folder(&directory, open_folder(&directory));
+                    .settle_output_action(action, &output, action.run(&output));
                 self.egui_context.request_repaint();
                 opened
             }

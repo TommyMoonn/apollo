@@ -30,7 +30,8 @@ pub enum QueueAction {
     MoveLater(JobId),
     Remove(JobId),
     Retry(JobId),
-    OpenFolder(JobId),
+    OpenOutput(JobId),
+    ShowInFolder(JobId),
     PreviewFrame(JobId),
     ClearFinished,
     Back,
@@ -50,7 +51,7 @@ pub(crate) enum QueueEffect {
     Handled(bool),
     AddFiles,
     Edit(JobId, QueueEditOrigin),
-    OpenFolder(PathBuf),
+    Output(crate::native::OutputAction, PathBuf),
     PreviewFrame(JobId, PathBuf),
     Returned,
 }
@@ -315,14 +316,28 @@ impl Application {
                 Handled(self.record_queue_mutation(result))
             }
             QueueAction::ClearFinished => Handled(self.queue.scheduler.clear_finished() > 0),
-            QueueAction::OpenFolder(id) => self
-                .queue
-                .scheduler
-                .jobs()
-                .iter()
-                .find(|job| job.id() == id)
-                .and_then(|job| completed_output_folder(job.state()))
-                .map_or(Handled(false), |path| OpenFolder(path.to_path_buf())),
+            QueueAction::OpenOutput(id) | QueueAction::ShowInFolder(id) => {
+                if self.queue_origin().is_none() {
+                    return Handled(false);
+                }
+                let Some(output) = self
+                    .queue
+                    .scheduler
+                    .jobs()
+                    .iter()
+                    .find(|job| job.id() == id)
+                    .and_then(|job| completed_output(job.state()))
+                else {
+                    self.queue_action_error = Some("This job has no completed output.".into());
+                    return Handled(false);
+                };
+                let action = if matches!(action, QueueAction::OpenOutput(_)) {
+                    crate::native::OutputAction::Open
+                } else {
+                    crate::native::OutputAction::Reveal
+                };
+                Output(action, output.to_path_buf())
+            }
             QueueAction::PreviewFrame(id) => {
                 if self.queue_origin().is_none() {
                     return Handled(false);
@@ -361,18 +376,19 @@ impl Application {
         }
     }
 
-    /// Record the result of the native folder action at the same boundary as other queue errors.
-    pub(crate) fn settle_open_folder(
+    pub(crate) fn settle_output_action(
         &mut self,
-        directory: &Path,
+        action: crate::native::OutputAction,
+        output: &Path,
         result: std::io::Result<()>,
     ) -> bool {
         match result {
             Ok(()) => true,
             Err(error) => {
                 self.queue_action_error = Some(format!(
-                    "Could not open output folder {}: {error}. Check that the folder still exists and retry.",
-                    directory.display()
+                    "{} failed for {}: {error}. Check that the output still exists and can be opened.",
+                    action.label(),
+                    output.display()
                 ));
                 false
             }
@@ -572,9 +588,9 @@ fn media_error_from_queue_enqueue(error: &QueueEnqueueError) -> MediaError {
     }
 }
 
-fn completed_output_folder(state: &QueueJobState) -> Option<&Path> {
+fn completed_output(state: &QueueJobState) -> Option<&Path> {
     match state {
-        QueueJobState::Completed { output } => output.parent(),
+        QueueJobState::Completed { output } => Some(output),
         _ => None,
     }
 }
