@@ -4,7 +4,7 @@ use egui::{Align, Label, Layout, Rect, RichText, Sense, Sides, TextStyle, Ui, Ui
 
 use crate::{
     media::progress::MediaProgress,
-    queue::{JobId, QueueJobState, QueueRunState, QueuedJob},
+    queue::{JobId, QueueJobState, QueueRunState, QueuedJob, QueuedOperation},
 };
 
 use super::{fonts, layout, media_lifecycle, theme, widgets};
@@ -27,6 +27,7 @@ const REMOVE_LABEL: &str = "Remove";
 const CLEAR_LABEL: &str = "Clear finished";
 const BACK_LABEL: &str = "Back";
 const OPEN_FOLDER_LABEL: &str = "Open folder";
+const PREVIEW_LABEL: &str = "Preview";
 const DETAILS_LABEL: &str = "Details";
 
 #[derive(Debug, Clone, Copy)]
@@ -608,12 +609,16 @@ fn show_row_actions(
                 }
             }
         }
-        QueueJobState::Completed { .. }
-            if widgets::plain_button(ui, OPEN_FOLDER_LABEL).clicked() =>
-        {
-            action.set(QueueAction::OpenFolder(job.id()));
+        QueueJobState::Completed { .. } => {
+            if widgets::plain_button(ui, OPEN_FOLDER_LABEL).clicked() {
+                action.set(QueueAction::OpenFolder(job.id()));
+            }
+            if matches!(job.operation(), QueuedOperation::FrameCapture(_))
+                && widgets::plain_button(ui, PREVIEW_LABEL).clicked()
+            {
+                action.set(QueueAction::PreviewFrame(job.id()));
+            }
         }
-        QueueJobState::Completed { .. } => {}
         _ => {}
     }
 }
@@ -626,7 +631,9 @@ fn has_row_actions(state: &QueueJobState) -> bool {
 }
 
 fn row_action_width(ui: &Ui) -> f32 {
-    let completed = widgets::plain_button_intrinsic_size(ui, OPEN_FOLDER_LABEL).x;
+    let completed = widgets::plain_button_intrinsic_size(ui, OPEN_FOLDER_LABEL).x
+        + widgets::plain_button_intrinsic_size(ui, PREVIEW_LABEL).x
+        + theme::INLINE_ACTION_GAP;
     let waiting = widgets::plain_button_intrinsic_size(ui, EDIT_LABEL).x
         + widgets::compact_secondary_button_intrinsic_size(ui, MOVE_EARLIER_LABEL).x
         + widgets::compact_secondary_button_intrinsic_size(ui, MOVE_LATER_LABEL).x

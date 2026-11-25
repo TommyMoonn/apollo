@@ -207,11 +207,7 @@ impl Application {
         paths: Vec<PathBuf>,
         spawn: impl FnOnce(Vec<PathBuf>) -> std::io::Result<BatchInspectionOwner>,
     ) -> bool {
-        if paths.len() < 2
-            || self.source.is_inspecting()
-            || !self.executors_idle()
-            || self.frame_work.copy_active()
-        {
+        if paths.len() < 2 || self.source.is_inspecting() || self.frame_work.copy_active() {
             return false;
         }
         let Some(origin) = self.batch_origin() else {

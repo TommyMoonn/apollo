@@ -62,8 +62,8 @@ impl ApolloApp {
                         &session.media,
                         &mut session.selection,
                         capabilities,
-                        OperationSurfaceMode::Immediate {
-                            start_allowed: process_now_allowed,
+                        OperationSurfaceMode::Normal {
+                            process_now_allowed,
                             queue_confirmation,
                             action_error: action_error.as_ref(),
                         },

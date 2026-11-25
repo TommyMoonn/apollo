@@ -10,7 +10,7 @@ fn initialization_has_no_source_without_starting_an_executor() {
     assert!(app.state.remux.is_none());
     assert!(app.state.audio_extract.is_none());
     assert!(app.state.frame_capture.is_none());
-    assert!(app.core.executors_idle());
+    assert!(app.file_intake_enabled());
     assert!(app.core.queue.scheduler().jobs().is_empty());
 }
 
@@ -138,40 +138,11 @@ fn close_source_returns_to_true_empty_intake() {
 }
 
 #[test]
-fn running_and_terminal_operation_states_hide_workspace_chrome() {
-    let non_ready_states = [
-        MediaExecutionState::Running {
-            output: PathBuf::from("output.mp4"),
-        },
-        MediaExecutionState::Completed {
-            output: PathBuf::from("finished.mp4"),
-        },
-        MediaExecutionState::Failed(MediaExecutionFailure::Process {
-            reason: MediaProcessFailure::Exit(Some(1)),
-            diagnostic: "failed".to_owned(),
-        }),
-        MediaExecutionState::Cancelled,
-    ];
-
-    assert!(operation_workspace_visible(
-        &MediaExecutionState::Idle,
-        true
-    ));
-    assert!(!operation_workspace_visible(
-        &MediaExecutionState::Idle,
-        false
-    ));
-    for state in non_ready_states {
-        assert!(!operation_workspace_visible(&state, true));
-    }
-}
-
-#[test]
 fn intake_queue_navigation_and_back_preserve_jobs() {
     let (directory, path) = temp_file("queue-navigation");
     let mut app = app();
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.enqueue_from_ready_surface(Operation::AudioMix);
+    app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested);
     let job_id = app.core.queue.scheduler().jobs()[0].id();
     let replacement = directory.join("replacement.mkv");
     fs::write(&replacement, b"replacement").unwrap();
@@ -434,17 +405,6 @@ fn switching_operations_does_not_revalidate_or_clear_the_source() {
         Some(&path)
     );
     fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn frame_capture_execution_blocks_replacement_until_idle() {
-    assert!(file_intake_enabled(&FrameCaptureExecutionState::Idle));
-    assert!(!file_intake_enabled(&FrameCaptureExecutionState::Running {
-        output: PathBuf::from("output.png")
-    }));
-    for state in terminal_execution_states() {
-        assert!(!file_intake_enabled(&state));
-    }
 }
 
 #[test]

@@ -1,11 +1,11 @@
 //! Frame Capture presentation and routing to the current editor.
 use super::{ApolloApp, completion_wake, state::FramePreviewTexture};
 use crate::app::frame_capture::{FrameCaptureEditorState, FrameCopyStatus, PositionSettle};
+use crate::app::queue::QueueSubmission;
 use crate::app::{NavigationState, Operation, dialogs::OutputDraft};
 use crate::app::{batch::BatchEditTarget, editor::OperationEditorState};
 use crate::frame_capture::{
     clipboard::{CopyFrameError, CopyFrameRequest},
-    execution::FrameCaptureStartError,
     frame_index::{
         FrameDirection, FrameIndexError, FrameIndexRequest, FrameIndexState, FrameNavigation,
     },
@@ -13,11 +13,7 @@ use crate::frame_capture::{
     preview::{PreviewExtractionError, PreviewImage, PreviewRequest, PreviewState},
 };
 use crate::media::{model::MediaFile, process::MediaProcessWake};
-use crate::native::open_folder;
-use crate::ui::{
-    frame_capture::FrameCaptureSelectionAction,
-    frame_capture_progress::{FrameCaptureLifecycleAction, FrameCaptureThumbnailRequest},
-};
+use crate::ui::frame_capture::FrameCaptureSelectionAction;
 use egui::{ColorImage, TextureOptions};
 use std::time::Instant;
 
@@ -417,10 +413,7 @@ impl ApolloApp {
     }
 
     fn start_copy_frame(&mut self) {
-        if self.copy_frame_active()
-            || self.core.media_operation_running()
-            || !self.core.execution_arbitration().immediate_start_allowed()
-        {
+        if !self.core.clipboard_start_allowed() {
             return;
         }
         let request = self.state.frame_capture.as_ref().and_then(|session| {
@@ -519,64 +512,37 @@ impl ApolloApp {
         }
     }
 
-    pub(super) fn poll_frame_capture_thumbnail(&mut self) {
-        let Some((session_id, request_id, result)) = self.core.frame_work.poll_thumbnail() else {
-            return;
-        };
-        if let Some(session) = self
-            .state
-            .frame_capture
-            .as_mut()
-            .filter(|session| session.session_id == session_id)
+    pub(super) fn handle_frame_capture_action(&mut self, action: FrameCaptureSelectionAction) {
+        if self.core.active_operation() != Some(Operation::FrameCapture)
+            || !self.file_intake_enabled()
+            || self.ready_media_tools().is_none()
+            || !self.operation_ready_surface(Operation::FrameCapture)
         {
-            session.lifecycle_ui.settle_thumbnail(request_id, result);
+            return;
         }
-    }
-
-    pub(super) fn handle_frame_capture_action(
-        &mut self,
-        action: FrameCaptureSelectionAction,
-    ) -> Result<(), FrameCaptureStartError> {
-        if self.file_dialog.is_pending() {
-            return Ok(());
-        }
-        if action != FrameCaptureSelectionAction::None {
+        if !matches!(
+            action,
+            FrameCaptureSelectionAction::None
+                | FrameCaptureSelectionAction::QueueRequested
+                | FrameCaptureSelectionAction::SaveFrameRequested
+        ) {
             self.core.queue_confirmation = None;
             self.core.operation_action_error = None;
         }
         match action {
             FrameCaptureSelectionAction::BrowseOutput => {
                 let Some(session) = self.state.frame_capture.as_ref() else {
-                    return Ok(());
+                    return;
                 };
                 self.start_file_dialog(
                     OutputDraft::FrameCapture(&session.selection).request(session.session_id),
                 );
             }
             FrameCaptureSelectionAction::QueueRequested => {
-                self.enqueue_from_ready_surface(Operation::FrameCapture);
+                self.submit_queued_operation(Operation::FrameCapture, QueueSubmission::AddToQueue);
             }
-            FrameCaptureSelectionAction::CaptureRequested => {
-                if !self.core.execution_arbitration().immediate_start_allowed() {
-                    return Ok(());
-                }
-                let Some(session) = self.state.frame_capture.as_ref() else {
-                    return Ok(());
-                };
-                let Some(request) = session.selection.request(&session.media) else {
-                    return Ok(());
-                };
-                let Some(tools) = self.ready_media_tools().cloned() else {
-                    return Ok(());
-                };
-                let wake = self.progress_repaint.begin();
-                self.core.frame_capture_executor.start_with_wake(
-                    &tools,
-                    &session.media,
-                    &request,
-                    wake,
-                )?;
-                self.core.frame_work.cancel_thumbnail();
+            FrameCaptureSelectionAction::SaveFrameRequested => {
+                self.submit_queued_operation(Operation::FrameCapture, QueueSubmission::ProcessNow);
             }
             FrameCaptureSelectionAction::CopyRequested => {
                 self.start_copy_frame();
@@ -588,60 +554,6 @@ impl ApolloApp {
             | FrameCaptureSelectionAction::StepRequested(_) => {
                 if let Some(session) = self.state.frame_capture.as_mut() {
                     session.copy_status = FrameCopyStatus::Idle;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn handle_frame_capture_lifecycle_action(
-        &mut self,
-        action: FrameCaptureLifecycleAction,
-    ) {
-        match action {
-            FrameCaptureLifecycleAction::LoadThumbnail(request) => {
-                self.start_frame_capture_thumbnail_load(request);
-            }
-            FrameCaptureLifecycleAction::OpenFolder(path) => {
-                if let Err(error) = open_folder(&path) {
-                    eprintln!("Frame Capture output folder could not be opened: {error}");
-                }
-            }
-            FrameCaptureLifecycleAction::None
-            | FrameCaptureLifecycleAction::CancelRequested
-            | FrameCaptureLifecycleAction::Done
-            | FrameCaptureLifecycleAction::Back => {}
-        }
-    }
-
-    fn start_frame_capture_thumbnail_load(&mut self, request: FrameCaptureThumbnailRequest) {
-        let Some(session_id) = self
-            .state
-            .frame_capture
-            .as_ref()
-            .map(|session| session.session_id)
-        else {
-            return;
-        };
-        match self.core.frame_work.start_thumbnail(
-            session_id,
-            &request,
-            completion_wake(&self.egui_context),
-        ) {
-            Ok(()) => {}
-            Err(error) => {
-                if let Some(session) = self
-                    .state
-                    .frame_capture
-                    .as_mut()
-                    .filter(|session| session.session_id == session_id)
-                {
-                    session.lifecycle_ui.settle_thumbnail(
-                        request.request_id(),
-                        Err(format!(
-                            "Frame Capture preview worker could not start: {error}"
-                        )),
-                    );
                 }
             }
         }

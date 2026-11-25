@@ -1,29 +1,6 @@
 use super::*;
 
 #[test]
-fn frame_thumbnail_decode_runs_on_the_dedicated_worker() {
-    let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
-    let (wake_tx, wake_rx) = mpsc::channel();
-    let wake = move || {
-        let _ = wake_tx.send(());
-    };
-    let load = FrameCaptureThumbnailLoad::spawn_with(7, 11, wake, move || {
-        thread_sender.send(std::thread::current().id()).unwrap();
-        Ok(thumbnail())
-    })
-    .expect("thumbnail worker should start");
-
-    assert_ne!(
-        thread_receiver
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap(),
-        std::thread::current().id()
-    );
-    wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert!(load.receiver.try_recv().unwrap().is_ok());
-}
-
-#[test]
 fn live_preview_decode_runs_on_the_dedicated_worker() {
     let (directory, path) = temp_file("preview-decode-worker");
     let mut app = app();
@@ -432,42 +409,6 @@ fn stale_decode_completion_is_rejected_after_a_newer_edit() {
 }
 
 #[test]
-fn thumbnail_completion_routes_to_its_originating_frame_capture_session() {
-    let (directory, path) = temp_file("thumbnail-routing");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::FrameCapture);
-    let session = app.state.frame_capture.as_mut().unwrap();
-    let session_id = session.session_id;
-    let request = session
-        .lifecycle_ui
-        .begin_thumbnail(Path::new("capture.png"))
-        .unwrap();
-    let (sender, receiver) = mpsc::sync_channel(1);
-    app.core.frame_work.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
-        session_id,
-        request_id: request.request_id(),
-        receiver,
-    });
-
-    sender.send(Ok(thumbnail())).unwrap();
-    app.poll_frame_capture_thumbnail();
-
-    assert!(app.core.frame_work.frame_capture_thumbnail_load.is_none());
-    assert!(matches!(
-        app.state
-            .frame_capture
-            .as_ref()
-            .unwrap()
-            .lifecycle_ui
-            .thumbnail(),
-        FrameCaptureThumbnailState::Ready { request_id, .. }
-            if *request_id == request.request_id()
-    ));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn frame_preview_ownership_follows_source_and_operation_sessions() {
     use crate::frame_capture::preview::PreviewState;
 
@@ -671,7 +612,7 @@ fn opening_frame_capture_source_renders_ready_surface() {
         "lossless",
         "Output",
         "Browse",
-        "Capture frame",
+        "Save frame",
     ] {
         assert!(output_contains_text(&output, text), "missing {text:?}");
     }
@@ -806,27 +747,6 @@ fn workspace_queue_frame_capture_switch_and_cancel_retire_support_work() {
 }
 
 #[test]
-fn frame_capture_intent_reaches_executor() {
-    let (directory, path) = temp_file("frame-capture-execute");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::FrameCapture);
-
-    let error = app
-        .handle_frame_capture_action(FrameCaptureSelectionAction::CaptureRequested)
-        .expect_err("missing test FFmpeg should prove the execution path was attempted");
-    assert!(matches!(
-        error,
-        crate::frame_capture::execution::FrameCaptureStartError::Process(
-            crate::media::process::MediaProcessStartError::ProcessLaunchFailed(
-                std::io::ErrorKind::NotFound
-            )
-        )
-    ));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn copy_frame_is_output_independent_and_never_creates_a_queue_job() {
     let (directory, path) = temp_file("copy-frame-execute");
     let mut app = app();
@@ -842,8 +762,7 @@ fn copy_frame_is_output_independent_and_never_creates_a_queue_job() {
     assert!(!editor.selection.can_capture(media));
     assert!(copy_frame_action_eligible(media, resolved.into()));
 
-    app.handle_frame_capture_action(FrameCaptureSelectionAction::CopyRequested)
-        .unwrap();
+    app.handle_frame_capture_action(FrameCaptureSelectionAction::CopyRequested);
 
     assert!(app.core.queue.scheduler().jobs().is_empty());
     assert_eq!(
@@ -880,8 +799,7 @@ fn oversized_copy_reaches_actionable_preflight_without_starting_work_or_mutating
         .set_output_filename_stem(OsString::from("unchanged-output"));
     assert!(copy_frame_action_eligible(&session.media, position));
 
-    app.handle_frame_capture_action(FrameCaptureSelectionAction::CopyRequested)
-        .unwrap();
+    app.handle_frame_capture_action(FrameCaptureSelectionAction::CopyRequested);
 
     assert_eq!(
         app.core
@@ -893,7 +811,6 @@ fn oversized_copy_reaches_actionable_preflight_without_starting_work_or_mutating
     assert!(!app.core.frame_work.copy_frame_extraction.is_active());
     assert!(app.core.frame_work.copy_frame_worker.is_none());
     assert!(app.core.queue.scheduler().jobs().is_empty());
-    assert!(app.core.frame_work.frame_capture_thumbnail_load.is_none());
     assert_eq!(
         app.state
             .frame_capture
@@ -977,5 +894,43 @@ fn returning_from_queue_restarts_retired_frame_work_without_losing_selection() {
         current,
         Ok(PreviewImage::from_rgba([1, 1], vec![255; 4]).unwrap())
     ));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn clipboard_settlement_blocks_file_launch_but_waiting_jobs_do_not_block_copy() {
+    let (directory, path) = temp_file("copy-queue-guard");
+    let mut app = app();
+    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+    app.select_tool(Operation::FrameCapture);
+    app.handle_frame_capture_action(FrameCaptureSelectionAction::QueueRequested);
+    assert!(app.core.clipboard_start_allowed());
+    let session = app.state.frame_capture.as_ref().unwrap();
+    let request = session
+        .editor
+        .state
+        .copy_request(&session.media)
+        .unwrap()
+        .unwrap();
+    let session_id = session.session_id;
+    let (wake_tx, wake_rx) = mpsc::channel();
+    app.core
+        .frame_work
+        .start_copy_publication(session_id, request, vec![], None, move || {
+            let _ = wake_tx.send(());
+        })
+        .unwrap();
+    assert!(app.core.frame_work.copy_active());
+    assert!(!app.core.queue_start_allowed());
+    assert!(!app.core.clipboard_start_allowed());
+    assert!(!app.handle_queue_action(QueueAction::Start));
+    app.handle_frame_capture_action(FrameCaptureSelectionAction::QueueRequested);
+    assert_eq!(app.core.queue.scheduler().jobs().len(), 1);
+    wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    app.poll_copy_frame();
+    assert!(!app.core.frame_work.copy_active());
+    assert!(app.core.queue_start_allowed());
+    assert!(app.core.clipboard_start_allowed());
+    assert!(app.core.operation_action_error.is_some());
     fs::remove_dir_all(directory).unwrap();
 }

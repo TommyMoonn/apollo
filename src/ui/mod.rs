@@ -4,7 +4,6 @@ pub mod batch;
 pub mod file_intake;
 pub mod fonts;
 pub mod frame_capture;
-pub mod frame_capture_progress;
 pub mod icon;
 pub mod layout;
 pub mod legacy;
@@ -31,8 +30,8 @@ pub const CANCEL_BATCH_EDIT_LABEL: &str = "Cancel";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationSurfaceMode<'a> {
-    Immediate {
-        start_allowed: bool,
+    Normal {
+        process_now_allowed: bool,
         queue_confirmation: bool,
         action_error: Option<&'a MediaError>,
     },
@@ -46,7 +45,7 @@ pub enum OperationSurfaceMode<'a> {
 impl OperationSurfaceMode<'_> {
     pub const fn edit_labels(self) -> Option<(&'static str, &'static str)> {
         match self {
-            Self::Immediate { .. } => None,
+            Self::Normal { .. } => None,
             Self::QueueEdit => Some((SAVE_QUEUE_CHANGES_LABEL, CANCEL_QUEUE_EDIT_LABEL)),
             Self::BatchDefaults { .. } => {
                 Some((APPLY_BATCH_DEFAULTS_LABEL, CANCEL_BATCH_EDIT_LABEL))
@@ -59,16 +58,16 @@ impl OperationSurfaceMode<'_> {
 impl<'a> OperationSurfaceMode<'a> {
     pub const fn inline_action_error(self) -> Option<&'a MediaError> {
         match self {
-            Self::Immediate { action_error, .. } => action_error,
+            Self::Normal { action_error, .. } => action_error,
             _ => None,
         }
     }
 }
 
 impl From<bool> for OperationSurfaceMode<'_> {
-    fn from(start_allowed: bool) -> Self {
-        Self::Immediate {
-            start_allowed,
+    fn from(process_now_allowed: bool) -> Self {
+        Self::Normal {
+            process_now_allowed,
             queue_confirmation: false,
             action_error: None,
         }
@@ -78,6 +77,7 @@ impl From<bool> for OperationSurfaceMode<'_> {
 /// Normal queued forms share the same file-submission controls and action priority.
 pub(crate) fn show_queued_submission_actions(
     ui: &mut egui::Ui,
+    process_now_label: &str,
     process_now_allowed: bool,
     request_valid: bool,
     queue_confirmation: bool,
@@ -85,7 +85,7 @@ pub(crate) fn show_queued_submission_actions(
     use crate::app::queue::QueueSubmission;
     let mut action = None;
     if process_now_allowed
-        && widgets::primary_button_enabled(ui, PROCESS_NOW_LABEL, request_valid).clicked()
+        && widgets::primary_button_enabled(ui, process_now_label, request_valid).clicked()
     {
         action = Some(QueueSubmission::ProcessNow);
     }

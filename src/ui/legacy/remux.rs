@@ -64,8 +64,8 @@ impl ApolloApp {
                         &remux.media,
                         &presentation.remux,
                         &mut remux.selection,
-                        OperationSurfaceMode::Immediate {
-                            start_allowed: process_now_allowed,
+                        OperationSurfaceMode::Normal {
+                            process_now_allowed,
                             queue_confirmation,
                             action_error: action_error.as_ref(),
                         },

@@ -15,7 +15,7 @@ use crate::{
     audio_extract::draft::AudioExtractDraft,
     audio_mix::draft::AudioMixDraft,
     file_dialog::FileDialogStartError,
-    frame_capture::{draft::FrameCaptureDraft, execution::FrameCaptureExecutionState},
+    frame_capture::draft::FrameCaptureDraft,
     media::error::MediaError,
     remux::draft::RemuxDraft,
     upscale::draft::UpscaleDraft,
@@ -70,12 +70,7 @@ impl ApolloApp {
             let selected = if let Some(editor) = editor {
                 settle_editor_output(editor, operation, &outcome)
             } else {
-                settle_output_file_dialog(
-                    &mut self.state,
-                    self.core.frame_capture_executor.state(),
-                    target,
-                    &outcome,
-                )
+                settle_output_file_dialog(&mut self.state, target, &outcome)
             };
             if selected && let DialogOutcome::Selected(path) = outcome {
                 self.core.settings.remember_output(&path);
@@ -164,7 +159,6 @@ fn settle_editor_output(
 /// Returns true only when a selected path was applied to the original editable draft.
 pub(super) fn settle_output_file_dialog(
     state: &mut LegacyEditorState,
-    frame_capture_state: &FrameCaptureExecutionState,
     target: DialogTarget,
     outcome: &DialogOutcome,
 ) -> bool {
@@ -236,9 +230,7 @@ pub(super) fn settle_output_file_dialog(
                 AudioExtractDraft::set_custom_output_path,
             )
         }
-        Operation::FrameCapture
-            if matches!(frame_capture_state, FrameCaptureExecutionState::Idle) =>
-        {
+        Operation::FrameCapture => {
             let Some(session) = state
                 .frame_capture
                 .as_mut()
@@ -248,13 +240,12 @@ pub(super) fn settle_output_file_dialog(
             };
             settle_normal_output(
                 &mut session.editor.selection,
-                &mut session.start_error,
-                &mut session.start_error_details_open,
+                &mut session.picker_error,
+                &mut session.picker_error_details_open,
                 outcome,
                 FrameCaptureDraft::set_custom_output_path,
             )
         }
-        _ => false,
     }
 }
 

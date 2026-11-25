@@ -1,5 +1,5 @@
+use crate::app::frame_capture::FramePreviewDecode;
 use crate::app::frame_capture::frame_navigation_availability;
-use crate::app::frame_capture::{FrameCaptureThumbnailLoad, FramePreviewDecode};
 use crate::frame_capture::draft::FrameCaptureDraft;
 mod dialogs;
 mod frame_capture;
@@ -20,7 +20,6 @@ use std::{
 };
 
 use super::state::FrameCaptureToolState;
-use super::workflows::shows_frame_capture_lifecycle;
 use super::{ApolloApp, completion_wake};
 use crate::app::batch::{
     BatchDefaults, BatchEditTarget, BatchItem, BatchItemId, BatchReadiness, BatchSetupState,
@@ -29,7 +28,6 @@ use crate::app::batch::{
 use crate::app::discovery::{MediaToolsDiscovery, MediaToolsState};
 use crate::app::{
     Application, BatchOrigin, NavigationState, Operation, QueueAction, QueueEditOrigin,
-    operation_workspace_visible,
 };
 use crate::frame_capture::clipboard::copy_frame_action_eligible;
 use crate::frame_capture::frame_index::{
@@ -38,37 +36,32 @@ use crate::frame_capture::frame_index::{
 use crate::settings::AppSettings;
 use crate::ui::frame_capture::PositionSettle;
 
+use crate::app::QueueOrigin;
 use crate::app::dialogs::{DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogRequest};
-use crate::app::{QueueOrigin, file_intake_enabled};
 use crate::file_dialog::FileDialogOwner;
 use crate::{
     audio_extract::model::AudioExtractFormat,
     audio_mix::model::{LoudnessNormalization, LoudnessTargets, OutputContainer, TrackGain},
     frame_capture::{
-        execution::FrameCaptureExecutionState,
         model::{
             FrameCaptureFormat, FramePosition, FrameTimeBase, FrameTimestamp, ResolvedFramePosition,
         },
         preview::{PREVIEW_DEBOUNCE, PreviewImage, PreviewState},
-        thumbnail::FrameCaptureThumbnail,
     },
     media::{
         container::MediaContainer,
         error::{MediaError, MediaErrorKind},
-        execution::{MediaExecutionFailure, MediaExecutionState},
         intake::{MediaIntake, MediaLoadStart},
         model::{AudioStream, FrameRate, MediaFile, MediaStream, StreamKind, VideoStream},
         probe::MediaProbeError,
-        process::MediaProcessFailure,
         tools::{MediaTools, MediaToolsError},
     },
     queue::{QueueJobFailure, QueueJobState, QueueRunState, QueuedOperation},
     ui::{
         SourceAction, audio_extract::AudioExtractSelectionAction,
         audio_mix::AudioMixSelectionAction, file_intake::FileIntakeAction, fonts,
-        frame_capture::FrameCaptureSelectionAction,
-        frame_capture_progress::FrameCaptureThumbnailState, layout, remux::RemuxSelectionAction,
-        theme, upscale::UpscaleSelectionAction,
+        frame_capture::FrameCaptureSelectionAction, layout, remux::RemuxSelectionAction, theme,
+        upscale::UpscaleSelectionAction,
     },
     upscale::model::{UpscaleTarget, VideoCodec},
 };
@@ -128,7 +121,7 @@ fn running_queue_resumes_on_discovery_completion_without_process_notification() 
     assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
     assert_eq!(queue.run_state(), QueueRunState::Running);
     assert!(queue.active_job().is_none());
-    assert!(!app.core.execution_arbitration().immediate_start_allowed());
+    assert!(!app.core.clipboard_start_allowed());
     assert!(!app.handle_queue_action(QueueAction::Start));
 
     release_tx.send(()).unwrap();
@@ -141,7 +134,7 @@ fn running_queue_resumes_on_discovery_completion_without_process_notification() 
         QueueJobState::Failed(QueueJobFailure::ProcessStart(_))
     ));
     assert_eq!(queue.run_state(), QueueRunState::Stopped);
-    assert!(app.core.execution_arbitration().immediate_start_allowed());
+    assert!(app.core.clipboard_start_allowed());
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -402,10 +395,6 @@ fn media(path: &Path) -> MediaFile {
     }
 }
 
-fn thumbnail() -> FrameCaptureThumbnail {
-    FrameCaptureThumbnail::from_rgba([2, 1], vec![255; 8]).unwrap()
-}
-
 fn app() -> ApolloApp {
     let egui_context = egui::Context::default();
     let file_dialog = FileDialogOwner::new_for_test(completion_wake(&egui_context), || {
@@ -631,19 +620,6 @@ fn output_bottom_text_rect(output: &egui::FullOutput, text: &str) -> egui::Rect 
         .unwrap_or_else(|| panic!("missing rendered text {text:?}"))
 }
 
-fn terminal_execution_states() -> [MediaExecutionState; 3] {
-    [
-        MediaExecutionState::Completed {
-            output: PathBuf::from("finished.mp4"),
-        },
-        MediaExecutionState::Failed(MediaExecutionFailure::Process {
-            reason: MediaProcessFailure::Exit(Some(1)),
-            diagnostic: "encoding failed".to_owned(),
-        }),
-        MediaExecutionState::Cancelled,
-    ]
-}
-
 #[test]
 fn opening_upscale_source_renders_ready_surface() {
     let (directory, path) = temp_file("upscale-ready-render");
@@ -832,8 +808,9 @@ fn standalone_operation_feedback_does_not_render_workspace_components() {
     let mut app = app();
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
     app.select_tool(Operation::FrameCapture);
-    app.state.frame_capture.as_mut().unwrap().start_error =
-        Some(MediaError::invalid_request("simulated start failure"));
+    app.state.frame_capture.as_mut().unwrap().picker_error = Some(
+        MediaError::output_picker_unavailable("simulated picker failure"),
+    );
     let context = egui::Context::default();
     fonts::install(&context);
     theme::install(&context);
@@ -841,10 +818,7 @@ fn standalone_operation_feedback_does_not_render_workspace_components() {
     let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
     output.textures_delta.clear();
 
-    assert!(output_contains_text(
-        &output,
-        "Frame capture could not start"
-    ));
+    assert!(output_contains_text(&output, "Output picker unavailable"));
     for workspace_label in [
         "Change file",
         "Close source",
@@ -876,7 +850,7 @@ fn every_ready_operation_keeps_its_primary_action_bottom_owned_at_all_heights() 
         (Operation::VideoUpscale, "Process now"),
         (Operation::Remux, "Process now"),
         (Operation::AudioExtract, "Process now"),
-        (Operation::FrameCapture, "Capture frame"),
+        (Operation::FrameCapture, "Save frame"),
     ] {
         for (width, height) in [
             (400.0, 260.0),
@@ -987,7 +961,7 @@ fn every_ready_request_owner_builds_an_immutable_queue_operation() {
             .iter()
             .all(|job| matches!(job.state(), QueueJobState::Waiting))
     );
-    assert!(app.core.execution_arbitration().queue_start_allowed());
+    assert!(app.core.queue_start_allowed());
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -1018,9 +992,9 @@ fn every_ready_enqueue_action_remains_in_the_workspace_without_launching() {
             Operation::AudioExtract => {
                 app.handle_audio_extract_action(AudioExtractSelectionAction::QueueRequested)
             }
-            Operation::FrameCapture => app
-                .handle_frame_capture_action(FrameCaptureSelectionAction::QueueRequested)
-                .unwrap(),
+            Operation::FrameCapture => {
+                app.handle_frame_capture_action(FrameCaptureSelectionAction::QueueRequested)
+            }
         }
 
         assert_eq!(app.core.queue.scheduler().jobs().len(), previous_count + 1);
@@ -1030,7 +1004,7 @@ fn every_ready_enqueue_action_remains_in_the_workspace_without_launching() {
                 active_operation: operation
             }
         );
-        assert!(app.core.execution_arbitration().queue_start_allowed());
+        assert!(app.core.queue_start_allowed());
         assert!(!app.core.queue.scheduler().is_running());
     }
 
@@ -1079,7 +1053,7 @@ fn repeated_output_requests_are_accepted_without_touching_existing_files() {
         .selection
         .set_custom_output_path(existing_output.clone());
     for count in 1..=2 {
-        app.enqueue_from_ready_surface(Operation::AudioMix);
+        app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested);
         assert_eq!(app.core.queue.scheduler().pending_count(), count);
         assert_eq!(app.core.queue_confirmation, Some(Operation::AudioMix));
         assert!(app.core.operation_action_error.is_none());
@@ -1094,7 +1068,7 @@ fn relevant_workspace_actions_clear_enqueue_confirmation() {
     let (directory, path) = temp_file("queue-confirmation-clear");
     let mut app = app();
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.enqueue_from_ready_surface(Operation::AudioMix);
+    app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested);
     assert_eq!(app.core.queue_confirmation, Some(Operation::AudioMix));
 
     app.select_tool(Operation::Remux);
@@ -1107,7 +1081,7 @@ fn relevant_workspace_actions_clear_enqueue_confirmation() {
         .unwrap()
         .selection
         .set_custom_output_path(directory.join("another.mkv"));
-    app.enqueue_from_ready_surface(Operation::AudioMix);
+    app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested);
     let job_id = app.core.queue.scheduler().jobs()[1].id();
     assert_eq!(app.core.queue_confirmation, Some(Operation::AudioMix));
     assert!(app.begin_queue_edit(job_id, QueueEditOrigin::SourceWorkspace));
@@ -1323,36 +1297,6 @@ fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_othe
         assert_eq!(&request, original);
     }
     fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn frame_capture_routes_only_non_idle_execution_to_lifecycle_ui() {
-    let states = [
-        (MediaExecutionState::Idle, false),
-        (
-            MediaExecutionState::Running {
-                output: PathBuf::from("output.mp4"),
-            },
-            true,
-        ),
-        (
-            MediaExecutionState::Completed {
-                output: PathBuf::from("recording.mp4"),
-            },
-            true,
-        ),
-        (
-            MediaExecutionState::Failed(MediaExecutionFailure::Process {
-                reason: MediaProcessFailure::Exit(Some(1)),
-                diagnostic: String::new(),
-            }),
-            true,
-        ),
-        (MediaExecutionState::Cancelled, true),
-    ];
-    for (state, visible) in states {
-        assert_eq!(shows_frame_capture_lifecycle(&state), visible);
-    }
 }
 
 #[test]

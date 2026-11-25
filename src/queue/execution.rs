@@ -1738,6 +1738,13 @@ mod tests {
             QueuedOperation::AudioMix(audio.request(&media)),
             remux(&media, directory.path().join("remux.mkv")),
             audio_extract(&media, directory.path().join("extract.m4a")),
+            QueuedOperation::FrameCapture(crate::frame_capture::model::FrameCaptureRequest {
+                input: media.path.clone(),
+                output: directory.path().join("capture.png"),
+                position: crate::frame_capture::model::FrameTimestamp::from_milliseconds(100)
+                    .into(),
+                format: crate::frame_capture::model::FrameCaptureFormat::Png,
+            }),
             upscale(
                 &media,
                 directory.path().join("upscale.mp4"),
@@ -1748,10 +1755,12 @@ mod tests {
             let output = operation.output().to_path_buf();
             let mut queue = MediaQueue::new();
             queue.enqueue(&identity, &media, operation.clone()).unwrap();
+            queue.enqueue(&identity, &media, operation.clone()).unwrap();
             queue.enqueue(&identity, &media, operation).unwrap();
             let first = FakeProcessControl::running();
             let second = FakeProcessControl::deferred_cancellation();
-            let mut processes = VecDeque::from([first.clone(), second.clone()]);
+            let third = FakeProcessControl::running();
+            let mut processes = VecDeque::from([first.clone(), second.clone(), third.clone()]);
             let mut launch = |_, _| Ok(processes.pop_front().expect("one launch per job"));
             let tools = tools(&directory);
             assert!(queue.start_with_launcher(&tools, true, &mut launch));
@@ -1773,8 +1782,16 @@ mod tests {
             second.set_state(MediaProcessState::Cancelled);
             queue.poll_with_launcher(Some(&tools), true, &mut launch);
             assert_eq!(queue.jobs()[1].state(), &QueueJobState::Cancelled);
-            assert_eq!(queue.run_state(), QueueRunState::Stopped);
             assert!(!temporary.exists());
+            let failed_output = queue.temporary_output_path().unwrap().to_path_buf();
+            fs::write(&failed_output, b"partial").unwrap();
+            third.set_state(MediaProcessState::Failed(MediaProcessFailure::Exit(Some(
+                1,
+            ))));
+            queue.poll_with_launcher(Some(&tools), true, &mut launch);
+            assert!(matches!(queue.jobs()[2].state(), QueueJobState::Failed(_)));
+            assert!(!failed_output.exists());
+            assert_eq!(queue.run_state(), QueueRunState::Stopped);
             assert_eq!(fs::read(output).unwrap(), b"published");
         }
     }
@@ -1818,6 +1835,17 @@ mod tests {
                 format,
             }));
         }
+        use crate::frame_capture::model::{
+            FrameCaptureFormat, FrameCaptureRequest, FrameTimeBase, ResolvedFramePosition,
+        };
+        operations.push(QueuedOperation::FrameCapture(FrameCaptureRequest {
+            input: media.path.clone(),
+            output: directory.path().join("frame.jpg"),
+            position: ResolvedFramePosition::new(1001, FrameTimeBase::new(1, 24_000).unwrap())
+                .unwrap()
+                .into(),
+            format: FrameCaptureFormat::Jpeg,
+        }));
         let mut queue = MediaQueue::new();
         let ids: Vec<_> = operations
             .iter()
@@ -1875,7 +1903,7 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["-c:v", "h264_nvenc"])
         );
-        for (args, (codec, title_flag, language_flag)) in launches[4..].iter().zip([
+        for (args, (codec, title_flag, language_flag)) in launches[4..7].iter().zip([
             ("copy", "-metadata:s:a:0", "-metadata:s:a:0"),
             ("aac", "-metadata", "-metadata:s:a:0"),
             ("flac", "-metadata", "-metadata"),
@@ -1891,6 +1919,12 @@ mod tests {
                     .any(|pair| pair == [language_flag, "language=eng"])
             );
         }
+        assert!(
+            launches[7]
+                .windows(2)
+                .any(|pair| pair == ["-ss", "0.041708333"])
+        );
+        assert!(launches[7].windows(2).any(|pair| pair == ["-c:v", "mjpeg"]));
     }
 
     #[test]

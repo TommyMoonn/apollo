@@ -1,5 +1,7 @@
 //! Queue presentation integration and native action dispatch.
-use super::{ApolloApp, state::EditorPresentation};
+use super::{ApolloApp, completion_wake, state::EditorPresentation};
+use crate::frame_capture::thumbnail::{FrameCaptureThumbnail, decode_frame_capture_thumbnail};
+use crate::ui::{theme, widgets};
 use crate::{
     app::{
         NavigationState, Operation, QueueAction, QueueEditOrigin,
@@ -7,8 +9,9 @@ use crate::{
         queue::{QueueEditReturn, QueueEffect, QueueSubmission},
     },
     native::open_folder,
-    queue::{JobId, QueueEnqueueError, QueuedOperation},
+    queue::{JobId, QueueEnqueueError, QueueJobState, QueuedOperation},
 };
+use std::{path::PathBuf, sync::mpsc, thread};
 
 impl ApolloApp {
     pub(super) fn enter_queue(&mut self) {
@@ -24,7 +27,7 @@ impl ApolloApp {
     }
 
     pub(super) fn handle_queue_view_action(&mut self, action: QueueAction) {
-        if self.confirm_cancel_queue {
+        if self.confirm_cancel_queue || self.queue_frame_preview.is_some() {
             return;
         }
         if action == QueueAction::CancelQueue {
@@ -75,7 +78,17 @@ impl ApolloApp {
                 }
                 true
             }
+            QueueEffect::PreviewFrame(id, output) => {
+                self.queue_frame_preview = Some(QueueFramePreview::new(
+                    id,
+                    output,
+                    completion_wake(&self.egui_context),
+                ));
+                self.egui_context.request_repaint();
+                true
+            }
             QueueEffect::Returned => {
+                self.queue_frame_preview = None;
                 self.schedule_active_frame_capture_support();
                 true
             }
@@ -228,9 +241,105 @@ impl ApolloApp {
             self.handle_queue_action(QueueAction::Start);
         }
     }
+}
 
-    pub(super) fn enqueue_from_ready_surface(&mut self, operation: Operation) {
-        let result = self.enqueue_current_operation(operation);
-        self.core.record_queue_submission(operation, result);
+// One view-local decode request. Dropping the receiver retires the result without blocking UI.
+pub(super) struct QueueFramePreview {
+    job_id: JobId,
+    state: QueueFramePreviewState,
+}
+
+enum QueueFramePreviewState {
+    Loading(mpsc::Receiver<Result<FrameCaptureThumbnail, String>>),
+    Ready(egui::TextureHandle),
+    Failed(String),
+}
+
+impl QueueFramePreview {
+    fn new(job_id: JobId, output: PathBuf, wake: impl FnOnce() + Send + 'static) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let spawn = thread::Builder::new()
+            .name("queue-frame-thumbnail".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(|| decode_frame_capture_thumbnail(&output))
+                    .unwrap_or_else(|_| Err("Captured image decoding failed.".into()));
+                let _ = sender.send(result);
+                drop(sender);
+                wake();
+            });
+        Self {
+            job_id,
+            state: match spawn {
+                Ok(_) => QueueFramePreviewState::Loading(receiver),
+                Err(error) => {
+                    QueueFramePreviewState::Failed(format!("Preview could not start: {error}"))
+                }
+            },
+        }
+    }
+
+    fn poll(&mut self, context: &egui::Context) {
+        let QueueFramePreviewState::Loading(receiver) = &self.state else {
+            return;
+        };
+        self.state = match receiver.try_recv() {
+            Ok(Ok(image)) => QueueFramePreviewState::Ready(context.load_texture(
+                "queue-frame-thumbnail",
+                egui::ColorImage::from_rgba_unmultiplied(image.size(), image.rgba()),
+                egui::TextureOptions::LINEAR,
+            )),
+            Ok(Err(error)) => QueueFramePreviewState::Failed(error),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                QueueFramePreviewState::Failed("Preview worker disconnected.".into())
+            }
+            Err(mpsc::TryRecvError::Empty) => return,
+        };
+    }
+}
+
+impl ApolloApp {
+    pub(super) fn show_queue_frame_preview(&mut self, ui: &egui::Ui) {
+        let Some(preview) = self.queue_frame_preview.as_mut() else {
+            return;
+        };
+        if !self.core.queue.scheduler().jobs().iter().any(|job| {
+            job.id() == preview.job_id && matches!(job.state(), QueueJobState::Completed { .. })
+        }) {
+            self.queue_frame_preview = None;
+            return;
+        }
+        preview.poll(ui.ctx());
+        let modal = egui::Modal::new(egui::Id::new("queue-frame-preview")).show(ui.ctx(), |ui| {
+            let available = ui.ctx().content_rect().size() - egui::vec2(64.0, 140.0);
+            let size = available
+                .min(egui::vec2(512.0, 512.0))
+                .max(egui::vec2(32.0, 32.0));
+            ui.set_max_width(size.x);
+            ui.heading("Captured frame");
+            ui.add_space(theme::SPACING.related);
+            match &preview.state {
+                QueueFramePreviewState::Loading(_) => {
+                    ui.label("Loading preview…");
+                }
+                QueueFramePreviewState::Ready(texture) => {
+                    ui.add(
+                        egui::Image::new((texture.id(), texture.size_vec2()))
+                            .max_size(size)
+                            .alt_text("Captured frame"),
+                    );
+                }
+                QueueFramePreviewState::Failed(error) => {
+                    ui.label(error);
+                }
+            }
+            ui.add_space(theme::SPACING.related);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                widgets::secondary_button(ui, "Close").clicked()
+            })
+            .inner
+        });
+        if modal.inner || modal.should_close() {
+            self.queue_frame_preview = None;
+        }
     }
 }

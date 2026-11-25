@@ -12,7 +12,7 @@ use crate::{
         validation::validate_audio_mix_request,
     },
     frame_capture::{
-        execution::{FrameCaptureStartError, prepare_frame_capture_operation},
+        execution::{FrameCapturePreparationError, prepare_frame_capture_operation},
         model::FrameCaptureRequest,
         validation::validate_frame_capture_request,
     },
@@ -120,7 +120,9 @@ impl QueuedOperation {
             }),
             Self::FrameCapture(request) => {
                 validate_frame_capture_request(request, media).map_err(|error| {
-                    QueuePreparationError::FrameCapture(FrameCaptureStartError::Validation(error))
+                    QueuePreparationError::FrameCapture(FrameCapturePreparationError::Validation(
+                        error,
+                    ))
                 })
             }
         }
@@ -157,7 +159,7 @@ pub enum QueuePreparationError {
     Upscale(UpscalePreparationError),
     Remux(RemuxPreparationError),
     AudioExtract(AudioExtractPreparationError),
-    FrameCapture(FrameCaptureStartError),
+    FrameCapture(FrameCapturePreparationError),
 }
 
 impl QueuePreparationError {

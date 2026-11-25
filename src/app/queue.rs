@@ -30,6 +30,7 @@ pub enum QueueAction {
     MoveLater(JobId),
     Remove(JobId),
     OpenFolder(JobId),
+    PreviewFrame(JobId),
     ClearFinished,
     Back,
     #[default]
@@ -49,6 +50,7 @@ pub(crate) enum QueueEffect {
     AddFiles,
     Edit(JobId, QueueEditOrigin),
     OpenFolder(PathBuf),
+    PreviewFrame(JobId, PathBuf),
     Returned,
 }
 
@@ -195,9 +197,7 @@ impl Application {
     pub(crate) fn process_now_allowed(&self) -> bool {
         self.queue.scheduler().pending_count() == 0
             && !self.queue.scheduler().is_started()
-            && self.discovery.ready().is_some()
-            && self.executors_idle()
-            && self.execution_arbitration().queue_start_allowed()
+            && self.queue_start_allowed()
     }
 
     pub(crate) fn poll_media_queue(&mut self, wake: impl FnMut() -> MediaProcessWake) {
@@ -222,7 +222,7 @@ impl Application {
             }
             QueueAction::AddFiles => Handled(false),
             QueueAction::Start => {
-                if !self.execution_arbitration().queue_start_allowed() {
+                if !self.queue_start_allowed() {
                     return Handled(false);
                 }
                 let Some(tools) = self.discovery.ready() else {
@@ -262,6 +262,23 @@ impl Application {
                 .find(|job| job.id() == id)
                 .and_then(|job| completed_output_folder(job.state()))
                 .map_or(Handled(false), |path| OpenFolder(path.to_path_buf())),
+            QueueAction::PreviewFrame(id) => {
+                if self.queue_origin().is_none() {
+                    return Handled(false);
+                }
+                self.queue
+                    .scheduler
+                    .jobs()
+                    .iter()
+                    .find(|job| job.id() == id)
+                    .and_then(|job| match (job.operation(), job.state()) {
+                        (QueuedOperation::FrameCapture(_), QueueJobState::Completed { output }) => {
+                            Some(output.clone())
+                        }
+                        _ => None,
+                    })
+                    .map_or(Handled(false), |output| PreviewFrame(id, output))
+            }
             QueueAction::Back => {
                 if self.queue_origin().is_none() {
                     return Handled(false);

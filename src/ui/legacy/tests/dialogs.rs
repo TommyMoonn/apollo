@@ -1,4 +1,4 @@
-use super::super::dialogs::{editor_output_dialog_request, settle_output_file_dialog};
+use super::super::dialogs::editor_output_dialog_request;
 use super::*;
 use crate::app::dialogs::OutputDraft;
 use crate::file_dialog::FileDialogStartError;
@@ -347,7 +347,6 @@ fn pending_dialog_blocks_conflicting_app_actions_and_a_second_request() {
         .unwrap();
 
     assert!(!app.file_intake_enabled());
-    assert!(app.workspace_interaction_enabled());
     assert_workspace(&app.core, Operation::AudioMix);
     assert_eq!(
         app.file_dialog.request(FileDialogRequest::OpenSource {
@@ -419,43 +418,6 @@ fn stale_output_completions_cannot_mutate_replacement_sessions() {
     assert_eq!(
         app.state.upscale.as_ref().unwrap().selection.output_path(),
         replacement_upscale_output
-    );
-
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn frame_capture_output_completion_cannot_mutate_selection_after_execution_starts() {
-    let (directory, path) = temp_file("dialog-after-execution");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::FrameCapture);
-    let capture_id = app.state.frame_capture.as_ref().unwrap().session_id;
-    let capture_output = app
-        .state
-        .frame_capture
-        .as_ref()
-        .unwrap()
-        .selection
-        .output_path();
-    settle_output_file_dialog(
-        &mut app.state,
-        &FrameCaptureExecutionState::Running {
-            output: PathBuf::from("output.mp4"),
-        },
-        DialogTarget::FrameCaptureOutput {
-            session_id: capture_id,
-        },
-        &DialogOutcome::Selected(directory.join("late-frame.png")),
-    );
-    assert_eq!(
-        app.state
-            .frame_capture
-            .as_ref()
-            .unwrap()
-            .selection
-            .output_path(),
-        capture_output
     );
 
     fs::remove_dir_all(directory).unwrap();

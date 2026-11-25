@@ -16,15 +16,15 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error, show_queue_confirmation,
-    theme, widgets,
+    OperationSurfaceMode, fonts, layout, media_error, show_queued_submission_actions, theme,
+    widgets,
 };
 
 const TIMESTAMP_LABEL: &str = "Timestamp";
 const OUTPUT_LABEL: &str = "Output";
 const FORMAT_LABEL: &str = "Format";
 const BROWSE_LABEL: &str = "Browse";
-const CAPTURE_LABEL: &str = "Capture frame";
+const SAVE_FRAME_LABEL: &str = "Save frame";
 const COPY_LABEL: &str = "Copy frame";
 const COPYING_LABEL: &str = "Copying…";
 const COPIED_LABEL: &str = "Copied frame";
@@ -102,7 +102,7 @@ pub enum FrameCaptureSelectionAction {
     None,
     BrowseOutput,
     QueueRequested,
-    CaptureRequested,
+    SaveFrameRequested,
     CopyRequested,
     PositionEdited(PositionSettle),
     StepRequested(FrameDirection),
@@ -197,8 +197,8 @@ pub fn show<'a>(
             }
         },
         |ui| match mode {
-            OperationSurfaceMode::Immediate {
-                start_allowed,
+            OperationSurfaceMode::Normal {
+                process_now_allowed,
                 queue_confirmation,
                 ..
             } => {
@@ -206,39 +206,35 @@ pub fn show<'a>(
                     enabled: false,
                     status: FrameCopyStatus::Idle,
                 });
-                if widgets::primary_button_enabled(
+                match show_queued_submission_actions(
                     ui,
-                    CAPTURE_LABEL,
-                    validation.is_ok() && start_allowed,
-                )
-                .clicked()
-                {
-                    action.set(FrameCaptureSelectionAction::CaptureRequested);
+                    SAVE_FRAME_LABEL,
+                    process_now_allowed,
+                    validation.is_ok(),
+                    queue_confirmation,
+                ) {
+                    Some(crate::app::queue::QueueSubmission::ProcessNow) => {
+                        action.set(FrameCaptureSelectionAction::SaveFrameRequested)
+                    }
+                    Some(crate::app::queue::QueueSubmission::AddToQueue) => {
+                        action.set(FrameCaptureSelectionAction::QueueRequested)
+                    }
+                    None => {}
                 }
                 if widgets::secondary_button_enabled(
                     ui,
                     copy_button_label(copy.status),
-                    copy.enabled && start_allowed && copy.status != FrameCopyStatus::Copying,
+                    copy.enabled && copy.status != FrameCopyStatus::Copying,
                 )
                 .clicked()
                 {
                     action.set(FrameCaptureSelectionAction::CopyRequested);
                 }
-                if ui
-                    .add_enabled_ui(validation.is_ok(), |ui| {
-                        widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
-                    })
-                    .inner
-                    .clicked()
-                {
-                    action.set(FrameCaptureSelectionAction::QueueRequested);
-                }
-                show_queue_confirmation(ui, queue_confirmation);
             }
             edit_mode => {
                 let (save_label, cancel_label) = edit_mode
                     .edit_labels()
-                    .expect("non-immediate operation mode has edit labels");
+                    .expect("editor mode has edit labels");
                 let save_allowed = match edit_mode {
                     OperationSurfaceMode::BatchDefaults { save_allowed } => save_allowed,
                     _ => validation.is_ok(),

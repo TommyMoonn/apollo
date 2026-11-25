@@ -14,16 +14,14 @@ use crate::frame_capture::preview::PreviewGeneration;
 use crate::media::error::MediaError;
 use crate::media::intake::SourceIdentity;
 use crate::media::model::MediaFile;
-use crate::ui::frame_capture_progress::FrameCaptureLifecycleUiState;
 use crate::ui::source_presentation::SourcePresentation;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FrameCaptureToolState {
     pub(super) media: MediaFile,
     pub(super) editor: FrameCaptureEditor,
-    pub(super) lifecycle_ui: FrameCaptureLifecycleUiState,
-    pub(super) start_error: Option<MediaError>,
-    pub(super) start_error_details_open: bool,
+    pub(super) picker_error: Option<MediaError>,
+    pub(super) picker_error_details_open: bool,
 }
 
 impl Deref for FrameCaptureToolState {

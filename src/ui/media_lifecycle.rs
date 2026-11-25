@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use egui::{Align, Label, Layout, RichText, ScrollArea, Sides, TextStyle, Ui};
 
@@ -92,18 +92,6 @@ pub(super) fn diagnostic_height(ui: &Ui, text: &str, wrap_width: f32) -> f32 {
         .min(layout::DIAGNOSTIC_MAX_HEIGHT)
 }
 
-pub(super) fn file_name(ui: &mut Ui, output: &std::path::Path) {
-    let name = output
-        .file_name()
-        .unwrap_or(output.as_os_str())
-        .to_string_lossy();
-    ui.add(
-        Label::new(RichText::new(name).text_style(TextStyle::Body))
-            .truncate()
-            .selectable(false),
-    );
-}
-
 pub(super) fn right_aligned_actions<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
     ui.allocate_ui_with_layout(
         egui::vec2(ui.available_width(), theme::PRIMARY_CONTROL_HEIGHT),
@@ -145,22 +133,6 @@ pub(super) fn progress_presentation(progress: Option<&MediaProgress>) -> Progres
         time,
         frame,
     }
-}
-
-pub(super) fn source_to_output(input: &std::path::Path, output: &std::path::Path) -> String {
-    format!(
-        "{} → {}",
-        file_display_name(input),
-        file_display_name(output)
-    )
-}
-
-pub(super) fn output_parent(output: &std::path::Path) -> PathBuf {
-    output
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 pub(super) fn format_duration(duration: Duration) -> String {
@@ -238,11 +210,4 @@ fn progress_metadata(ui: &mut Ui, presentation: &ProgressPresentation) {
                 }
             },
         );
-}
-
-fn file_display_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned()
 }

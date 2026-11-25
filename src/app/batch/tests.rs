@@ -55,7 +55,7 @@ fn app() -> Application {
 }
 fn assert_no_batch_execution(app: &Application) {
     assert!(app.queue.scheduler().jobs().is_empty());
-    assert!(!app.media_operation_running());
+    assert!(!app.queue.scheduler().is_running());
 }
 #[test]
 fn audio_extract_batch_requires_explicit_selection_for_multi_track_sources() {

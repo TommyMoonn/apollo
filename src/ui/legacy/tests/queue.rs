@@ -222,7 +222,7 @@ fn queue_terminal_failure_does_not_replace_the_ready_source_session() {
         app.core.queue.scheduler().jobs()[0].state(),
         QueueJobState::Failed(QueueJobFailure::ProcessStart(_))
     ));
-    assert!(app.core.execution_arbitration().queue_start_allowed());
+    assert!(app.core.queue_start_allowed());
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -436,7 +436,12 @@ fn dispatch_submission(app: &mut ApolloApp, operation: Operation, process_now: b
         (Operation::AudioExtract, false) => {
             app.handle_audio_extract_action(AudioExtractSelectionAction::QueueRequested)
         }
-        _ => unreachable!("test covers migrated forms"),
+        (Operation::FrameCapture, true) => {
+            app.handle_frame_capture_action(FrameCaptureSelectionAction::SaveFrameRequested)
+        }
+        (Operation::FrameCapture, false) => {
+            app.handle_frame_capture_action(FrameCaptureSelectionAction::QueueRequested)
+        }
     }
 }
 
@@ -447,6 +452,7 @@ fn migrated_form_actions_admit_equivalent_requests_and_keep_terminal_history() {
         Operation::Remux,
         Operation::AudioExtract,
         Operation::VideoUpscale,
+        Operation::FrameCapture,
     ] {
         let (directory, path) = temp_file("migrated-form-submission");
         let mut app = app();
@@ -490,7 +496,20 @@ fn migrated_form_actions_admit_equivalent_requests_and_keep_terminal_history() {
                     .selection
                     .set_custom_output_path(directory.join("custom.mp4"));
             }
-            _ => unreachable!(),
+            Operation::FrameCapture => {
+                let session = app.state.frame_capture.as_mut().unwrap();
+                let FrameCaptureToolState { media, editor, .. } = session;
+                editor.selection.set_position(
+                    media,
+                    ResolvedFramePosition::new(1001, FrameTimeBase::new(1, 24_000).unwrap())
+                        .unwrap()
+                        .into(),
+                );
+                editor.selection.set_format(FrameCaptureFormat::Jpeg);
+                editor
+                    .selection
+                    .set_custom_output_path(directory.join("custom.jpg"));
+            }
         }
         assert!(app.core.process_now_allowed());
         dispatch_submission(&mut app, operation, true);
@@ -509,6 +528,15 @@ fn migrated_form_actions_admit_equivalent_requests_and_keep_terminal_history() {
             QueueJobState::Failed(QueueJobFailure::ProcessStart(_))
         ));
         let first_request = queue.jobs()[0].operation().clone();
+        if let QueuedOperation::FrameCapture(request) = &first_request {
+            assert_eq!(
+                request.position,
+                ResolvedFramePosition::new(1001, FrameTimeBase::new(1, 24_000).unwrap())
+                    .unwrap()
+                    .into()
+            );
+            assert_eq!(request.format, FrameCaptureFormat::Jpeg);
+        }
         dispatch_submission(&mut app, operation, true); // stale form action from the Queue route
         assert_eq!(app.core.queue.scheduler().jobs().len(), 1);
         assert!(app.handle_queue_action(QueueAction::Back));
@@ -523,6 +551,7 @@ fn migrated_form_actions_admit_equivalent_requests_and_keep_terminal_history() {
         assert_eq!(queue.jobs()[1].operation(), &first_request);
         assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
         assert!(!app.core.process_now_allowed());
+        assert!(app.core.clipboard_start_allowed());
         dispatch_submission(&mut app, operation, true);
         assert_workspace(&app.core, operation);
         assert_eq!(app.core.queue.scheduler().jobs().len(), 2);
@@ -532,6 +561,7 @@ fn migrated_form_actions_admit_equivalent_requests_and_keep_terminal_history() {
         theme::install(&context);
         let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
         assert!(!output_contains_text(&output, "Process now"));
+        assert!(!output_contains_text(&output, "Save frame"));
         assert!(output_contains_text(&output, "Add to queue"));
         output.textures_delta.clear();
         assert!(app.handle_queue_action(QueueAction::CancelQueue));
@@ -552,6 +582,7 @@ fn migrated_form_admission_errors_preserve_draft_route_and_job_id() {
         Operation::Remux,
         Operation::AudioExtract,
         Operation::VideoUpscale,
+        Operation::FrameCapture,
     ] {
         let (directory, path) = temp_file("migrated-form-rejection");
         let mut app = app();
@@ -568,7 +599,14 @@ fn migrated_form_admission_errors_preserve_draft_route_and_job_id() {
                 .format()
                 .extension(),
             Operation::Remux => "mkv",
-            _ => unreachable!(),
+            Operation::FrameCapture => app
+                .state
+                .frame_capture
+                .as_ref()
+                .unwrap()
+                .selection
+                .format()
+                .extension(),
         };
         let output = directory
             .join("missing")
@@ -602,7 +640,13 @@ fn migrated_form_admission_errors_preserve_draft_route_and_job_id() {
                 .unwrap()
                 .selection
                 .set_custom_output_path(output.clone()),
-            _ => unreachable!(),
+            Operation::FrameCapture => app
+                .state
+                .frame_capture
+                .as_mut()
+                .unwrap()
+                .selection
+                .set_custom_output_path(output.clone()),
         }
         for process_now in [true, false] {
             dispatch_submission(&mut app, operation, process_now);
@@ -632,6 +676,7 @@ fn migrated_forms_append_to_running_queue_without_competing_launch() {
         Operation::Remux,
         Operation::AudioExtract,
         Operation::VideoUpscale,
+        Operation::FrameCapture,
     ] {
         let (directory, path) = temp_file("migrated-form-running");
         let mut app = app();
@@ -655,7 +700,37 @@ fn migrated_forms_append_to_running_queue_without_competing_launch() {
         assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
         assert_eq!(queue.jobs()[0].operation(), queue.jobs()[1].operation());
         assert_workspace(&app.core, operation);
+        assert!(!app.core.clipboard_start_allowed());
+        app.select_tool(Operation::FrameCapture);
+        app.handle_frame_capture_action(FrameCaptureSelectionAction::CopyRequested);
+        assert!(!app.core.frame_work.copy_active());
+        let replacement = directory.join("replacement.mp4");
+        fs::write(&replacement, b"replacement").unwrap();
+        assert!(app.file_intake_enabled());
+        app.load_media_path_with_probe(&replacement, |path| Ok(media(path)));
+        assert_eq!(app.core.source.current().unwrap().path, replacement);
+        assert_eq!(app.core.queue.scheduler().active_job(), Some(first));
+        assert_eq!(app.core.queue.scheduler().jobs()[0].media().path, path);
         drop(app); // joins the active child before removing its temporary output
         fs::remove_dir_all(directory).unwrap();
     }
+}
+
+#[test]
+fn waiting_and_cancelled_frame_jobs_cannot_open_completed_preview() {
+    let (directory, path) = temp_file("queue-frame-preview-eligibility");
+    let mut app = app();
+    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+    app.select_tool(Operation::FrameCapture);
+    let id = app
+        .enqueue_current_operation(Operation::FrameCapture)
+        .unwrap()
+        .unwrap();
+    app.enter_queue();
+    assert!(!app.handle_queue_action(QueueAction::PreviewFrame(id)));
+    assert!(app.queue_frame_preview.is_none());
+    assert!(app.handle_queue_action(QueueAction::CancelQueue));
+    assert!(!app.handle_queue_action(QueueAction::PreviewFrame(id)));
+    assert!(app.queue_frame_preview.is_none());
+    fs::remove_dir_all(directory).unwrap();
 }

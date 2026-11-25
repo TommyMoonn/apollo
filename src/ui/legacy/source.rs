@@ -15,7 +15,6 @@ use crate::media::intake::{MediaIntakeRequest, MediaLoadStart};
 use crate::media::{model::MediaFile, probe::MediaProbeError};
 use crate::queue::QueuedOperation;
 use crate::ui::frame_capture::{FrameCopyStatus, PositionSettle};
-use crate::ui::frame_capture_progress::FrameCaptureLifecycleUiState;
 use crate::ui::{
     SourceAction, file_intake::FileIntakeAction, source_presentation::SourcePresentation,
     workspace::WorkspaceAction,
@@ -58,7 +57,6 @@ impl ApolloApp {
     }
 
     fn retire_source_presentation(&mut self) {
-        self.core.frame_work.cancel_thumbnail();
         self.cancel_copy_frame_work();
         self.cancel_frame_capture_support();
         self.state.source_presentation = None;
@@ -167,9 +165,8 @@ impl ApolloApp {
                             Some(source_identity.clone()),
                             media,
                         ),
-                        lifecycle_ui: FrameCaptureLifecycleUiState::default(),
-                        start_error: None,
-                        start_error_details_open: false,
+                        picker_error: None,
+                        picker_error_details_open: false,
                         media: media.clone(),
                     });
                 }
@@ -310,12 +307,7 @@ impl ApolloApp {
             }
         ) && !self.core.source.is_inspecting()
             && !self.file_dialog.is_pending()
-            && self.core.executors_idle()
             && !self.copy_frame_active()
-    }
-
-    pub(super) fn workspace_interaction_enabled(&self) -> bool {
-        !self.core.source.is_inspecting() && !self.copy_frame_active()
     }
 
     pub(super) fn handle_workspace_action(&mut self, action: WorkspaceAction) {

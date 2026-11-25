@@ -150,13 +150,18 @@ pub fn show<'a>(
             }
         },
         |ui| match mode {
-            OperationSurfaceMode::Immediate {
-                start_allowed,
+            OperationSurfaceMode::Normal {
+                process_now_allowed,
                 queue_confirmation,
                 ..
             } => {
-                match show_queued_submission_actions(ui, start_allowed, can_mix, queue_confirmation)
-                {
+                match show_queued_submission_actions(
+                    ui,
+                    super::PROCESS_NOW_LABEL,
+                    process_now_allowed,
+                    can_mix,
+                    queue_confirmation,
+                ) {
                     Some(crate::app::queue::QueueSubmission::ProcessNow) => {
                         action.set(AudioMixSelectionAction::MixRequested)
                     }
@@ -169,7 +174,7 @@ pub fn show<'a>(
             edit_mode => {
                 let (save_label, cancel_label) = edit_mode
                     .edit_labels()
-                    .expect("non-immediate operation mode has edit labels");
+                    .expect("editor mode has edit labels");
                 let save_allowed = match edit_mode {
                     OperationSurfaceMode::BatchDefaults { save_allowed } => save_allowed,
                     _ => can_mix,

@@ -73,10 +73,6 @@ impl MediaExecution {
         &self.state
     }
 
-    pub(crate) fn is_running(&self) -> bool {
-        self.operation.is_some()
-    }
-
     pub(crate) fn progress(&self) -> Option<&MediaProgress> {
         self.operation
             .as_ref()

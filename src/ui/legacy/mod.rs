@@ -32,6 +32,7 @@ pub struct ApolloApp {
     state: LegacyEditorState,
     queue_editor_presentation: Option<EditorPresentation>,
     confirm_cancel_queue: bool,
+    queue_frame_preview: Option<queue::QueueFramePreview>,
     batch_editor_presentation: Option<EditorPresentation>,
     batch_append_error_details_open: bool,
     progress_repaint: MediaProgressRepaintOwner,
@@ -81,6 +82,7 @@ impl ApolloApp {
             state: LegacyEditorState::default(),
             queue_editor_presentation: None,
             confirm_cancel_queue: false,
+            queue_frame_preview: None,
             batch_editor_presentation: None,
             batch_append_error_details_open: false,
             progress_repaint: MediaProgressRepaintOwner::new(completion_wake(&egui_context)),
@@ -97,6 +99,12 @@ impl ApolloApp {
             self.tools_error_details_open = false;
             self.core.refresh_batch_capabilities();
         }
+        if !matches!(
+            self.core.navigation(),
+            crate::app::NavigationState::Queue { .. }
+        ) {
+            self.queue_frame_preview = None;
+        }
         let progress = &mut self.progress_repaint;
         self.core.poll_media_queue(|| progress.begin());
         if !matches!(self.core.discovery.state(), MediaToolsState::Ready(_)) {
@@ -108,13 +116,11 @@ impl ApolloApp {
         self.poll_frame_capture_preview();
         self.poll_frame_capture_index();
         self.poll_copy_frame();
-        self.poll_frame_capture_thumbnail();
     }
 
     fn shutdown(&mut self) {
         self.cancel_copy_frame_work();
         self.cancel_frame_capture_support();
-        self.core.frame_work.cancel_thumbnail();
         self.core.retire_batch();
         self.core.queue.cancel();
     }

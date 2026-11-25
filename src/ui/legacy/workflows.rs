@@ -2,7 +2,6 @@
 
 use super::{ApolloApp, completion_wake};
 use crate::app::NavigationState;
-use crate::frame_capture::execution::FrameCaptureExecutionState;
 use crate::media::tools::MediaTools;
 
 impl ApolloApp {
@@ -44,8 +43,4 @@ impl ApolloApp {
                 .start(completion_wake(&self.egui_context));
         }
     }
-}
-
-pub(super) fn shows_frame_capture_lifecycle(state: &FrameCaptureExecutionState) -> bool {
-    !matches!(state, FrameCaptureExecutionState::Idle)
 }

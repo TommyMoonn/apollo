@@ -27,77 +27,6 @@ fn inspection_completion_enters_default_source_workspace() {
 }
 
 #[test]
-fn source_replacement_clears_thumbnail_and_rejects_stale_completion() {
-    let (first_directory, first_path) = temp_file("thumbnail-first-source");
-    let (second_directory, second_path) = temp_file("thumbnail-second-source");
-    let mut app = app();
-    app.load_media_path_with_probe(&first_path, |path| Ok(media(path)));
-    app.select_tool(Operation::FrameCapture);
-    let old_session = app.state.frame_capture.as_mut().unwrap();
-    let old_session_id = old_session.session_id;
-    let old_request = old_session
-        .lifecycle_ui
-        .begin_thumbnail(Path::new("old-capture.png"))
-        .unwrap();
-
-    app.load_media_path_with_probe(&second_path, |path| Ok(media(path)));
-    assert!(app.core.frame_work.frame_capture_thumbnail_load.is_none());
-    let replacement = app.state.frame_capture.as_ref().unwrap();
-    assert_ne!(replacement.session_id, old_session_id);
-    assert!(matches!(
-        replacement.lifecycle_ui.thumbnail(),
-        FrameCaptureThumbnailState::Empty
-    ));
-
-    let (sender, receiver) = mpsc::sync_channel(1);
-    app.core.frame_work.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
-        session_id: old_session_id,
-        request_id: old_request.request_id(),
-        receiver,
-    });
-    sender.send(Ok(thumbnail())).unwrap();
-    app.poll_frame_capture_thumbnail();
-    assert!(matches!(
-        app.state
-            .frame_capture
-            .as_ref()
-            .unwrap()
-            .lifecycle_ui
-            .thumbnail(),
-        FrameCaptureThumbnailState::Empty
-    ));
-
-    fs::remove_dir_all(first_directory).unwrap();
-    fs::remove_dir_all(second_directory).unwrap();
-}
-
-#[test]
-fn close_source_releases_thumbnail_worker_and_session_state() {
-    let (directory, path) = temp_file("thumbnail-close-source");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::FrameCapture);
-    let session = app.state.frame_capture.as_mut().unwrap();
-    let request = session
-        .lifecycle_ui
-        .begin_thumbnail(Path::new("capture.png"))
-        .unwrap();
-    let (_sender, receiver) = mpsc::sync_channel(1);
-    app.core.frame_work.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
-        session_id: session.session_id,
-        request_id: request.request_id(),
-        receiver,
-    });
-
-    app.handle_source_action(SourceAction::CloseSource);
-
-    assert!(app.core.frame_work.frame_capture_thumbnail_load.is_none());
-    assert!(app.state.frame_capture.is_none());
-    assert_no_source(&app.core);
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn failed_inspection_returns_to_intake_without_current_metadata() {
     let (directory, path) = temp_file("inspection-failure");
     let mut app = app();
@@ -275,7 +204,7 @@ fn open_valid_file_routes_audio_mix_to_ready_state() {
 fn dropped_valid_file_enters_default_workspace() {
     let (directory, path) = temp_file("drop");
     let mut app = app();
-    assert!(file_intake_enabled(app.core.frame_capture_executor.state(),));
+    assert!(app.file_intake_enabled());
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
 
     assert_workspace(&app.core, Operation::AudioMix);

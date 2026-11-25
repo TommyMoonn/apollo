@@ -13,13 +13,9 @@ use apollo::{
         AudioMixRequest, LoudnessNormalization, LoudnessTargets, OutputContainer,
         SelectedAudioTrack, TrackGain,
     },
-    frame_capture::{
-        execution::FrameCaptureExecutor,
-        model::{FrameCaptureFormat, FrameCaptureRequest, FrameTimestamp},
-    },
+    frame_capture::model::{FrameCaptureFormat, FrameCaptureRequest, FrameTimestamp},
     media::{
         container::MediaContainer,
-        execution::MediaExecutionState,
         intake::{MediaIntake, MediaLoadStart, SourceIdentity},
         model::MediaFile,
         probe::probe_media,
@@ -68,7 +64,7 @@ pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &s
             audio_mix(tools, identity, media, directory);
             remux(tools, identity, media, directory);
             audio_extract(tools, identity, media, directory);
-            frame_capture(tools, media, directory);
+            frame_capture(tools, identity, media, directory);
             upscale(
                 tools,
                 identity,
@@ -174,29 +170,6 @@ fn generate_fixture(tools: &MediaTools, input: &Path) {
         "{}",
         process.diagnostic_stderr()
     );
-}
-
-fn settle(mut poll: impl FnMut() -> MediaExecutionState, output: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let state = poll();
-        if state.is_terminal() {
-            assert_eq!(
-                state,
-                MediaExecutionState::Completed {
-                    output: output.to_path_buf()
-                }
-            );
-            assert!(fs::metadata(output).unwrap().len() > 0);
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "operation timed out: {}",
-            output.display()
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
 }
 
 fn settle_queued(
@@ -339,7 +312,12 @@ fn audio_extract(
     }
 }
 
-fn frame_capture(tools: &MediaTools, media: &MediaFile, directory: &Path) {
+fn frame_capture(
+    tools: &MediaTools,
+    identity: &SourceIdentity,
+    media: &MediaFile,
+    directory: &Path,
+) {
     for (format, codec) in [
         (FrameCaptureFormat::Png, "png"),
         (FrameCaptureFormat::Jpeg, "mjpeg"),
@@ -350,9 +328,12 @@ fn frame_capture(tools: &MediaTools, media: &MediaFile, directory: &Path) {
             position: FrameTimestamp::from_milliseconds(500).into(),
             format,
         };
-        let mut executor = FrameCaptureExecutor::new();
-        executor.start(tools, media, &request).unwrap();
-        settle(|| executor.poll().clone(), &request.output);
+        settle_queued(
+            tools,
+            identity,
+            media,
+            QueuedOperation::FrameCapture(request.clone()),
+        );
         let result = probe_media(tools, &request.output).unwrap();
         assert_video(&result, codec, 320, 180);
         assert!(result.audio_streams.is_empty());

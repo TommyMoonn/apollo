@@ -14,7 +14,6 @@ use crate::frame_capture::{
         FramePreview, PREVIEW_DEBOUNCE, PreviewCompletion, PreviewExtractionError,
         PreviewExtractionOwner, PreviewImage, PreviewRequest, decode_preview_png,
     },
-    thumbnail::{FrameCaptureThumbnail, decode_frame_capture_thumbnail},
 };
 use crate::media::{
     error::MediaError,
@@ -26,7 +25,6 @@ use crate::media::{
 use std::{
     io,
     ops::{Deref, DerefMut},
-    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
     time::Instant,
@@ -163,147 +161,10 @@ pub(crate) fn frame_navigation_availability(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameCaptureThumbnailRequest {
-    request_id: u64,
-    output: PathBuf,
-}
-
-impl FrameCaptureThumbnailRequest {
-    pub fn request_id(&self) -> u64 {
-        self.request_id
-    }
-
-    pub fn output(&self) -> &Path {
-        &self.output
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum FrameCaptureThumbnailState {
-    #[default]
-    Empty,
-    Loading {
-        request_id: u64,
-    },
-    Ready {
-        request_id: u64,
-        preview: FrameCaptureThumbnail,
-    },
-    Failed {
-        request_id: u64,
-        diagnostic: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct CaptureThumbnail {
-    next_thumbnail_request_id: u64,
-    thumbnail: FrameCaptureThumbnailState,
-}
-impl CaptureThumbnail {
-    pub fn thumbnail(&self) -> &FrameCaptureThumbnailState {
-        &self.thumbnail
-    }
-
-    pub fn settle_thumbnail(
-        &mut self,
-        request_id: u64,
-        result: Result<FrameCaptureThumbnail, String>,
-    ) -> bool {
-        if !matches!(
-            self.thumbnail,
-            FrameCaptureThumbnailState::Loading {
-                request_id: active_request_id
-            } if active_request_id == request_id
-        ) {
-            return false;
-        }
-
-        self.thumbnail = match result {
-            Ok(preview) => FrameCaptureThumbnailState::Ready {
-                request_id,
-                preview,
-            },
-            Err(diagnostic) => FrameCaptureThumbnailState::Failed {
-                request_id,
-                diagnostic,
-            },
-        };
-        true
-    }
-
-    pub fn begin_thumbnail(&mut self, output: &Path) -> Option<FrameCaptureThumbnailRequest> {
-        if !matches!(self.thumbnail, FrameCaptureThumbnailState::Empty) {
-            return None;
-        }
-
-        self.next_thumbnail_request_id = self
-            .next_thumbnail_request_id
-            .checked_add(1)
-            .expect("frame capture thumbnail request identifier space is exhausted");
-        let request_id = self.next_thumbnail_request_id;
-        self.thumbnail = FrameCaptureThumbnailState::Loading { request_id };
-        Some(FrameCaptureThumbnailRequest {
-            request_id,
-            output: output.to_path_buf(),
-        })
-    }
-
-    pub(crate) fn reset(&mut self) {
-        self.thumbnail = FrameCaptureThumbnailState::Empty;
-    }
-}
-pub(crate) struct FrameCaptureThumbnailLoad {
-    pub(crate) session_id: u64,
-    pub(crate) request_id: u64,
-    pub(crate) receiver: Receiver<Result<FrameCaptureThumbnail, String>>,
-}
-
 pub(crate) struct FramePreviewDecode {
     pub(crate) session_id: u64,
     pub(crate) request: PreviewRequest,
     pub(crate) receiver: Receiver<Result<PreviewImage, PreviewExtractionError>>,
-}
-
-impl FrameCaptureThumbnailLoad {
-    pub(crate) fn spawn(
-        session_id: u64,
-        request: &FrameCaptureThumbnailRequest,
-        wake: impl FnOnce() + Send + 'static,
-    ) -> io::Result<Self> {
-        let output = request.output().to_path_buf();
-        Self::spawn_with(session_id, request.request_id(), wake, move || {
-            decode_frame_capture_thumbnail(&output)
-        })
-    }
-
-    pub(crate) fn spawn_with<F>(
-        session_id: u64,
-        request_id: u64,
-        wake: impl FnOnce() + Send + 'static,
-        decode: F,
-    ) -> io::Result<Self>
-    where
-        F: FnOnce() -> Result<FrameCaptureThumbnail, String> + Send + 'static,
-    {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        thread::Builder::new()
-            .name("apollo-frame-thumbnail".to_owned())
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode));
-                if let Ok(result) = result {
-                    let _ = sender.send(result);
-                }
-                drop(sender);
-                wake();
-            })?;
-        Ok(Self {
-            session_id,
-            request_id,
-            receiver,
-        })
-    }
 }
 
 impl FramePreviewDecode {
@@ -350,7 +211,6 @@ impl FramePreviewDecode {
 
 #[derive(Default)]
 pub(crate) struct FrameCaptureWork {
-    pub(crate) frame_capture_thumbnail_load: Option<FrameCaptureThumbnailLoad>,
     pub(crate) frame_preview_extraction: PreviewExtractionOwner,
     pub(crate) frame_preview_decode: Option<FramePreviewDecode>,
     pub(crate) frame_index_query: FrameIndexQueryOwner,
@@ -690,40 +550,6 @@ impl FrameCaptureWork {
         self.copy_frame_extraction.cancel();
         self.copy_frame_worker = None;
         self.copy_frame_session_id = None;
-    }
-
-    pub(crate) fn start_thumbnail(
-        &mut self,
-        session: u64,
-        request: &FrameCaptureThumbnailRequest,
-        wake: impl FnOnce() + Send + 'static,
-    ) -> io::Result<()> {
-        self.frame_capture_thumbnail_load =
-            Some(FrameCaptureThumbnailLoad::spawn(session, request, wake)?);
-        Ok(())
-    }
-
-    pub(crate) fn poll_thumbnail(
-        &mut self,
-    ) -> Option<(u64, u64, Result<FrameCaptureThumbnail, String>)> {
-        let result = match self
-            .frame_capture_thumbnail_load
-            .as_ref()?
-            .receiver
-            .try_recv()
-        {
-            Ok(result) => result,
-            Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => {
-                Err("Frame Capture preview worker stopped before returning a result.".to_owned())
-            }
-        };
-        let load = self.frame_capture_thumbnail_load.take()?;
-        Some((load.session_id, load.request_id, result))
-    }
-
-    pub(crate) fn cancel_thumbnail(&mut self) {
-        self.frame_capture_thumbnail_load = None;
     }
 }
 

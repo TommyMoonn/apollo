@@ -6,9 +6,9 @@ use std::time::Instant;
 
 use egui::{CentralPanel, Ui};
 
-use crate::app::{NavigationState, Operation, operation_workspace_visible};
+use crate::app::{NavigationState, Operation};
 use crate::frame_capture::clipboard::copy_frame_action_eligible;
-use crate::media::error::{MediaError, MediaErrorKind};
+use crate::media::error::MediaError;
 use crate::queue::QueueRunState;
 use crate::ui::audio_extract::AudioExtractSelectionAction;
 use crate::ui::audio_mix::AudioMixSelectionAction;
@@ -20,13 +20,12 @@ use crate::ui::upscale::UpscaleSelectionAction;
 use crate::ui::workspace::{EditableQueuedJob, WorkspaceAction, WorkspaceMode};
 use crate::ui::{
     OperationSurfaceMode, audio_extract as audio_extract_ui, audio_mix as audio_mix_ui,
-    file_intake, frame_capture as frame_capture_ui, frame_capture_progress, layout, media_error,
-    queue as queue_ui, remux as remux_ui, theme, upscale as upscale_ui, widgets, workspace,
+    file_intake, frame_capture as frame_capture_ui, layout, media_error, queue as queue_ui,
+    remux as remux_ui, theme, upscale as upscale_ui, widgets, workspace,
 };
 
 use super::ApolloApp;
 use super::state::{EditorPresentation, FrameCaptureToolState, QueueEditAction};
-use super::workflows::shows_frame_capture_lifecycle;
 use crate::app::{discovery::MediaToolsState, editor::OperationEditorState};
 
 impl ApolloApp {
@@ -52,7 +51,7 @@ impl ApolloApp {
                     }
                     MediaToolsState::Ready(_) => {}
                 }
-                if !self.confirm_cancel_queue {
+                if !self.confirm_cancel_queue && self.queue_frame_preview.is_none() {
                     self.handle_window_file_drop(ui.ctx());
                     if self.drag_hovered(ui.ctx()) {
                         file_intake::show_drag_hover(ui);
@@ -133,13 +132,11 @@ impl ApolloApp {
                 .audio_extract
                 .as_ref()
                 .is_some_and(|session| session.picker_error.is_none()),
-            Operation::FrameCapture => operation_workspace_visible(
-                self.core.frame_capture_executor.state(),
-                self.state
-                    .frame_capture
-                    .as_ref()
-                    .is_some_and(|session| session.start_error.is_none()),
-            ),
+            Operation::FrameCapture => self
+                .state
+                .frame_capture
+                .as_ref()
+                .is_some_and(|session| session.picker_error.is_none()),
         }
     }
 
@@ -260,7 +257,6 @@ impl ApolloApp {
     }
 
     pub(super) fn show_queue(&mut self, ui: &mut Ui) {
-        let arbitration = self.core.execution_arbitration();
         let scheduler = self.core.queue.scheduler();
         let capabilities_ready = self.core.discovery.settled_capabilities().is_some();
         let waiting_for_encoder_discovery = self.ready_media_tools().is_some()
@@ -274,8 +270,7 @@ impl ApolloApp {
             self.core.queue.scheduler().active_progress(),
             self.core.queue.scheduler().run_state(),
             queue_ui::QueueAvailability {
-                can_start: arbitration.queue_start_allowed()
-                    && self.ready_media_tools().is_some()
+                can_start: self.core.queue_start_allowed()
                     && scheduler.next_job_ready(capabilities_ready),
                 waiting_for_encoder_discovery,
                 can_add_files: self.file_intake_enabled() && self.ready_media_tools().is_some(),
@@ -284,6 +279,7 @@ impl ApolloApp {
             self.core.queue.scheduler().cancellation_pending(),
         );
         self.handle_queue_view_action(action);
+        self.show_queue_frame_preview(ui);
         if self.confirm_cancel_queue {
             if self.core.queue.scheduler().pending_count() == 0 {
                 self.resolve_queue_cancellation(false);
@@ -374,29 +370,7 @@ impl ApolloApp {
     }
 
     fn show_frame_capture_tool(&mut self, ui: &mut Ui) {
-        if shows_frame_capture_lifecycle(self.core.frame_capture_executor.state()) {
-            let action = {
-                let session = self
-                    .state
-                    .frame_capture
-                    .as_mut()
-                    .expect("frame capture source exists while lifecycle surface is shown");
-                let request = session
-                    .selection
-                    .request(&session.media)
-                    .expect("running frame capture session owns a valid timestamp");
-                frame_capture_progress::show(
-                    ui,
-                    &request,
-                    &mut self.core.frame_capture_executor,
-                    &mut session.lifecycle_ui,
-                )
-            };
-            self.handle_frame_capture_lifecycle_action(action);
-            return;
-        }
-
-        if self.show_frame_capture_start_error(ui) {
+        if self.show_frame_capture_picker_error(ui) {
             return;
         }
 
@@ -406,8 +380,8 @@ impl ApolloApp {
             .as_ref()
             .expect("source presentation exists while workspace is shown")
             .clone();
-        let immediate_start_allowed = self.core.execution_arbitration().immediate_start_allowed()
-            && !self.copy_frame_active();
+        let process_now_allowed = self.core.process_now_allowed();
+        let clipboard_allowed = self.core.clipboard_start_allowed();
         let queue_confirmation = self.core.queue_confirmation == Some(Operation::FrameCapture);
         let action_error = self
             .core
@@ -416,47 +390,51 @@ impl ApolloApp {
             .filter(|(tool, _)| *tool == Operation::FrameCapture)
             .map(|(_, error)| error.clone());
         let action = ui
-            .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
-                let session = self
-                    .state
-                    .frame_capture
-                    .as_mut()
-                    .expect("frame capture source exists while ready surface is shown");
-                let live_preview = frame_capture_ui::FrameCaptureLivePreview::from_preview(
-                    session.preview.state(),
-                    session
-                        .preview_texture
-                        .as_ref()
-                        .map(|texture| (texture.handle.id(), texture.size, texture.position)),
-                );
-                let navigation = frame_navigation_availability(&session.media, &session.editor);
-                let copy = FrameCopyActionState {
-                    enabled: session
-                        .selection
-                        .valid_position(&session.media)
-                        .is_some_and(|position| {
-                            copy_frame_action_eligible(&session.media, position)
-                        }),
-                    status: session.copy_status,
-                };
-                let FrameCaptureToolState { media, editor, .. } = session;
-                frame_capture_ui::show(
-                    ui,
-                    media,
-                    &presentation.frame_capture,
-                    &mut editor.selection,
-                    FrameCapturePositionSurface::Precision {
-                        preview: live_preview,
-                        navigation,
-                    },
-                    Some(copy),
-                    OperationSurfaceMode::Immediate {
-                        start_allowed: immediate_start_allowed,
-                        queue_confirmation,
-                        action_error: action_error.as_ref(),
-                    },
-                )
-            })
+            .add_enabled_ui(
+                self.file_intake_enabled() && self.ready_media_tools().is_some(),
+                |ui| {
+                    let session = self
+                        .state
+                        .frame_capture
+                        .as_mut()
+                        .expect("frame capture source exists while ready surface is shown");
+                    let live_preview = frame_capture_ui::FrameCaptureLivePreview::from_preview(
+                        session.preview.state(),
+                        session
+                            .preview_texture
+                            .as_ref()
+                            .map(|texture| (texture.handle.id(), texture.size, texture.position)),
+                    );
+                    let navigation = frame_navigation_availability(&session.media, &session.editor);
+                    let copy = FrameCopyActionState {
+                        enabled: clipboard_allowed
+                            && session
+                                .selection
+                                .valid_position(&session.media)
+                                .is_some_and(|position| {
+                                    copy_frame_action_eligible(&session.media, position)
+                                }),
+                        status: session.copy_status,
+                    };
+                    let FrameCaptureToolState { media, editor, .. } = session;
+                    frame_capture_ui::show(
+                        ui,
+                        media,
+                        &presentation.frame_capture,
+                        &mut editor.selection,
+                        FrameCapturePositionSurface::Precision {
+                            preview: live_preview,
+                            navigation,
+                        },
+                        Some(copy),
+                        OperationSurfaceMode::Normal {
+                            process_now_allowed,
+                            queue_confirmation,
+                            action_error: action_error.as_ref(),
+                        },
+                    )
+                },
+            )
             .inner;
         match action {
             FrameCaptureSelectionAction::PositionEdited(settle) => {
@@ -472,39 +450,35 @@ impl ApolloApp {
             }
             _ => {}
         }
-        if let Err(error) = self.handle_frame_capture_action(action)
-            && let Some(session) = self.state.frame_capture.as_mut()
-        {
-            session.start_error = Some(error.user_error());
-            session.start_error_details_open = false;
-        }
+        self.handle_frame_capture_action(action);
     }
 
-    fn show_frame_capture_start_error(&mut self, ui: &mut Ui) -> bool {
+    fn show_frame_capture_picker_error(&mut self, ui: &mut Ui) -> bool {
         let Some(session) = self.state.frame_capture.as_mut() else {
             return false;
         };
-        let Some(error) = session.start_error.as_ref() else {
+        let Some(error) = session.picker_error.as_ref() else {
             return false;
         };
 
-        let title = if error.kind() == MediaErrorKind::OutputPickerUnavailable {
-            "Output picker unavailable"
-        } else {
-            "Frame capture could not start"
-        };
         let response = layout::focus_content(ui, |ui| {
-            let mut sizing_details_open = session.start_error_details_open;
+            let mut sizing_details_open = session.picker_error_details_open;
             let details_open = if ui.is_sizing_pass() {
                 &mut sizing_details_open
             } else {
-                &mut session.start_error_details_open
+                &mut session.picker_error_details_open
             };
-            media_error::show_failure_content(ui, title, error, details_open, "Back")
+            media_error::show_failure_content(
+                ui,
+                "Output picker unavailable",
+                error,
+                details_open,
+                "Back",
+            )
         });
         if response.inner.clicked() {
-            session.start_error = None;
-            session.start_error_details_open = false;
+            session.picker_error = None;
+            session.picker_error_details_open = false;
         }
         true
     }
