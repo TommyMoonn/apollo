@@ -18,6 +18,7 @@ pub struct MediaQueue {
     next_job_id: Option<u64>,
     run_state: QueueRunState,
     active_job: Option<JobId>,
+    cancellation_pending: bool,
     execution: MediaExecution,
 }
 
@@ -40,6 +41,7 @@ impl MediaQueue {
             next_job_id: Some(1),
             run_state: QueueRunState::Stopped,
             active_job: None,
+            cancellation_pending: false,
             execution: MediaExecution::new(),
         }
     }
@@ -67,6 +69,10 @@ impl MediaQueue {
 
     pub fn active_progress(&self) -> Option<&MediaProgress> {
         self.execution.progress()
+    }
+
+    pub fn cancellation_pending(&self) -> bool {
+        self.cancellation_pending
     }
 
     pub fn is_started(&self) -> bool {
@@ -136,6 +142,7 @@ impl MediaQueue {
         Ok(ids)
     }
 
+    /// Returns whether a start request changed queue state, even if all launches failed.
     pub fn start<F>(&mut self, tools: &MediaTools, mut wake_for_job: F) -> bool
     where
         F: FnMut(JobId) -> MediaProcessWake,
@@ -145,7 +152,7 @@ impl MediaQueue {
         self.start_with_launcher(tools, &mut launcher)
     }
 
-    pub fn poll<F>(&mut self, tools: &MediaTools, mut wake_for_job: F)
+    pub fn poll<F>(&mut self, tools: Option<&MediaTools>, mut wake_for_job: F)
     where
         F: FnMut(JobId) -> MediaProcessWake,
     {
@@ -154,8 +161,12 @@ impl MediaQueue {
         self.poll_with_launcher(tools, &mut launcher);
     }
 
-    pub fn cancel_current(&self) -> bool {
-        self.execution.cancel()
+    pub fn cancel_current(&mut self) -> bool {
+        if self.cancellation_pending || !self.execution.cancel() {
+            return false;
+        }
+        self.cancellation_pending = true;
+        true
     }
 
     pub fn stop_after_current(&mut self) -> bool {
@@ -173,15 +184,15 @@ impl MediaQueue {
     }
 
     pub fn cancel_queue(&mut self) -> bool {
+        let mut changed = self.run_state != QueueRunState::Stopped;
         self.run_state = QueueRunState::Stopped;
-        let mut changed = false;
         for job in &mut self.jobs {
             if matches!(job.state(), QueueJobState::Waiting) {
                 job.set_state(QueueJobState::Cancelled);
                 changed = true;
             }
         }
-        self.execution.cancel() || changed
+        self.cancel_current() || changed
     }
 
     pub fn replace_waiting_operation(
@@ -264,20 +275,27 @@ impl MediaQueue {
         F: FnMut(JobId, MediaProcessCommand) -> Result<P, MediaProcessStartError>,
         P: ProcessControl + 'static,
     {
-        if self.run_state != QueueRunState::Stopped || self.active_job.is_some() {
+        if self.run_state != QueueRunState::Stopped
+            || self.active_job.is_some()
+            || self.waiting_jobs().next().is_none()
+        {
             return false;
         }
 
         self.run_state = QueueRunState::Running;
         self.advance_with_launcher(tools, launcher);
-        self.active_job.is_some()
+        // Even if every launch fails, the waiting jobs have changed state.
+        true
     }
 
-    fn poll_with_launcher<F, P>(&mut self, tools: &MediaTools, launcher: &mut F)
+    fn poll_with_launcher<F, P>(&mut self, tools: Option<&MediaTools>, launcher: &mut F)
     where
         F: FnMut(JobId, MediaProcessCommand) -> Result<P, MediaProcessStartError>,
         P: ProcessControl + 'static,
     {
+        if tools.is_none() {
+            self.stop_after_current();
+        }
         let Some(active_job) = self.active_job else {
             return;
         };
@@ -299,15 +317,16 @@ impl MediaQueue {
         };
         self.job_mut(active_job).set_state(terminal_state);
         self.active_job = None;
+        self.cancellation_pending = false;
         assert!(
             self.execution.reset(),
             "terminal queue execution must reset before advancing"
         );
 
-        match self.run_state {
-            QueueRunState::Running => self.advance_with_launcher(tools, launcher),
-            QueueRunState::StoppingAfterCurrent => self.run_state = QueueRunState::Stopped,
-            QueueRunState::Stopped => {}
+        if let (QueueRunState::Running, Some(tools)) = (self.run_state, tools) {
+            self.advance_with_launcher(tools, launcher);
+        } else {
+            self.run_state = QueueRunState::Stopped;
         }
     }
 
@@ -441,6 +460,7 @@ mod tests {
         sync::{
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
+            mpsc,
         },
     };
 
@@ -448,10 +468,13 @@ mod tests {
         audio_extract::model::{AudioExtractFormat, AudioExtractRequest},
         media::{
             container::MediaContainer,
-            execution::ProcessControl,
+            execution::{MediaExecutionFailure, ProcessControl},
             intake::SourceIdentity,
             model::{AudioStream, MediaFile, MediaStream, StreamKind},
-            process::{MediaProcessFailure, MediaProcessStartError, MediaProcessState},
+            process::{
+                MediaProcess, MediaProcessCommand, MediaProcessEvent, MediaProcessFailure,
+                MediaProcessStartError, MediaProcessState, MediaProcessWake, ProcessProgressSource,
+            },
             tools::MediaTools,
         },
         queue::model::{
@@ -1068,7 +1091,7 @@ mod tests {
             assert!(!actual.exists());
             fs::write(queue.temporary_output_path().unwrap(), bytes).unwrap();
             process.set_state(MediaProcessState::Completed);
-            queue.poll_with_launcher(&tools(&directory), &mut launcher);
+            queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
             assert_eq!(
                 queue
                     .jobs()
@@ -1087,8 +1110,14 @@ mod tests {
     }
 
     #[test]
-    fn success_failure_and_cancel_each_advance_to_one_next_process() {
-        for outcome in [Outcome::Success, Outcome::Failure, Outcome::Cancel] {
+    fn settled_outcomes_advance_to_one_next_process() {
+        for outcome in [
+            Outcome::Success,
+            Outcome::Failure,
+            Outcome::OutputFailure,
+            Outcome::Cancel,
+            Outcome::CancelFailure,
+        ] {
             let directory = TestDirectory::new(outcome.label());
             let (first_media_identity, first_media) = media(&directory, "first-source.mkv");
             let (second_media_identity, second_media) = media(&directory, "second-source.mkv");
@@ -1107,7 +1136,7 @@ mod tests {
                     remux(&second_media, directory.path().join("second-output.mkv")),
                 )
                 .unwrap();
-            let first_process = FakeProcessControl::running();
+            let first_process = FakeProcessControl::deferred_cancellation();
             let first_handle = first_process.clone();
             let second_process = FakeProcessControl::running();
             let mut processes = VecDeque::from([first_process, second_process]);
@@ -1122,22 +1151,50 @@ mod tests {
             assert_eq!(queue.active_job(), Some(first));
             assert!(!queue.start_with_launcher(&tools(&directory), &mut launcher));
             assert_eq!(launches.load(Ordering::Relaxed), 1);
-            if matches!(outcome, Outcome::Success) {
-                fs::write(queue.temporary_output_path().unwrap(), b"complete").unwrap();
-                first_handle.set_state(MediaProcessState::Completed);
-            } else if matches!(outcome, Outcome::Failure) {
-                first_handle.set_state(MediaProcessState::Failed(MediaProcessFailure::Exit(Some(
-                    2,
-                ))));
-            } else {
-                assert!(queue.cancel_current());
+            match outcome {
+                Outcome::Success => {
+                    fs::write(queue.temporary_output_path().unwrap(), b"complete").unwrap();
+                    first_handle.set_state(MediaProcessState::Completed);
+                }
+                Outcome::OutputFailure => first_handle.set_state(MediaProcessState::Completed),
+                Outcome::Failure => first_handle.set_state(MediaProcessState::Failed(
+                    MediaProcessFailure::Exit(Some(2)),
+                )),
+                Outcome::Cancel | Outcome::CancelFailure => {
+                    assert!(queue.cancel_current());
+                    let terminal = if matches!(outcome, Outcome::Cancel) {
+                        MediaProcessState::Cancelled
+                    } else {
+                        MediaProcessState::Failed(MediaProcessFailure::Io(
+                            std::io::ErrorKind::Other,
+                        ))
+                    };
+                    first_handle.set_state(terminal);
+                }
             }
 
-            queue.poll_with_launcher(&tools(&directory), &mut launcher);
+            queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
 
             assert_eq!(queue.active_job(), Some(second));
             assert_eq!(launches.load(Ordering::Relaxed), 2);
-            assert!(queue.jobs()[0].state().is_terminal());
+            assert!(!queue.cancellation_pending());
+            let state = queue.jobs()[0].state();
+            match outcome {
+                Outcome::Success => assert!(matches!(state, QueueJobState::Completed { .. })),
+                Outcome::Failure | Outcome::CancelFailure => assert!(matches!(
+                    state,
+                    QueueJobState::Failed(QueueJobFailure::Execution(
+                        MediaExecutionFailure::Process { .. }
+                    ))
+                )),
+                Outcome::OutputFailure => assert!(matches!(
+                    state,
+                    QueueJobState::Failed(QueueJobFailure::Execution(
+                        MediaExecutionFailure::Output { .. }
+                    ))
+                )),
+                Outcome::Cancel => assert_eq!(state, &QueueJobState::Cancelled),
+            }
             assert!(matches!(
                 queue.jobs()[1].state(),
                 QueueJobState::Running { .. }
@@ -1200,7 +1257,7 @@ mod tests {
         );
 
         assert!(queue.cancel_queue());
-        queue.poll_with_launcher(&tools(&directory), &mut launcher);
+        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
         assert_eq!(
             queue.replace_waiting_operation(
                 running,
@@ -1253,7 +1310,7 @@ mod tests {
         fs::write(queue.temporary_output_path().unwrap(), b"complete").unwrap();
         first_handle.set_state(MediaProcessState::Completed);
 
-        queue.poll_with_launcher(&tools(&directory), &mut launcher);
+        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
 
         assert_eq!(queue.run_state(), QueueRunState::Stopped);
         assert_eq!(queue.active_job(), None);
@@ -1323,7 +1380,7 @@ mod tests {
         assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
 
         assert!(queue.cancel_queue());
-        queue.poll_with_launcher(&tools(&directory), &mut launcher);
+        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
 
         assert_eq!(queue.run_state(), QueueRunState::Stopped);
         assert_eq!(queue.jobs()[0].id(), terminal);
@@ -1395,18 +1452,30 @@ mod tests {
                 remux(&second_media, directory.path().join("second-output.mkv")),
             )
             .unwrap();
-        let launches = Arc::new(AtomicUsize::new(0));
-        let launch_count = Arc::clone(&launches);
-        let mut launcher = move |_, _| {
-            launch_count.fetch_add(1, Ordering::Relaxed);
-            Ok(FakeProcessControl::running())
-        };
+        let process = FakeProcessControl::deferred_cancellation();
+        let handle = process.clone();
+        let mut process = Some(process);
+        let mut launcher = move |_, _| Ok(process.take().expect("only one launch"));
 
         assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        let active = queue.active_job().unwrap();
         assert!(queue.cancel_queue());
-        queue.poll_with_launcher(&tools(&directory), &mut launcher);
+        assert!(!queue.cancel_queue());
+        assert!(queue.cancellation_pending());
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(queue.jobs()[1].state(), &QueueJobState::Cancelled);
+        assert!(!queue.start_with_launcher(&tools(&directory), &mut launcher));
+        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
+        assert_eq!(queue.active_job(), Some(active));
+        assert!(matches!(
+            queue.jobs()[0].state(),
+            QueueJobState::Running { .. }
+        ));
 
-        assert_eq!(launches.load(Ordering::Relaxed), 1);
+        handle.set_state(MediaProcessState::Cancelled);
+        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
+
+        assert!(!queue.cancellation_pending());
         assert!(!queue.is_started());
         assert!(!queue.is_running());
         assert!(
@@ -1415,6 +1484,210 @@ mod tests {
                 .iter()
                 .all(|job| matches!(job.state(), QueueJobState::Cancelled))
         );
+    }
+
+    #[test]
+    fn empty_start_is_unchanged_and_all_launch_failures_are_reported_as_changes() {
+        let directory = TestDirectory::new("all-launches-fail");
+        let (identity, media) = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let tools = tools(&directory);
+        let mut attempts = 0;
+        let mut launcher = |_, _| -> Result<FakeProcessControl, _> {
+            attempts += 1;
+            Err(MediaProcessStartError::ProcessLaunchFailed(
+                std::io::ErrorKind::NotFound,
+            ))
+        };
+        assert!(!queue.start_with_launcher(&tools, &mut launcher));
+        for name in ["first.mkv", "second.mkv"] {
+            queue
+                .enqueue(
+                    &identity,
+                    &media,
+                    remux(&media, directory.path().join(name)),
+                )
+                .unwrap();
+        }
+        assert!(queue.start_with_launcher(&tools, &mut launcher));
+        assert!(!queue.start_with_launcher(&tools, &mut launcher));
+        assert_eq!(attempts, 2);
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert!(queue.active_job().is_none());
+        assert!(queue.jobs().iter().all(|job| matches!(
+            job.state(),
+            QueueJobState::Failed(QueueJobFailure::ProcessStart(_))
+        )));
+    }
+
+    #[test]
+    fn cancelling_after_stop_preserves_waiting_work_until_explicit_restart() {
+        let directory = TestDirectory::new("cancel-after-stop");
+        let (identity, media) = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        for name in ["first.mkv", "second.mkv"] {
+            queue
+                .enqueue(
+                    &identity,
+                    &media,
+                    remux(&media, directory.path().join(name)),
+                )
+                .unwrap();
+        }
+        let first = FakeProcessControl::deferred_cancellation();
+        let handle = first.clone();
+        let mut processes = VecDeque::from([first, FakeProcessControl::running()]);
+        let mut launcher = |_, _| Ok(processes.pop_front().expect("one process per job"));
+        let tools = tools(&directory);
+        assert!(queue.start_with_launcher(&tools, &mut launcher));
+        let active = queue.active_job();
+        assert!(queue.stop_after_current());
+        assert!(queue.cancel_current());
+        assert!(!queue.cancel_current());
+        assert!(queue.cancellation_pending());
+        queue.poll_with_launcher(Some(&tools), &mut launcher);
+        assert_eq!(queue.active_job(), active);
+        assert!(!queue.start_with_launcher(&tools, &mut launcher));
+        handle.set_state(MediaProcessState::Cancelled);
+        queue.poll_with_launcher(Some(&tools), &mut launcher);
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(queue.jobs()[0].state(), &QueueJobState::Cancelled);
+        assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
+        assert!(queue.start_with_launcher(&tools, &mut launcher));
+        assert_eq!(queue.active_job(), Some(queue.jobs()[1].id()));
+        assert!(!queue.cancellation_pending());
+    }
+
+    #[test]
+    fn readiness_loss_settles_active_output_without_advancing_even_if_tools_recover() {
+        let directory = TestDirectory::new("tools-unavailable");
+        let (identity, media) = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let output = directory.path().join("first.mkv");
+        queue
+            .enqueue(&identity, &media, remux(&media, output.clone()))
+            .unwrap();
+        queue
+            .enqueue(
+                &identity,
+                &media,
+                remux(&media, directory.path().join("second.mkv")),
+            )
+            .unwrap();
+        let process = FakeProcessControl::running();
+        let handle = process.clone();
+        let mut process = Some(process);
+        let mut launcher = |_, _| Ok(process.take().expect("must not advance"));
+        let tools = tools(&directory);
+        assert!(queue.start_with_launcher(&tools, &mut launcher));
+        let active = queue.active_job();
+        queue.poll_with_launcher(None, &mut launcher);
+        assert_eq!(queue.active_job(), active);
+        assert_eq!(queue.run_state(), QueueRunState::StoppingAfterCurrent);
+        assert!(!queue.cancellation_pending());
+        fs::write(queue.temporary_output_path().unwrap(), b"complete").unwrap();
+        handle.set_state(MediaProcessState::Completed);
+        queue.poll_with_launcher(Some(&tools), &mut launcher);
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(queue.active_job(), None);
+        assert_eq!(
+            queue.jobs()[0].state(),
+            &QueueJobState::Completed {
+                output: output.clone()
+            }
+        );
+        assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
+        assert_eq!(fs::read(output).unwrap(), b"complete");
+    }
+
+    #[test]
+    fn bulk_cancellation_does_not_overwrite_a_completed_process_awaiting_settlement() {
+        let directory = TestDirectory::new("cancel-terminal-claim");
+        let (identity, media) = media(&directory, "source.mkv");
+        let mut queue = MediaQueue::new();
+        let output = directory.path().join("first.mkv");
+        queue
+            .enqueue(&identity, &media, remux(&media, output.clone()))
+            .unwrap();
+        let process = FakeProcessControl::running();
+        let handle = process.clone();
+        let mut process = Some(process);
+        let mut launcher = |_, _| Ok(process.take().expect("only one launch"));
+        let tools = tools(&directory);
+        assert!(queue.start_with_launcher(&tools, &mut launcher));
+        fs::write(queue.temporary_output_path().unwrap(), b"complete").unwrap();
+        handle.set_state(MediaProcessState::Completed);
+        assert!(!queue.cancel_current());
+        // Even without waiting jobs, stopping advancement is a state change.
+        assert!(queue.cancel_queue());
+        assert!(!queue.cancel_queue());
+        assert!(!queue.cancellation_pending());
+        queue.poll_with_launcher(None, &mut launcher);
+        assert_eq!(
+            queue.jobs()[0].state(),
+            &QueueJobState::Completed {
+                output: output.clone()
+            }
+        );
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(fs::read(output).unwrap(), b"complete");
+    }
+
+    #[test]
+    fn real_child_cancellation_settles_staged_output_without_touching_existing_file() {
+        use std::time::Duration;
+        let directory = TestDirectory::new("cancel-real-child");
+        let (identity, media) = media(&directory, "source.mkv");
+        let output = directory.path().join("existing.mkv");
+        fs::write(&output, b"existing").unwrap();
+        let mut queue = MediaQueue::new();
+        queue
+            .enqueue(&identity, &media, remux(&media, output.clone()))
+            .unwrap();
+        #[cfg(windows)]
+        let command = MediaProcessCommand::new("cmd.exe").args([
+            "/D",
+            "/S",
+            "/C",
+            "echo ready& for /L %i in (1,1,2147483647) do @rem",
+        ]);
+        #[cfg(not(windows))]
+        let command =
+            MediaProcessCommand::new("sh").args(["-c", "printf 'ready\\n'; exec sleep 60"]);
+        let (sender, receiver) = mpsc::channel();
+        let wake = MediaProcessWake::new(move |event| {
+            let _ = sender.send(event);
+        });
+        let mut launcher = |_, _| {
+            MediaProcess::start_with_wake(
+                command
+                    .clone()
+                    .progress_source(ProcessProgressSource::Stdout),
+                wake.clone(),
+            )
+        };
+        let tools = tools(&directory);
+        assert!(queue.start_with_launcher(&tools, &mut launcher));
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(10)).unwrap(),
+            MediaProcessEvent::Progress
+        );
+        let temporary = queue.temporary_output_path().unwrap().to_path_buf();
+        let staging = temporary.parent().unwrap();
+        fs::write(&temporary, b"partial").unwrap();
+        assert!(queue.cancel_current());
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(10)).unwrap(),
+            MediaProcessEvent::Terminal
+        );
+        assert!(temporary.exists());
+        assert!(queue.cancellation_pending());
+        queue.poll_with_launcher(Some(&tools), &mut launcher);
+        assert_eq!(queue.jobs()[0].state(), &QueueJobState::Cancelled);
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert!(!staging.exists());
+        assert_eq!(fs::read(output).unwrap(), b"existing");
+        assert!(!directory.path().join("existing (1).mkv").exists());
     }
 
     #[test]
@@ -1434,8 +1707,8 @@ mod tests {
         fs::write(queue.temporary_output_path().unwrap(), b"published").unwrap();
         handle.set_state(MediaProcessState::Completed);
 
-        queue.poll_with_launcher(&tools(&directory), &mut launcher);
-        queue.poll_with_launcher(&tools(&directory), &mut launcher);
+        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
+        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
 
         assert_eq!(fs::read(&output).unwrap(), b"published");
         assert_eq!(queue.jobs().len(), 1);
@@ -1573,12 +1846,21 @@ mod tests {
     #[derive(Clone)]
     struct FakeProcessControl {
         state: Arc<Mutex<MediaProcessState>>,
+        defer_cancellation: bool,
     }
 
     impl FakeProcessControl {
         fn running() -> Self {
             Self {
                 state: Arc::new(Mutex::new(MediaProcessState::Running)),
+                defer_cancellation: false,
+            }
+        }
+
+        fn deferred_cancellation() -> Self {
+            Self {
+                defer_cancellation: true,
+                ..Self::running()
             }
         }
 
@@ -1597,7 +1879,9 @@ mod tests {
             if *state != MediaProcessState::Running {
                 return false;
             }
-            *state = MediaProcessState::Cancelled;
+            if !self.defer_cancellation {
+                *state = MediaProcessState::Cancelled;
+            }
             true
         }
 
@@ -1614,7 +1898,9 @@ mod tests {
     enum Outcome {
         Success,
         Failure,
+        OutputFailure,
         Cancel,
+        CancelFailure,
     }
 
     impl Outcome {
@@ -1622,7 +1908,9 @@ mod tests {
             match self {
                 Self::Success => "success",
                 Self::Failure => "failure",
+                Self::OutputFailure => "output-failure",
                 Self::Cancel => "cancel",
+                Self::CancelFailure => "cancel-failure",
             }
         }
     }

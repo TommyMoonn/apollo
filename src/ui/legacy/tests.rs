@@ -406,7 +406,7 @@ fn populate_cancelled_and_failed_queue_history(app: &mut ApolloApp, path: &Path,
     app.enqueue_current_operation(Operation::Remux)
         .unwrap()
         .unwrap();
-    assert!(!app.handle_queue_action(QueueAction::Start));
+    assert!(app.handle_queue_action(QueueAction::Start));
     assert_eq!(app.core.queue.scheduler().pending_count(), 0);
     assert!(matches!(
         app.core.queue.scheduler().jobs()[0].state(),

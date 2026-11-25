@@ -17,10 +17,39 @@ impl ApolloApp {
         self.state.intake_error_details_open = false;
     }
 
+    pub(super) fn handle_queue_view_action(&mut self, action: QueueAction) {
+        if self.confirm_cancel_queue {
+            return;
+        }
+        if action == QueueAction::CancelQueue {
+            if self.core.queue.scheduler().pending_count() > 0 {
+                self.confirm_cancel_queue = true;
+                self.egui_context.request_repaint();
+            }
+        } else {
+            self.handle_queue_action(action);
+        }
+    }
+
+    pub(super) fn resolve_queue_cancellation(&mut self, confirmed: bool) {
+        if !std::mem::take(&mut self.confirm_cancel_queue) {
+            return;
+        }
+        if confirmed {
+            self.handle_queue_action(QueueAction::CancelQueue);
+        }
+        self.egui_context.request_repaint();
+    }
+
     pub(super) fn handle_queue_action(&mut self, action: QueueAction) -> bool {
         let progress = &mut self.progress_repaint;
         match self.core.queue_action(action, || progress.begin()) {
-            QueueEffect::Handled(changed) => changed,
+            QueueEffect::Handled(changed) => {
+                if changed {
+                    self.egui_context.request_repaint();
+                }
+                changed
+            }
             QueueEffect::AddFiles => {
                 self.start_file_dialog(FileDialogRequest::OpenSources {
                     initial_directory: None,

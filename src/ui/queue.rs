@@ -17,7 +17,7 @@ const TITLE: &str = "Queue";
 const ADD_FILES_LABEL: &str = "Add files";
 const EMPTY_COPY: &str = "No jobs queued.";
 const START_LABEL: &str = "Start queue";
-const CANCEL_LABEL: &str = "Cancel current";
+const CANCEL_LABEL: &str = "Cancel job";
 const STOP_AFTER_CURRENT_LABEL: &str = "Stop after current";
 const CANCEL_QUEUE_LABEL: &str = "Cancel queue";
 const STOPPING_LABEL: &str = "Stopping after current";
@@ -51,8 +51,9 @@ struct QueueRowContext<'a> {
     move_capabilities: &'a [WaitingMoveCapability],
     active_job: Option<JobId>,
     active_progress: Option<&'a MediaProgress>,
+    cancellation_pending: bool,
     plan: layout::QueueRowPlan,
-    run_state: QueueRunState,
+    waiting_mutation_allowed: bool,
     action: &'a Cell<QueueAction>,
 }
 
@@ -120,12 +121,15 @@ pub fn show(
     active_progress: Option<&MediaProgress>,
     run_state: QueueRunState,
     queue_start_allowed: bool,
+    cancellation_pending: bool,
 ) -> QueueAction {
     let action = Cell::new(QueueAction::None);
     let capabilities = QueueCapabilities::from_jobs(jobs);
     let summary = QueueSummary::from_jobs(jobs);
-    let action_rows = queue_action_rows(ui, active_job, run_state);
-    let action_width = (!jobs.is_empty()).then(|| row_action_width(ui, jobs, run_state));
+    let action_rows = queue_action_rows(ui, active_job, capabilities.has_waiting);
+    let waiting_mutation_allowed = run_state == QueueRunState::Stopped && active_job.is_none();
+    let action_width =
+        (!jobs.is_empty()).then(|| row_action_width(ui, jobs, waiting_mutation_allowed));
 
     layout::operation_surface_with_action_rows(
         ui,
@@ -145,8 +149,9 @@ pub fn show(
                     move_capabilities: &move_capabilities,
                     active_job,
                     active_progress,
+                    cancellation_pending,
                     plan: row_plan,
-                    run_state,
+                    waiting_mutation_allowed,
                     action: &action,
                 };
                 if matches!(row_plan.layout, layout::QueueRowLayout::Inline) {
@@ -170,6 +175,7 @@ pub fn show(
                     run_state,
                     capabilities,
                     queue_start_allowed,
+                    cancellation_pending,
                     &action,
                 );
             } else {
@@ -184,10 +190,15 @@ pub fn show(
                 );
                 ui.add_space(theme::SPACING.compact);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::destructive_button(ui, CANCEL_QUEUE_LABEL).clicked() {
-                        action.set(QueueAction::CancelQueue);
-                    }
-                    show_active_controls(ui, run_state, &action);
+                    show_queue_controls(
+                        ui,
+                        active_job,
+                        run_state,
+                        capabilities,
+                        queue_start_allowed,
+                        cancellation_pending,
+                        &action,
+                    );
                 });
             }
         },
@@ -196,16 +207,18 @@ pub fn show(
     action.get()
 }
 
-fn queue_action_rows(ui: &Ui, active_job: Option<JobId>, run_state: QueueRunState) -> usize {
-    if active_job.is_none() {
+fn queue_action_rows(ui: &Ui, active_job: Option<JobId>, has_waiting: bool) -> usize {
+    let labels: &[&str] = if active_job.is_some() {
+        &[CANCEL_LABEL, STOPPING_LABEL, CANCEL_QUEUE_LABEL, BACK_LABEL]
+    } else if has_waiting {
+        &[START_LABEL, CANCEL_QUEUE_LABEL, BACK_LABEL]
+    } else {
         return 1;
-    }
-    let middle_label = match run_state {
-        QueueRunState::StoppingAfterCurrent => STOPPING_LABEL,
-        QueueRunState::Stopped | QueueRunState::Running => STOP_AFTER_CURRENT_LABEL,
     };
-    let widths = [CANCEL_LABEL, middle_label, CANCEL_QUEUE_LABEL, BACK_LABEL]
-        .map(|label| widgets::mode_button_intrinsic_size(ui, label).x);
+    let widths: Vec<_> = labels
+        .iter()
+        .map(|label| widgets::mode_button_intrinsic_size(ui, label).x)
+        .collect();
     let content_width = (ui.available_width() - f32::from(layout::CONTENT_PADDING) * 2.0).max(0.0);
     if matches!(
         layout::action_layout(content_width, &widths),
@@ -223,6 +236,7 @@ fn show_queue_footer(
     run_state: QueueRunState,
     capabilities: QueueCapabilities,
     queue_start_allowed: bool,
+    cancellation_pending: bool,
     action: &Cell<QueueAction>,
 ) {
     Sides::new().shrink_left().show(
@@ -235,38 +249,76 @@ fn show_queue_footer(
         |ui| {
             ui.spacing_mut().item_spacing.x = theme::FOOTER_ACTION_GAP;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if active_job.is_some() {
-                    if widgets::destructive_button(ui, CANCEL_QUEUE_LABEL).clicked() {
-                        action.set(QueueAction::CancelQueue);
-                    }
-                    show_active_controls(ui, run_state, action);
-                } else if capabilities.has_waiting
-                    && matches!(run_state, QueueRunState::Stopped)
-                    && widgets::primary_button_enabled(ui, START_LABEL, queue_start_allowed)
-                        .clicked()
-                {
-                    action.set(QueueAction::Start);
-                }
+                show_queue_controls(
+                    ui,
+                    active_job,
+                    run_state,
+                    capabilities,
+                    queue_start_allowed,
+                    cancellation_pending,
+                    action,
+                );
             });
         },
     );
 }
 
-fn show_active_controls(ui: &mut Ui, run_state: QueueRunState, action: &Cell<QueueAction>) {
-    match run_state {
-        QueueRunState::Running => {
-            if widgets::secondary_button(ui, STOP_AFTER_CURRENT_LABEL).clicked() {
-                action.set(QueueAction::StopAfterCurrent);
-            }
+fn show_queue_controls(
+    ui: &mut Ui,
+    active_job: Option<JobId>,
+    run_state: QueueRunState,
+    capabilities: QueueCapabilities,
+    queue_start_allowed: bool,
+    cancellation_pending: bool,
+    action: &Cell<QueueAction>,
+) {
+    if active_job.is_some() {
+        let can_cancel_queue = capabilities.has_waiting || run_state != QueueRunState::Stopped;
+        if widgets::destructive_button_enabled(ui, CANCEL_QUEUE_LABEL, can_cancel_queue).clicked() {
+            action.set(QueueAction::CancelQueue);
         }
-        QueueRunState::StoppingAfterCurrent => {
-            media_lifecycle::technical_faint(ui, STOPPING_LABEL);
+        let stopping = run_state != QueueRunState::Running;
+        let stop_label = if stopping {
+            STOPPING_LABEL
+        } else {
+            STOP_AFTER_CURRENT_LABEL
+        };
+        if widgets::secondary_button_enabled(ui, stop_label, !stopping).clicked() {
+            action.set(QueueAction::StopAfterCurrent);
         }
-        QueueRunState::Stopped => {}
+        if widgets::destructive_button_enabled(
+            ui,
+            CANCEL_LABEL,
+            !cancellation_pending && run_state != QueueRunState::Stopped,
+        )
+        .clicked()
+        {
+            action.set(QueueAction::CancelCurrent);
+        }
+    } else if capabilities.has_waiting && run_state == QueueRunState::Stopped {
+        if widgets::destructive_button(ui, CANCEL_QUEUE_LABEL).clicked() {
+            action.set(QueueAction::CancelQueue);
+        }
+        if widgets::primary_button_enabled(ui, START_LABEL, queue_start_allowed).clicked() {
+            action.set(QueueAction::Start);
+        }
     }
-    if widgets::destructive_button(ui, CANCEL_LABEL).clicked() {
-        action.set(QueueAction::CancelCurrent);
-    }
+}
+
+pub(super) fn confirm_cancel(ui: &Ui) -> (bool, bool) {
+    let modal = egui::Modal::new(egui::Id::new("confirm-cancel-queue")).show(ui.ctx(), |ui| {
+        ui.set_max_width(300.0);
+        ui.heading("Cancel queue?");
+        ui.label("Stop the current job and cancel all waiting jobs? Completed files are kept.");
+        ui.add_space(theme::SPACING.related);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let confirm = widgets::destructive_button(ui, CANCEL_QUEUE_LABEL).clicked();
+            let dismiss = widgets::secondary_button(ui, "Keep queue").clicked();
+            (confirm, dismiss)
+        })
+        .inner
+    });
+    (modal.inner.0, modal.inner.1 || modal.should_close())
 }
 
 fn show_header(ui: &mut Ui, summary: &str, can_clear: bool, action: &Cell<QueueAction>) {
@@ -338,14 +390,16 @@ fn show_job_row(ui: &mut Ui, job_index: usize, job: &QueuedJob, context: &QueueR
             context.move_capabilities[job_index],
             job,
             plan,
-            context.run_state,
+            context.waiting_mutation_allowed,
+            context.cancellation_pending && context.active_job == Some(job.id()),
             context.action,
         ),
         layout::QueueRowLayout::Stacked => show_stacked_job_row(
             ui,
             context.move_capabilities[job_index],
             job,
-            context.run_state,
+            context.waiting_mutation_allowed,
+            context.cancellation_pending && context.active_job == Some(job.id()),
             context.action,
         ),
     }
@@ -374,7 +428,8 @@ fn show_inline_job_row(
     move_capability: WaitingMoveCapability,
     job: &QueuedJob,
     plan: layout::QueueRowPlan,
-    run_state: QueueRunState,
+    waiting_mutation_allowed: bool,
+    cancellation_pending: bool,
     action: &Cell<QueueAction>,
 ) {
     let cells = allocate_inline_row(ui, plan, plan.row_height);
@@ -394,11 +449,11 @@ fn show_inline_job_row(
         ui,
         cells.state,
         Layout::left_to_right(Align::Center),
-        |ui| state_text(ui, job.state()),
+        |ui| state_text(ui, job.state(), cancellation_pending),
     );
     if let Some(actions) = cells.actions {
         exact_cell(ui, actions, Layout::right_to_left(Align::Center), |ui| {
-            show_row_actions(ui, move_capability, job, run_state, action)
+            show_row_actions(ui, move_capability, job, waiting_mutation_allowed, action)
         });
     }
 }
@@ -407,7 +462,8 @@ fn show_stacked_job_row(
     ui: &mut Ui,
     move_capability: WaitingMoveCapability,
     job: &QueuedJob,
-    run_state: QueueRunState,
+    waiting_mutation_allowed: bool,
+    cancellation_pending: bool,
     action: &Cell<QueueAction>,
 ) {
     show_identity(ui, job);
@@ -419,7 +475,7 @@ fn show_stacked_job_row(
         Sides::new().truncate().show(
             ui,
             |ui| secondary_text(ui, job.operation().display_name()),
-            |ui| state_text(ui, job.state()),
+            |ui| state_text(ui, job.state(), cancellation_pending),
         );
     });
     if has_row_actions(job.state()) {
@@ -429,7 +485,7 @@ fn show_stacked_job_row(
             Sense::hover(),
         );
         exact_cell(ui, actions, Layout::right_to_left(Align::Center), |ui| {
-            show_row_actions(ui, move_capability, job, run_state, action)
+            show_row_actions(ui, move_capability, job, waiting_mutation_allowed, action)
         });
     }
 }
@@ -465,7 +521,7 @@ fn show_row_actions(
     ui: &mut Ui,
     move_capability: WaitingMoveCapability,
     job: &QueuedJob,
-    run_state: QueueRunState,
+    waiting_mutation_allowed: bool,
     action: &Cell<QueueAction>,
 ) {
     ui.spacing_mut().item_spacing.x = theme::INLINE_ACTION_GAP;
@@ -474,7 +530,7 @@ fn show_row_actions(
             if widgets::plain_button(ui, REMOVE_LABEL).clicked() {
                 action.set(QueueAction::Remove(job.id()));
             }
-            if matches!(run_state, QueueRunState::Stopped) {
+            if waiting_mutation_allowed {
                 if widgets::plain_button(ui, EDIT_LABEL).clicked() {
                     action.set(QueueAction::Edit(job.id()));
                 }
@@ -517,9 +573,9 @@ fn has_row_actions(state: &QueueJobState) -> bool {
     )
 }
 
-fn row_action_width(ui: &Ui, jobs: &[QueuedJob], run_state: QueueRunState) -> f32 {
+fn row_action_width(ui: &Ui, jobs: &[QueuedJob], waiting_mutation_allowed: bool) -> f32 {
     let completed = widgets::plain_button_intrinsic_size(ui, OPEN_FOLDER_LABEL).x;
-    let waiting = if matches!(run_state, QueueRunState::Stopped) {
+    let waiting = if waiting_mutation_allowed {
         widgets::plain_button_intrinsic_size(ui, EDIT_LABEL).x
             + widgets::compact_secondary_button_intrinsic_size(ui, MOVE_EARLIER_LABEL).x
             + widgets::compact_secondary_button_intrinsic_size(ui, MOVE_LATER_LABEL).x
@@ -571,8 +627,15 @@ fn secondary_text(ui: &mut Ui, text: &str) {
     );
 }
 
-fn state_text(ui: &mut Ui, state: &QueueJobState) {
-    secondary_text(ui, state_label(state));
+fn state_text(ui: &mut Ui, state: &QueueJobState, cancellation_pending: bool) {
+    secondary_text(
+        ui,
+        if cancellation_pending {
+            "Cancelling"
+        } else {
+            state_label(state)
+        },
+    );
 }
 
 fn failure_details(state: &QueueJobState) -> Option<String> {
@@ -912,7 +975,7 @@ mod tests {
         theme::install(&context);
         let mut output = context.run_ui(Default::default(), |ui| {
             ui.set_width(760.0);
-            let _ = show(ui, &jobs, None, None, QueueRunState::Stopped, true);
+            let _ = show(ui, &jobs, None, None, QueueRunState::Stopped, true, false);
         });
 
         let title_baseline = output_text_baselines(&output, "Queue")[0];
@@ -964,7 +1027,7 @@ mod tests {
                 )
                 .size()
                 .x;
-            let _ = show(ui, &jobs, None, None, QueueRunState::Stopped, true);
+            let _ = show(ui, &jobs, None, None, QueueRunState::Stopped, true, false);
         });
 
         let operation_guide = output_text_rect(&output, "Operation").unwrap();
@@ -1006,7 +1069,7 @@ mod tests {
         theme::install(&context);
         let mut output = context.run_ui(Default::default(), |ui| {
             ui.set_width(400.0);
-            let _ = show(ui, &jobs, None, None, QueueRunState::Stopped, true);
+            let _ = show(ui, &jobs, None, None, QueueRunState::Stopped, true, false);
         });
 
         assert!(output_text_rect(&output, "Source / output").is_none());
@@ -1037,6 +1100,7 @@ mod tests {
                 None,
                 QueueRunState::Running,
                 true,
+                false,
             );
         });
         let back = output_text_rect(&output, BACK_LABEL).unwrap();
@@ -1078,6 +1142,7 @@ mod tests {
                 None,
                 QueueRunState::Running,
                 true,
+                false,
             );
         });
 
@@ -1114,6 +1179,7 @@ mod tests {
                 None,
                 QueueRunState::Running,
                 true,
+                false,
             );
         });
 
@@ -1141,6 +1207,7 @@ mod tests {
                 None,
                 QueueRunState::StoppingAfterCurrent,
                 true,
+                false,
             );
         });
 

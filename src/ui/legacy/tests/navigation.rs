@@ -374,6 +374,8 @@ fn workspace_queue_edit_is_blocked_during_automatic_advancement() {
         app.core.queue.scheduler().run_state(),
         QueueRunState::StoppingAfterCurrent
     );
+    app.core.discovery =
+        MediaToolsDiscovery::with_state(MediaToolsState::Unavailable(MediaToolsError::MissingBoth));
     receiver.recv_timeout(Duration::from_secs(10)).unwrap();
     app.core
         .poll_media_queue(|| panic!("stopped queue must not advance"));

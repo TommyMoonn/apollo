@@ -46,9 +46,11 @@ impl ApolloApp {
                     }
                     MediaToolsState::Ready(_) => {}
                 }
-                self.handle_window_file_drop(ui.ctx());
-                if self.drag_hovered(ui.ctx()) {
-                    file_intake::show_drag_hover(ui);
+                if !self.confirm_cancel_queue {
+                    self.handle_window_file_drop(ui.ctx());
+                    if self.drag_hovered(ui.ctx()) {
+                        file_intake::show_drag_hover(ui);
+                    }
                 }
                 self.show_navigation(ui);
             });
@@ -180,7 +182,8 @@ impl ApolloApp {
                         enabled: !self.core.source.is_inspecting() && self.core.executors_idle(),
                         editable_jobs: &editable_jobs,
                         queue_editing_allowed: self.core.queue.scheduler().run_state()
-                            == QueueRunState::Stopped,
+                            == QueueRunState::Stopped
+                            && !self.core.queue.scheduler().is_running(),
                     },
                 )
             })
@@ -243,8 +246,19 @@ impl ApolloApp {
             self.core.queue.scheduler().active_progress(),
             self.core.queue.scheduler().run_state(),
             arbitration.queue_start_allowed(),
+            self.core.queue.scheduler().cancellation_pending(),
         );
-        self.handle_queue_action(action);
+        self.handle_queue_view_action(action);
+        if self.confirm_cancel_queue {
+            if self.core.queue.scheduler().pending_count() == 0 {
+                self.resolve_queue_cancellation(false);
+                return;
+            }
+            let (confirm, dismiss) = queue_ui::confirm_cancel(ui);
+            if confirm || dismiss {
+                self.resolve_queue_cancellation(confirm);
+            }
+        }
     }
 
     fn show_queue_edit(&mut self, ui: &mut Ui) {

@@ -109,13 +109,13 @@ impl QueueWorkflow {
     }
 
     fn poll(&mut self, tools: Option<&MediaTools>, mut wake: impl FnMut() -> MediaProcessWake) {
-        if !self.drain_current_events(self.scheduler.active_job()) {
+        let received = self.drain_current_events(self.scheduler.active_job());
+        // Readiness loss stops advancement even if the active process has not notified us yet.
+        let readiness_lost =
+            tools.is_none() && self.scheduler.run_state() == QueueRunState::Running;
+        if !received && !readiness_lost {
             return;
         }
-        let Some(tools) = tools else {
-            self.cancel();
-            return;
-        };
         let sender = self.sender.clone();
         self.scheduler.poll(tools, |job_id| {
             queue_execution_wake(job_id, sender.clone(), wake())
@@ -264,6 +264,7 @@ impl Application {
         origin: QueueEditOrigin,
     ) -> Option<QueueEditState> {
         if self.queue.scheduler.run_state() != QueueRunState::Stopped
+            || self.queue.scheduler.is_running()
             || !self.can_enter_queue_edit(origin)
         {
             return None;

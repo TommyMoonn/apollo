@@ -86,9 +86,9 @@ Workers publish results to their existing channels before invoking a completion 
 
 `src/app/queue.rs` owns application queue commands, edit admission and settlement, and the active-job notification channel. It passes typed requests and commands to the single scheduler and supplies renderer-neutral wake callbacks. `ProcessExecutionArbitration` uses immediate executor, clipboard and queue state directly. `src/app/editor.rs` owns fixed-source draft state and request construction shared by queue and batch editors; textures and source presentation remain in the adapter.
 
-`MediaQueue` owns queued request snapshots, monotonic `JobId` values, source revalidation, sequential advancement, cancellation, terminal history, and atomic batch insertion. Single and batch admission require the source identity retained at inspection, validate it against the request and current filesystem, and apply the operation validator and output preflight without staging files. Batch admission checks all candidates and the full ID range before appending jobs; queue edits revalidate against the retained identity. Launch still rechecks source and destination. Queued jobs use `MediaExecution` for processing and staged-output publication. Queue progress and completion are routed by the active `JobId`; repainting a Queue or Batch surface must not inspect media or touch the filesystem.
+`MediaQueue` owns queued request snapshots, monotonic `JobId` values, source revalidation, sequential advancement, cancellation, terminal history, and atomic batch insertion. Single and batch admission require the source identity retained at inspection, validate it against the request and current filesystem, and apply the operation validator and output preflight without staging files. Batch admission checks all candidates and the full ID range before appending jobs; queue edits revalidate against the retained identity. Launch still rechecks source and destination. Queued jobs use `MediaExecution` for processing and staged-output publication. Queue progress and completion are routed by the active `JobId`; repainting a Queue or Batch surface must not inspect media or touch the filesystem. Tool readiness gates new launches, not settlement. If readiness is lost during a run, the active job settles without cancellation and automatic advancement stops, preserving waiting jobs for an explicit restart.
 
-Only Waiting jobs are editable or reorderable, and editing is disabled while automatic advancement is Running or Stopping after current. Queue-row Edit and the loaded-source queued-item selector enter the same queue editor and hydrate the retained `MediaFile` and immutable request without another FFprobe invocation. The source is fixed, while the operation and settings may change. Saving replaces the Waiting request atomically without changing its `JobId` or queue position. Entry origin owns the return route.
+Only Waiting jobs are editable or reorderable, and editing requires a stopped queue with no active execution. Queue-row Edit and the loaded-source queued-item selector enter the same queue editor and hydrate the retained `MediaFile` and immutable request without another FFprobe invocation. The source is fixed, while the operation and settings may change. Saving replaces the Waiting request atomically without changing its `JobId` or queue position. Entry origin owns the return route.
 
 `Add to queue` from a normal source workspace keeps the source and operation active, increments the pending count, and shows operation-local success or failure feedback. Pending counts include Waiting and Running jobs only. Multiple jobs may target the same requested filename. Completed rows display the actual published path.
 
@@ -96,9 +96,9 @@ Only Waiting jobs are editable or reorderable, and editing is disabled while aut
 
 Queue controls:
 
-- `Cancel current` cancels the active job and continues normal advancement.
+- `Cancel job` requests cancellation of the active job and continues advancement only while the queue is Running. The active job remains owned and displays Cancelling until process and output settlement finishes.
 - `Stop after current` lets the active job finish, stops advancement, and preserves Waiting jobs.
-- `Cancel queue` cancels the active job and marks all Waiting jobs Cancelled.
+- `Cancel queue` requires confirmation, stops advancement, marks all Waiting jobs Cancelled and requests active cancellation. An already claimed terminal result is not replaced by cancellation.
 - `Clear finished` removes every terminal job, including failures.
 - Leaving Queue through Back or starting Add files removes only disposable Completed and Cancelled history. Failed jobs remain available with diagnostic Details.
 
