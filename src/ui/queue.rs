@@ -10,7 +10,8 @@ use crate::{
     queue::{JobId, QueueJobState, QueueRunState, QueuedJob},
 };
 
-use super::{QueueAction, fonts, layout, media_lifecycle, theme, widgets};
+use super::{fonts, layout, media_lifecycle, theme, widgets};
+use crate::app::QueueAction;
 
 const TITLE: &str = "Queue";
 const ADD_FILES_LABEL: &str = "Add files";

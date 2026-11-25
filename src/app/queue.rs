@@ -1,0 +1,387 @@
+//! Application integration with the existing queue scheduler.
+use super::{
+    Application, NavigationState, Operation, QueueEditOrigin, editor::OperationEditorState,
+};
+use crate::{
+    media::{error::MediaError, model::MediaFile, process::MediaProcessWake, tools::MediaTools},
+    queue::{
+        BatchEnqueueError, JobId, MediaQueue, QueueEnqueueError, QueueJobState, QueueRunState,
+        QueuedJob, QueuedOperation, WaitingJobMove,
+    },
+};
+use std::{
+    ops::{Deref, DerefMut},
+    path::{Path, PathBuf},
+    sync::mpsc,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueueAction {
+    AddFiles,
+    Start,
+    CancelCurrent,
+    StopAfterCurrent,
+    CancelQueue,
+    Edit(JobId),
+    MoveEarlier(JobId),
+    MoveLater(JobId),
+    Remove(JobId),
+    OpenFolder(JobId),
+    ClearFinished,
+    Back,
+    #[default]
+    None,
+}
+
+/// Native and presentation work stays in the adapter.
+pub(crate) enum QueueEffect {
+    Handled(bool),
+    AddFiles,
+    Edit(JobId, QueueEditOrigin),
+    OpenFolder(PathBuf),
+    Returned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueueExecutionEvent {
+    job_id: JobId,
+}
+
+pub(crate) struct QueueWorkflow {
+    scheduler: MediaQueue,
+    sender: mpsc::Sender<QueueExecutionEvent>,
+    receiver: mpsc::Receiver<QueueExecutionEvent>,
+}
+
+impl Default for QueueWorkflow {
+    fn default() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        Self {
+            scheduler: MediaQueue::new(),
+            sender,
+            receiver,
+        }
+    }
+}
+
+impl QueueWorkflow {
+    pub(crate) fn scheduler(&self) -> &MediaQueue {
+        &self.scheduler
+    }
+
+    pub(crate) fn enqueue(
+        &mut self,
+        media: &MediaFile,
+        operation: QueuedOperation,
+    ) -> Result<JobId, QueueEnqueueError> {
+        self.scheduler.enqueue(media, operation)
+    }
+
+    pub(crate) fn enqueue_batch(
+        &mut self,
+        requests: &[(MediaFile, QueuedOperation)],
+    ) -> Result<Vec<JobId>, BatchEnqueueError> {
+        self.scheduler.enqueue_batch(requests)
+    }
+
+    pub(crate) fn cancel(&mut self) -> bool {
+        self.scheduler.cancel_queue()
+    }
+
+    fn start(&mut self, tools: &MediaTools, mut wake: impl FnMut() -> MediaProcessWake) -> bool {
+        let sender = self.sender.clone();
+        self.scheduler.start(tools, |job_id| {
+            queue_execution_wake(job_id, sender.clone(), wake())
+        })
+    }
+
+    fn drain_current_events(&self, active: Option<JobId>) -> bool {
+        // Drain all notifications, including retired job notifications, before advancing.
+        let mut received = false;
+        while let Ok(event) = self.receiver.try_recv() {
+            received |= active == Some(event.job_id);
+        }
+        received
+    }
+
+    fn poll(&mut self, tools: Option<&MediaTools>, mut wake: impl FnMut() -> MediaProcessWake) {
+        if !self.drain_current_events(self.scheduler.active_job()) {
+            return;
+        }
+        let Some(tools) = tools else {
+            self.cancel();
+            return;
+        };
+        let sender = self.sender.clone();
+        self.scheduler.poll(tools, |job_id| {
+            queue_execution_wake(job_id, sender.clone(), wake())
+        });
+    }
+}
+
+fn queue_execution_wake(
+    job_id: JobId,
+    sender: mpsc::Sender<QueueExecutionEvent>,
+    wake: MediaProcessWake,
+) -> MediaProcessWake {
+    MediaProcessWake::new(move |event| {
+        // Make the event observable before asking the adapter to wake up.
+        let _ = sender.send(QueueExecutionEvent { job_id });
+        wake.notify(event);
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QueueEditState {
+    pub(crate) job_id: JobId,
+    pub(crate) editor: OperationEditorState,
+}
+impl Deref for QueueEditState {
+    type Target = OperationEditorState;
+    fn deref(&self) -> &Self::Target {
+        &self.editor
+    }
+}
+impl DerefMut for QueueEditState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.editor
+    }
+}
+impl QueueEditState {
+    fn new(session_id: u64, job: &QueuedJob) -> Self {
+        let mut editor = OperationEditorState::new(
+            session_id,
+            Some(job.source_identity().clone()),
+            job.media().clone(),
+            Operation::from(job.operation()),
+        );
+        editor.hydrate(job.operation());
+        Self {
+            job_id: job.id(),
+            editor,
+        }
+    }
+}
+
+pub(crate) enum QueueEditReturn {
+    Queue,
+    Source(Box<QueuedOperation>),
+}
+
+impl Application {
+    pub(crate) fn poll_media_queue(&mut self, wake: impl FnMut() -> MediaProcessWake) {
+        self.queue.poll(self.discovery.ready(), wake);
+    }
+
+    pub(crate) fn queue_action(
+        &mut self,
+        action: QueueAction,
+        wake: impl FnMut() -> MediaProcessWake,
+    ) -> QueueEffect {
+        use QueueEffect::*;
+        match action {
+            QueueAction::AddFiles => {
+                self.queue.scheduler.clear_disposable_history();
+                AddFiles
+            }
+            QueueAction::Start => {
+                if !self.execution_arbitration().queue_start_allowed() {
+                    return Handled(false);
+                }
+                let Some(tools) = self.discovery.ready() else {
+                    return Handled(false);
+                };
+                Handled(self.queue.start(tools, wake))
+            }
+            QueueAction::CancelCurrent => Handled(self.queue.scheduler.cancel_current()),
+            QueueAction::StopAfterCurrent => Handled(self.queue.scheduler.stop_after_current()),
+            QueueAction::CancelQueue => Handled(self.queue.cancel()),
+            QueueAction::Edit(id) => self.queue_origin().map_or(Handled(false), |origin| {
+                Edit(id, QueueEditOrigin::Queue(origin))
+            }),
+            QueueAction::MoveEarlier(id) => Handled(
+                self.queue
+                    .scheduler
+                    .move_waiting(id, WaitingJobMove::Earlier)
+                    .is_ok(),
+            ),
+            QueueAction::MoveLater(id) => Handled(
+                self.queue
+                    .scheduler
+                    .move_waiting(id, WaitingJobMove::Later)
+                    .is_ok(),
+            ),
+            QueueAction::Remove(id) => Handled(self.queue.scheduler.remove_waiting(id)),
+            QueueAction::ClearFinished => Handled(self.queue.scheduler.clear_finished() > 0),
+            QueueAction::OpenFolder(id) => self
+                .queue
+                .scheduler
+                .jobs()
+                .iter()
+                .find(|job| job.id() == id)
+                .and_then(|job| completed_output_folder(job.state()))
+                .map_or(Handled(false), |path| OpenFolder(path.to_path_buf())),
+            QueueAction::Back => {
+                if self.queue_origin().is_none() {
+                    return Handled(false);
+                }
+                self.queue.scheduler.clear_disposable_history();
+                self.return_from_queue();
+                Returned
+            }
+            QueueAction::None => Handled(false),
+        }
+    }
+
+    pub(crate) fn queue_edit(&self) -> Option<&QueueEditState> {
+        self.queue_edit.as_ref()
+    }
+    pub(crate) fn queue_edit_with_capabilities(
+        &mut self,
+    ) -> Option<(
+        &mut QueueEditState,
+        crate::upscale::draft::UpscaleEncoderCapabilities<'_>,
+    )> {
+        let capabilities = self.discovery.settled_capabilities().map_or(
+            crate::upscale::draft::UpscaleEncoderCapabilities::Checking,
+            crate::upscale::draft::UpscaleEncoderCapabilities::Ready,
+        );
+        Some((self.queue_edit.as_mut()?, capabilities))
+    }
+
+    pub(crate) fn queue_edit_mut(&mut self) -> Option<&mut QueueEditState> {
+        self.queue_edit.as_mut()
+    }
+
+    // Prepare before retiring the old editor, so rejected requests leave it intact.
+    pub(crate) fn prepare_queue_edit(
+        &mut self,
+        id: JobId,
+        origin: QueueEditOrigin,
+    ) -> Option<QueueEditState> {
+        if self.queue.scheduler.run_state() != QueueRunState::Stopped
+            || !self.can_enter_queue_edit(origin)
+        {
+            return None;
+        }
+        let job = self
+            .queue
+            .scheduler
+            .jobs()
+            .iter()
+            .find(|job| job.id() == id && matches!(job.state(), QueueJobState::Waiting))?;
+        Some(QueueEditState::new(self.source.allocate_session_id(), job))
+    }
+
+    pub(crate) fn activate_queue_edit(&mut self, edit: QueueEditState, origin: QueueEditOrigin) {
+        self.queue_edit = Some(edit);
+        self.enter_queue_edit(origin);
+    }
+
+    pub(crate) fn finish_queue_edit(&mut self) -> Option<QueueEditReturn> {
+        let NavigationState::QueueEdit { origin } = self.navigation() else {
+            return None;
+        };
+        match origin {
+            QueueEditOrigin::Queue(origin) => {
+                self.queue_edit = None;
+                self.show_queue(origin);
+                Some(QueueEditReturn::Queue)
+            }
+            QueueEditOrigin::SourceWorkspace => {
+                let id = self.queue_edit.as_ref()?.job_id;
+                let job = self
+                    .queue
+                    .scheduler
+                    .jobs()
+                    .iter()
+                    .find(|job| job.id() == id)?;
+                let operation = Box::new(job.operation().clone());
+                self.source
+                    .restore(job.source_identity().clone(), job.media().clone());
+                self.queue_edit = None;
+                Some(QueueEditReturn::Source(operation))
+            }
+        }
+    }
+
+    pub(crate) fn select_queue_edit_tool(&mut self, operation: Operation) -> bool {
+        if !matches!(self.navigation(), NavigationState::QueueEdit { .. }) {
+            return false;
+        }
+        let Some(edit) = self.queue_edit.as_mut() else {
+            return false;
+        };
+        if edit.active_operation != operation {
+            edit.active_operation = operation;
+            edit.error = None;
+            edit.error_details_open = false;
+        }
+        true
+    }
+
+    pub(crate) fn save_queue_edit(&mut self) -> bool {
+        let capabilities = self.discovery.upscale_capabilities();
+        let Some(edit) = self.queue_edit.as_mut() else {
+            return false;
+        };
+        let Some(operation) = edit.validated_request(capabilities) else {
+            return false;
+        };
+        match self
+            .queue
+            .scheduler
+            .replace_waiting_operation(edit.job_id, operation)
+        {
+            Ok(()) => true,
+            Err(error) => {
+                edit.error = Some(MediaError::invalid_request(format!(
+                    "Could not save queue changes: {error}"
+                )));
+                edit.error_details_open = false;
+                false
+            }
+        }
+    }
+
+    pub(crate) fn record_queue_submission(
+        &mut self,
+        operation: Operation,
+        result: Result<Option<JobId>, QueueEnqueueError>,
+    ) {
+        self.queue_confirmation = None;
+        self.operation_action_error = None;
+        match result {
+            Ok(Some(_)) => self.queue_confirmation = Some(operation),
+            Ok(None) => {}
+            Err(error) => {
+                self.operation_action_error =
+                    Some((operation, media_error_from_queue_enqueue(&error)))
+            }
+        }
+    }
+}
+
+fn media_error_from_queue_enqueue(error: &QueueEnqueueError) -> MediaError {
+    match error {
+        QueueEnqueueError::Source(error) => MediaError::from_intake_error(error),
+        QueueEnqueueError::SourceDoesNotMatchMedia => {
+            MediaError::source_unavailable(error.to_string())
+        }
+        QueueEnqueueError::Output(error) => MediaError::from_output_error(error),
+        QueueEnqueueError::DuplicateDestination { .. } => {
+            MediaError::queue_destination_reserved(error.to_string())
+        }
+        QueueEnqueueError::JobIdExhausted => MediaError::invalid_request(error.to_string()),
+    }
+}
+
+fn completed_output_folder(state: &QueueJobState) -> Option<&Path> {
+    match state {
+        QueueJobState::Completed { output } => output.parent(),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests;

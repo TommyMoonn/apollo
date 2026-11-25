@@ -758,7 +758,7 @@ fn queue_frame_capture_edit_reuses_precision_support_and_saves_exact_position() 
         .enqueue_current_operation(Operation::FrameCapture)
         .unwrap()
         .unwrap();
-    let queued_identity = app.core.media_queue.jobs()[0]
+    let queued_identity = app.core.queue.scheduler().jobs()[0]
         .retained_intake()
         .current_with_identity()
         .unwrap()
@@ -767,7 +767,7 @@ fn queue_frame_capture_edit_reuses_precision_support_and_saves_exact_position() 
     app.enter_queue();
 
     assert!(app.handle_queue_action(QueueAction::Edit(job_id)));
-    let edit = app.queue_edit.as_ref().unwrap();
+    let edit = app.core.queue_edit().unwrap();
     assert_eq!(
         edit.frame_capture.source_identity.as_ref(),
         Some(&queued_identity)
@@ -794,11 +794,11 @@ fn queue_frame_capture_edit_reuses_precision_support_and_saves_exact_position() 
     );
     app.request_frame_step(FrameDirection::Next);
     let selected = app
-        .queue_edit
-        .as_ref()
+        .core
+        .queue_edit()
         .unwrap()
         .frame_capture
-        .valid_position(&app.queue_edit.as_ref().unwrap().media)
+        .valid_position(&app.core.queue_edit().unwrap().media)
         .unwrap();
     assert_eq!(
         selected,
@@ -808,11 +808,12 @@ fn queue_frame_capture_edit_reuses_precision_support_and_saves_exact_position() 
     );
 
     assert!(app.save_queue_edit());
-    let QueuedOperation::FrameCapture(saved) = app.core.media_queue.jobs()[0].operation() else {
+    let QueuedOperation::FrameCapture(saved) = app.core.queue.scheduler().jobs()[0].operation()
+    else {
         panic!("frame capture edit must remain Frame Capture");
     };
     assert_eq!(saved.position, selected);
-    assert_eq!(app.core.media_queue.jobs()[0].id(), job_id);
+    assert_eq!(app.core.queue.scheduler().jobs()[0].id(), job_id);
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -828,22 +829,28 @@ fn workspace_queue_frame_capture_switch_and_cancel_retire_support_work() {
 
     assert!(app.begin_queue_edit(job_id, QueueEditOrigin::SourceWorkspace));
     assert!(app.select_queue_edit_tool(Operation::FrameCapture));
-    let session_id = app.queue_edit.as_ref().unwrap().session_id;
+    let session_id = app.core.queue_edit().unwrap().session_id;
     let stale_request = app
-        .queue_edit
-        .as_mut()
+        .core
+        .queue_edit_mut()
         .unwrap()
         .frame_capture
         .preview
         .take_due_request(Instant::now() + PREVIEW_DEBOUNCE)
         .unwrap();
     assert!(app.select_queue_edit_tool(Operation::Remux));
-    let edit = app.queue_edit.as_ref().unwrap();
+    let edit = app.core.queue_edit().unwrap();
     assert!(matches!(
         edit.frame_capture.preview.state(),
         PreviewState::Idle
     ));
-    assert!(edit.frame_capture.preview_texture.is_none());
+    assert!(
+        app.queue_editor_presentation
+            .as_ref()
+            .unwrap()
+            .preview_texture
+            .is_none()
+    );
     assert!(!app.settle_frame_preview(
         session_id,
         stale_request,
@@ -851,14 +858,7 @@ fn workspace_queue_frame_capture_switch_and_cancel_retire_support_work() {
     ));
 
     assert!(app.select_queue_edit_tool(Operation::FrameCapture));
-    let current_request = match app
-        .queue_edit
-        .as_ref()
-        .unwrap()
-        .frame_capture
-        .preview
-        .state()
-    {
+    let current_request = match app.core.queue_edit().unwrap().frame_capture.preview.state() {
         PreviewState::Debouncing { request, .. } => request.clone(),
         state => panic!("expected fresh editor preview, got {state:?}"),
     };
@@ -912,7 +912,7 @@ fn copy_frame_is_output_independent_and_never_creates_a_queue_job() {
     app.handle_frame_capture_action(FrameCaptureSelectionAction::CopyRequested)
         .unwrap();
 
-    assert!(app.core.media_queue.jobs().is_empty());
+    assert!(app.core.queue.scheduler().jobs().is_empty());
     assert_eq!(
         app.core
             .operation_action_error
@@ -959,7 +959,7 @@ fn oversized_copy_reaches_actionable_preflight_without_starting_work_or_mutating
     );
     assert!(!app.core.frame_work.copy_frame_extraction.is_active());
     assert!(app.core.frame_work.copy_frame_worker.is_none());
-    assert!(app.core.media_queue.jobs().is_empty());
+    assert!(app.core.queue.scheduler().jobs().is_empty());
     assert!(app.core.frame_work.frame_capture_thumbnail_load.is_none());
     assert_eq!(
         app.state

@@ -13,12 +13,17 @@ use crate::app::{Operation, QueueEditOrigin, source::SourceSettlement};
 use crate::media::intake::{MediaIntakeRequest, MediaLoadStart};
 #[cfg(test)]
 use crate::media::{model::MediaFile, probe::MediaProbeError};
-use crate::queue::QueuedJob;
+use crate::queue::QueuedOperation;
 use crate::ui::frame_capture::{FrameCopyStatus, PositionSettle};
 use crate::ui::frame_capture_progress::FrameCaptureLifecycleUiState;
 use crate::ui::{
     SourceAction, file_intake::FileIntakeAction, source_presentation::SourcePresentation,
     workspace::WorkspaceAction,
+};
+use crate::{
+    audio_extract::draft::AudioExtractDraft, audio_mix::draft::AudioMixDraft,
+    frame_capture::draft::FrameCaptureDraft, remux::draft::RemuxDraft,
+    upscale::draft::UpscaleDraft,
 };
 use egui::Context;
 use std::{path::Path, sync::Arc, time::Instant};
@@ -314,15 +319,12 @@ impl ApolloApp {
         }
     }
 
-    pub(super) fn restore_queued_job_workspace(&mut self, job: &QueuedJob) -> bool {
-        let operation = Operation::from(job.operation());
-        self.core
-            .source
-            .restore(job.source_identity().clone(), job.media().clone());
+    pub(super) fn restore_queued_job_workspace(&mut self, request: &QueuedOperation) -> bool {
+        let operation = Operation::from(request);
         if !self.publish_source_presentation(operation) {
             return false;
         }
-        self.hydrate_cached_source_operation(job.operation());
+        self.hydrate_cached_source_operation(request);
         self.enter_workspace(operation);
         if operation == Operation::FrameCapture {
             self.schedule_active_frame_capture_support();
@@ -330,5 +332,40 @@ impl ApolloApp {
         self.core.queue_confirmation = None;
         self.core.operation_action_error = None;
         true
+    }
+    fn hydrate_cached_source_operation(&mut self, operation: &QueuedOperation) {
+        match operation {
+            QueuedOperation::AudioMix(request) => {
+                if let Some(session) = self.state.audio_mix.as_mut() {
+                    session.selection = AudioMixDraft::from_request(&session.media, request);
+                }
+            }
+            QueuedOperation::Upscale(request) => {
+                if let Some(session) = self.state.upscale.as_mut() {
+                    session.selection = UpscaleDraft::from_request(&session.media, request);
+                }
+            }
+            QueuedOperation::Remux(request) => {
+                if let Some(session) = self.state.remux.as_mut() {
+                    session.selection = RemuxDraft::from_request(&session.media, request);
+                }
+            }
+            QueuedOperation::AudioExtract(request) => {
+                if let Some(session) = self.state.audio_extract.as_mut() {
+                    session.selection = AudioExtractDraft::from_request(&session.media, request);
+                }
+            }
+            QueuedOperation::FrameCapture(request) => {
+                if let Some(session) = self.state.frame_capture.as_mut() {
+                    session.selection = FrameCaptureDraft::from_request(&session.media, request);
+                    let position = session.selection.valid_position(&session.media);
+                    self.update_frame_capture_position(
+                        position,
+                        PositionSettle::Debounced,
+                        Instant::now(),
+                    );
+                }
+            }
+        }
     }
 }

@@ -8,11 +8,10 @@ use std::sync::Arc;
 
 use egui::TextureHandle;
 
+use crate::app::editor::OperationEditorState;
 use crate::app::frame_capture::{FrameCaptureEditorState, PositionSettle};
 use crate::app::{BatchOrigin, Operation};
-use crate::audio_extract::draft::AudioExtractDraft;
 use crate::audio_extract::model::AudioExtractFormat;
-use crate::audio_mix::draft::AudioMixDraft;
 use crate::audio_mix::model::{LoudnessNormalization, OutputContainer};
 use crate::frame_capture::frame_index::FrameDirection;
 use crate::frame_capture::model::{FrameCaptureFormat, FramePosition, FrameTimestamp};
@@ -22,13 +21,10 @@ use crate::media::container::MediaContainer;
 use crate::media::error::MediaError;
 use crate::media::intake::SourceIdentity;
 use crate::media::model::MediaFile;
-use crate::media::process::MediaProcessEvent;
-use crate::queue::{JobId, QueuedJob, QueuedOperation};
-use crate::remux::draft::RemuxDraft;
+use crate::queue::QueuedOperation;
 use crate::ui::batch::BatchReadiness;
 use crate::ui::frame_capture_progress::FrameCaptureLifecycleUiState;
 use crate::ui::source_presentation::SourcePresentation;
-use crate::upscale::draft::UpscaleDraft;
 use crate::upscale::model::{UpscaleEncoderSettings, UpscaleTarget, VideoCodec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,81 +99,17 @@ impl std::fmt::Debug for FramePreviewTexture {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct OperationEditorState {
-    pub(super) session_id: u64,
-    pub(super) media: MediaFile,
-    pub(super) presentation: Arc<SourcePresentation>,
-    pub(super) active_operation: Operation,
-    pub(super) audio_mix: AudioMixDraft,
-    pub(super) upscale: UpscaleDraft,
-    pub(super) remux: RemuxDraft,
-    pub(super) audio_extract: AudioExtractDraft,
-    pub(super) frame_capture: FrameCaptureEditor,
-    pub(super) error: Option<MediaError>,
-    pub(super) error_details_open: bool,
+pub(super) struct EditorPresentation {
+    pub(super) source: SourcePresentation,
+    pub(super) preview_texture: Option<FramePreviewTexture>,
 }
 
-impl OperationEditorState {
-    pub(super) fn new(
-        session_id: u64,
-        source_identity: Option<SourceIdentity>,
-        media: MediaFile,
-        active_operation: Operation,
-    ) -> Self {
+impl EditorPresentation {
+    pub(super) fn new(media: &MediaFile) -> Self {
         Self {
-            session_id,
-            presentation: Arc::new(SourcePresentation::new(&media)),
-            active_operation,
-            audio_mix: AudioMixDraft::new(&media),
-            upscale: UpscaleDraft::new(&media),
-            remux: RemuxDraft::new(&media),
-            audio_extract: AudioExtractDraft::new(&media),
-            frame_capture: FrameCaptureEditor::new(session_id, source_identity, &media),
-            media,
-            error: None,
-            error_details_open: false,
+            source: SourcePresentation::new(media),
+            preview_texture: None,
         }
-    }
-
-    pub(super) fn hydrate(&mut self, operation: &QueuedOperation) {
-        match operation {
-            QueuedOperation::AudioMix(request) => {
-                self.audio_mix = AudioMixDraft::from_request(&self.media, request);
-            }
-            QueuedOperation::Upscale(request) => {
-                self.upscale = UpscaleDraft::from_request(&self.media, request);
-            }
-            QueuedOperation::Remux(request) => {
-                self.remux = RemuxDraft::from_request(&self.media, request);
-            }
-            QueuedOperation::AudioExtract(request) => {
-                self.audio_extract = AudioExtractDraft::from_request(&self.media, request);
-            }
-            QueuedOperation::FrameCapture(request) => {
-                self.frame_capture.hydrate(&self.media, request);
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct QueueEditState {
-    pub(super) job_id: JobId,
-    pub(super) editor: OperationEditorState,
-}
-
-impl Deref for QueueEditState {
-    type Target = OperationEditorState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.editor
-    }
-}
-
-impl DerefMut for QueueEditState {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.editor
     }
 }
 
@@ -189,24 +121,6 @@ pub(super) enum QueueEditAction {
     Cancel,
     FramePositionEdited(PositionSettle),
     FrameStepRequested(FrameDirection),
-}
-
-impl QueueEditState {
-    pub(super) fn new(session_id: u64, job: &QueuedJob) -> Self {
-        let media = job.media().clone();
-        let source_identity = job.source_identity().clone();
-        let mut editor = OperationEditorState::new(
-            session_id,
-            Some(source_identity),
-            media,
-            Operation::from(job.operation()),
-        );
-        editor.hydrate(job.operation());
-        Self {
-            job_id: job.id(),
-            editor,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,9 +201,9 @@ pub(super) enum BatchEditTarget {
     Item(usize),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BatchEditState {
     pub(super) target: BatchEditTarget,
+    pub(super) presentation: EditorPresentation,
     pub(super) editor: OperationEditorState,
 }
 
@@ -326,10 +240,4 @@ impl LegacyEditorState {
         self.audio_extract = None;
         self.frame_capture = None;
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct QueueExecutionEvent {
-    pub(super) job_id: JobId,
-    pub(super) process_event: MediaProcessEvent,
 }

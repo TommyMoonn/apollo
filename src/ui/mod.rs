@@ -23,7 +23,6 @@ pub mod widgets;
 pub mod workspace;
 
 use crate::media::error::MediaError;
-use crate::queue::JobId;
 
 pub const ADD_TO_QUEUE_LABEL: &str = "Add to queue";
 pub const ADDED_TO_QUEUE_LABEL: &str = "Added to queue";
@@ -93,22 +92,4 @@ pub fn queue_count_label(count: usize) -> String {
 pub enum SourceAction {
     ChangeFile,
     CloseSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum QueueAction {
-    AddFiles,
-    Start,
-    CancelCurrent,
-    StopAfterCurrent,
-    CancelQueue,
-    Edit(JobId),
-    MoveEarlier(JobId),
-    MoveLater(JobId),
-    Remove(JobId),
-    OpenFolder(JobId),
-    ClearFinished,
-    Back,
-    #[default]
-    None,
 }

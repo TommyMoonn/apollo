@@ -1,38 +1,25 @@
 //! Existing feature actions and worker coordination. Extracted incrementally by their owning phases.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::time::Instant;
 
-use crate::app::dialogs::{DialogTarget, FileDialogRequest};
-use crate::app::frame_capture::PositionSettle;
-use crate::app::{NavigationState, Operation, ProcessExecutionArbitration, QueueEditOrigin};
-use crate::audio_extract::draft::AudioExtractDraft;
+use crate::app::editor::OperationEditorState;
+use crate::app::{NavigationState, Operation};
 use crate::audio_extract::execution::AudioExtractExecutionState;
-use crate::audio_mix::draft::AudioMixDraft;
 use crate::audio_mix::execution::AudioMixExecutionState;
 use crate::audio_mix::model::LoudnessNormalization;
-use crate::frame_capture::draft::FrameCaptureDraft;
 use crate::frame_capture::execution::FrameCaptureExecutionState;
 use crate::media::batch::BatchInspectionOwner;
 use crate::media::error::MediaError;
-use crate::media::process::{MediaProcessEvent, MediaProcessWake};
 use crate::media::tools::MediaTools;
-use crate::native::open_folder;
-use crate::queue::{
-    JobId, QueueEnqueueError, QueueJobState, QueueRunState, QueuedOperation, WaitingJobMove,
-};
-use crate::remux::draft::RemuxDraft;
 use crate::remux::execution::RemuxExecutionState;
-use crate::ui::QueueAction;
 use crate::ui::batch::BatchReadiness;
-use crate::upscale::draft::{UpscaleDraft, UpscaleEncoderCapabilities};
+use crate::upscale::draft::UpscaleEncoderCapabilities;
 use crate::upscale::execution::UpscaleExecutionState;
 use crate::upscale::model::VideoCodec;
 
 use super::state::{
     BatchDefaults, BatchEditState, BatchEditTarget, BatchInspectionSession, BatchItem,
-    BatchSetupState, BatchSourceState, OperationEditorState, QueueEditState, QueueExecutionEvent,
+    BatchSetupState, BatchSourceState, EditorPresentation,
 };
 use super::{ApolloApp, completion_wake};
 
@@ -47,7 +34,7 @@ impl ApolloApp {
                 self.core.show_no_source();
                 None
             }
-            NavigationState::QueueEdit { .. } if self.queue_edit.is_none() => {
+            NavigationState::QueueEdit { .. } if self.core.queue_edit().is_none() => {
                 self.finish_queue_edit();
                 None
             }
@@ -62,324 +49,8 @@ impl ApolloApp {
         }
     }
 
-    pub(super) fn enter_queue(&mut self) {
-        self.suspend_frame_capture_support();
-        self.core.enter_queue();
-        self.state.intake_error_details_open = false;
-    }
-
     pub(super) fn ready_media_tools(&self) -> Option<&MediaTools> {
         self.core.discovery.ready()
-    }
-
-    pub(super) fn execution_arbitration(&self) -> ProcessExecutionArbitration {
-        self.core.execution_arbitration(self.copy_frame_active())
-    }
-
-    pub(super) fn start_media_queue(&mut self) -> bool {
-        if !self.execution_arbitration().queue_start_allowed() {
-            return false;
-        }
-        let Some(tools) = self.ready_media_tools().cloned() else {
-            return false;
-        };
-        let sender = self.queue_event_sender.clone();
-        let progress_repaint = &mut self.progress_repaint;
-        self.core.media_queue.start(&tools, |job_id| {
-            queue_execution_wake(job_id, sender.clone(), progress_repaint.begin())
-        })
-    }
-
-    pub(super) fn poll_media_queue(&mut self) {
-        let mut current_event_received = false;
-        while let Ok(event) = self.queue_event_receiver.try_recv() {
-            if queue_event_matches_active(self.core.media_queue.active_job(), event) {
-                current_event_received = match event.process_event {
-                    MediaProcessEvent::Progress | MediaProcessEvent::Terminal => true,
-                };
-            }
-        }
-        if !current_event_received {
-            return;
-        }
-
-        let Some(tools) = self.ready_media_tools().cloned() else {
-            self.core.media_queue.cancel_queue();
-            return;
-        };
-        let sender = self.queue_event_sender.clone();
-        let progress_repaint = &mut self.progress_repaint;
-        self.core.media_queue.poll(&tools, |job_id| {
-            queue_execution_wake(job_id, sender.clone(), progress_repaint.begin())
-        });
-    }
-
-    pub(super) fn handle_queue_action(&mut self, action: QueueAction) -> bool {
-        match action {
-            QueueAction::AddFiles => {
-                self.core.media_queue.clear_disposable_history();
-                self.start_file_dialog(FileDialogRequest::OpenSources {
-                    initial_directory: None,
-                    target: DialogTarget::BatchInput,
-                });
-                true
-            }
-            QueueAction::Start => self.start_media_queue(),
-            QueueAction::CancelCurrent => self.core.media_queue.cancel_current(),
-            QueueAction::StopAfterCurrent => self.core.media_queue.stop_after_current(),
-            QueueAction::CancelQueue => self.core.media_queue.cancel_queue(),
-            QueueAction::Edit(job_id) => {
-                let Some(origin) = self.core.queue_origin() else {
-                    return false;
-                };
-                self.begin_queue_edit(job_id, QueueEditOrigin::Queue(origin))
-            }
-            QueueAction::MoveEarlier(job_id) => self
-                .core
-                .media_queue
-                .move_waiting(job_id, WaitingJobMove::Earlier)
-                .is_ok(),
-            QueueAction::MoveLater(job_id) => self
-                .core
-                .media_queue
-                .move_waiting(job_id, WaitingJobMove::Later)
-                .is_ok(),
-            QueueAction::Remove(job_id) => self.core.media_queue.remove_waiting(job_id),
-            QueueAction::ClearFinished => self.core.media_queue.clear_finished() > 0,
-            QueueAction::OpenFolder(job_id) => {
-                let directory = self
-                    .core
-                    .media_queue
-                    .jobs()
-                    .iter()
-                    .find(|job| job.id() == job_id)
-                    .and_then(|job| completed_output_folder(job.state()))
-                    .map(Path::to_path_buf);
-                let Some(directory) = directory else {
-                    return false;
-                };
-                if let Err(error) = open_folder(&directory) {
-                    eprintln!("Queue output folder could not be opened: {error}");
-                }
-                true
-            }
-            QueueAction::Back => {
-                if self.core.queue_origin().is_none() {
-                    return false;
-                }
-                self.core.media_queue.clear_disposable_history();
-                self.core.return_from_queue();
-                self.schedule_active_frame_capture_support();
-                true
-            }
-            QueueAction::None => false,
-        }
-    }
-
-    pub(super) fn begin_queue_edit(&mut self, job_id: JobId, origin: QueueEditOrigin) -> bool {
-        if self.core.media_queue.run_state() != QueueRunState::Stopped {
-            return false;
-        }
-        if !self.core.can_enter_queue_edit(origin) {
-            return false;
-        }
-        let Some(job) = self
-            .core
-            .media_queue
-            .jobs()
-            .iter()
-            .find(|job| job.id() == job_id && matches!(job.state(), QueueJobState::Waiting))
-            .cloned()
-        else {
-            return false;
-        };
-        let session_id = self.core.source.allocate_session_id();
-        self.suspend_frame_capture_support();
-        self.queue_edit = Some(QueueEditState::new(session_id, &job));
-        self.core.enter_queue_edit(origin);
-        self.schedule_active_frame_capture_support();
-        true
-    }
-
-    pub(super) fn finish_queue_edit(&mut self) -> bool {
-        let NavigationState::QueueEdit { origin } = self.core.navigation() else {
-            return false;
-        };
-        self.cancel_frame_capture_support();
-        match origin {
-            QueueEditOrigin::Queue(origin) => {
-                self.queue_edit = None;
-                self.core.show_queue(origin);
-                true
-            }
-            QueueEditOrigin::SourceWorkspace => {
-                let Some(job) = self.queue_edit.as_ref().and_then(|edit| {
-                    self.core
-                        .media_queue
-                        .jobs()
-                        .iter()
-                        .find(|job| job.id() == edit.job_id)
-                        .cloned()
-                }) else {
-                    return false;
-                };
-                self.queue_edit = None;
-                self.restore_queued_job_workspace(&job)
-            }
-        }
-    }
-
-    pub(super) fn select_queue_edit_tool(&mut self, operation: Operation) -> bool {
-        if !matches!(self.core.navigation(), NavigationState::QueueEdit { .. }) {
-            return false;
-        }
-        let Some(previous) = self.queue_edit.as_ref().map(|edit| edit.active_operation) else {
-            return false;
-        };
-        if previous == operation {
-            return true;
-        }
-        if previous == Operation::FrameCapture {
-            self.cancel_frame_capture_support();
-        }
-        let Some(edit) = self.queue_edit.as_mut() else {
-            return false;
-        };
-        edit.active_operation = operation;
-        edit.error = None;
-        edit.error_details_open = false;
-        if operation == Operation::FrameCapture {
-            self.schedule_active_frame_capture_support();
-        }
-        true
-    }
-
-    pub(super) fn hydrate_cached_source_operation(&mut self, operation: &QueuedOperation) {
-        match operation {
-            QueuedOperation::AudioMix(request) => {
-                if let Some(session) = self.state.audio_mix.as_mut() {
-                    session.selection = AudioMixDraft::from_request(&session.media, request);
-                }
-            }
-            QueuedOperation::Upscale(request) => {
-                if let Some(session) = self.state.upscale.as_mut() {
-                    session.selection = UpscaleDraft::from_request(&session.media, request);
-                }
-            }
-            QueuedOperation::Remux(request) => {
-                if let Some(session) = self.state.remux.as_mut() {
-                    session.selection = RemuxDraft::from_request(&session.media, request);
-                }
-            }
-            QueuedOperation::AudioExtract(request) => {
-                if let Some(session) = self.state.audio_extract.as_mut() {
-                    session.selection = AudioExtractDraft::from_request(&session.media, request);
-                }
-            }
-            QueuedOperation::FrameCapture(request) => {
-                if let Some(session) = self.state.frame_capture.as_mut() {
-                    session.selection = FrameCaptureDraft::from_request(&session.media, request);
-                    let position = session.selection.valid_position(&session.media);
-                    self.update_frame_capture_position(
-                        position,
-                        PositionSettle::Debounced,
-                        Instant::now(),
-                    );
-                }
-            }
-        }
-    }
-
-    pub(super) fn save_queue_edit(&mut self) -> bool {
-        let nvenc_capabilities = self.core.discovery.upscale_capabilities();
-        let Some(edit) = self.queue_edit.as_mut() else {
-            return false;
-        };
-        let job_id = edit.job_id;
-        let edit = &mut edit.editor;
-        let Some(operation) = operation_from_editor(edit, nvenc_capabilities) else {
-            return false;
-        };
-        match self
-            .core
-            .media_queue
-            .replace_waiting_operation(job_id, operation)
-        {
-            Ok(()) => self.finish_queue_edit(),
-            Err(error) => {
-                edit.error = Some(MediaError::invalid_request(format!(
-                    "Could not save queue changes: {error}"
-                )));
-                edit.error_details_open = false;
-                false
-            }
-        }
-    }
-
-    pub(super) fn enqueue_current_operation(
-        &mut self,
-        operation: Operation,
-    ) -> Result<Option<JobId>, QueueEnqueueError> {
-        // Borrow each draft and its source directly; the queue owns the resulting immutable request.
-        let queued = match operation {
-            Operation::AudioMix => self.state.audio_mix.as_ref().and_then(|session| {
-                session
-                    .selection
-                    .validated_request(&session.media)
-                    .ok()
-                    .map(|request| (&session.media, QueuedOperation::AudioMix(request)))
-            }),
-            Operation::VideoUpscale => {
-                let Some(capabilities) = self.core.discovery.upscale_capabilities() else {
-                    return Ok(None);
-                };
-                self.state.upscale.as_ref().and_then(|session| {
-                    session
-                        .selection
-                        .validated_request(&session.media, capabilities)?
-                        .ok()
-                        .map(|request| (&session.media, QueuedOperation::Upscale(request)))
-                })
-            }
-            Operation::Remux => self.state.remux.as_ref().and_then(|session| {
-                session
-                    .selection
-                    .validated_request(&session.media)
-                    .ok()
-                    .map(|request| (&session.media, QueuedOperation::Remux(request)))
-            }),
-            Operation::AudioExtract => self.state.audio_extract.as_ref().and_then(|session| {
-                session
-                    .selection
-                    .validated_request(&session.media)
-                    .ok()
-                    .map(|request| (&session.media, QueuedOperation::AudioExtract(request)))
-            }),
-            Operation::FrameCapture => self.state.frame_capture.as_ref().and_then(|session| {
-                session
-                    .selection
-                    .validated_request(&session.media)
-                    .ok()
-                    .map(|request| (&session.media, QueuedOperation::FrameCapture(request)))
-            }),
-        };
-        let Some((media, request)) = queued else {
-            return Ok(None);
-        };
-        self.core.media_queue.enqueue(media, request).map(Some)
-    }
-
-    pub(super) fn enqueue_from_ready_surface(&mut self, operation: Operation) {
-        self.core.queue_confirmation = None;
-        self.core.operation_action_error = None;
-        match self.enqueue_current_operation(operation) {
-            Ok(Some(_)) => self.core.queue_confirmation = Some(operation),
-            Ok(None) => {}
-            Err(error) => {
-                self.core.operation_action_error =
-                    Some((operation, media_error_from_queue_enqueue(&error)));
-            }
-        }
     }
 
     pub(super) fn retry_media_tools(&mut self) {
@@ -603,7 +274,12 @@ impl ApolloApp {
         } else if let Some(defaults) = defaults.as_ref() {
             apply_batch_defaults(&mut editor, defaults);
         }
-        self.batch_edit = Some(BatchEditState { target, editor });
+        let presentation = EditorPresentation::new(&editor.media);
+        self.batch_edit = Some(BatchEditState {
+            target,
+            editor,
+            presentation,
+        });
         self.core.show_batch_edit();
         self.schedule_active_frame_capture_support();
         true
@@ -637,7 +313,7 @@ impl ApolloApp {
                 refresh_batch_items(batch, capabilities);
             }
             BatchEditTarget::Item(index) => {
-                let Some(operation) = operation_from_editor(&edit.editor, capabilities) else {
+                let Some(operation) = edit.editor.validated_request(capabilities) else {
                     return false;
                 };
                 let Some(item) = batch.items.get_mut(index) else {
@@ -693,7 +369,7 @@ impl ApolloApp {
             batch.error = Some("Include at least one ready file.".to_owned());
             return false;
         }
-        match self.core.media_queue.enqueue_batch(&queued) {
+        match self.core.queue.enqueue_batch(&queued) {
             Ok(_) => {
                 let origin = batch.origin;
                 self.batch_setup = None;
@@ -724,40 +400,6 @@ impl ApolloApp {
                 false
             }
         }
-    }
-}
-
-fn operation_from_editor(
-    edit: &OperationEditorState,
-    capabilities: Option<UpscaleEncoderCapabilities<'_>>,
-) -> Option<QueuedOperation> {
-    let media = &edit.media;
-    match edit.active_operation {
-        Operation::AudioMix => edit
-            .audio_mix
-            .validated_request(media)
-            .ok()
-            .map(QueuedOperation::AudioMix),
-        Operation::VideoUpscale => edit
-            .upscale
-            .validated_request(media, capabilities?)?
-            .ok()
-            .map(QueuedOperation::Upscale),
-        Operation::Remux => edit
-            .remux
-            .validated_request(media)
-            .ok()
-            .map(QueuedOperation::Remux),
-        Operation::AudioExtract => edit
-            .audio_extract
-            .validated_request(media)
-            .ok()
-            .map(QueuedOperation::AudioExtract),
-        Operation::FrameCapture => edit
-            .frame_capture
-            .validated_request(media)
-            .ok()
-            .map(QueuedOperation::FrameCapture),
     }
 }
 
@@ -889,7 +531,7 @@ pub(super) fn refresh_batch_items(
         {
             apply_batch_defaults(&mut editor, defaults);
         }
-        match operation_from_editor(&editor, capabilities) {
+        match editor.validated_request(capabilities) {
             Some(operation) => {
                 item.operation = Some(operation);
                 item.readiness = BatchReadiness::Ready;
@@ -940,27 +582,6 @@ pub(super) fn shows_frame_capture_lifecycle(state: &FrameCaptureExecutionState) 
     !matches!(state, FrameCaptureExecutionState::Idle)
 }
 
-pub(super) fn queue_execution_wake(
-    job_id: JobId,
-    sender: mpsc::Sender<QueueExecutionEvent>,
-    repaint: MediaProcessWake,
-) -> MediaProcessWake {
-    MediaProcessWake::new(move |process_event| {
-        repaint.notify(process_event);
-        let _ = sender.send(QueueExecutionEvent {
-            job_id,
-            process_event,
-        });
-    })
-}
-
-pub(super) fn queue_event_matches_active(
-    active_job: Option<JobId>,
-    event: QueueExecutionEvent,
-) -> bool {
-    active_job == Some(event.job_id)
-}
-
 fn normalized_source_paths_equal(left: &Path, right: &Path) -> bool {
     let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
     let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
@@ -975,31 +596,10 @@ fn normalized_source_paths_equal(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn media_error_from_queue_enqueue(error: &QueueEnqueueError) -> MediaError {
-    match error {
-        QueueEnqueueError::Source(error) => MediaError::from_intake_error(error),
-        QueueEnqueueError::SourceDoesNotMatchMedia => {
-            MediaError::source_unavailable(error.to_string())
-        }
-        QueueEnqueueError::Output(error) => MediaError::from_output_error(error),
-        QueueEnqueueError::DuplicateDestination { .. } => {
-            MediaError::queue_destination_reserved(error.to_string())
-        }
-        QueueEnqueueError::JobIdExhausted => MediaError::invalid_request(error.to_string()),
-    }
-}
-
 fn duplicate_source_message(count: usize) -> String {
     if count == 1 {
         "Ignored 1 file that is already in this batch.".to_owned()
     } else {
         format!("Ignored {count} files that are already in this batch.")
-    }
-}
-
-pub(super) fn completed_output_folder(state: &QueueJobState) -> Option<&Path> {
-    match state {
-        QueueJobState::Completed { output } => output.parent(),
-        _ => None,
     }
 }

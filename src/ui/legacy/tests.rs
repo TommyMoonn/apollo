@@ -4,6 +4,7 @@ use crate::frame_capture::draft::FrameCaptureDraft;
 mod dialogs;
 mod frame_capture;
 mod navigation;
+mod queue;
 mod source;
 
 use std::{
@@ -20,17 +21,16 @@ use std::{
 
 use super::state::{
     BatchDefaults, BatchEditTarget, BatchItem, BatchSetupState, BatchSourceState,
-    FrameCaptureToolState, QueueExecutionEvent,
+    FrameCaptureToolState,
 };
 use super::workflows::{
-    completed_output_folder, queue_event_matches_active, queue_execution_wake, refresh_batch_items,
-    shows_audio_extract_lifecycle, shows_audio_mix_lifecycle, shows_frame_capture_lifecycle,
-    shows_remux_lifecycle, shows_upscale_lifecycle,
+    refresh_batch_items, shows_audio_extract_lifecycle, shows_audio_mix_lifecycle,
+    shows_frame_capture_lifecycle, shows_remux_lifecycle, shows_upscale_lifecycle,
 };
 use super::{ApolloApp, completion_wake};
 use crate::app::discovery::{MediaToolsDiscovery, MediaToolsState};
 use crate::app::{
-    Application, BatchOrigin, NavigationState, Operation, QueueEditOrigin,
+    Application, BatchOrigin, NavigationState, Operation, QueueAction, QueueEditOrigin,
     operation_workspace_visible,
 };
 use crate::frame_capture::clipboard::copy_frame_action_eligible;
@@ -64,13 +64,13 @@ use crate::{
         intake::{MediaIntake, MediaLoadStart},
         model::{AudioStream, FrameRate, MediaFile, MediaStream, StreamKind, VideoStream},
         probe::MediaProbeError,
-        process::{MediaProcessEvent, MediaProcessFailure, MediaProcessWake},
+        process::MediaProcessFailure,
         tools::{MediaTools, MediaToolsError},
     },
     queue::{QueueJobFailure, QueueJobState, QueueRunState, QueuedOperation},
     remux::execution::RemuxExecutionState,
     ui::{
-        QueueAction, SourceAction, audio_extract::AudioExtractSelectionAction,
+        SourceAction, audio_extract::AudioExtractSelectionAction,
         audio_mix::AudioMixSelectionAction, batch::BatchReadiness, file_intake::FileIntakeAction,
         fonts, frame_capture::FrameCaptureSelectionAction,
         frame_capture_progress::FrameCaptureThumbnailState, layout, media_error,
@@ -184,8 +184,8 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
         .unwrap()
         .unwrap();
     assert!(app.begin_queue_edit(job_id, QueueEditOrigin::SourceWorkspace));
-    app.queue_edit
-        .as_mut()
+    app.core
+        .queue_edit_mut()
         .unwrap()
         .upscale
         .set_encoder_selection(VideoEncoderSelection::Auto);
@@ -367,7 +367,6 @@ fn app() -> ApolloApp {
 
 fn seed_frame_neighborhood(app: &mut ApolloApp, center: FramePosition, payload: &[u8]) {
     let (media, editor) = app.active_frame_capture_editor_mut().unwrap();
-    let editor = &mut editor.state;
     editor.frame_index_due = None;
     editor.selection.set_position(media, center);
     let request = editor
@@ -391,7 +390,7 @@ fn ready_batch_source(media: MediaFile) -> BatchSourceState {
 }
 
 fn assert_no_batch_execution(app: &ApolloApp) {
-    assert!(app.core.media_queue.jobs().is_empty());
+    assert!(app.core.queue.scheduler().jobs().is_empty());
     assert!(!app.core.audio_mix_executor.is_running());
     assert!(!app.core.upscale_executor.is_running());
     assert!(!app.core.remux_executor.is_running());
@@ -405,7 +404,7 @@ fn populate_cancelled_and_failed_queue_history(app: &mut ApolloApp, path: &Path,
     app.enqueue_current_operation(Operation::Remux)
         .unwrap()
         .unwrap();
-    assert!(app.core.media_queue.cancel_queue());
+    assert!(app.handle_queue_action(QueueAction::CancelQueue));
     app.state
         .remux
         .as_mut()
@@ -415,14 +414,14 @@ fn populate_cancelled_and_failed_queue_history(app: &mut ApolloApp, path: &Path,
     app.enqueue_current_operation(Operation::Remux)
         .unwrap()
         .unwrap();
-    assert!(!app.start_media_queue());
-    assert_eq!(app.core.media_queue.pending_count(), 0);
+    assert!(!app.handle_queue_action(QueueAction::Start));
+    assert_eq!(app.core.queue.scheduler().pending_count(), 0);
     assert!(matches!(
-        app.core.media_queue.jobs()[0].state(),
+        app.core.queue.scheduler().jobs()[0].state(),
         QueueJobState::Cancelled
     ));
     assert!(matches!(
-        app.core.media_queue.jobs()[1].state(),
+        app.core.queue.scheduler().jobs()[1].state(),
         QueueJobState::Failed(_)
     ));
 }
@@ -1144,35 +1143,36 @@ fn every_ready_request_owner_builds_an_immutable_queue_operation() {
         assert!(app.enqueue_current_operation(operation).unwrap().is_some());
     }
 
-    assert_eq!(app.core.media_queue.jobs().len(), 5);
+    assert_eq!(app.core.queue.scheduler().jobs().len(), 5);
     assert!(matches!(
-        app.core.media_queue.jobs()[0].operation(),
+        app.core.queue.scheduler().jobs()[0].operation(),
         QueuedOperation::AudioMix(_)
     ));
     assert!(matches!(
-        app.core.media_queue.jobs()[1].operation(),
+        app.core.queue.scheduler().jobs()[1].operation(),
         QueuedOperation::Upscale(_)
     ));
     assert!(matches!(
-        app.core.media_queue.jobs()[2].operation(),
+        app.core.queue.scheduler().jobs()[2].operation(),
         QueuedOperation::Remux(_)
     ));
     assert!(matches!(
-        app.core.media_queue.jobs()[3].operation(),
+        app.core.queue.scheduler().jobs()[3].operation(),
         QueuedOperation::AudioExtract(_)
     ));
     assert!(matches!(
-        app.core.media_queue.jobs()[4].operation(),
+        app.core.queue.scheduler().jobs()[4].operation(),
         QueuedOperation::FrameCapture(_)
     ));
     assert!(
         app.core
-            .media_queue
+            .queue
+            .scheduler()
             .jobs()
             .iter()
             .all(|job| matches!(job.state(), QueueJobState::Waiting))
     );
-    assert!(app.execution_arbitration().queue_start_allowed());
+    assert!(app.core.execution_arbitration().queue_start_allowed());
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -1190,7 +1190,7 @@ fn every_ready_enqueue_action_remains_in_the_workspace_without_launching() {
     ] {
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
         app.select_tool(operation);
-        let previous_count = app.core.media_queue.jobs().len();
+        let previous_count = app.core.queue.scheduler().jobs().len();
 
         match operation {
             Operation::AudioMix => app
@@ -1210,20 +1210,21 @@ fn every_ready_enqueue_action_remains_in_the_workspace_without_launching() {
                 .unwrap(),
         }
 
-        assert_eq!(app.core.media_queue.jobs().len(), previous_count + 1);
+        assert_eq!(app.core.queue.scheduler().jobs().len(), previous_count + 1);
         assert_eq!(
             app.core.navigation(),
             NavigationState::SourceWorkspace {
                 active_operation: operation
             }
         );
-        assert!(app.execution_arbitration().queue_start_allowed());
-        assert!(!app.core.media_queue.is_running());
+        assert!(app.core.execution_arbitration().queue_start_allowed());
+        assert!(!app.core.queue.scheduler().is_running());
     }
 
     assert!(
         app.core
-            .media_queue
+            .queue
+            .scheduler()
             .jobs()
             .iter()
             .all(|job| matches!(job.state(), QueueJobState::Waiting))
@@ -1241,7 +1242,7 @@ fn invalid_ready_request_cannot_be_enqueued_by_direct_intent() {
     app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested)
         .unwrap();
 
-    assert!(app.core.media_queue.jobs().is_empty());
+    assert!(app.core.queue.scheduler().jobs().is_empty());
     assert_eq!(app.core.queue_confirmation, None);
     assert!(matches!(
         app.core.navigation(),
@@ -1261,8 +1262,8 @@ fn duplicate_queued_destination_is_truthful_operation_local_feedback() {
     app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested)
         .unwrap();
 
-    assert_eq!(app.core.media_queue.pending_count(), 1);
-    let output_path = app.core.media_queue.jobs()[0]
+    assert_eq!(app.core.queue.scheduler().pending_count(), 1);
+    let output_path = app.core.queue.scheduler().jobs()[0]
         .operation()
         .output()
         .to_path_buf();
@@ -1277,7 +1278,7 @@ fn duplicate_queued_destination_is_truthful_operation_local_feedback() {
 
     app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested)
         .unwrap();
-    assert_eq!(app.core.media_queue.pending_count(), 1);
+    assert_eq!(app.core.queue.scheduler().pending_count(), 1);
     assert!(!output_path.exists());
     assert_eq!(app.core.queue_confirmation, None);
     assert!(app.core.source.error().is_none());
@@ -1327,7 +1328,7 @@ fn genuine_existing_output_keeps_filesystem_output_exists_feedback() {
 
     app.enqueue_from_ready_surface(Operation::AudioMix);
 
-    assert!(app.core.media_queue.jobs().is_empty());
+    assert!(app.core.queue.scheduler().jobs().is_empty());
     assert!(app.core.source.error().is_none());
     assert!(matches!(
         app.core.operation_action_error,
@@ -1375,7 +1376,7 @@ fn batch_append_ignores_duplicates_without_mutating_existing_configuration() {
         Some("Ignored 2 files that are already in this batch.")
     );
     assert!(app.batch_inspection.is_none());
-    assert!(app.core.media_queue.jobs().is_empty());
+    assert!(app.core.queue.scheduler().jobs().is_empty());
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -1398,7 +1399,7 @@ fn relevant_workspace_actions_clear_enqueue_confirmation() {
         .selection
         .set_custom_output_path(directory.join("another.mkv"));
     app.enqueue_from_ready_surface(Operation::AudioMix);
-    let job_id = app.core.media_queue.jobs()[1].id();
+    let job_id = app.core.queue.scheduler().jobs()[1].id();
     assert_eq!(app.core.queue_confirmation, Some(Operation::AudioMix));
     assert!(app.begin_queue_edit(job_id, QueueEditOrigin::SourceWorkspace));
     assert_eq!(app.core.queue_confirmation, None);
@@ -1408,7 +1409,7 @@ fn relevant_workspace_actions_clear_enqueue_confirmation() {
 
 #[test]
 fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_other_editors() {
-    use super::state::OperationEditorState;
+    use crate::app::editor::OperationEditorState;
     use crate::upscale::model::{CpuQuality, VideoEncoderSelection};
 
     fn set_editor_stem(edit: &mut OperationEditorState, stem: &OsStr) {
@@ -1496,7 +1497,8 @@ fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_othe
     app.enter_queue();
     let originals = app
         .core
-        .media_queue
+        .queue
+        .scheduler()
         .jobs()
         .iter()
         .map(|job| job.operation().clone())
@@ -1504,11 +1506,15 @@ fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_othe
     for (job_id, original) in job_ids.into_iter().zip(&originals) {
         assert!(app.handle_queue_action(QueueAction::Edit(job_id)));
         let stem = original.output().file_stem().unwrap();
-        set_editor_stem(&mut app.queue_edit.as_mut().unwrap().editor, OsStr::new(""));
+        set_editor_stem(
+            &mut app.core.queue_edit_mut().unwrap().editor,
+            OsStr::new(""),
+        );
         assert!(!app.save_queue_edit());
         assert_eq!(
             app.core
-                .media_queue
+                .queue
+                .scheduler()
                 .jobs()
                 .iter()
                 .find(|job| job.id() == job_id)
@@ -1516,11 +1522,12 @@ fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_othe
                 .operation(),
             original
         );
-        set_editor_stem(&mut app.queue_edit.as_mut().unwrap().editor, stem);
+        set_editor_stem(&mut app.core.queue_edit_mut().unwrap().editor, stem);
         assert!(app.save_queue_edit());
         assert_eq!(
             app.core
-                .media_queue
+                .queue
+                .scheduler()
                 .jobs()
                 .iter()
                 .find(|job| job.id() == job_id)
@@ -1603,249 +1610,6 @@ fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_othe
         };
         assert_eq!(&request, original);
     }
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn queue_edit_reuses_workspace_without_source_or_execution_actions() {
-    let (directory, path) = temp_file("queue-edit-surface");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::Remux);
-    let job_id = app
-        .enqueue_current_operation(Operation::Remux)
-        .unwrap()
-        .unwrap();
-    app.enter_queue();
-    assert!(app.handle_queue_action(QueueAction::Edit(job_id)));
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-
-    let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
-
-    for label in [
-        "Editing queued item",
-        "Audio Mix",
-        "Upscale",
-        "Remux",
-        "Audio Extract",
-        "Frame Capture",
-        "Save changes",
-        "Cancel edit",
-    ] {
-        assert!(output_contains_text(&output, label), "missing {label:?}");
-    }
-    for label in ["Change file", "Close source", "Add to queue"] {
-        assert!(
-            !output_contains_text(&output, label),
-            "unexpected {label:?}"
-        );
-    }
-    output.textures_delta.clear();
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn stopped_queue_surface_exposes_edit_remove_and_bounded_reorder_controls() {
-    let (directory, path) = temp_file("queue-controls-surface");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::Remux);
-    app.enqueue_current_operation(Operation::Remux)
-        .unwrap()
-        .unwrap();
-    app.enter_queue();
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-
-    let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
-
-    for label in ["Edit", "Remove", "↑", "↓", "Start queue", "Back"] {
-        assert!(output_contains_text(&output, label), "missing {label:?}");
-    }
-    output.textures_delta.clear();
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn queue_edit_failed_replacement_keeps_original_job_and_editor() {
-    let (directory, path) = temp_file("queue-edit-failure");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::Remux);
-    let first = app
-        .enqueue_current_operation(Operation::Remux)
-        .unwrap()
-        .unwrap();
-    app.state
-        .remux
-        .as_mut()
-        .unwrap()
-        .selection
-        .set_custom_output_path(directory.join("second.mkv"));
-    let second = app
-        .enqueue_current_operation(Operation::Remux)
-        .unwrap()
-        .unwrap();
-    let original = app.core.media_queue.jobs()[0].operation().clone();
-    let duplicate_output = app.core.media_queue.jobs()[1]
-        .operation()
-        .output()
-        .to_path_buf();
-    app.enter_queue();
-    assert!(app.handle_queue_action(QueueAction::Edit(first)));
-    app.queue_edit
-        .as_mut()
-        .unwrap()
-        .remux
-        .set_custom_output_path(duplicate_output);
-
-    assert!(!app.save_queue_edit());
-
-    assert_eq!(app.core.media_queue.jobs()[0].id(), first);
-    assert_eq!(app.core.media_queue.jobs()[0].operation(), &original);
-    assert_eq!(app.core.media_queue.jobs()[1].id(), second);
-    assert!(app.queue_edit.as_ref().unwrap().error.is_some());
-    assert!(matches!(
-        app.core.navigation(),
-        NavigationState::QueueEdit { .. }
-    ));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn queue_reorder_actions_move_only_the_requested_waiting_item() {
-    let (directory, path) = temp_file("queue-reorder-actions");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::Remux);
-    let first = app
-        .enqueue_current_operation(Operation::Remux)
-        .unwrap()
-        .unwrap();
-    app.state
-        .remux
-        .as_mut()
-        .unwrap()
-        .selection
-        .set_custom_output_path(directory.join("later.mkv"));
-    let second = app
-        .enqueue_current_operation(Operation::Remux)
-        .unwrap()
-        .unwrap();
-
-    assert!(app.handle_queue_action(QueueAction::MoveEarlier(second)));
-    assert_eq!(app.core.media_queue.jobs()[0].id(), second);
-    assert_eq!(app.core.media_queue.jobs()[1].id(), first);
-    assert!(app.handle_queue_action(QueueAction::MoveLater(second)));
-    assert_eq!(app.core.media_queue.jobs()[0].id(), first);
-    assert_eq!(app.core.media_queue.jobs()[1].id(), second);
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn completed_queue_output_resolves_its_parent_folder_only_for_success() {
-    let completed = QueueJobState::Completed {
-        output: PathBuf::from("exports/output.mkv"),
-    };
-    assert_eq!(
-        completed_output_folder(&completed),
-        Some(Path::new("exports"))
-    );
-    assert_eq!(completed_output_folder(&QueueJobState::Waiting), None);
-    assert_eq!(
-        completed_output_folder(&QueueJobState::Failed(QueueJobFailure::SourceChanged)),
-        None
-    );
-}
-
-#[test]
-fn queue_remove_and_clear_actions_respect_job_state() {
-    let (directory, path) = temp_file("queue-row-actions");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    let waiting = app
-        .enqueue_current_operation(Operation::AudioMix)
-        .unwrap()
-        .unwrap();
-
-    assert!(app.handle_queue_action(QueueAction::Remove(waiting)));
-    assert!(app.core.media_queue.jobs().is_empty());
-
-    let terminal = app
-        .enqueue_current_operation(Operation::AudioMix)
-        .unwrap()
-        .unwrap();
-    assert!(app.handle_queue_action(QueueAction::CancelQueue));
-    assert!(!app.handle_queue_action(QueueAction::Remove(terminal)));
-    assert!(app.handle_queue_action(QueueAction::ClearFinished));
-    assert!(app.core.media_queue.jobs().is_empty());
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn queue_terminal_failure_does_not_replace_the_ready_source_session() {
-    let (directory, path) = temp_file("queue-session");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::Remux);
-    let session_id = app.state.remux.as_ref().unwrap().session_id;
-    let job_id = app
-        .enqueue_current_operation(Operation::Remux)
-        .unwrap()
-        .unwrap();
-
-    assert!(!app.start_media_queue());
-
-    assert_workspace(&app.core, Operation::Remux);
-    assert_eq!(app.state.remux.as_ref().unwrap().session_id, session_id);
-    assert_eq!(app.core.media_queue.jobs()[0].id(), job_id);
-    assert!(matches!(
-        app.core.media_queue.jobs()[0].state(),
-        QueueJobState::Failed(QueueJobFailure::ProcessStart(_))
-    ));
-    assert!(app.execution_arbitration().queue_start_allowed());
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn queue_process_events_are_tagged_and_filtered_by_job_id() {
-    let (directory, path) = temp_file("queue-events");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::Remux);
-    let first = app
-        .enqueue_current_operation(Operation::Remux)
-        .unwrap()
-        .unwrap();
-    app.state
-        .remux
-        .as_mut()
-        .unwrap()
-        .selection
-        .set_custom_output_path(directory.join("second-remux.mkv"));
-    let second = app
-        .enqueue_current_operation(Operation::Remux)
-        .unwrap()
-        .unwrap();
-    let (sender, receiver) = mpsc::channel();
-    let wake = queue_execution_wake(first, sender, MediaProcessWake::default());
-
-    wake.notify(MediaProcessEvent::Progress);
-    let event = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
-
-    assert_eq!(
-        event,
-        QueueExecutionEvent {
-            job_id: first,
-            process_event: MediaProcessEvent::Progress,
-        }
-    );
-    assert!(queue_event_matches_active(Some(first), event));
-    assert!(!queue_event_matches_active(Some(second), event));
-    assert!(!queue_event_matches_active(None, event));
     fs::remove_dir_all(directory).unwrap();
 }
 

@@ -29,12 +29,12 @@ use crate::ui::{
 
 use super::ApolloApp;
 use super::state::{
-    BatchEditTarget, BatchSourceState, FrameCaptureToolState, OperationEditorState, QueueEditAction,
+    BatchEditTarget, BatchSourceState, EditorPresentation, FrameCaptureToolState, QueueEditAction,
 };
 use super::workflows::{
     batch_defaults_from_editor, refresh_batch_items, shows_frame_capture_lifecycle,
 };
-use crate::app::discovery::MediaToolsState;
+use crate::app::{discovery::MediaToolsState, editor::OperationEditorState};
 
 impl ApolloApp {
     pub(super) fn show_root(&mut self, ui: &mut Ui) {
@@ -167,7 +167,8 @@ impl ApolloApp {
         if self.operation_ready_surface(active_operation) {
             let editable_jobs = self
                 .core
-                .media_queue
+                .queue
+                .scheduler()
                 .waiting_jobs()
                 .map(|job| EditableQueuedJob {
                     id: job.id(),
@@ -182,10 +183,10 @@ impl ApolloApp {
                     &source_presentation.workspace,
                     active_operation,
                     WorkspaceMode::Source {
-                        pending_queue_count: self.core.media_queue.pending_count(),
+                        pending_queue_count: self.core.queue.scheduler().pending_count(),
                         enabled: !self.core.source.is_inspecting() && self.core.executors_idle(),
                         editable_jobs: &editable_jobs,
-                        queue_editing_allowed: self.core.media_queue.run_state()
+                        queue_editing_allowed: self.core.queue.scheduler().run_state()
                             == QueueRunState::Stopped,
                     },
                 )
@@ -233,7 +234,7 @@ impl ApolloApp {
         let action = file_intake::show(
             ui,
             self.core.source.is_inspecting(),
-            self.core.media_queue.pending_count(),
+            self.core.queue.scheduler().pending_count(),
             self.core.source.error(),
             &mut self.state.intake_error_details_open,
         );
@@ -241,13 +242,13 @@ impl ApolloApp {
     }
 
     pub(super) fn show_queue(&mut self, ui: &mut Ui) {
-        let arbitration = self.execution_arbitration();
+        let arbitration = self.core.execution_arbitration();
         let action = queue_ui::show(
             ui,
-            self.core.media_queue.jobs(),
-            self.core.media_queue.active_job(),
-            self.core.media_queue.active_progress(),
-            self.core.media_queue.run_state(),
+            self.core.queue.scheduler().jobs(),
+            self.core.queue.scheduler().active_job(),
+            self.core.queue.scheduler().active_progress(),
+            self.core.queue.scheduler().run_state(),
             arbitration.queue_start_allowed(),
         );
         self.handle_queue_action(action);
@@ -358,7 +359,7 @@ impl ApolloApp {
             return;
         };
         let target = edit.target;
-        let presentation = edit.presentation.clone();
+        let presentation = &edit.presentation.source;
         let operation = edit.active_operation;
         let enabled = !self.file_dialog.is_pending();
         layout::workspace_chrome(ui, |ui| {
@@ -393,6 +394,7 @@ impl ApolloApp {
         let action = show_operation_editor(
             ui,
             &mut edit.editor,
+            &edit.presentation,
             capabilities,
             match target {
                 BatchEditTarget::Defaults => OperationSurfaceMode::BatchDefaults {
@@ -433,10 +435,13 @@ impl ApolloApp {
     }
 
     fn show_queue_edit(&mut self, ui: &mut Ui) {
-        let Some(edit) = self.queue_edit.as_ref() else {
+        let Some(edit) = self.core.queue_edit() else {
             return;
         };
-        let presentation = edit.presentation.clone();
+        let Some(presentation) = self.queue_editor_presentation.as_ref() else {
+            return;
+        };
+        let presentation = &presentation.source;
         let active_operation = edit.active_operation;
         let enabled = !self.file_dialog.is_pending();
         let workspace_action = layout::workspace_chrome(ui, |ui| {
@@ -456,7 +461,7 @@ impl ApolloApp {
             self.select_queue_edit_tool(operation);
         }
 
-        let Some(edit) = self.queue_edit.as_mut() else {
+        let Some((edit, capabilities)) = self.core.queue_edit_with_capabilities() else {
             return;
         };
         let job_id = edit.job_id;
@@ -467,13 +472,14 @@ impl ApolloApp {
                 ui.add_space(theme::SPACING.related);
             });
         }
-        let capabilities = self.core.discovery.settled_capabilities().map_or(
-            crate::upscale::draft::UpscaleEncoderCapabilities::Checking,
-            crate::upscale::draft::UpscaleEncoderCapabilities::Ready,
-        );
+
+        let Some(presentation) = self.queue_editor_presentation.as_ref() else {
+            return;
+        };
         let action = show_operation_editor(
             ui,
             edit,
+            presentation,
             capabilities,
             OperationSurfaceMode::QueueEdit,
             enabled,
@@ -481,7 +487,7 @@ impl ApolloApp {
         );
         match action {
             QueueEditAction::BrowseOutput => {
-                if let Some(edit) = self.queue_edit.as_ref() {
+                if let Some(edit) = self.core.queue_edit() {
                     self.start_file_dialog(editor_output_dialog_request(&edit.editor));
                 }
             }
@@ -493,8 +499,8 @@ impl ApolloApp {
             }
             QueueEditAction::FramePositionEdited(settle) => {
                 let position = self
-                    .queue_edit
-                    .as_ref()
+                    .core
+                    .queue_edit()
                     .and_then(|edit| edit.frame_capture.valid_position(&edit.media));
                 self.update_frame_capture_position(position, settle, Instant::now());
             }
@@ -538,8 +544,8 @@ impl ApolloApp {
             .as_ref()
             .expect("source presentation exists while workspace is shown")
             .clone();
-        let immediate_start_allowed =
-            self.execution_arbitration().immediate_start_allowed() && !self.copy_frame_active();
+        let immediate_start_allowed = self.core.execution_arbitration().immediate_start_allowed()
+            && !self.copy_frame_active();
         let queue_confirmation = self.core.queue_confirmation == Some(Operation::FrameCapture);
         let action_error = self
             .core
@@ -645,6 +651,7 @@ impl ApolloApp {
 fn show_operation_editor(
     ui: &mut Ui,
     edit: &mut OperationEditorState,
+    presentation: &EditorPresentation,
     capabilities: crate::upscale::draft::UpscaleEncoderCapabilities<'_>,
     mode: OperationSurfaceMode,
     enabled: bool,
@@ -656,7 +663,7 @@ fn show_operation_editor(
             Operation::AudioMix => match audio_mix_ui::show(
                 ui,
                 &edit.media,
-                &edit.presentation.audio_mix,
+                &presentation.source.audio_mix,
                 &mut edit.audio_mix,
                 mode,
             ) {
@@ -676,7 +683,7 @@ fn show_operation_editor(
             Operation::Remux => match remux_ui::show(
                 ui,
                 &edit.media,
-                &edit.presentation.remux,
+                &presentation.source.remux,
                 &mut edit.remux,
                 mode,
             ) {
@@ -688,7 +695,7 @@ fn show_operation_editor(
             Operation::AudioExtract => match audio_extract_ui::show(
                 ui,
                 &edit.media,
-                &edit.presentation.audio_extract,
+                &presentation.source.audio_extract,
                 &mut edit.audio_extract,
                 mode,
             ) {
@@ -703,7 +710,7 @@ fn show_operation_editor(
                     |_| FrameCapturePositionSurface::Precision {
                         preview: frame_capture_ui::FrameCaptureLivePreview::from_preview(
                             edit.frame_capture.preview.state(),
-                            edit.frame_capture.preview_texture.as_ref().map(|texture| {
+                            presentation.preview_texture.as_ref().map(|texture| {
                                 (texture.handle.id(), texture.size, texture.position)
                             }),
                         ),
@@ -713,7 +720,7 @@ fn show_operation_editor(
                 match frame_capture_ui::show(
                     ui,
                     &edit.media,
-                    &edit.presentation.frame_capture,
+                    &presentation.source.frame_capture,
                     &mut edit.frame_capture.selection,
                     position_surface,
                     None,

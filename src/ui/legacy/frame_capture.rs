@@ -1,9 +1,10 @@
 //! Frame Capture presentation and routing to the current editor.
 use super::{
     ApolloApp, completion_wake,
-    state::{BatchEditTarget, FrameCaptureEditor, FramePreviewTexture, OperationEditorState},
+    state::{BatchEditTarget, FramePreviewTexture},
 };
-use crate::app::frame_capture::{FrameCopyStatus, PositionSettle};
+use crate::app::editor::OperationEditorState;
+use crate::app::frame_capture::{FrameCaptureEditorState, FrameCopyStatus, PositionSettle};
 use crate::app::{NavigationState, Operation, dialogs::OutputDraft};
 use crate::frame_capture::{
     clipboard::{CopyFrameError, CopyFrameRequest},
@@ -28,7 +29,7 @@ impl ApolloApp {
         self.core.frame_work.copy_active()
     }
 
-    fn active_frame_capture_editor(&self) -> Option<(&MediaFile, &FrameCaptureEditor)> {
+    fn active_frame_capture_editor(&self) -> Option<(&MediaFile, &FrameCaptureEditorState)> {
         match self.core.navigation() {
             NavigationState::SourceWorkspace {
                 active_operation: Operation::FrameCapture,
@@ -36,10 +37,10 @@ impl ApolloApp {
                 .state
                 .frame_capture
                 .as_ref()
-                .map(|session| (&session.media, &session.editor)),
+                .map(|session| (&session.media, &session.editor.state)),
             NavigationState::QueueEdit { .. } => self
-                .queue_edit
-                .as_ref()
+                .core
+                .queue_edit()
                 .filter(|edit| edit.active_operation == Operation::FrameCapture)
                 .map(|edit| (&edit.media, &edit.frame_capture)),
             NavigationState::BatchEdit => self
@@ -56,42 +57,53 @@ impl ApolloApp {
 
     pub(super) fn active_frame_capture_editor_mut(
         &mut self,
-    ) -> Option<(&MediaFile, &mut FrameCaptureEditor)> {
+    ) -> Option<(&MediaFile, &mut FrameCaptureEditorState)> {
+        self.active_frame_capture_parts_mut()
+            .map(|(media, editor, _)| (media, editor))
+    }
+
+    fn active_frame_capture_parts_mut(
+        &mut self,
+    ) -> Option<(
+        &MediaFile,
+        &mut FrameCaptureEditorState,
+        &mut Option<FramePreviewTexture>,
+    )> {
         match self.core.navigation() {
             NavigationState::SourceWorkspace {
                 active_operation: Operation::FrameCapture,
-            } => self
-                .state
-                .frame_capture
-                .as_mut()
-                .map(|session| (&session.media, &mut session.editor)),
-            NavigationState::QueueEdit { .. } => self
-                .queue_edit
-                .as_mut()
-                .filter(|edit| edit.active_operation == Operation::FrameCapture)
-                .map(|edit| {
-                    let OperationEditorState {
-                        media,
-                        frame_capture,
-                        ..
-                    } = &mut edit.editor;
-                    (&*media, frame_capture)
-                }),
-            NavigationState::BatchEdit => self
-                .batch_edit
-                .as_mut()
-                .filter(|edit| {
+            } => self.state.frame_capture.as_mut().map(|session| {
+                (
+                    &session.media,
+                    &mut session.editor.state,
+                    &mut session.editor.preview_texture,
+                )
+            }),
+            NavigationState::QueueEdit { .. } => {
+                let presentation = self.queue_editor_presentation.as_mut()?;
+                let edit = self
+                    .core
+                    .queue_edit_mut()
+                    .filter(|edit| edit.active_operation == Operation::FrameCapture)?;
+                let OperationEditorState {
+                    media,
+                    frame_capture,
+                    ..
+                } = &mut edit.editor;
+                Some((media, frame_capture, &mut presentation.preview_texture))
+            }
+            NavigationState::BatchEdit => {
+                let edit = self.batch_edit.as_mut().filter(|edit| {
                     matches!(edit.target, BatchEditTarget::Item(_))
                         && edit.active_operation == Operation::FrameCapture
-                })
-                .map(|edit| {
-                    let OperationEditorState {
-                        media,
-                        frame_capture,
-                        ..
-                    } = &mut edit.editor;
-                    (&*media, frame_capture)
-                }),
+                })?;
+                let OperationEditorState {
+                    media,
+                    frame_capture,
+                    ..
+                } = &mut edit.editor;
+                Some((media, frame_capture, &mut edit.presentation.preview_texture))
+            }
             _ => None,
         }
     }
@@ -130,7 +142,7 @@ impl ApolloApp {
         if editor.source_identity.is_none() {
             return;
         }
-        editor.state.retire_index();
+        editor.retire_index();
         let ready_at = self.schedule_frame_capture_preview(position, settle, now);
         if let (Some(position), Some(ready_at), Some((_, editor))) =
             (position, ready_at, self.active_frame_capture_editor_mut())
@@ -147,9 +159,7 @@ impl ApolloApp {
     ) -> Option<Instant> {
         self.core.frame_work.cancel_preview();
         let (media, editor) = self.active_frame_capture_editor_mut()?;
-        let deadline = editor
-            .state
-            .schedule_preview(media, position, settle, now)?;
+        let deadline = editor.schedule_preview(media, position, settle, now)?;
         self.egui_context
             .request_repaint_after(deadline.saturating_duration_since(now));
         Some(deadline)
@@ -182,7 +192,7 @@ impl ApolloApp {
         let now = Instant::now();
         if let Some(position) = self
             .active_frame_capture_editor_mut()
-            .and_then(|(_, editor)| editor.state.take_due_index(now))
+            .and_then(|(_, editor)| editor.take_due_index(now))
         {
             self.start_frame_index_query(position);
         }
@@ -198,7 +208,7 @@ impl ApolloApp {
         if self
             .active_frame_capture_editor()
             .is_some_and(|(_, editor)| {
-                editor.state.index_loading_at(position)
+                editor.index_loading_at(position)
                     && self.core.frame_work.index_owned_by(editor.session_id)
             })
         {
@@ -208,7 +218,7 @@ impl ApolloApp {
             return;
         };
         let session = editor.session_id;
-        let request = match editor.state.schedule_index(media, position) {
+        let request = match editor.schedule_index(media, position) {
             Ok(Some(request)) => request,
             Ok(None) => {
                 self.resolve_pending_frame_step();
@@ -235,7 +245,7 @@ impl ApolloApp {
     ) {
         if self
             .active_frame_capture_editor_mut()
-            .is_some_and(|(_, editor)| editor.state.settle_index(session, request, result))
+            .is_some_and(|(_, editor)| editor.settle_index(session, request, result))
         {
             self.resolve_pending_frame_step();
         }
@@ -244,7 +254,7 @@ impl ApolloApp {
     pub(super) fn request_frame_step(&mut self, direction: FrameDirection) {
         let outcome = self
             .active_frame_capture_editor_mut()
-            .and_then(|(media, editor)| editor.state.request_step(media, direction));
+            .and_then(|(media, editor)| editor.request_step(media, direction));
         if let Some(outcome) = outcome {
             self.apply_frame_step_outcome(outcome);
         }
@@ -253,7 +263,7 @@ impl ApolloApp {
     fn resolve_pending_frame_step(&mut self) {
         let outcome = self
             .active_frame_capture_editor_mut()
-            .and_then(|(_, editor)| editor.state.pending_outcome());
+            .and_then(|(_, editor)| editor.pending_outcome());
         if let Some(outcome) = outcome {
             self.apply_frame_step_outcome(outcome);
         }
@@ -265,7 +275,7 @@ impl ApolloApp {
                 let Some((media, editor)) = self.active_frame_capture_editor_mut() else {
                     return;
                 };
-                if !editor.state.apply_resolved_step(media, position.into()) {
+                if !editor.apply_resolved_step(media, position.into()) {
                     return;
                 }
                 self.schedule_frame_capture_preview(
@@ -301,7 +311,7 @@ impl ApolloApp {
         };
         if !self
             .active_frame_capture_editor()
-            .is_some_and(|(_, editor)| editor.state.accepts_preview(session, &completion.request))
+            .is_some_and(|(_, editor)| editor.accepts_preview(session, &completion.request))
         {
             return;
         }
@@ -336,19 +346,18 @@ impl ApolloApp {
         result: Result<PreviewImage, PreviewExtractionError>,
     ) -> bool {
         self.active_frame_capture_editor_mut()
-            .is_some_and(|(_, editor)| editor.state.settle_preview(session, request, result))
+            .is_some_and(|(_, editor)| editor.settle_preview(session, request, result))
     }
 
     pub(super) fn sync_frame_preview_texture(&mut self) {
         let context = self.egui_context.clone();
-        let Some((_, editor)) = self.active_frame_capture_editor_mut() else {
+        let Some((_, editor, texture)) = self.active_frame_capture_parts_mut() else {
             return;
         };
         let PreviewState::Ready { request, image } = editor.preview.state() else {
             return;
         };
-        if editor
-            .preview_texture
+        if texture
             .as_ref()
             .is_some_and(|texture| texture.generation == request.generation)
         {
@@ -365,7 +374,7 @@ impl ApolloApp {
             color,
             TextureOptions::LINEAR,
         );
-        editor.preview_texture = Some(FramePreviewTexture {
+        *texture = Some(FramePreviewTexture {
             generation: request.generation,
             size,
             position: request.position,
@@ -377,23 +386,23 @@ impl ApolloApp {
         self.core.frame_work.cancel_preview();
         self.core.frame_work.cancel_index();
         if let Some((_, editor)) = self.active_frame_capture_editor_mut() {
-            editor.state.suspend_support();
+            editor.suspend_support();
         }
     }
 
     pub(super) fn cancel_frame_capture_support(&mut self) {
         self.core.frame_work.cancel_preview();
         self.core.frame_work.cancel_index();
-        if let Some((_, editor)) = self.active_frame_capture_editor_mut() {
-            editor.state.retire_support();
-            editor.preview_texture = None;
+        if let Some((_, editor, texture)) = self.active_frame_capture_parts_mut() {
+            editor.retire_support();
+            *texture = None;
         }
     }
 
     fn start_copy_frame(&mut self) {
         if self.copy_frame_active()
             || self.core.media_operation_running()
-            || !self.execution_arbitration().immediate_start_allowed()
+            || !self.core.execution_arbitration().immediate_start_allowed()
         {
             return;
         }
@@ -531,7 +540,7 @@ impl ApolloApp {
                 self.enqueue_from_ready_surface(Operation::FrameCapture);
             }
             FrameCaptureSelectionAction::CaptureRequested => {
-                if !self.execution_arbitration().immediate_start_allowed() {
+                if !self.core.execution_arbitration().immediate_start_allowed() {
                     return Ok(());
                 }
                 let Some(session) = self.state.frame_capture.as_ref() else {

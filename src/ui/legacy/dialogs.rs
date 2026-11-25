@@ -2,10 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::{
-    ApolloApp,
-    state::{LegacyEditorState, OperationEditorState},
-};
+use super::{ApolloApp, state::LegacyEditorState};
 use crate::{
     app::{
         NavigationState, Operation,
@@ -13,6 +10,7 @@ use crate::{
             DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogRequest,
             InputDialogOrigin, OutputDraft,
         },
+        editor::OperationEditorState,
     },
     audio_extract::{draft::AudioExtractDraft, execution::AudioExtractExecutionState},
     audio_mix::{draft::AudioMixDraft, execution::AudioMixExecutionState},
@@ -61,7 +59,7 @@ impl ApolloApp {
             // Independent editors have unique session IDs; settle at most one owner.
             let editor = match self.core.navigation() {
                 NavigationState::QueueEdit { .. } => {
-                    self.queue_edit.as_mut().map(|edit| &mut edit.editor)
+                    self.core.queue_edit_mut().map(|edit| &mut edit.editor)
                 }
                 NavigationState::BatchEdit => self.batch_edit.as_mut().map(|edit| &mut edit.editor),
                 _ => None,

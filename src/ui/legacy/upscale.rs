@@ -67,7 +67,7 @@ impl ApolloApp {
         }
 
         let enabled = self.workspace_interaction_enabled();
-        let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
+        let immediate_start_allowed = self.core.execution_arbitration().immediate_start_allowed();
         let queue_confirmation = self.core.queue_confirmation == Some(Operation::VideoUpscale);
         let action_error = self
             .core
@@ -159,7 +159,7 @@ impl ApolloApp {
                 self.enqueue_from_ready_surface(Operation::VideoUpscale);
             }
             UpscaleSelectionAction::UpscaleRequested => {
-                if !self.execution_arbitration().immediate_start_allowed() {
+                if !self.core.execution_arbitration().immediate_start_allowed() {
                     return Ok(());
                 }
                 let Some(upscale) = self.state.upscale.as_ref() else {

@@ -8,12 +8,11 @@ mod upscale;
 mod dialogs;
 mod frame_capture;
 mod preferences;
+mod queue;
 mod render;
 mod source;
 mod state;
 mod workflows;
-
-use std::sync::mpsc::{self, Receiver};
 
 use egui::{Context, Ui};
 
@@ -26,19 +25,16 @@ use crate::settings::AppSettings;
 use crate::ui::{fonts, theme};
 
 use state::{
-    BatchEditState, BatchInspectionSession, BatchSetupState, LegacyEditorState, QueueEditState,
-    QueueExecutionEvent,
+    BatchEditState, BatchInspectionSession, BatchSetupState, EditorPresentation, LegacyEditorState,
 };
 
 pub struct ApolloApp {
     core: Application,
     state: LegacyEditorState,
-    queue_edit: Option<QueueEditState>,
+    queue_editor_presentation: Option<EditorPresentation>,
     batch_setup: Option<BatchSetupState>,
     batch_edit: Option<BatchEditState>,
     batch_inspection: Option<BatchInspectionSession>,
-    queue_event_sender: mpsc::Sender<QueueExecutionEvent>,
-    queue_event_receiver: Receiver<QueueExecutionEvent>,
     progress_repaint: MediaProgressRepaintOwner,
     file_dialog: FileDialogOwner,
     clipboard_owner: Option<isize>,
@@ -81,16 +77,13 @@ impl ApolloApp {
         clipboard_owner: Option<isize>,
         settings: AppSettings,
     ) -> Self {
-        let (queue_event_sender, queue_event_receiver) = mpsc::channel();
         Self {
             core: Application::with_settings(settings),
             state: LegacyEditorState::default(),
-            queue_edit: None,
+            queue_editor_presentation: None,
             batch_setup: None,
             batch_edit: None,
             batch_inspection: None,
-            queue_event_sender,
-            queue_event_receiver,
             progress_repaint: MediaProgressRepaintOwner::new(completion_wake(&egui_context)),
             file_dialog,
             clipboard_owner,
@@ -110,7 +103,8 @@ impl ApolloApp {
                 workflows::refresh_batch_items(batch, self.core.discovery.upscale_capabilities());
             }
         }
-        self.poll_media_queue();
+        let progress = &mut self.progress_repaint;
+        self.core.poll_media_queue(|| progress.begin());
         if !matches!(self.core.discovery.state(), MediaToolsState::Ready(_)) {
             return;
         }
@@ -127,7 +121,7 @@ impl ApolloApp {
         self.cancel_copy_frame_work();
         self.cancel_frame_capture_support();
         self.core.frame_work.cancel_thumbnail();
-        self.core.media_queue.cancel_queue();
+        self.core.queue.cancel();
     }
 }
 

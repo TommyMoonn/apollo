@@ -3,6 +3,9 @@
 
 pub(crate) mod dialogs;
 pub(crate) mod discovery;
+pub(crate) mod editor;
+pub(crate) mod queue;
+pub use queue::QueueAction;
 pub(crate) mod frame_capture;
 mod navigation;
 pub(crate) mod source;
@@ -13,7 +16,6 @@ use crate::{
     audio_mix::execution::AudioMixExecutor,
     frame_capture::execution::FrameCaptureExecutor,
     media::{error::MediaError, execution::MediaExecutionState},
-    queue::MediaQueue,
     remux::execution::RemuxExecutor,
     upscale::execution::UpscaleExecutor,
 };
@@ -31,7 +33,8 @@ pub struct Application {
     pub(crate) remux_executor: RemuxExecutor,
     pub(crate) audio_extract_executor: AudioExtractExecutor,
     pub(crate) frame_capture_executor: FrameCaptureExecutor,
-    pub(crate) media_queue: MediaQueue,
+    pub(crate) queue: queue::QueueWorkflow,
+    queue_edit: Option<queue::QueueEditState>,
     pub(crate) queue_confirmation: Option<Operation>,
     pub(crate) operation_action_error: Option<(Operation, MediaError)>,
 }
@@ -62,10 +65,10 @@ impl Application {
         )
     }
 
-    pub(crate) fn execution_arbitration(&self, copy_active: bool) -> ProcessExecutionArbitration {
+    pub(crate) fn execution_arbitration(&self) -> ProcessExecutionArbitration {
         ProcessExecutionArbitration::new(
-            self.media_operation_running() || copy_active,
-            self.media_queue.is_running(),
+            self.media_operation_running() || self.frame_work.copy_active(),
+            self.queue.scheduler().is_running(),
         )
     }
 }

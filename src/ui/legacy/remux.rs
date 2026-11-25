@@ -69,7 +69,7 @@ impl ApolloApp {
             .as_ref()
             .expect("source presentation exists while workspace is shown")
             .clone();
-        let immediate_start_allowed = self.execution_arbitration().immediate_start_allowed();
+        let immediate_start_allowed = self.core.execution_arbitration().immediate_start_allowed();
         let queue_confirmation = self.core.queue_confirmation == Some(Operation::Remux);
         let action_error = self
             .core
@@ -158,7 +158,7 @@ impl ApolloApp {
                 self.enqueue_from_ready_surface(Operation::Remux);
             }
             RemuxSelectionAction::RemuxRequested => {
-                if !self.execution_arbitration().immediate_start_allowed() {
+                if !self.core.execution_arbitration().immediate_start_allowed() {
                     return Ok(());
                 }
                 let Some(remux) = self.state.remux.as_ref() else {

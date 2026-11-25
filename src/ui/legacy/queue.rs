@@ -1,0 +1,154 @@
+//! Queue presentation integration and native action dispatch.
+use super::{ApolloApp, state::EditorPresentation};
+use crate::{
+    app::{
+        NavigationState, Operation, QueueAction, QueueEditOrigin,
+        dialogs::{DialogTarget, FileDialogRequest},
+        queue::{QueueEditReturn, QueueEffect},
+    },
+    native::open_folder,
+    queue::{JobId, QueueEnqueueError, QueuedOperation},
+};
+
+impl ApolloApp {
+    pub(super) fn enter_queue(&mut self) {
+        self.suspend_frame_capture_support();
+        self.core.enter_queue();
+        self.state.intake_error_details_open = false;
+    }
+
+    pub(super) fn handle_queue_action(&mut self, action: QueueAction) -> bool {
+        let progress = &mut self.progress_repaint;
+        match self.core.queue_action(action, || progress.begin()) {
+            QueueEffect::Handled(changed) => changed,
+            QueueEffect::AddFiles => {
+                self.start_file_dialog(FileDialogRequest::OpenSources {
+                    initial_directory: None,
+                    target: DialogTarget::BatchInput,
+                });
+                true
+            }
+            QueueEffect::Edit(id, origin) => self.begin_queue_edit(id, origin),
+            QueueEffect::OpenFolder(directory) => {
+                if let Err(error) = open_folder(&directory) {
+                    eprintln!("Queue output folder could not be opened: {error}");
+                }
+                true
+            }
+            QueueEffect::Returned => {
+                self.schedule_active_frame_capture_support();
+                true
+            }
+        }
+    }
+
+    pub(super) fn begin_queue_edit(&mut self, id: JobId, origin: QueueEditOrigin) -> bool {
+        let Some(edit) = self.core.prepare_queue_edit(id, origin) else {
+            return false;
+        };
+        self.suspend_frame_capture_support();
+        self.queue_editor_presentation = Some(EditorPresentation::new(&edit.media));
+        self.core.activate_queue_edit(edit, origin);
+        self.schedule_active_frame_capture_support();
+        true
+    }
+
+    pub(super) fn finish_queue_edit(&mut self) -> bool {
+        if !matches!(self.core.navigation(), NavigationState::QueueEdit { .. }) {
+            return false;
+        }
+        self.cancel_frame_capture_support();
+        let Some(return_to) = self.core.finish_queue_edit() else {
+            return false;
+        };
+        self.queue_editor_presentation = None;
+        match return_to {
+            QueueEditReturn::Queue => true,
+            QueueEditReturn::Source(request) => self.restore_queued_job_workspace(&request),
+        }
+    }
+
+    pub(super) fn select_queue_edit_tool(&mut self, operation: Operation) -> bool {
+        if !matches!(self.core.navigation(), NavigationState::QueueEdit { .. }) {
+            return false;
+        }
+        let Some(previous) = self.core.queue_edit().map(|edit| edit.active_operation) else {
+            return false;
+        };
+        if previous == operation {
+            return true;
+        }
+        if previous == Operation::FrameCapture {
+            self.cancel_frame_capture_support();
+        }
+        if !self.core.select_queue_edit_tool(operation) {
+            return false;
+        }
+        if operation == Operation::FrameCapture {
+            self.schedule_active_frame_capture_support();
+        }
+        true
+    }
+
+    pub(super) fn save_queue_edit(&mut self) -> bool {
+        self.core.save_queue_edit() && self.finish_queue_edit()
+    }
+
+    pub(super) fn enqueue_current_operation(
+        &mut self,
+        operation: Operation,
+    ) -> Result<Option<JobId>, QueueEnqueueError> {
+        // Borrow each draft and its source directly; the queue owns the resulting immutable request.
+        let queued = match operation {
+            Operation::AudioMix => self.state.audio_mix.as_ref().and_then(|session| {
+                session
+                    .selection
+                    .validated_request(&session.media)
+                    .ok()
+                    .map(|request| (&session.media, QueuedOperation::AudioMix(request)))
+            }),
+            Operation::VideoUpscale => {
+                let Some(capabilities) = self.core.discovery.upscale_capabilities() else {
+                    return Ok(None);
+                };
+                self.state.upscale.as_ref().and_then(|session| {
+                    session
+                        .selection
+                        .validated_request(&session.media, capabilities)?
+                        .ok()
+                        .map(|request| (&session.media, QueuedOperation::Upscale(request)))
+                })
+            }
+            Operation::Remux => self.state.remux.as_ref().and_then(|session| {
+                session
+                    .selection
+                    .validated_request(&session.media)
+                    .ok()
+                    .map(|request| (&session.media, QueuedOperation::Remux(request)))
+            }),
+            Operation::AudioExtract => self.state.audio_extract.as_ref().and_then(|session| {
+                session
+                    .selection
+                    .validated_request(&session.media)
+                    .ok()
+                    .map(|request| (&session.media, QueuedOperation::AudioExtract(request)))
+            }),
+            Operation::FrameCapture => self.state.frame_capture.as_ref().and_then(|session| {
+                session
+                    .selection
+                    .validated_request(&session.media)
+                    .ok()
+                    .map(|request| (&session.media, QueuedOperation::FrameCapture(request)))
+            }),
+        };
+        let Some((media, request)) = queued else {
+            return Ok(None);
+        };
+        self.core.queue.enqueue(media, request).map(Some)
+    }
+
+    pub(super) fn enqueue_from_ready_surface(&mut self, operation: Operation) {
+        let result = self.enqueue_current_operation(operation);
+        self.core.record_queue_submission(operation, result);
+    }
+}

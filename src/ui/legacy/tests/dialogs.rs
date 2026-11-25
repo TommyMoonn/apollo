@@ -711,7 +711,7 @@ fn batch_append_picker_respects_cancellation_and_original_batch_identity() {
 
     assert_eq!(app.batch_setup, before);
     assert!(app.core.source.error().is_none());
-    assert!(app.core.media_queue.jobs().is_empty());
+    assert!(app.core.queue.scheduler().jobs().is_empty());
     let selected_directory = directory.join("additional");
     fs::create_dir_all(&selected_directory).unwrap();
     let selected = selected_directory.join("additional.mkv");
@@ -806,7 +806,7 @@ fn output_dialogs_are_isolated_between_queue_batch_and_normal_drafts() {
         .unwrap()
         .unwrap();
     assert!(app.begin_queue_edit(job, QueueEditOrigin::SourceWorkspace));
-    let queue_request = editor_output_dialog_request(&app.queue_edit.as_ref().unwrap().editor);
+    let queue_request = editor_output_dialog_request(&app.core.queue_edit().unwrap().editor);
     let queue_target = queue_request.target();
     let queue_path = chosen_directory.join("queue.mp4");
     app.settle_file_dialog(FileDialogCompletion {
@@ -814,7 +814,7 @@ fn output_dialogs_are_isolated_between_queue_batch_and_normal_drafts() {
         outcome: DialogOutcome::Selected(queue_path.clone()),
     });
     assert_eq!(
-        app.queue_edit.as_ref().unwrap().audio_mix.output_path(),
+        app.core.queue_edit().unwrap().audio_mix.output_path(),
         queue_path
     );
     assert_eq!(
