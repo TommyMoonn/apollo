@@ -403,25 +403,6 @@ fn queue_edit_can_change_operation_with_atomic_same_id_replacement() {
 }
 
 #[test]
-fn app_shutdown_cancels_waiting_queue_work() {
-    let (directory, path) = temp_file("queue-shutdown");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::Remux);
-    app.enqueue_current_operation(Operation::Remux)
-        .unwrap()
-        .unwrap();
-
-    app.shutdown();
-
-    assert!(matches!(
-        app.core.queue.scheduler().jobs()[0].state(),
-        QueueJobState::Cancelled
-    ));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn enqueue_rejects_stale_source_and_preserves_workspace_until_reopened() {
     let (directory, path) = temp_file("stale-queue-admission");
     let mut app = app();

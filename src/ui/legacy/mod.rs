@@ -11,6 +11,7 @@ mod frame_capture;
 mod preferences;
 mod queue;
 mod render;
+mod shutdown;
 mod source;
 mod state;
 mod workflows;
@@ -32,6 +33,7 @@ pub struct ApolloApp {
     state: LegacyEditorState,
     queue_editor_presentation: Option<EditorPresentation>,
     confirm_cancel_queue: bool,
+    exit: shutdown::ExitPresentation,
     queue_frame_preview: Option<queue::QueueFramePreview>,
     batch_editor_presentation: Option<EditorPresentation>,
     batch_append_error_details_open: bool,
@@ -82,6 +84,7 @@ impl ApolloApp {
             state: LegacyEditorState::default(),
             queue_editor_presentation: None,
             confirm_cancel_queue: false,
+            exit: shutdown::ExitPresentation::Open,
             queue_frame_preview: None,
             batch_editor_presentation: None,
             batch_append_error_details_open: false,
@@ -118,6 +121,7 @@ impl ApolloApp {
         self.poll_copy_frame();
     }
 
+    // Defensive fallback only; normal close waits for settlement before Drop.
     fn shutdown(&mut self) {
         self.cancel_copy_frame_work();
         self.cancel_frame_capture_support();
@@ -133,8 +137,16 @@ impl Drop for ApolloApp {
 }
 
 impl eframe::App for ApolloApp {
+    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.handle_close_request(ctx);
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        self.show_root(ui);
+        if self.exit != shutdown::ExitPresentation::Open {
+            self.show_shutdown(ui);
+        } else {
+            self.show_root(ui);
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

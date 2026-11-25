@@ -202,7 +202,7 @@ impl Application {
     }
 
     pub(crate) fn poll_media_queue(&mut self, wake: impl FnMut() -> MediaProcessWake) {
-        let before = self.batch_setup.is_some().then(|| {
+        let before = (!self.is_closing() && self.batch_setup.is_some()).then(|| {
             (
                 self.queue.scheduler().pending_count(),
                 self.queue.scheduler().active_job(),
@@ -230,6 +230,9 @@ impl Application {
         wake: impl FnMut() -> MediaProcessWake,
     ) -> QueueEffect {
         use QueueEffect::*;
+        if self.is_closing() {
+            return Handled(false);
+        }
         if action != QueueAction::None {
             self.queue_action_error = None;
         }
@@ -430,7 +433,7 @@ impl Application {
     }
 
     pub(crate) fn select_queue_edit_tool(&mut self, operation: Operation) -> bool {
-        if !matches!(self.navigation(), NavigationState::QueueEdit { .. }) {
+        if self.is_closing() || !matches!(self.navigation(), NavigationState::QueueEdit { .. }) {
             return false;
         }
         let Some(edit) = self.queue_edit.as_mut() else {

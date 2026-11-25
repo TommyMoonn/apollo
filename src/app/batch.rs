@@ -489,7 +489,7 @@ impl Application {
     }
 
     pub(crate) fn enqueue_batch(&mut self) -> bool {
-        if self.navigation() != NavigationState::BatchSetup {
+        if self.is_closing() || self.navigation() != NavigationState::BatchSetup {
             return false;
         }
         let Some(batch) = self.batch_setup.as_mut() else {
@@ -651,6 +651,22 @@ impl Application {
             if let Some(item) = batch.items.iter_mut().find(|item| item.id == ids[index]) {
                 item.readiness = BatchReadiness::NeedsAttention;
                 item.reason = Some(message);
+            }
+        }
+    }
+
+    pub(crate) fn cancel_batch_inspection_for_shutdown(&self) {
+        if let Some(session) = &self.batch_inspection {
+            session.owner.request_cancel();
+        }
+    }
+
+    pub(crate) fn poll_batch_inspection_for_shutdown(&mut self) {
+        if let Some(session) = &mut self.batch_inspection {
+            // No more inspection results are applied to drafts during shutdown.
+            session.owner.poll();
+            if session.owner.is_complete() {
+                self.batch_inspection = None;
             }
         }
     }

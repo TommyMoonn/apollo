@@ -298,14 +298,16 @@ impl ApolloApp {
     }
 
     pub(super) fn file_intake_enabled(&self) -> bool {
-        !matches!(
-            self.core.navigation(),
-            crate::app::NavigationState::Queue {
-                origin: crate::app::QueueOrigin::BatchSetup
-            } | crate::app::NavigationState::QueueEdit {
-                origin: QueueEditOrigin::Queue(crate::app::QueueOrigin::BatchSetup)
-            }
-        ) && !self.core.source.is_inspecting()
+        !self.core.is_closing()
+            && !matches!(
+                self.core.navigation(),
+                crate::app::NavigationState::Queue {
+                    origin: crate::app::QueueOrigin::BatchSetup
+                } | crate::app::NavigationState::QueueEdit {
+                    origin: QueueEditOrigin::Queue(crate::app::QueueOrigin::BatchSetup)
+                }
+            )
+            && !self.core.source.is_inspecting()
             && !self.file_dialog.is_pending()
             && !self.copy_frame_active()
     }

@@ -5,6 +5,7 @@ mod dialogs;
 mod frame_capture;
 mod navigation;
 mod queue;
+mod shutdown;
 mod source;
 
 use std::{

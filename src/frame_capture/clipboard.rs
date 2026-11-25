@@ -259,6 +259,18 @@ impl CopyFrameExtractionOwner {
         Some(completion)
     }
 
+    /// Request cancellation but retain the process until its terminal notification.
+    pub(crate) fn request_cancel(&self) {
+        if let Some(active) = &self.active {
+            active.cancel();
+        }
+    }
+
+    pub(crate) fn poll_shutdown(&mut self) -> bool {
+        self.poll();
+        self.active.is_none()
+    }
+
     pub fn cancel(&mut self) -> bool {
         let Some(active) = self.active.take() else {
             return false;
@@ -424,6 +436,10 @@ impl CopyFrameWorker {
         })
     }
 
+    pub(crate) fn retire(&self) {
+        self.publication.retire();
+    }
+
     pub fn poll(&self) -> Option<Result<(), CopyFrameError>> {
         match self.receiver.try_recv() {
             Ok(result) => Some(result),
@@ -435,7 +451,7 @@ impl CopyFrameWorker {
 
 impl Drop for CopyFrameWorker {
     fn drop(&mut self) {
-        self.publication.retire();
+        self.retire();
     }
 }
 

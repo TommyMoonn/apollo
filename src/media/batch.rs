@@ -103,6 +103,10 @@ impl BatchInspectionOwner {
                         }
                         wake();
                     }
+                    // Cancellation may finish without producing a result. Drop the sender
+                    // before waking so the owner can observe disconnection.
+                    drop(sender);
+                    wake();
                 });
             if let Err(error) = spawned {
                 cancellation.store(true, Ordering::Release);
@@ -115,6 +119,10 @@ impl BatchInspectionOwner {
             cancellation,
             remaining,
         })
+    }
+
+    pub(crate) fn request_cancel(&self) {
+        self.cancellation.store(true, Ordering::Release);
     }
 
     pub fn poll(&mut self) -> Vec<BatchInspectionResult> {
@@ -142,7 +150,7 @@ impl BatchInspectionOwner {
 
 impl Drop for BatchInspectionOwner {
     fn drop(&mut self) {
-        self.cancellation.store(true, Ordering::Release);
+        self.request_cancel();
     }
 }
 

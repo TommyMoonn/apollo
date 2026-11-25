@@ -282,11 +282,13 @@ impl MediaOutput {
             MediaProcessState::Completed => {
                 let result = self.publish();
                 if result.is_ok() {
-                    // Successful publication relinquishes the staged name.
+                    // Publication relinquishes the staged name; never remove a later file there.
                     self.state = OutputState::Settled;
-                    let _ = remove_empty_staging_directory(&self.staging_directory);
+                    remove_empty_staging_directory(&self.staging_directory)?;
                 } else {
-                    self.finish_cleanup();
+                    // A failed publication must also report any failure to discard its staging.
+                    self.cleanup_owned_temporary_output()?;
+                    self.state = OutputState::Settled;
                 }
                 result
             }
@@ -296,12 +298,6 @@ impl MediaOutput {
                 Ok(MediaOutputDisposition::Discarded)
             }
             MediaProcessState::Running => unreachable!("running state rejected before settlement"),
-        }
-    }
-
-    fn finish_cleanup(&mut self) {
-        if self.cleanup_owned_temporary_output().is_ok() {
-            self.state = OutputState::Settled;
         }
     }
 

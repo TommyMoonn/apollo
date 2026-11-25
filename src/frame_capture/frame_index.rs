@@ -596,6 +596,18 @@ impl FrameIndexQueryOwner {
         Some(completion)
     }
 
+    /// Request cancellation but retain the process until its terminal notification.
+    pub(crate) fn request_cancel(&self) {
+        if let Some(active) = &self.active {
+            active.cancel();
+        }
+    }
+
+    pub(crate) fn poll_shutdown(&mut self) -> bool {
+        self.poll();
+        self.active.is_none()
+    }
+
     pub fn cancel(&mut self) -> bool {
         let Some(active) = self.active.take() else {
             return false;

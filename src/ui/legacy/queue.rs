@@ -157,6 +157,9 @@ impl ApolloApp {
         &mut self,
         operation: Operation,
     ) -> Result<Option<JobId>, QueueEnqueueError> {
+        if self.core.is_closing() {
+            return Ok(None);
+        }
         // Borrow each draft and its source directly; the queue owns the resulting immutable request.
         let queued = match operation {
             Operation::AudioMix => {

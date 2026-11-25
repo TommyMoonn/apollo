@@ -377,6 +377,32 @@ impl FrameCaptureEditorState {
 }
 
 impl FrameCaptureWork {
+    pub(crate) fn begin_shutdown(&mut self) {
+        self.frame_preview_extraction.request_cancel();
+        self.frame_index_query.request_cancel();
+        self.copy_frame_extraction.request_cancel();
+        if let Some(worker) = &self.copy_frame_worker {
+            worker.retire();
+        }
+        // Decode is read-only and cannot publish after its receiver is retired.
+        self.frame_preview_decode = None;
+    }
+
+    pub(crate) fn poll_shutdown(&mut self) -> bool {
+        let preview_settled = self.frame_preview_extraction.poll_shutdown();
+        let index_settled = self.frame_index_query.poll_shutdown();
+        let copy_settled = self.copy_frame_extraction.poll_shutdown();
+        // Discard extraction results rather than starting a new clipboard publication.
+        if self
+            .copy_frame_worker
+            .as_ref()
+            .is_some_and(|worker| worker.poll().is_some())
+        {
+            self.copy_frame_worker = None;
+        }
+        preview_settled && index_settled && copy_settled && self.copy_frame_worker.is_none()
+    }
+
     pub(crate) fn copy_active(&self) -> bool {
         self.copy_frame_extraction.is_active() || self.copy_frame_worker.is_some()
     }

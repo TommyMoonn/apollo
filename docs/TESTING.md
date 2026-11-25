@@ -55,7 +55,7 @@ For concurrency tests, hold work at a controlled boundary and release it explici
 
 For application and UI tests, drive lifecycle events with explicit timestamps or completion signals. Check interaction, selection, focus, clipping, non-overlap and reachability at narrow and normal widths; avoid exact paint snapshots, copied theme constants and incidental pixel geometry. Retain renderer-specific regressions until their replacement proves the same behavior.
 
-For filesystem and processing changes, verify that cancellation, output collisions, failed processes and stale results preserve existing files and cannot publish an incomplete result. Shared execution and process tests cover child and reader settlement, terminal notifications, bounded diagnostics and cleanup after owner disposal. Output tests cover publication failure and repeat settlement. The operation executor tests compare the staged launch arguments with the domain command builders; queue tests also exercise a destination removed after admission and preserve typed preparation failures. For queue changes, cover job transitions, numbered output publication and atomic batch insertion at their owning layer. Admission tests distinguish stale, missing and unrelated sources, reject unverifiable inspection identities and invalid requests, preserve equivalent paths, and check that rejected submissions consume no IDs or staging files.
+For filesystem and processing changes, verify that cancellation, output collisions, failed processes and stale results preserve existing files and cannot publish an incomplete result. Shared execution and process tests cover child and reader settlement, terminal notifications, bounded diagnostics and cleanup after owner disposal. Output tests cover publication failure and repeat settlement. Queue execution tests compare the staged launch arguments with the domain command builders; queue tests also exercise a destination removed after admission and preserve typed preparation failures. For queue changes, cover job transitions, numbered output publication and atomic batch insertion at their owning layer. Admission tests distinguish stale, missing and unrelated sources, reject unverifiable inspection identities and invalid requests, preserve equivalent paths, and check that rejected submissions consume no IDs or staging files.
 
 ## Real media tests
 
@@ -87,9 +87,13 @@ For queue changes, exercise empty and mixed-state queues, each job state and lon
 
 Also verify both queue-edit entry points with same-source duplicate jobs and different sources; Save and Cancel return to the correct origin; changing operation preserves the queued source; retained queued media opens without FFprobe; and successful single-item enqueue keeps its source workspace with `Added to queue` feedback and an updated pending count.
 
-For batch changes, exercise native multi-select, multi-file drop and Add files. Check repeated-source selection, shared defaults, Ready Override, Needs attention Review, inspection failures, Include/Exclude and atomic enqueue. Confirm that appending preserves existing state, each active inspection session never exceeds two concurrent probes, and failed or incompatible sources expose no inert actions.
+For batch changes, exercise native multi-select, multi-file drop and Add files. Check repeated-source selection, shared defaults, Ready, Edit settings, clickable Needs review diagnostics, inspection failures, Skip/Include and atomic enqueue. Confirm that appending preserves existing state, each active inspection session never exceeds two concurrent probes, and failed or incompatible sources expose no inert actions.
 
-Close the window during immediate and queued processing. Verify that the owned child exits, staging is removed and existing destination files remain intact. Exercise repeated queued destinations and existing files: verify numbered publication, the actual completed filename and unchanged original bytes. Also check invalid requests, changed or missing sources, and short and long diagnostics. Concise corrective guidance must remain visible without opening Details, while expanded diagnostics use only the required height up to the shared maximum.
+Use disposable media for the completed A02 acceptance pass. Exercise Process now (Save frame for Frame Capture), Add to queue, mixed batch submission, navigation, Start, Cancel job, Stop after current, Cancel queue, waiting reorder/removal, edit/retry, output actions, frame preview, clipboard and failure recovery across the five operations. Check that only the queue launches file-producing work and that reopening Apollo does not restore jobs.
+
+Close an empty queue and a queue with terminal-only history without a queue confirmation. With waiting or active work, including stopping or cancellation already in progress, dismiss the exit confirmation and verify that the queue and draft are retained. Confirm exit and verify that waiting jobs do not launch, the active child exits, its owned staging is removed and existing output bytes remain intact before the window disappears. Repeat close requests during settlement; the confirmation must not recur. Verify that a completion racing cancellation retains its published output and that cleanup failure is reported, not silently labelled Cancelled. Close while a native dialog, inspection or Frame Capture support worker is active and verify that no new work is started during shutdown. The automated shutdown tests exercise viewport commands and controlled process settlement; native Windows closure still requires this manual check. Forced OS termination is outside the graceful-close guarantee.
+
+Exercise repeated queued destinations and existing files: verify numbered publication, the actual completed filename and unchanged original bytes. Also check invalid requests, changed or missing sources, and short and long diagnostics. Concise corrective guidance must remain visible without opening Details, while expanded diagnostics use only the required height up to the shared maximum.
 
 For Upscale changes, exercise preset and custom sizing, CPU and both NVENC codecs where available, Auto fallback, explicit unavailable NVENC and supported or unsupported pixel formats. Check output dimensions and color metadata with FFprobe. Inspect representative output for visual regressions; metadata alone does not establish visual fidelity or full HDR preservation.
 
@@ -116,7 +120,7 @@ just test-media --media-dir 'C:/Media Tools' --require-nvenc
 
 The default pair location is `.scratch/dev-media`. The command copies the selected pair into disposable scratch space and uses the same production media acceptance harness. It does not modify the original media-tool directory, download a predecessor or touch installer registration. Generated fixtures are removed after the check. Both commands are outside `just verify`.
 
-For both portable and installed payloads, the harness uses Apollo's production discovery, probe, queue execution for Audio Mix and Remux, remaining feature executors and output publication with a one-second 320x180/two-audio-track source:
+For both portable and installed payloads, the harness uses Apollo's production discovery, probe, queue execution for all five file-producing operations, mixed-batch admission and output publication with a one-second 320x180/two-audio-track source:
 
 | Acceptance | Required result |
 | --- | --- |
@@ -126,6 +130,7 @@ For both portable and installed payloads, the harness uses Apollo's production d
 | Remux | MKV with the source stream-kind/codec inventory |
 | Audio Extract | Original MKA, AAC and FLAC, exactly one audio stream |
 | Frame Capture | PNG and JPEG at 500 ms, source dimensions, no audio |
+| Mixed batch | Atomic admission and sequential completion of Remux, Audio Extract and Frame Capture |
 | Real NVENC failure | Fresh child with `CUDA_VISIBLE_DEVICES=-1`; compiled encoders fail real probes, both Auto encodes resolve to CPU and complete; explicit NVENC refuses with the retained reason |
 
 This failure fixture uses the unmodified pinned binary. It proves no-device initialization failure handling, not behavior on a particular obsolete driver. Native-window interaction, image quality and full-length source coverage remain separate manual checks. Do not describe this command-level evidence as a rendered UI review.
