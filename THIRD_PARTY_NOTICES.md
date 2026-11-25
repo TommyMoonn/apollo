@@ -37,6 +37,15 @@ license file alone is not evidence that this review has been completed.
 
 ## Repository-embedded fonts
 
+### Geist Variable (Sans)
+
+- File: `assets/fonts/Geist-Variable.ttf` (local asset acquisition pending)
+- Pinned source package: `geist` version `1.7.2`, https://www.npmjs.com/package/geist/v/1.7.2
+- Upstream: https://github.com/vercel/geist-font
+- Copyright: Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font.git); created by Vercel in collaboration with Basement Studio.
+- License: `OFL-1.1`, see [SIL Open Font License 1.1](#sil-open-font-license-11).
+- SHA-256 and exact embedded font metadata must be recorded after acquisition and before release.
+
 ### IBM Plex Sans Regular
 
 - File: `assets/fonts/IBMPlexSans-Regular.ttf`
@@ -1240,7 +1249,7 @@ licensed under the Apache License, Version 2.0 <LICENSE-APACHE> or
 
 ### epaint_default_fonts bundled font notices
 
-`epaint_default_fonts 0.36.1` is part of the runtime dependency graph. Its package metadata is `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0`; Apollo uses Apache-2.0 for the crate code. The crate also embeds font resources carrying the following upstream notices. The OFL-1.1 text in this section also covers Apollo's repository-embedded IBM Plex Sans Regular and Fira Code Regular assets.
+`epaint_default_fonts 0.36.1` is part of the runtime dependency graph. Its package metadata is `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0`; Apollo uses Apache-2.0 for the crate code. The crate also embeds font resources carrying the following upstream notices. The OFL-1.1 text in this section also covers Apollo's repository-embedded Geist Variable, IBM Plex Sans Regular and Fira Code Regular assets.
 
 #### Hack font notice
 

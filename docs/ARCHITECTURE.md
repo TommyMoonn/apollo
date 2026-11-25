@@ -24,9 +24,11 @@ The GPUI migration is in progress. The initial window owns the existing `Applica
 
 The library exports the application core and UI modules through `src/lib.rs`. The native binary creates one GPUI root with exactly one core. The core does not import UI or native adapters. Keep operation policy in its domain module and use the shared media and queue owners. Views display state and collect input; repainting must not start probes or processing.
 
-The retained presentation modules have explicit migration owners: U01.2 replaces theme, layout, fonts and shared widgets; U01.3 replaces background wake and shutdown coordination; U01.4 replaces native-dialog routing and preferences; U01.5 and U01.6 replace intake and workspace navigation; U02 replaces queue presentation; U03–U05 replace operation forms and frame capture; U06 replaces batch presentation; U07 replaces settings presentation. Keep the existing regression tests until equivalent GPUI or core behavior tests cover their contracts.
+The retained presentation modules have explicit migration owners: U01.2 establishes GPUI theme, layout, fonts and shared controls without removing the retained egui consumers; U01.3 replaces background wake and shutdown coordination; U01.4 replaces native-dialog routing and preferences; U01.5 and U01.6 replace intake and workspace navigation; U02 replaces queue presentation; U03–U05 replace operation forms and frame capture; U06 replaces batch presentation; U07 replaces settings presentation. Keep the existing regression tests until equivalent GPUI or core behavior tests cover their contracts.
 
 ## Native GPUI foundation
+
+`src/ui/design.rs` owns GPUI color and geometry roles. `src/ui/components.rs` implements reusable stateless controls, and `src/ui/root.rs` composes the actual pending shell. The [UI design guide](DESIGN.md) defines their contracts. The older egui `theme`, `fonts`, `layout` and `widgets` modules remain solely for retained views and tests.
 
 The entry uses the official [`gpui` 0.2.2 release](https://docs.rs/crate/gpui/0.2.2), not a fork or moving Git ref. It requests a centered 730 × 489 logical-pixel window and a 400 × 260 minimum, with native chrome and title. The Win32 icon comes from the existing executable resource. No second renderer entry or feature switch is provided.
 

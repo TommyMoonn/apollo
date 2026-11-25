@@ -22,6 +22,8 @@ Rustup is the recommended way to install the pinned Rust toolchain. From the rep
 
 Apollo uses the official GPUI 0.2.2 crate with its Windows manifest feature. Linux GUI backends are not enabled; the application executable targets Windows x64. The existing Rust 1.97.1 pin is retained pending verification of the complete locked GPUI graph. The migration shell intentionally does not start media work until background and shutdown integration is in place.
 
+Before the first Windows build, ensure the pinned Geist Variable file is present as documented in [font assets](../assets/fonts/README.md). The [UI design guide](DESIGN.md) defines the shared presentation contracts.
+
 GPUI compiles HLSL shaders in release builds. Install a Windows SDK with x64 `fxc.exe`. If it is not discoverable by GPUI, set `GPUI_FXC_PATH` to its full path in your development shell. For example, to locate the newest installed SDK compiler:
 
 ```powershell

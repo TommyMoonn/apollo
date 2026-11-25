@@ -67,7 +67,7 @@ Prefer early returns and readable control flow. Write comments for invariants an
 
 ## Build a consistent, accessible interface
 
-Follow the current interface and the typography and layout guidance in [the architecture guide](docs/ARCHITECTURE.md). Reuse the shared controls, layout, theme and typography definitions in `src/ui/widgets.rs`, `src/ui/layout.rs`, `src/ui/theme.rs` and `src/ui/fonts.rs`.
+Follow [the UI design guide](docs/DESIGN.md). New GPUI views use `src/ui/design.rs` and `src/ui/components.rs`; the egui `widgets`, `layout`, `theme` and `fonts` modules serve only retained views and tests.
 
 Handle applicable loading, empty, error, success and cancellation states. Keep dimensions stable when feedback changes. Preserve keyboard access, visible focus, readable labels and appropriate hit areas. Follow the shared motion policy and keep animations restrained.
 

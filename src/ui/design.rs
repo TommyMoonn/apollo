@@ -1,0 +1,152 @@
+//! Semantic roles for GPUI. The retained egui views still use `theme` and `fonts`.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    pub background: u32,
+    pub foreground: u32,
+}
+
+impl Palette {
+    pub const DARK: Self = Self {
+        background: 0x000000ff,
+        foreground: 0xffffffff,
+    };
+    pub const LIGHT: Self = Self {
+        background: 0xffffffff,
+        foreground: 0x000000ff,
+    };
+
+    const fn ink(self, alpha: u8) -> u32 {
+        (self.foreground & 0xffffff00) | alpha as u32
+    }
+
+    pub const fn secondary(self) -> u32 {
+        self.ink(168)
+    }
+    pub const fn faint(self) -> u32 {
+        self.ink(122)
+    }
+    pub const fn separator(self) -> u32 {
+        self.ink(46)
+    }
+    pub const fn border(self) -> u32 {
+        self.ink(77)
+    }
+    pub const fn hover(self) -> u32 {
+        self.ink(14)
+    }
+    pub const fn pressed(self) -> u32 {
+        self.ink(28)
+    }
+    pub const fn disabled(self) -> u32 {
+        self.ink(87)
+    }
+    pub const fn primary_hover(self) -> u32 {
+        self.ink(224)
+    }
+    pub const fn primary_pressed(self) -> u32 {
+        self.ink(194)
+    }
+}
+
+pub const DESTRUCTIVE_BORDER: u32 = 0x7e3030ff;
+pub const FONT_FAMILY: &str = "Geist";
+pub const SPINNER_CYCLE_MS: u64 = 900;
+
+/// Logical pixels; GPUI handles display scaling. Text-scale preferences arrive in U07.
+#[derive(Clone, Copy, Debug)]
+pub struct Metrics {
+    pub inset: f32,
+    pub tight: f32,
+    pub compact: f32,
+    pub related: f32,
+    pub focal: f32,
+    pub section: f32,
+    pub spacious: f32,
+    pub action_inset: f32,
+    pub action_gap: f32,
+    pub primary_height: f32,
+    pub compact_height: f32,
+    pub row_height: f32,
+    pub radius: f32,
+    pub rule: f32,
+    pub focus_width: f32,
+    pub focus_offset: f32,
+    pub body: f32,
+    pub secondary: f32,
+    pub title: f32,
+}
+
+pub const METRICS: Metrics = Metrics {
+    inset: 28.,
+    tight: 4.,
+    compact: 7.,
+    related: 11.,
+    focal: 18.,
+    section: 24.,
+    spacious: 40.,
+    action_inset: 10.,
+    action_gap: 8.,
+    primary_height: 31.,
+    compact_height: 30.,
+    row_height: 34.,
+    radius: 4.,
+    rule: 1.,
+    focus_width: 2.,
+    focus_offset: 2.,
+    body: 14.,
+    secondary: 12.,
+    title: 20.,
+};
+
+pub const SURFACE_MOTION_MS: u64 = 120;
+pub const DETAIL_MOTION_MS: u64 = 110;
+pub const HOVER_MOTION_MS: u64 = 85;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luminance(value: f64) -> f64 {
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn composite(ink: u32, background: u32) -> f64 {
+        let alpha = f64::from(ink & 255) / 255.;
+        let gray = |color: u32| f64::from((color >> 24) & 255) / 255.;
+        luminance(gray(ink) * alpha + gray(background) * (1. - alpha))
+    }
+
+    #[test]
+    fn essential_labels_keep_normal_text_contrast_in_both_palettes() {
+        for palette in [Palette::DARK, Palette::LIGHT] {
+            let background = composite(palette.background, palette.background);
+            let contrast = |a: f64, b: f64| (a.max(b) + 0.05) / (a.min(b) + 0.05);
+            assert!(
+                contrast(
+                    composite(palette.secondary(), palette.background),
+                    background
+                ) >= 4.5
+            );
+            for fill in [palette.background, palette.hover(), palette.pressed()] {
+                assert!(
+                    contrast(
+                        composite(palette.foreground, palette.background),
+                        composite(fill, palette.background)
+                    ) >= 4.5
+                );
+            }
+            for fill in [
+                palette.foreground,
+                palette.primary_hover(),
+                palette.primary_pressed(),
+            ] {
+                assert!(contrast(composite(fill, palette.background), background) >= 4.5);
+            }
+        }
+    }
+}

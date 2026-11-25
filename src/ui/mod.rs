@@ -1,6 +1,9 @@
 pub mod audio_extract;
 pub mod audio_mix;
 pub mod batch;
+#[cfg(windows)]
+pub mod components;
+pub mod design;
 pub mod file_intake;
 pub mod fonts;
 pub mod frame_capture;
