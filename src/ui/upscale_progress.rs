@@ -79,7 +79,9 @@ pub fn show(
 
     match execution_state {
         UpscaleExecutionState::Idle => UpscaleLifecycleAction::None,
-        UpscaleExecutionState::Running => show_running(ui, request, progress.as_ref(), executor),
+        UpscaleExecutionState::Running { output } => {
+            show_running(ui, request, &output, progress.as_ref(), executor)
+        }
         UpscaleExecutionState::Completed { output } => {
             show_completed(ui, media, request, &output, executor, ui_state)
         }
@@ -91,13 +93,14 @@ pub fn show(
 fn show_running(
     ui: &mut Ui,
     request: &UpscaleRequest,
+    output: &std::path::Path,
     progress: Option<&MediaProgress>,
     executor: &UpscaleExecutor,
 ) -> UpscaleLifecycleAction {
     let mut action = UpscaleLifecycleAction::None;
     let presentation = progress_presentation(progress);
     let title = running_title(request);
-    let path_summary = source_to_output(&request.input, &request.output);
+    let path_summary = source_to_output(&request.input, output);
 
     layout::focus_content(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -290,13 +293,19 @@ mod tests {
         let executor = UpscaleExecutor::new();
 
         let mut output = render_test_ui_with_fonts(|ui| {
-            let _ = show_running(ui, &request, Some(&progress), &executor);
+            let _ = show_running(
+                ui,
+                &request,
+                &request.output.with_file_name("recording-4k (1).mp4"),
+                Some(&progress),
+                &executor,
+            );
         });
         output.textures_delta.clear();
 
         for text in [
             "Upscaling to 4K",
-            "recording.mkv → recording-4k.mp4",
+            "recording.mkv → recording-4k (1).mp4",
             "Processing",
             "61%",
             "00:37 / 01:01",

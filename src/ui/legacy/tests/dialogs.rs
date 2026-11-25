@@ -443,7 +443,9 @@ fn output_completion_cannot_mutate_selection_after_execution_starts() {
     settle_output_file_dialog(
         &mut app.state,
         ToolExecutionStates {
-            audio_mix: &AudioMixExecutionState::Running,
+            audio_mix: &AudioMixExecutionState::Running {
+                output: PathBuf::from("output.mp4"),
+            },
             upscale: &UpscaleExecutionState::Idle,
             remux: &RemuxExecutionState::Idle,
             audio_extract: &AudioExtractExecutionState::Idle,
@@ -471,7 +473,9 @@ fn output_completion_cannot_mutate_selection_after_execution_starts() {
         &mut app.state,
         ToolExecutionStates {
             audio_mix: &AudioMixExecutionState::Idle,
-            upscale: &UpscaleExecutionState::Running,
+            upscale: &UpscaleExecutionState::Running {
+                output: PathBuf::from("output.mp4"),
+            },
             remux: &RemuxExecutionState::Idle,
             audio_extract: &AudioExtractExecutionState::Idle,
             frame_capture: &FrameCaptureExecutionState::Idle,
@@ -501,7 +505,9 @@ fn output_completion_cannot_mutate_selection_after_execution_starts() {
             audio_mix: &AudioMixExecutionState::Idle,
             upscale: &UpscaleExecutionState::Idle,
             remux: &RemuxExecutionState::Idle,
-            audio_extract: &AudioExtractExecutionState::Running,
+            audio_extract: &AudioExtractExecutionState::Running {
+                output: PathBuf::from("output.mp4"),
+            },
             frame_capture: &FrameCaptureExecutionState::Idle,
         },
         DialogTarget::AudioExtractOutput {
@@ -535,7 +541,9 @@ fn output_completion_cannot_mutate_selection_after_execution_starts() {
             upscale: &UpscaleExecutionState::Idle,
             remux: &RemuxExecutionState::Idle,
             audio_extract: &AudioExtractExecutionState::Idle,
-            frame_capture: &FrameCaptureExecutionState::Running,
+            frame_capture: &FrameCaptureExecutionState::Running {
+                output: PathBuf::from("output.mp4"),
+            },
         },
         DialogTarget::FrameCaptureOutput {
             session_id: capture_id,

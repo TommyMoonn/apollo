@@ -68,7 +68,7 @@ impl QueueSummary {
         for job in jobs {
             match job.state() {
                 QueueJobState::Waiting => summary.waiting += 1,
-                QueueJobState::Running => summary.running += 1,
+                QueueJobState::Running { .. } => summary.running += 1,
                 QueueJobState::Completed { .. } => summary.completed += 1,
                 QueueJobState::Failed(_) => summary.failed += 1,
                 QueueJobState::Cancelled => summary.cancelled += 1,
@@ -449,7 +449,7 @@ fn show_identity(ui: &mut Ui, job: &QueuedJob) {
         &job.media().path,
     );
     let output = match job.state() {
-        QueueJobState::Completed { output } => output.as_path(),
+        QueueJobState::Running { output } | QueueJobState::Completed { output } => output.as_path(),
         _ => job.operation().output(),
     };
     let _ = widgets::truncated_identity(
@@ -592,7 +592,7 @@ fn file_name(path: &Path) -> String {
 fn state_label(state: &QueueJobState) -> &'static str {
     match state {
         QueueJobState::Waiting => "Waiting",
-        QueueJobState::Running => "Running",
+        QueueJobState::Running { .. } => "Running",
         QueueJobState::Completed { .. } => "Completed",
         QueueJobState::Failed(_) => "Failed",
         QueueJobState::Cancelled => "Cancelled",
@@ -605,7 +605,7 @@ fn bound_active_progress<'a>(
     active_job: Option<JobId>,
     active_progress: Option<&'a MediaProgress>,
 ) -> Option<Option<&'a MediaProgress>> {
-    (active_job == Some(job_id) && matches!(state, QueueJobState::Running))
+    (active_job == Some(job_id) && matches!(state, QueueJobState::Running { .. }))
         .then_some(active_progress)
 }
 
@@ -806,22 +806,20 @@ mod tests {
         };
         let first = JobId::new(1);
         let second = JobId::new(2);
+        let running = QueueJobState::Running {
+            output: PathBuf::from("output.mkv"),
+        };
 
         assert_eq!(
-            bound_active_progress(first, &QueueJobState::Running, Some(first), Some(&progress)),
+            bound_active_progress(first, &running, Some(first), Some(&progress)),
             Some(Some(&progress))
         );
         assert_eq!(
-            bound_active_progress(first, &QueueJobState::Running, Some(first), None),
+            bound_active_progress(first, &running, Some(first), None),
             Some(None)
         );
         assert_eq!(
-            bound_active_progress(
-                second,
-                &QueueJobState::Running,
-                Some(first),
-                Some(&progress)
-            ),
+            bound_active_progress(second, &running, Some(first), Some(&progress)),
             None
         );
         assert_eq!(
@@ -838,7 +836,9 @@ mod tests {
     #[test]
     fn queue_summary_classifies_each_job_state_without_a_finished_bucket() {
         let (directory, mut jobs) = waiting_jobs(5);
-        jobs[0].set_state(QueueJobState::Running);
+        jobs[0].set_state(QueueJobState::Running {
+            output: directory.join("active (1).mkv"),
+        });
         jobs[1].set_state(QueueJobState::Completed {
             output: directory.join("nice portal-2.mkv"),
         });
@@ -866,7 +866,9 @@ mod tests {
         assert!(has_row_actions(&QueueJobState::Completed {
             output: PathBuf::from("output.mkv")
         }));
-        assert!(!has_row_actions(&QueueJobState::Running));
+        assert!(!has_row_actions(&QueueJobState::Running {
+            output: PathBuf::from("output.mkv")
+        }));
         assert!(!has_row_actions(&QueueJobState::Failed(
             QueueJobFailure::SourceChanged
         )));
@@ -1054,7 +1056,9 @@ mod tests {
     #[test]
     fn populated_running_queue_retains_back_beside_process_controls() {
         let (directory, mut jobs) = waiting_jobs(6);
-        jobs[0].set_state(QueueJobState::Running);
+        jobs[0].set_state(QueueJobState::Running {
+            output: directory.join("active (1).mkv"),
+        });
         let completed_output = directory.join("result (1).mkv");
         jobs[3].set_state(QueueJobState::Completed {
             output: completed_output,
@@ -1081,10 +1085,12 @@ mod tests {
         let cancel_current = output_text_rect(&output, CANCEL_LABEL).unwrap();
         let stop = output_text_rect(&output, STOP_AFTER_CURRENT_LABEL).unwrap();
         let cancel_queue = output_text_rect(&output, CANCEL_QUEUE_LABEL).unwrap();
+        let running_name_visible = output_text_rect(&output, "→ active (1).mkv").is_some();
         let published_name_visible = output_text_rect(&output, "→ result (1).mkv").is_some();
         let requested_name_visible = output_text_rect(&output, "→ nice portal-4.mkv").is_some();
         output.textures_delta.clear();
 
+        assert!(running_name_visible);
         assert!(published_name_visible);
         assert!(!requested_name_visible);
         assert_eq!(back.top(), cancel_current.top());

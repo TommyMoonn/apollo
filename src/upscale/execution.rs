@@ -285,7 +285,12 @@ mod tests {
             .unwrap();
 
         assert!(executor.is_running());
-        assert_eq!(executor.state(), &UpscaleExecutionState::Running);
+        assert_eq!(
+            executor.state(),
+            &UpscaleExecutionState::Running {
+                output: request.output.clone()
+            }
+        );
         let args = observed_args.lock().unwrap();
         assert!(args.windows(2).any(|pair| {
             pair == [
@@ -356,9 +361,11 @@ mod tests {
     }
 
     #[test]
-    fn successful_process_publishes_final_output() {
+    fn successful_process_publishes_running_output_name() {
         let directory = TestDirectory::new("success-publishes");
         let (request, media) = valid_request_and_media(&directory);
+        fs::write(&request.output, b"existing output").unwrap();
+        let actual_output = directory.path().join("upscaled (1).mp4");
         let tools = fake_tools(&directory);
         let process = FakeProcessControl::running();
         let process_handle = process.clone();
@@ -367,16 +374,24 @@ mod tests {
         executor
             .start_with_launcher(&tools, &media, &request, |_| Ok(process))
             .unwrap();
+        assert_eq!(
+            executor.state(),
+            &UpscaleExecutionState::Running {
+                output: actual_output.clone()
+            }
+        );
+        assert!(!actual_output.exists());
         write_temporary_output(&executor, b"complete upscale");
         process_handle.set_state(MediaProcessState::Completed);
 
         assert_eq!(
             executor.poll(),
             &UpscaleExecutionState::Completed {
-                output: request.output.clone(),
+                output: actual_output.clone(),
             }
         );
-        assert_eq!(fs::read(&request.output).unwrap(), b"complete upscale");
+        assert_eq!(fs::read(&request.output).unwrap(), b"existing output");
+        assert_eq!(fs::read(actual_output).unwrap(), b"complete upscale");
         assert!(!executor.is_running());
     }
 
@@ -468,7 +483,12 @@ mod tests {
             .unwrap();
         progress_handle.push_progress(["frame=240", "out_time_us=2500000", "progress=continue"]);
 
-        assert_eq!(executor.poll(), &UpscaleExecutionState::Running);
+        assert_eq!(
+            executor.poll(),
+            &UpscaleExecutionState::Running {
+                output: request.output.clone()
+            }
+        );
         let progress = executor.progress().expect("progress snapshot");
         assert_eq!(progress.processed, Some(Duration::from_millis(2_500)));
         assert_eq!(progress.total, media.duration);

@@ -25,7 +25,7 @@ pub enum MediaExecutionFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaExecutionState {
     Idle,
-    Running,
+    Running { output: PathBuf },
     Completed { output: PathBuf },
     Failed(MediaExecutionFailure),
     Cancelled,
@@ -33,7 +33,7 @@ pub enum MediaExecutionState {
 
 impl MediaExecutionState {
     pub fn is_running(&self) -> bool {
-        matches!(self, Self::Running)
+        matches!(self, Self::Running { .. })
     }
 
     pub fn is_terminal(&self) -> bool {
@@ -147,13 +147,15 @@ impl MediaExecution {
 
         let (output, command, duration) = operation.into_parts();
         let process = launcher(command).map_err(MediaExecutionStartError::Process)?;
+        self.state = MediaExecutionState::Running {
+            output: output.final_path().to_path_buf(),
+        };
         self.operation = Some(RunningMediaOperation {
             process: Box::new(process),
             output,
             progress_parser: MediaProgressParser::new(duration),
             progress: None,
         });
-        self.state = MediaExecutionState::Running;
         Ok(())
     }
 

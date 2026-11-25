@@ -18,7 +18,7 @@ use super::{
     layout, media_error,
     media_lifecycle::{
         file_name, heading, output_parent, progress_presentation, right_aligned_actions,
-        secondary_copy, show_progress, source_to_output as source_to_output_paths, technical_faint,
+        secondary_copy, show_progress, source_to_output, technical_faint,
     },
     theme, widgets,
 };
@@ -76,7 +76,9 @@ pub fn show(
 
     match execution_state {
         AudioMixExecutionState::Idle => AudioMixLifecycleAction::None,
-        AudioMixExecutionState::Running => show_running(ui, request, progress.as_ref(), executor),
+        AudioMixExecutionState::Running { output } => {
+            show_running(ui, request, &output, progress.as_ref(), executor)
+        }
         AudioMixExecutionState::Completed { output } => {
             show_completed(ui, media, request, &output, executor, ui_state)
         }
@@ -90,12 +92,13 @@ pub fn show(
 fn show_running(
     ui: &mut Ui,
     request: &AudioMixRequest,
+    output: &std::path::Path,
     progress: Option<&MediaProgress>,
     executor: &AudioMixExecutor,
 ) -> AudioMixLifecycleAction {
     let mut action = AudioMixLifecycleAction::None;
     let presentation = progress_presentation(progress);
-    let path_summary = source_to_output(request);
+    let path_summary = source_to_output(&request.input, output);
 
     layout::focus_content(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -242,10 +245,6 @@ fn show_cancelled(
     action
 }
 
-fn source_to_output(request: &AudioMixRequest) -> String {
-    source_to_output_paths(&request.input, &request.output)
-}
-
 fn video_copy_summary(media: &MediaFile) -> Option<String> {
     let video = media.video_streams.first()?;
     match (video.width, video.height) {
@@ -271,7 +270,7 @@ mod tests {
 
     use crate::{
         audio_mix::{
-            execution::AudioMixExecutionFailure,
+            execution::{AudioMixExecutionFailure, AudioMixExecutor},
             model::{AudioMixRequest, LoudnessNormalization, OutputContainer, SelectedAudioTrack},
         },
         media::{
@@ -283,7 +282,7 @@ mod tests {
 
     use super::{
         AudioMixLifecycleUiState, failure_content, failure_error, mixed_audio_summary,
-        progress_presentation, source_to_output, video_copy_summary,
+        progress_presentation, show_running, video_copy_summary,
     };
     use crate::ui::media_lifecycle::{format_duration, format_integer};
 
@@ -533,13 +532,34 @@ mod tests {
     }
 
     #[test]
-    fn running_source_to_output_uses_file_names_only() {
+    fn running_view_renders_selected_output_name() {
         let request = request();
-
-        assert_eq!(
-            source_to_output(&request),
-            "recording.mkv → recording-mixed.mp4"
-        );
+        let destination = request.output.with_file_name("recording-mixed (1).mp4");
+        let executor = AudioMixExecutor::new();
+        let context = egui::Context::default();
+        crate::ui::fonts::install(&context);
+        crate::ui::theme::install(&context);
+        let mut output = context.run_ui(Default::default(), |ui| {
+            let _ = show_running(ui, &request, &destination, None, &executor);
+        });
+        output.textures_delta.clear();
+        let mut shapes = output
+            .shapes
+            .iter()
+            .map(|clipped| &clipped.shape)
+            .collect::<Vec<_>>();
+        let mut found = false;
+        while let Some(shape) = shapes.pop() {
+            match shape {
+                egui::Shape::Text(text) => {
+                    assert_ne!(text.galley.job.text, "recording.mkv → recording-mixed.mp4");
+                    found |= text.galley.job.text == "recording.mkv → recording-mixed (1).mp4";
+                }
+                egui::Shape::Vec(children) => shapes.extend(children),
+                _ => {}
+            }
+        }
+        assert!(found);
     }
 
     #[test]

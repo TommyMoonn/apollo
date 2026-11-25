@@ -308,18 +308,18 @@ impl MediaQueue {
             return;
         };
 
-        let execution_state = self.execution.poll().clone();
-        if matches!(execution_state, MediaExecutionState::Running) {
+        let execution_state = self.execution.poll();
+        if execution_state.is_running() {
             return;
         }
 
-        let terminal_state = match execution_state {
+        let terminal_state = match execution_state.clone() {
             MediaExecutionState::Completed { output } => QueueJobState::Completed { output },
             MediaExecutionState::Failed(error) => {
                 QueueJobState::Failed(QueueJobFailure::Execution(error))
             }
             MediaExecutionState::Cancelled => QueueJobState::Cancelled,
-            MediaExecutionState::Idle | MediaExecutionState::Running => {
+            MediaExecutionState::Idle | MediaExecutionState::Running { .. } => {
                 unreachable!("an active queue job must own a non-idle media execution")
             }
         };
@@ -380,7 +380,12 @@ impl MediaQueue {
                 .start_prepared_with_launcher(prepared, |command| launcher(job_id, command))
             {
                 Ok(()) => {
-                    self.jobs[index].set_state(QueueJobState::Running);
+                    let MediaExecutionState::Running { output } = self.execution.state() else {
+                        unreachable!("successful launch must own a running execution");
+                    };
+                    self.jobs[index].set_state(QueueJobState::Running {
+                        output: output.clone(),
+                    });
                     self.active_job = Some(job_id);
                     return;
                 }
@@ -828,10 +833,18 @@ mod tests {
             (ids[0], second_process, b"second".as_slice(), 2),
         ] {
             assert_eq!(queue.active_job(), Some(id));
+            let actual = directory.path().join(format!("result ({suffix}).mkv"));
+            let job = queue.jobs().iter().find(|job| job.id() == id).unwrap();
+            assert_eq!(
+                job.state(),
+                &QueueJobState::Running {
+                    output: actual.clone()
+                }
+            );
+            assert!(!actual.exists());
             fs::write(queue.temporary_output_path().unwrap(), bytes).unwrap();
             process.set_state(MediaProcessState::Completed);
             queue.poll_with_launcher(&tools(&directory), &mut launcher);
-            let actual = directory.path().join(format!("result ({suffix}).mkv"));
             assert_eq!(
                 queue
                     .jobs()
@@ -899,7 +912,10 @@ mod tests {
             assert_eq!(queue.active_job(), Some(second));
             assert_eq!(launches.load(Ordering::Relaxed), 2);
             assert!(queue.jobs()[0].state().is_terminal());
-            assert!(matches!(queue.jobs()[1].state(), QueueJobState::Running));
+            assert!(matches!(
+                queue.jobs()[1].state(),
+                QueueJobState::Running { .. }
+            ));
         }
     }
 
@@ -1173,7 +1189,9 @@ mod tests {
         });
         queue.jobs[1].set_state(QueueJobState::Cancelled);
         queue.jobs[2].set_state(QueueJobState::Failed(QueueJobFailure::SourceChanged));
-        queue.jobs[3].set_state(QueueJobState::Running);
+        queue.jobs[3].set_state(QueueJobState::Running {
+            output: directory.path().join("output-3.mkv"),
+        });
 
         assert_eq!(queue.pending_count(), 2);
         assert_eq!(queue.clear_disposable_history(), 2);
@@ -1182,7 +1200,10 @@ mod tests {
             queue.jobs()[0].state(),
             QueueJobState::Failed(QueueJobFailure::SourceChanged)
         ));
-        assert!(matches!(queue.jobs()[1].state(), QueueJobState::Running));
+        assert!(matches!(
+            queue.jobs()[1].state(),
+            QueueJobState::Running { .. }
+        ));
         assert!(matches!(queue.jobs()[2].state(), QueueJobState::Waiting));
         assert_eq!(queue.pending_count(), 2);
 

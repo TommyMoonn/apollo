@@ -72,8 +72,8 @@ pub fn show(
 
     match execution_state {
         AudioExtractExecutionState::Idle => AudioExtractLifecycleAction::None,
-        AudioExtractExecutionState::Running => {
-            show_running(ui, request, progress.as_ref(), executor)
+        AudioExtractExecutionState::Running { output } => {
+            show_running(ui, request, &output, progress.as_ref(), executor)
         }
         AudioExtractExecutionState::Completed { output } => {
             show_completed(ui, request, &output, executor, ui_state)
@@ -88,12 +88,13 @@ pub fn show(
 fn show_running(
     ui: &mut Ui,
     request: &AudioExtractRequest,
+    output: &Path,
     progress: Option<&MediaProgress>,
     executor: &AudioExtractExecutor,
 ) -> AudioExtractLifecycleAction {
     let mut action = AudioExtractLifecycleAction::None;
     let presentation = progress_presentation(progress);
-    let path_summary = source_to_output(&request.input, &request.output);
+    let path_summary = source_to_output(&request.input, output);
     layout::focus_content(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         heading(ui, RUNNING_TITLE);
@@ -244,12 +245,18 @@ mod tests {
         let request = request(AudioExtractFormat::Aac);
         let executor = AudioExtractExecutor::new();
         let mut running = render(|ui| {
-            let _ = show_running(ui, &request, None, &executor);
+            let _ = show_running(
+                ui,
+                &request,
+                &request.output.with_file_name("recording-audio (1).m4a"),
+                None,
+                &executor,
+            );
         });
         running.textures_delta.clear();
         for text in [
             "Extracting audio",
-            "recording.mkv → recording-audio.m4a",
+            "recording.mkv → recording-audio (1).m4a",
             "Processing",
             "Cancel",
         ] {

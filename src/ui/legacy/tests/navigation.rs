@@ -140,7 +140,9 @@ fn close_source_returns_to_true_empty_intake() {
 #[test]
 fn running_and_terminal_operation_states_hide_workspace_chrome() {
     let non_ready_states = [
-        AudioMixExecutionState::Running,
+        AudioMixExecutionState::Running {
+            output: PathBuf::from("output.mp4"),
+        },
         AudioMixExecutionState::Completed {
             output: PathBuf::from("finished.mp4"),
         },
@@ -436,7 +438,9 @@ fn file_drop_policy_disables_replacement_while_any_operation_runs() {
         &FrameCaptureExecutionState::Idle,
     ));
     assert!(!file_intake_enabled(
-        &AudioMixExecutionState::Running,
+        &AudioMixExecutionState::Running {
+            output: PathBuf::from("output.mp4")
+        },
         &UpscaleExecutionState::Idle,
         &RemuxExecutionState::Idle,
         &AudioExtractExecutionState::Idle,
@@ -444,7 +448,9 @@ fn file_drop_policy_disables_replacement_while_any_operation_runs() {
     ));
     assert!(!file_intake_enabled(
         &AudioMixExecutionState::Idle,
-        &UpscaleExecutionState::Running,
+        &UpscaleExecutionState::Running {
+            output: PathBuf::from("output.mp4")
+        },
         &RemuxExecutionState::Idle,
         &AudioExtractExecutionState::Idle,
         &FrameCaptureExecutionState::Idle,
@@ -452,7 +458,9 @@ fn file_drop_policy_disables_replacement_while_any_operation_runs() {
     assert!(!file_intake_enabled(
         &AudioMixExecutionState::Idle,
         &UpscaleExecutionState::Idle,
-        &RemuxExecutionState::Running,
+        &RemuxExecutionState::Running {
+            output: PathBuf::from("output.mp4")
+        },
         &AudioExtractExecutionState::Idle,
         &FrameCaptureExecutionState::Idle,
     ));
@@ -460,7 +468,9 @@ fn file_drop_policy_disables_replacement_while_any_operation_runs() {
         &AudioMixExecutionState::Idle,
         &UpscaleExecutionState::Idle,
         &RemuxExecutionState::Idle,
-        &AudioExtractExecutionState::Running,
+        &AudioExtractExecutionState::Running {
+            output: PathBuf::from("output.mp4")
+        },
         &FrameCaptureExecutionState::Idle,
     ));
     assert!(!file_intake_enabled(
@@ -468,7 +478,9 @@ fn file_drop_policy_disables_replacement_while_any_operation_runs() {
         &UpscaleExecutionState::Idle,
         &RemuxExecutionState::Idle,
         &AudioExtractExecutionState::Idle,
-        &FrameCaptureExecutionState::Running,
+        &FrameCaptureExecutionState::Running {
+            output: PathBuf::from("output.mp4")
+        },
     ));
 }
 

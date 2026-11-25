@@ -161,7 +161,7 @@ impl std::error::Error for QueueJobFailure {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueJobState {
     Waiting,
-    Running,
+    Running { output: std::path::PathBuf },
     Completed { output: std::path::PathBuf },
     Failed(QueueJobFailure),
     Cancelled,
@@ -169,7 +169,7 @@ pub enum QueueJobState {
 
 impl QueueJobState {
     pub fn is_pending(&self) -> bool {
-        matches!(self, Self::Waiting | Self::Running)
+        matches!(self, Self::Waiting | Self::Running { .. })
     }
 
     pub fn is_terminal(&self) -> bool {

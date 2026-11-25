@@ -94,6 +94,8 @@ impl std::error::Error for MediaOutputError {}
 
 #[derive(Debug)]
 pub struct MediaOutput {
+    requested_path: PathBuf,
+    suffix: u64,
     final_path: PathBuf,
     temporary_path: PathBuf,
     staging_directory: PathBuf,
@@ -157,11 +159,22 @@ fn validated_output_destination(
 impl MediaOutput {
     pub fn prepare(output: &Path) -> Result<Self, MediaOutputError> {
         let destination = validated_output_destination(output)?;
+        // Choose the name once at execution start for progress presentation. This is advisory:
+        // if inspection fails or another writer claims the name, publication remains authoritative.
+        let requested_path = destination.final_path;
+        let mut final_path = requested_path.clone();
+        let mut suffix = 0;
+        while fs::symlink_metadata(&final_path).is_ok() {
+            suffix += 1;
+            final_path = numbered_output_path(&requested_path, suffix);
+        }
         let staging_directory = create_staging_directory(&destination.parent)?;
         let temporary_path = staging_directory.join(&destination.file_name);
 
         Ok(Self {
-            final_path: destination.final_path,
+            requested_path,
+            suffix,
+            final_path,
             temporary_path,
             staging_directory,
             settled: false,
@@ -214,14 +227,13 @@ impl MediaOutput {
             ));
         }
 
-        // The filesystem decides whether each name is available. Never check then replace:
-        // another process could create the destination between those operations.
+        // Begin with the name shown during execution. Only the no-replace move can claim it.
         let mut candidate = self.final_path.clone();
-        for index in 1_u64.. {
+        for index in self.suffix + 1.. {
             match publish_file_no_replace(&self.temporary_path, &candidate) {
                 Ok(()) => break,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    candidate = numbered_output_path(&self.final_path, index);
+                    candidate = numbered_output_path(&self.requested_path, index);
                 }
                 Err(error) => {
                     return Err(MediaOutputError::PublishFailed {
@@ -705,6 +717,7 @@ mod tests {
         fs::write(&output, b"original source or existing output").unwrap();
         let mut prepared = MediaOutput::prepare(&output).unwrap();
         fs::write(prepared.temporary_path(), b"complete").unwrap();
+        assert_eq!(prepared.final_path(), first);
         // Occupy the first suffix after preparation, not before.
         fs::write(&first, b"concurrent owner").unwrap();
         assert_eq!(
@@ -718,6 +731,18 @@ mod tests {
         assert_eq!(fs::read(&first).unwrap(), b"concurrent owner");
         assert_eq!(fs::read(&second).unwrap(), b"complete");
         assert!(!prepared.temporary_path().exists());
+
+        let mut next = MediaOutput::prepare(&output).unwrap();
+        let third = directory.path().join("movie final (3).mp4");
+        assert_eq!(next.final_path(), third);
+        fs::remove_file(&first).unwrap();
+        fs::write(next.temporary_path(), b"next complete").unwrap();
+        assert_eq!(
+            next.settle(&MediaProcessState::Completed).unwrap(),
+            MediaOutputDisposition::Published(third.clone())
+        );
+        assert_eq!(fs::read(third).unwrap(), b"next complete");
+        assert!(!first.exists());
     }
 
     #[cfg(unix)]
@@ -731,6 +756,7 @@ mod tests {
         let mut prepared = MediaOutput::prepare(&output).unwrap();
         fs::write(prepared.temporary_path(), b"complete").unwrap();
         let numbered = directory.path().join("result (1).mp4");
+        assert_eq!(prepared.final_path(), numbered);
         assert_eq!(
             prepared.settle(&MediaProcessState::Completed).unwrap(),
             MediaOutputDisposition::Published(numbered.clone())

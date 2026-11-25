@@ -256,7 +256,12 @@ mod tests {
             .unwrap();
 
         assert!(executor.is_running());
-        assert_eq!(executor.state(), &RemuxExecutionState::Running);
+        assert_eq!(
+            executor.state(),
+            &RemuxExecutionState::Running {
+                output: request.output.clone()
+            }
+        );
         let args = observed_args.lock().unwrap();
         assert!(args.windows(2).any(|pair| pair == ["-map", "0"]));
         assert!(args.windows(2).any(|pair| pair == ["-c", "copy"]));
@@ -303,6 +308,13 @@ mod tests {
         executor
             .start_with_launcher(&tools, &media, &request, |_| Ok(process))
             .unwrap();
+        assert_eq!(
+            executor.state(),
+            &RemuxExecutionState::Running {
+                output: actual_output.clone()
+            }
+        );
+        assert!(!actual_output.exists());
         fs::write(temporary_output(&executor), b"complete remux").unwrap();
         process_handle.set_state(MediaProcessState::Completed);
 
@@ -383,7 +395,12 @@ mod tests {
             .unwrap();
         process_handle.push_progress(["out_time_us=5000000", "progress=continue"]);
 
-        assert_eq!(executor.poll(), &RemuxExecutionState::Running);
+        assert_eq!(
+            executor.poll(),
+            &RemuxExecutionState::Running {
+                output: request.output.clone()
+            }
+        );
         let progress = executor.progress().expect("progress snapshot");
         assert_eq!(progress.processed, Some(Duration::from_secs(5)));
         assert_eq!(progress.total, media.duration);

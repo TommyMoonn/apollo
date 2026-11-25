@@ -264,7 +264,12 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(executor.state(), &FrameCaptureExecutionState::Running);
+        assert_eq!(
+            executor.state(),
+            &FrameCaptureExecutionState::Running {
+                output: request.output.clone()
+            }
+        );
         let args = observed_args.lock().unwrap();
         assert!(args.windows(2).any(|pair| pair == ["-map", "0:7"]));
         assert!(
@@ -345,6 +350,8 @@ mod tests {
         for outcome in [Outcome::Success, Outcome::Failure, Outcome::Cancellation] {
             let directory = TestDirectory::new(outcome.label());
             let (request, media) = valid_request_and_media(&directory);
+            fs::write(&request.output, b"existing output").unwrap();
+            let actual_output = directory.path().join("frame (1).png");
             let tools = fake_tools(&directory);
             let process = FakeProcessControl::running();
             let handle = process.clone();
@@ -352,6 +359,13 @@ mod tests {
             executor
                 .start_with_launcher(&tools, &media, &request, |_| Ok(process))
                 .unwrap();
+            assert_eq!(
+                executor.state(),
+                &FrameCaptureExecutionState::Running {
+                    output: actual_output.clone()
+                }
+            );
+            assert!(!actual_output.exists());
             let temporary = executor
                 .execution
                 .temporary_output_path()
@@ -365,10 +379,10 @@ mod tests {
                     assert_eq!(
                         executor.poll(),
                         &FrameCaptureExecutionState::Completed {
-                            output: request.output.clone()
+                            output: actual_output.clone()
                         }
                     );
-                    assert_eq!(fs::read(&request.output).unwrap(), b"captured frame");
+                    assert_eq!(fs::read(&actual_output).unwrap(), b"captured frame");
                 }
                 Outcome::Failure => {
                     handle.set_state(MediaProcessState::Failed(MediaProcessFailure::Exit(Some(
@@ -383,16 +397,17 @@ mod tests {
                             }
                         )
                     );
-                    assert!(!request.output.exists());
+                    assert!(!actual_output.exists());
                     assert!(!temporary.exists());
                 }
                 Outcome::Cancellation => {
                     assert!(executor.cancel());
                     assert_eq!(executor.poll(), &FrameCaptureExecutionState::Cancelled);
-                    assert!(!request.output.exists());
+                    assert!(!actual_output.exists());
                     assert!(!temporary.exists());
                 }
             }
+            assert_eq!(fs::read(&request.output).unwrap(), b"existing output");
         }
     }
 

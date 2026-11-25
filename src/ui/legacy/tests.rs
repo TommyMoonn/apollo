@@ -1344,7 +1344,12 @@ fn audio_extract_intent_reaches_executor() {
 fn each_operation_routes_only_non_idle_execution_to_lifecycle_ui() {
     let states = [
         (AudioMixExecutionState::Idle, false),
-        (AudioMixExecutionState::Running, true),
+        (
+            AudioMixExecutionState::Running {
+                output: PathBuf::from("output.mp4"),
+            },
+            true,
+        ),
         (
             AudioMixExecutionState::Completed {
                 output: PathBuf::from("recording.mp4"),

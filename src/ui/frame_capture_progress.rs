@@ -119,8 +119,8 @@ pub fn show(
 
     match execution_state {
         FrameCaptureExecutionState::Idle => FrameCaptureLifecycleAction::None,
-        FrameCaptureExecutionState::Running => {
-            show_running(ui, request, progress.as_ref(), executor)
+        FrameCaptureExecutionState::Running { output } => {
+            show_running(ui, request, &output, progress.as_ref(), executor)
         }
         FrameCaptureExecutionState::Completed { output } => {
             let thumbnail_request = (!ui.is_sizing_pass())
@@ -145,12 +145,13 @@ pub fn show(
 fn show_running(
     ui: &mut Ui,
     request: &FrameCaptureRequest,
+    output: &Path,
     progress: Option<&MediaProgress>,
     executor: &FrameCaptureExecutor,
 ) -> FrameCaptureLifecycleAction {
     let mut action = FrameCaptureLifecycleAction::None;
     let presentation = progress_presentation(progress);
-    let path_summary = source_to_output(&request.input, &request.output);
+    let path_summary = source_to_output(&request.input, output);
     layout::focus_content(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         heading(ui, RUNNING_TITLE);
@@ -331,12 +332,18 @@ mod tests {
         let request = request();
         let executor = FrameCaptureExecutor::new();
         let mut running = render(|ui| {
-            let _ = show_running(ui, &request, None, &executor);
+            let _ = show_running(
+                ui,
+                &request,
+                &request.output.with_file_name("recording-frame (1).png"),
+                None,
+                &executor,
+            );
         });
         running.textures_delta.clear();
         for text in [
             "Capturing frame",
-            "recording.mkv → recording-frame.png",
+            "recording.mkv → recording-frame (1).png",
             "Processing",
             "Cancel",
         ] {
