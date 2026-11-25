@@ -6,7 +6,7 @@ use super::remux::RemuxToolState;
 use super::upscale::UpscaleToolState;
 use super::{
     ApolloApp, completion_wake,
-    state::{FrameCaptureEditorState, FrameCaptureToolState},
+    state::{FrameCaptureEditor, FrameCaptureToolState},
 };
 use crate::app::dialogs::{DialogTarget, FileDialogRequest};
 use crate::app::{Operation, QueueEditOrigin, source::SourceSettlement};
@@ -49,7 +49,8 @@ impl ApolloApp {
     }
 
     fn retire_source_presentation(&mut self) {
-        self.frame_capture_thumbnail_load = None;
+        self.core.frame_work.cancel_thumbnail();
+        self.cancel_copy_frame_work();
         self.cancel_frame_capture_support();
         self.state.source_presentation = None;
         self.state.retire_tool_sessions();
@@ -79,8 +80,6 @@ impl ApolloApp {
             if previous_tool == Operation::FrameCapture
                 && let Some(session) = self.state.frame_capture.as_mut()
             {
-                session.preview.invalidate();
-                session.preview_texture = None;
                 session.copy_status = FrameCopyStatus::Idle;
             }
             if previous_tool == Operation::FrameCapture {
@@ -154,8 +153,7 @@ impl ApolloApp {
                     .is_some_and(|session| session.session_id == session_id)
                 {
                     self.state.frame_capture = Some(FrameCaptureToolState {
-                        session_id,
-                        editor: FrameCaptureEditorState::new(
+                        editor: FrameCaptureEditor::new(
                             session_id,
                             Some(source_identity.clone()),
                             media,
@@ -163,7 +161,6 @@ impl ApolloApp {
                         lifecycle_ui: FrameCaptureLifecycleUiState::default(),
                         start_error: None,
                         start_error_details_open: false,
-                        copy_status: FrameCopyStatus::Idle,
                         media: media.clone(),
                     });
                 }

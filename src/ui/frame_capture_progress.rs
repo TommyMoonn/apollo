@@ -37,38 +37,8 @@ const BACK_LABEL: &str = "Back";
 const CANCELLED_COPY: &str = "No final output was published.";
 const CANCELLED_CLEANUP: &str = "temporary output cleaned";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameCaptureThumbnailRequest {
-    request_id: u64,
-    output: PathBuf,
-}
-
-impl FrameCaptureThumbnailRequest {
-    pub fn request_id(&self) -> u64 {
-        self.request_id
-    }
-
-    pub fn output(&self) -> &Path {
-        &self.output
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum FrameCaptureThumbnailState {
-    #[default]
-    Empty,
-    Loading {
-        request_id: u64,
-    },
-    Ready {
-        request_id: u64,
-        preview: FrameCaptureThumbnail,
-    },
-    Failed {
-        request_id: u64,
-        diagnostic: String,
-    },
-}
+use crate::app::frame_capture::CaptureThumbnail;
+pub use crate::app::frame_capture::{FrameCaptureThumbnailRequest, FrameCaptureThumbnailState};
 
 #[derive(Clone, PartialEq, Eq)]
 struct FrameCaptureThumbnailTexture {
@@ -89,8 +59,7 @@ impl std::fmt::Debug for FrameCaptureThumbnailTexture {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FrameCaptureLifecycleUiState {
     details_open: bool,
-    next_thumbnail_request_id: u64,
-    thumbnail: FrameCaptureThumbnailState,
+    thumbnail: CaptureThumbnail,
     thumbnail_texture: Option<FrameCaptureThumbnailTexture>,
 }
 
@@ -100,7 +69,7 @@ impl FrameCaptureLifecycleUiState {
     }
 
     pub fn thumbnail(&self) -> &FrameCaptureThumbnailState {
-        &self.thumbnail
+        self.thumbnail.thumbnail()
     }
 
     pub fn settle_thumbnail(
@@ -108,50 +77,22 @@ impl FrameCaptureLifecycleUiState {
         request_id: u64,
         result: Result<FrameCaptureThumbnail, String>,
     ) -> bool {
-        if !matches!(
-            self.thumbnail,
-            FrameCaptureThumbnailState::Loading {
-                request_id: active_request_id
-            } if active_request_id == request_id
-        ) {
+        if !self.thumbnail.settle_thumbnail(request_id, result) {
             return false;
         }
-
-        self.thumbnail = match result {
-            Ok(preview) => FrameCaptureThumbnailState::Ready {
-                request_id,
-                preview,
-            },
-            Err(diagnostic) => FrameCaptureThumbnailState::Failed {
-                request_id,
-                diagnostic,
-            },
-        };
         self.thumbnail_texture = None;
         true
     }
 
     pub fn begin_thumbnail(&mut self, output: &Path) -> Option<FrameCaptureThumbnailRequest> {
-        if !matches!(self.thumbnail, FrameCaptureThumbnailState::Empty) {
-            return None;
-        }
-
-        self.next_thumbnail_request_id = self
-            .next_thumbnail_request_id
-            .checked_add(1)
-            .expect("frame capture thumbnail request identifier space is exhausted");
-        let request_id = self.next_thumbnail_request_id;
-        self.thumbnail = FrameCaptureThumbnailState::Loading { request_id };
+        let request = self.thumbnail.begin_thumbnail(output)?;
         self.thumbnail_texture = None;
-        Some(FrameCaptureThumbnailRequest {
-            request_id,
-            output: output.to_path_buf(),
-        })
+        Some(request)
     }
 
     fn reset(&mut self) {
         self.details_open = false;
-        self.thumbnail = FrameCaptureThumbnailState::Empty;
+        self.thumbnail.reset();
         self.thumbnail_texture = None;
     }
 }
@@ -266,7 +207,10 @@ fn show_completed(
 }
 
 fn show_thumbnail(ui: &mut Ui, ui_state: &mut FrameCaptureLifecycleUiState) {
-    let (thumbnail, thumbnail_texture) = (&ui_state.thumbnail, &mut ui_state.thumbnail_texture);
+    let (thumbnail, thumbnail_texture) = (
+        ui_state.thumbnail.thumbnail(),
+        &mut ui_state.thumbnail_texture,
+    );
     match thumbnail {
         FrameCaptureThumbnailState::Empty => {}
         FrameCaptureThumbnailState::Loading { .. } => {

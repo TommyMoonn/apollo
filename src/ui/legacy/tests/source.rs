@@ -41,7 +41,7 @@ fn source_replacement_clears_thumbnail_and_rejects_stale_completion() {
         .unwrap();
 
     app.load_media_path_with_probe(&second_path, |path| Ok(media(path)));
-    assert!(app.frame_capture_thumbnail_load.is_none());
+    assert!(app.core.frame_work.frame_capture_thumbnail_load.is_none());
     let replacement = app.state.frame_capture.as_ref().unwrap();
     assert_ne!(replacement.session_id, old_session_id);
     assert!(matches!(
@@ -50,7 +50,7 @@ fn source_replacement_clears_thumbnail_and_rejects_stale_completion() {
     ));
 
     let (sender, receiver) = mpsc::sync_channel(1);
-    app.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
+    app.core.frame_work.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
         session_id: old_session_id,
         request_id: old_request.request_id(),
         receiver,
@@ -83,7 +83,7 @@ fn close_source_releases_thumbnail_worker_and_session_state() {
         .begin_thumbnail(Path::new("capture.png"))
         .unwrap();
     let (_sender, receiver) = mpsc::sync_channel(1);
-    app.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
+    app.core.frame_work.frame_capture_thumbnail_load = Some(FrameCaptureThumbnailLoad {
         session_id: session.session_id,
         request_id: request.request_id(),
         receiver,
@@ -91,7 +91,7 @@ fn close_source_releases_thumbnail_worker_and_session_state() {
 
     app.handle_source_action(SourceAction::CloseSource);
 
-    assert!(app.frame_capture_thumbnail_load.is_none());
+    assert!(app.core.frame_work.frame_capture_thumbnail_load.is_none());
     assert!(app.state.frame_capture.is_none());
     assert_no_source(&app.core);
     fs::remove_dir_all(directory).unwrap();

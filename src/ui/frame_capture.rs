@@ -1,3 +1,4 @@
+pub use crate::app::frame_capture::{FrameCopyStatus, FrameNavigationAvailability, PositionSettle};
 use crate::frame_capture::draft::{FrameCaptureDraft, FrameCaptureReadyError};
 
 use std::{cell::Cell, ffi::OsString, time::Duration};
@@ -87,26 +88,12 @@ impl FrameCapturePresentation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FrameNavigationAvailability {
-    pub previous: bool,
-    pub next: bool,
-    pub loading: bool,
-    pub failed: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameCapturePositionSurface {
     Simple,
     Precision {
         preview: FrameCaptureLivePreview,
         navigation: FrameNavigationAvailability,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PositionSettle {
-    Debounced,
-    Immediate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -121,14 +108,6 @@ pub enum FrameCaptureSelectionAction {
     StepRequested(FrameDirection),
     SaveQueueChanges,
     CancelQueueEdit,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum FrameCopyStatus {
-    #[default]
-    Idle,
-    Copying,
-    Copied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

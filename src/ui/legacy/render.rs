@@ -1,4 +1,5 @@
 //! Root surface dispatch and egui rendering.
+use crate::app::frame_capture::frame_navigation_availability;
 
 use super::dialogs::editor_output_dialog_request;
 use std::time::Instant;
@@ -28,8 +29,7 @@ use crate::ui::{
 
 use super::ApolloApp;
 use super::state::{
-    BatchEditTarget, BatchSourceState, FrameCaptureToolState, OperationEditorState,
-    QueueEditAction, frame_navigation_availability,
+    BatchEditTarget, BatchSourceState, FrameCaptureToolState, OperationEditorState, QueueEditAction,
 };
 use super::workflows::{
     batch_defaults_from_editor, refresh_batch_items, shows_frame_capture_lifecycle,

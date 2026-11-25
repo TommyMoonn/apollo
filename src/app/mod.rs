@@ -3,6 +3,7 @@
 
 pub(crate) mod dialogs;
 pub(crate) mod discovery;
+pub(crate) mod frame_capture;
 mod navigation;
 pub(crate) mod source;
 pub use navigation::{BatchOrigin, NavigationState, Operation, QueueEditOrigin, QueueOrigin};
@@ -24,6 +25,7 @@ pub struct Application {
     pub(crate) settings: crate::settings::AppSettings,
     pub(crate) discovery: discovery::MediaToolsDiscovery,
     pub(crate) source: source::SourceSession,
+    pub(crate) frame_work: frame_capture::FrameCaptureWork,
     pub(crate) audio_mix_executor: AudioMixExecutor,
     pub(crate) upscale_executor: UpscaleExecutor,
     pub(crate) remux_executor: RemuxExecutor,

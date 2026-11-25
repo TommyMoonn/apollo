@@ -6,6 +6,7 @@ mod remux;
 mod upscale;
 
 mod dialogs;
+mod frame_capture;
 mod preferences;
 mod render;
 mod source;
@@ -19,17 +20,14 @@ use egui::{Context, Ui};
 use crate::app::dialogs::InputDialogOrigin;
 use crate::app::{Application, discovery::MediaToolsState};
 use crate::file_dialog::FileDialogOwner;
-use crate::frame_capture::clipboard::{CopyFrameExtractionOwner, CopyFrameWorker};
-use crate::frame_capture::frame_index::FrameIndexQueryOwner;
-use crate::frame_capture::preview::PreviewExtractionOwner;
 use crate::native::WindowOwner;
 use crate::progress_repaint::MediaProgressRepaintOwner;
 use crate::settings::AppSettings;
 use crate::ui::{fonts, theme};
 
 use state::{
-    BatchEditState, BatchInspectionSession, BatchSetupState, FrameCaptureThumbnailLoad,
-    FramePreviewDecode, LegacyEditorState, QueueEditState, QueueExecutionEvent,
+    BatchEditState, BatchInspectionSession, BatchSetupState, LegacyEditorState, QueueEditState,
+    QueueExecutionEvent,
 };
 
 pub struct ApolloApp {
@@ -41,13 +39,6 @@ pub struct ApolloApp {
     batch_inspection: Option<BatchInspectionSession>,
     queue_event_sender: mpsc::Sender<QueueExecutionEvent>,
     queue_event_receiver: Receiver<QueueExecutionEvent>,
-    frame_capture_thumbnail_load: Option<FrameCaptureThumbnailLoad>,
-    frame_preview_extraction: PreviewExtractionOwner,
-    frame_preview_decode: Option<FramePreviewDecode>,
-    frame_index_query: FrameIndexQueryOwner,
-    copy_frame_extraction: CopyFrameExtractionOwner,
-    copy_frame_worker: Option<CopyFrameWorker>,
-    copy_frame_session_id: Option<u64>,
     progress_repaint: MediaProgressRepaintOwner,
     file_dialog: FileDialogOwner,
     clipboard_owner: Option<isize>,
@@ -100,13 +91,6 @@ impl ApolloApp {
             batch_inspection: None,
             queue_event_sender,
             queue_event_receiver,
-            frame_capture_thumbnail_load: None,
-            frame_preview_extraction: PreviewExtractionOwner::default(),
-            frame_preview_decode: None,
-            frame_index_query: FrameIndexQueryOwner::default(),
-            copy_frame_extraction: CopyFrameExtractionOwner::default(),
-            copy_frame_worker: None,
-            copy_frame_session_id: None,
             progress_repaint: MediaProgressRepaintOwner::new(completion_wake(&egui_context)),
             file_dialog,
             clipboard_owner,
@@ -141,6 +125,8 @@ impl ApolloApp {
 
     fn shutdown(&mut self) {
         self.cancel_copy_frame_work();
+        self.cancel_frame_capture_support();
+        self.core.frame_work.cancel_thumbnail();
         self.core.media_queue.cancel_queue();
     }
 }

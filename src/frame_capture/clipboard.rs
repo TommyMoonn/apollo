@@ -2,7 +2,11 @@ use std::{
     fmt,
     io::Cursor,
     path::PathBuf,
-    sync::mpsc::{self, Receiver, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, TryRecvError},
+    },
     thread,
 };
 
@@ -347,9 +351,32 @@ impl CopyFrameExtraction {
     }
 }
 
+#[derive(Clone, Default)]
+struct ClipboardPublication(Arc<AtomicBool>);
+
+impl ClipboardPublication {
+    fn retire(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn commit(
+        &self,
+        publish: impl FnOnce() -> Result<(), CopyFrameError>,
+    ) -> Result<(), CopyFrameError> {
+        // Claim the publication before touching the clipboard. Retirement before
+        // this point prevents publication; an already claimed native transaction
+        // may finish. Never block the UI thread waiting for native clipboard calls.
+        if self.0.swap(true, Ordering::AcqRel) {
+            return Err(CopyFrameError::Cancelled);
+        }
+        publish()
+    }
+}
+
 pub struct CopyFrameWorker {
     pub request: CopyFrameRequest,
     receiver: Receiver<Result<(), CopyFrameError>>,
+    publication: ClipboardPublication,
 }
 
 impl CopyFrameWorker {
@@ -359,9 +386,9 @@ impl CopyFrameWorker {
         native_window: Option<isize>,
         wake: impl FnOnce() + Send + 'static,
     ) -> Result<Self, CopyFrameError> {
-        Self::spawn_with(request, wake, move |request| {
+        Self::spawn_with(request, wake, move |request, publication| {
             let image = decode_copy_frame_png(&png_bytes, request.source_size)?;
-            publish_image_to_clipboard(&image, native_window)
+            publish_image_to_clipboard(&image, native_window, publication)
         })
     }
 
@@ -371,22 +398,30 @@ impl CopyFrameWorker {
         work: F,
     ) -> Result<Self, CopyFrameError>
     where
-        F: FnOnce(&CopyFrameRequest) -> Result<(), CopyFrameError> + Send + 'static,
+        F: FnOnce(&CopyFrameRequest, &ClipboardPublication) -> Result<(), CopyFrameError>
+            + Send
+            + 'static,
     {
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker_request = request.clone();
+        let publication = ClipboardPublication::default();
+        let worker_publication = publication.clone();
         thread::Builder::new()
             .name("apollo-copy-frame".to_owned())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    work(&worker_request)
+                    work(&worker_request, &worker_publication)
                 }))
                 .unwrap_or(Err(CopyFrameError::WorkerStopped));
                 let _ = sender.send(result);
                 wake();
             })
             .map_err(|error| CopyFrameError::WorkerStart(error.kind()))?;
-        Ok(Self { request, receiver })
+        Ok(Self {
+            request,
+            receiver,
+            publication,
+        })
     }
 
     pub fn poll(&self) -> Option<Result<(), CopyFrameError>> {
@@ -395,6 +430,12 @@ impl CopyFrameWorker {
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => Some(Err(CopyFrameError::WorkerStopped)),
         }
+    }
+}
+
+impl Drop for CopyFrameWorker {
+    fn drop(&mut self) {
+        self.publication.retire();
     }
 }
 
@@ -519,6 +560,7 @@ fn write_dibv5_payload(
 fn publish_image_to_clipboard(
     image: &CopyFrameImage,
     native_window: Option<isize>,
+    publication: &ClipboardPublication,
 ) -> Result<(), CopyFrameError> {
     use windows::Win32::{
         Foundation::{GlobalFree, HANDLE, HWND},
@@ -545,13 +587,6 @@ fn publish_image_to_clipboard(
     let total_bytes = dibv5_payload_size(image)?;
 
     unsafe {
-        OpenClipboard(Some(HWND(native_window as *mut _))).map_err(|error| {
-            CopyFrameError::Clipboard(format!("could not open clipboard: {error}"))
-        })?;
-        let _guard = ClipboardGuard;
-        EmptyClipboard().map_err(|error| {
-            CopyFrameError::Clipboard(format!("could not clear clipboard: {error}"))
-        })?;
         let memory = GlobalAlloc(GMEM_MOVEABLE, total_bytes).map_err(|error| {
             CopyFrameError::Clipboard(format!("could not allocate clipboard image: {error}"))
         })?;
@@ -569,12 +604,25 @@ fn publish_image_to_clipboard(
             return Err(error);
         }
         let _ = GlobalUnlock(memory);
-        if let Err(error) = SetClipboardData(CF_DIBV5, Some(HANDLE(memory.0))) {
+        // Prepare the complete allocation before opening or clearing the clipboard.
+        // The publication claim prevents a retired decode from clearing the clipboard.
+        let result = publication.commit(|| {
+            OpenClipboard(Some(HWND(native_window as *mut _))).map_err(|error| {
+                CopyFrameError::Clipboard(format!("could not open clipboard: {error}"))
+            })?;
+            let _guard = ClipboardGuard;
+            EmptyClipboard().map_err(|error| {
+                CopyFrameError::Clipboard(format!("could not clear clipboard: {error}"))
+            })?;
+            SetClipboardData(CF_DIBV5, Some(HANDLE(memory.0))).map_err(|error| {
+                CopyFrameError::Clipboard(format!("could not publish clipboard image: {error}"))
+            })?;
+            Ok(())
+        });
+        if result.is_err() {
             let _ = GlobalFree(Some(memory));
-            return Err(CopyFrameError::Clipboard(format!(
-                "could not publish clipboard image: {error}"
-            )));
         }
+        result?;
     }
     Ok(())
 }
@@ -583,10 +631,13 @@ fn publish_image_to_clipboard(
 fn publish_image_to_clipboard(
     _image: &CopyFrameImage,
     _native_window: Option<isize>,
+    publication: &ClipboardPublication,
 ) -> Result<(), CopyFrameError> {
-    Err(CopyFrameError::Clipboard(
-        "image clipboard publication is supported only on Windows".to_owned(),
-    ))
+    publication.commit(|| {
+        Err(CopyFrameError::Clipboard(
+            "image clipboard publication is supported only on Windows".to_owned(),
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -785,10 +836,12 @@ mod tests {
             },
             {
                 let observed = Arc::clone(&observed);
-                move |request| {
-                    *observed.lock().unwrap() =
-                        Some((request.source_identity.clone(), request.position));
-                    Ok(())
+                move |request, publication| {
+                    publication.commit(|| {
+                        *observed.lock().unwrap() =
+                            Some((request.source_identity.clone(), request.position));
+                        Ok(())
+                    })
                 }
             },
         )
@@ -802,6 +855,43 @@ mod tests {
             observed.lock().unwrap().as_ref(),
             Some(&(request.source_identity, request.position))
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn retiring_worker_during_decode_prevents_clipboard_publication() {
+        let (directory, request) = request([4, 2]);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+        let published = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&published);
+        let worker = CopyFrameWorker::spawn_with(
+            request,
+            move || {
+                let _ = wake_tx.send(());
+            },
+            move |_, publication| {
+                started_tx.send(()).unwrap();
+                resume_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                publication.commit(|| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            },
+        )
+        .unwrap();
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        drop(worker);
+        resume_tx.send(()).unwrap();
+        wake_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(published.load(Ordering::SeqCst), 0);
         fs::remove_dir_all(directory).unwrap();
     }
 

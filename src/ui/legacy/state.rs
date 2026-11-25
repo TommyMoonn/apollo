@@ -4,28 +4,19 @@ use super::remux::RemuxToolState;
 use super::upscale::UpscaleToolState;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
-use std::sync::{Arc, mpsc};
-use std::time::Instant;
-use std::{io, thread};
+use std::sync::Arc;
 
 use egui::TextureHandle;
 
+use crate::app::frame_capture::{FrameCaptureEditorState, PositionSettle};
 use crate::app::{BatchOrigin, Operation};
 use crate::audio_extract::draft::AudioExtractDraft;
 use crate::audio_extract::model::AudioExtractFormat;
 use crate::audio_mix::draft::AudioMixDraft;
 use crate::audio_mix::model::{LoudnessNormalization, OutputContainer};
-use crate::frame_capture::draft::FrameCaptureDraft;
-use crate::frame_capture::frame_index::{
-    FrameDirection, FrameIndexState, FrameNavigation, FrameNavigator, FrameStep,
-};
+use crate::frame_capture::frame_index::FrameDirection;
 use crate::frame_capture::model::{FrameCaptureFormat, FramePosition, FrameTimestamp};
-use crate::frame_capture::preview::{
-    FramePreview, PreviewExtractionError, PreviewGeneration, PreviewImage, PreviewRequest,
-    decode_preview_png,
-};
-use crate::frame_capture::thumbnail::{FrameCaptureThumbnail, decode_frame_capture_thumbnail};
+use crate::frame_capture::preview::PreviewGeneration;
 use crate::media::batch::BatchInspectionOwner;
 use crate::media::container::MediaContainer;
 use crate::media::error::MediaError;
@@ -35,27 +26,22 @@ use crate::media::process::MediaProcessEvent;
 use crate::queue::{JobId, QueuedJob, QueuedOperation};
 use crate::remux::draft::RemuxDraft;
 use crate::ui::batch::BatchReadiness;
-use crate::ui::frame_capture::{FrameCopyStatus, FrameNavigationAvailability, PositionSettle};
-use crate::ui::frame_capture_progress::{
-    FrameCaptureLifecycleUiState, FrameCaptureThumbnailRequest,
-};
+use crate::ui::frame_capture_progress::FrameCaptureLifecycleUiState;
 use crate::ui::source_presentation::SourcePresentation;
 use crate::upscale::draft::UpscaleDraft;
 use crate::upscale::model::{UpscaleEncoderSettings, UpscaleTarget, VideoCodec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FrameCaptureToolState {
-    pub(super) session_id: u64,
     pub(super) media: MediaFile,
-    pub(super) editor: FrameCaptureEditorState,
+    pub(super) editor: FrameCaptureEditor,
     pub(super) lifecycle_ui: FrameCaptureLifecycleUiState,
     pub(super) start_error: Option<MediaError>,
     pub(super) start_error_details_open: bool,
-    pub(super) copy_status: FrameCopyStatus,
 }
 
 impl Deref for FrameCaptureToolState {
-    type Target = FrameCaptureEditorState;
+    type Target = FrameCaptureEditor;
 
     fn deref(&self) -> &Self::Target {
         &self.editor
@@ -69,55 +55,31 @@ impl DerefMut for FrameCaptureToolState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct FrameCaptureEditorState {
-    pub(super) selection: FrameCaptureDraft,
-    pub(super) session_id: u64,
-    pub(super) source_identity: Option<SourceIdentity>,
-    pub(super) preview: FramePreview<PreviewImage>,
+pub(super) struct FrameCaptureEditor {
+    pub(super) state: FrameCaptureEditorState,
     pub(super) preview_texture: Option<FramePreviewTexture>,
-    pub(super) frame_navigator: FrameNavigator,
-    pub(super) frame_index_due: Option<(FramePosition, Instant)>,
-    pub(super) pending_step: Option<PendingFrameStep>,
 }
-
-impl FrameCaptureEditorState {
+impl FrameCaptureEditor {
     pub(super) fn new(
         session_id: u64,
         source_identity: Option<SourceIdentity>,
         media: &MediaFile,
     ) -> Self {
         Self {
-            selection: FrameCaptureDraft::new(media),
-            session_id,
-            source_identity,
-            preview: FramePreview::default(),
+            state: FrameCaptureEditorState::new(session_id, source_identity, media),
             preview_texture: None,
-            frame_navigator: FrameNavigator::default(),
-            frame_index_due: None,
-            pending_step: None,
         }
     }
-
-    pub(super) fn hydrate(
-        &mut self,
-        media: &MediaFile,
-        request: &crate::frame_capture::model::FrameCaptureRequest,
-    ) {
-        self.selection = FrameCaptureDraft::from_request(media, request);
-    }
 }
-
-impl Deref for FrameCaptureEditorState {
-    type Target = FrameCaptureDraft;
-
+impl Deref for FrameCaptureEditor {
+    type Target = FrameCaptureEditorState;
     fn deref(&self) -> &Self::Target {
-        &self.selection
+        &self.state
     }
 }
-
-impl DerefMut for FrameCaptureEditorState {
+impl DerefMut for FrameCaptureEditor {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.selection
+        &mut self.state
     }
 }
 
@@ -127,63 +89,6 @@ pub(super) struct FramePreviewTexture {
     pub(super) size: [usize; 2],
     pub(super) position: FramePosition,
     pub(super) handle: TextureHandle,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct PendingFrameStep {
-    pub(super) origin: FramePosition,
-    pub(super) direction: FrameDirection,
-    pub(super) step: FrameStep,
-}
-
-pub(super) fn frame_navigation_availability(
-    media: &MediaFile,
-    editor: &FrameCaptureEditorState,
-) -> FrameNavigationAvailability {
-    if editor.source_identity.is_none() {
-        return FrameNavigationAvailability {
-            previous: false,
-            next: false,
-            loading: false,
-            failed: false,
-        };
-    }
-    let Some(position) = editor.selection.valid_position(media) else {
-        return FrameNavigationAvailability {
-            previous: false,
-            next: false,
-            loading: false,
-            failed: false,
-        };
-    };
-    let loading = editor.frame_index_due.is_some()
-        || matches!(
-            editor.frame_navigator.state(),
-            FrameIndexState::Loading { .. }
-        );
-    let failed = matches!(
-        editor.frame_navigator.state(),
-        FrameIndexState::Failed { .. }
-    );
-    let step = editor.selection.step();
-    let previous = !matches!(
-        editor
-            .frame_navigator
-            .navigate(position, FrameDirection::Previous, step),
-        FrameNavigation::Boundary
-    );
-    let next = !matches!(
-        editor
-            .frame_navigator
-            .navigate(position, FrameDirection::Next, step),
-        FrameNavigation::Boundary
-    );
-    FrameNavigationAvailability {
-        previous,
-        next,
-        loading,
-        failed,
-    }
 }
 
 impl std::fmt::Debug for FramePreviewTexture {
@@ -208,7 +113,7 @@ pub(super) struct OperationEditorState {
     pub(super) upscale: UpscaleDraft,
     pub(super) remux: RemuxDraft,
     pub(super) audio_extract: AudioExtractDraft,
-    pub(super) frame_capture: FrameCaptureEditorState,
+    pub(super) frame_capture: FrameCaptureEditor,
     pub(super) error: Option<MediaError>,
     pub(super) error_details_open: bool,
 }
@@ -228,7 +133,7 @@ impl OperationEditorState {
             upscale: UpscaleDraft::new(&media),
             remux: RemuxDraft::new(&media),
             audio_extract: AudioExtractDraft::new(&media),
-            frame_capture: FrameCaptureEditorState::new(session_id, source_identity, &media),
+            frame_capture: FrameCaptureEditor::new(session_id, source_identity, &media),
             media,
             error: None,
             error_details_open: false,
@@ -423,93 +328,8 @@ impl LegacyEditorState {
     }
 }
 
-pub(super) struct FrameCaptureThumbnailLoad {
-    pub(super) session_id: u64,
-    pub(super) request_id: u64,
-    pub(super) receiver: Receiver<Result<FrameCaptureThumbnail, String>>,
-}
-
-pub(super) struct FramePreviewDecode {
-    pub(super) request: PreviewRequest,
-    pub(super) receiver: Receiver<Result<PreviewImage, PreviewExtractionError>>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct QueueExecutionEvent {
     pub(super) job_id: JobId,
     pub(super) process_event: MediaProcessEvent,
-}
-
-impl FrameCaptureThumbnailLoad {
-    pub(super) fn spawn(
-        session_id: u64,
-        request: &FrameCaptureThumbnailRequest,
-        wake: impl FnOnce() + Send + 'static,
-    ) -> io::Result<Self> {
-        let output = request.output().to_path_buf();
-        Self::spawn_with(session_id, request.request_id(), wake, move || {
-            decode_frame_capture_thumbnail(&output)
-        })
-    }
-
-    pub(super) fn spawn_with<F>(
-        session_id: u64,
-        request_id: u64,
-        wake: impl FnOnce() + Send + 'static,
-        decode: F,
-    ) -> io::Result<Self>
-    where
-        F: FnOnce() -> Result<FrameCaptureThumbnail, String> + Send + 'static,
-    {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        thread::Builder::new()
-            .name("apollo-frame-thumbnail".to_owned())
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode));
-                if let Ok(result) = result {
-                    let _ = sender.send(result);
-                }
-                drop(sender);
-                wake();
-            })?;
-        Ok(Self {
-            session_id,
-            request_id,
-            receiver,
-        })
-    }
-}
-
-impl FramePreviewDecode {
-    pub(super) fn spawn(
-        request: PreviewRequest,
-        bytes: Vec<u8>,
-        wake: impl FnOnce() + Send + 'static,
-    ) -> io::Result<Self> {
-        Self::spawn_with(request, wake, move || decode_preview_png(&bytes))
-    }
-
-    pub(super) fn spawn_with<F>(
-        request: PreviewRequest,
-        wake: impl FnOnce() + Send + 'static,
-        decode: F,
-    ) -> io::Result<Self>
-    where
-        F: FnOnce() -> Result<PreviewImage, PreviewExtractionError> + Send + 'static,
-    {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        thread::Builder::new()
-            .name("apollo-frame-preview-decode".to_owned())
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode))
-                    .unwrap_or_else(|_| {
-                        Err(PreviewExtractionError::Decode(
-                            "preview decode worker stopped unexpectedly".to_owned(),
-                        ))
-                    });
-                let _ = sender.send(result);
-                wake();
-            })?;
-        Ok(Self { request, receiver })
-    }
 }

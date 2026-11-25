@@ -12,7 +12,7 @@ This guide describes the egui implementation in the current checkout.
 | Area | Responsibility |
 | --- | --- |
 | `src/main.rs` | Native entry point and window configuration. |
-| `src/app/` | `Application`: renderer-independent route state, dialog requests, preferences, media-tool discovery, source intake, queue and immediate executors. |
+| `src/app/` | `Application`: renderer-independent route state, dialog requests, preferences, media-tool discovery, source intake, interactive frame coordination, queue and immediate executors. |
 | `src/ui/legacy/` | `ApolloApp`: egui composition, ordered background updates, renderer-dependent editors and existing feature actions. |
 | `src/ui/` | Operation views, shared widgets, queue and batch views, layout, themes and typography. |
 | `src/media/` | Source inspection, media models, tool discovery, process lifecycle, progress and output publication. |
@@ -28,9 +28,9 @@ The library exports the application core and UI modules through `src/lib.rs`. Th
 
 `src/app/navigation.rs` owns `Operation`, routes and return origins for queue and batch flows. Route transitions do not require an egui context. The adapter commits these transitions after the existing source, editor and queue actions succeed; it retains renderer-dependent editor presentation and worker coordination. Queue return and batch submission preserve the original source operation. Queue history changes remain with `MediaQueue`.
 
-`src/ui/legacy/mod.rs` constructs the application, installs the existing font and theme definitions and coordinates background updates and shutdown. `render.rs` dispatches the active route and draws the shell. `source.rs` handles source actions and presentation settlement. The four ordinary operation adapters (`audio_mix.rs`, `upscale.rs`, `remux.rs` and `audio_extract.rs`) own their ready surfaces, immediate actions and lifecycle feedback. `dialogs.rs` routes native completions; `workflows.rs` retains queue, batch and frame support coordination; `state.rs` retains editor and worker state that still depends on egui.
+`src/ui/legacy/mod.rs` constructs the application, installs the existing font and theme definitions and coordinates background updates and shutdown. `render.rs` dispatches the active route and draws the shell. `source.rs` handles source actions and presentation settlement. The four ordinary operation adapters (`audio_mix.rs`, `upscale.rs`, `remux.rs` and `audio_extract.rs`) own their ready surfaces, immediate actions and lifecycle feedback. `dialogs.rs` routes native completions; `frame_capture.rs` routes frame actions and uploads textures; `workflows.rs` retains queue and batch coordination; `state.rs` retains editor and worker state that still depends on egui.
 
-Each root update first polls media-tool discovery and queue events. While base tools are checking or unavailable, it renders that status and returns. Once ready, the update polls dialogs, source inspection, batch inspection, frame preview, frame index, clipboard and thumbnails in that order before handling drops and rendering the active route. Shutdown cancels clipboard work and the queue; owned resources retain their existing cleanup.
+Each root update first polls media-tool discovery and queue events. While base tools are checking or unavailable, it renders that status and returns. Once ready, the update polls dialogs, source inspection, batch inspection, frame preview, frame index, clipboard and thumbnails in that order before handling drops and rendering the active route. Shutdown retires interactive frame work and cancels the queue; owned resources retain their existing cleanup.
 
 ## Source intake and execution
 
@@ -45,6 +45,12 @@ The legacy source adapter builds one immutable `SourcePresentation` after accept
 5. `MediaOutput` checks the destination, owns temporary output and publishes it only after successful processing. Failed or cancelled jobs clean up their own temporary output without overwriting the input or an existing destination.
 
 Pass process arguments separately instead of constructing shell commands. Map streams by their probed indexes. Preserve request identity, cancellation and completion routing when adding background work. Frame Capture also has dedicated frame-index, preview and clipboard workers under `src/frame_capture/`; clipboard extraction does not publish a file.
+
+## Interactive Frame Capture
+
+`src/app/frame_capture.rs` owns renderer-independent editor state, debounce and step decisions, thumbnail request state and the worker lifecycle. Preview, index and clipboard work is tied to the originating editor identifier and source identity; preview and index generations also identify the exact request. Normal, queue and item-override editors retain separate state. Exact frame positions are independent of the formatted timestamp and decoded pixels. The legacy frame adapter routes active-editor actions, supplies notification callbacks and uploads egui textures only for accepted generations.
+
+The existing `FramePreview` and `FrameNavigator` retain their bounded caches; no second decoding or neighborhood cache is used. Explicit position changes retire superseded work. Temporary navigation away suspends outstanding work while retaining accepted pixels and cached neighborhoods, and returning schedules any necessary work. Clipboard extraction remains full-resolution and independent of file output and queue jobs. A retired decode cannot claim clipboard publication; a native publication already claimed may finish. Pixel conversion occurs before opening or clearing the clipboard, and shutdown does not wait on a native clipboard call.
 
 ## Native dialogs and preferences
 
@@ -72,7 +78,7 @@ One background worker validates the base tools, publishes their paths, then chec
 
 ## Worker notifications
 
-Workers publish results to their existing channels before invoking a completion callback. When a panic is reported through disconnection, the worker drops its result sender before notifying. The callback carries no application state; the owner consumes and validates the result on the application side. The egui adapter supplies a repaint callback for discovery, inspection, preview decoding, thumbnail loading, native dialogs and clipboard completion. `MediaProcessWake` carries process progress and terminal events. `MediaProgressRepaintOwner` coalesces progress notifications at 34 ms, rejects stale operation generations and wakes immediately on terminal events. Idle workers do not schedule periodic repaints. Delayed frame-preview scheduling remains in the egui adapter.
+Workers publish results to their existing channels before invoking a completion callback. When a panic is reported through disconnection, the worker drops its result sender before notifying. The callback carries no application state; the owner consumes and validates the result on the application side. The egui adapter supplies a repaint callback for discovery, inspection, preview decoding, thumbnail loading, native dialogs and clipboard completion. `MediaProcessWake` carries process progress and terminal events. `MediaProgressRepaintOwner` coalesces progress notifications at 34 ms, rejects stale operation generations and wakes immediately on terminal events. Idle workers do not schedule periodic repaints. Frame Capture returns debounce deadlines to the adapter, which schedules delayed repaints.
 
 ## Queue and batch ownership
 
