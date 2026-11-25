@@ -1,6 +1,6 @@
 # Apollo
 
-Apollo is a local-first desktop media utility for Windows x64, built with Rust, egui and eframe. It runs FFmpeg and FFprobe as external processes for audio mixing, video upscaling, remuxing, audio extraction and frame capture. Users can run jobs individually or add them to a queue, with batch setup for multiple sources.
+Apollo is a local-first desktop media utility for Windows x64, built with Rust and GPUI. The retained egui/eframe code is migration reference and regression coverage, not a second runnable interface. It runs FFmpeg and FFprobe as external processes for audio mixing, video upscaling, remuxing, audio extraction and frame capture. Users can run jobs individually or add them to a queue, with batch setup for multiple sources.
 
 ## Engineering philosophy
 
@@ -32,8 +32,8 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 
 ## Where code lives
 
-- `src/main.rs` starts the native app. `src/app/` owns renderer-independent application state and route transitions.
-- `src/ui/` contains operation screens, queue and batch views, shared controls, layout, typography and themes. `src/ui/legacy/` hosts the egui application adapter, its editor state and feature coordination.
+- `src/main.rs` starts the GPUI application via `src/ui/root.rs`. `src/app/` owns renderer-independent application state and route transitions.
+- `src/ui/` contains operation screens, queue and batch views, shared controls, layout, typography and themes. `src/ui/legacy/` retains egui presentation and behavior contracts until their replacement phases.
 - `src/media/` handles media intake, probing, tool discovery, stream models, child processes, output publication and progress parsing.
 - `src/queue/` handles queued requests, execution order and job state.
 - `src/audio_mix/`, `src/upscale/`, `src/remux/`, `src/audio_extract/` and `src/frame_capture/` contain editable drafts, operation requests, validation, command construction and execution. Frame Capture also handles frame indexing, previews and clipboard extraction. `src/app/frame_capture.rs` owns interactive editor state and worker settlement; `src/ui/legacy/frame_capture.rs` routes editor actions and uploads textures. Keep exact position, session identity and request generation separate from renderer resources.
@@ -43,7 +43,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 
 ## Keep ownership clear
 
-`Application` owns the route, media-tool discovery, source intake, queue and interactive frame work. `ApolloApp` owns one core and coordinates the egui shell and background work. Keep route transitions in the core and renderer-dependent presentation and worker state in the adapter. Each operation owns its typed draft and request construction in `draft.rs`. Normal forms and independent editors reuse these drafts; the adapter retains presentation, lifecycle feedback and action routing. Keep execution validation in the operation validators and preparation functions.
+`Application` owns the route, media-tool discovery, source intake, queue and interactive frame work. The GPUI root owns one core. The legacy `ApolloApp` retains the existing behavior contracts while the GPUI background and feature integration is completed. Keep route transitions in the core and renderer-dependent presentation and worker state in the adapter. Each operation owns its typed draft and request construction in `draft.rs`. Normal forms and independent editors reuse these drafts; the adapter retains presentation, lifecycle feedback and action routing. Keep execution validation in the operation validators and preparation functions.
 
 `SourceSession` in `src/app/source.rs` owns source acceptance, worker settlement and session retirement. `MediaIntake` remains responsible for source identity, retained probe results and pending requests. Keep accepted source presentation and drafts intact until replacement succeeds. `src/app/batch.rs` owns batch setup, stable item identity, defaults, overrides, inspection settlement and atomic submission. `BatchInspectionOwner` manages probing and limits each active inspection session to two concurrent probes. Preserve request identity checks so results from an earlier request cannot replace the current source or batch state.
 

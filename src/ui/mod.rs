@@ -4,13 +4,14 @@ pub mod batch;
 pub mod file_intake;
 pub mod fonts;
 pub mod frame_capture;
-pub mod icon;
 pub mod layout;
 pub mod legacy;
 pub mod media_error;
 mod media_lifecycle;
 pub mod queue;
 pub mod remux;
+#[cfg(windows)]
+pub mod root;
 pub mod source_presentation;
 pub mod theme;
 pub mod upscale;
@@ -18,6 +19,10 @@ pub mod widgets;
 pub mod workspace;
 
 use crate::media::error::MediaError;
+
+/// Default and minimum drawable window dimensions in logical pixels.
+pub const REFERENCE_CONTENT_DIMENSIONS: (f32, f32) = (730.0, 489.0);
+pub const MINIMUM_CONTENT_DIMENSIONS: (f32, f32) = (400.0, 260.0);
 
 pub const PROCESS_NOW_LABEL: &str = "Process now";
 pub const ADD_TO_QUEUE_LABEL: &str = "Add to queue";

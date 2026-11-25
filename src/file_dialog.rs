@@ -84,6 +84,7 @@ pub(crate) struct FileDialogOwner {
 }
 
 impl FileDialogOwner {
+    #[allow(dead_code, reason = "Native dialog integration resumes in U01.4")]
     pub(crate) fn new(
         wake: impl Fn() + Send + 'static,
         owner: Result<WindowOwner, String>,

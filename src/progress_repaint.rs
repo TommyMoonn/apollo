@@ -20,6 +20,10 @@ pub(crate) struct MediaProgressRepaintOwner {
 }
 
 impl MediaProgressRepaintOwner {
+    #[allow(
+        dead_code,
+        reason = "Background notification integration resumes in U01.3"
+    )]
     pub(crate) fn new(request_repaint: impl Fn() + Send + 'static) -> Self {
         let (sender, receiver) = mpsc::channel();
         thread::Builder::new()

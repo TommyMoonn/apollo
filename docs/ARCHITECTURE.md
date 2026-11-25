@@ -3,17 +3,17 @@
 > [!IMPORTANT]
 > All of the documentation here are written by LLMs.
 
-Apollo is a native Windows x64 media utility written in Rust. eframe hosts an egui interface, and FFmpeg and FFprobe run as separate child processes. Media stays on the user's machine. The application has no web frontend, server or account dependency.
+Apollo is a native Windows x64 media utility written in Rust. GPUI is the native application entry, and FFmpeg and FFprobe run as separate child processes. Media stays on the user's machine. The application has no web frontend, server or account dependency.
 
-This guide describes the egui implementation in the current checkout.
+The GPUI migration is in progress. The initial window owns the existing `Application` and displays an explicit unavailable state. It does not start discovery, dialogs, source inspection, queue work or frame workers until their presentation and settlement paths are connected. The retained egui implementation below describes the existing behavior contracts and regression tests, not an alternative runnable application.
 
 ## Module boundaries
 
 | Area | Responsibility |
 | --- | --- |
-| `src/main.rs` | Native entry point and window configuration. |
+| `src/main.rs`, `src/ui/root.rs` | GPUI entry, native window configuration and root entity owning one `Application`. |
 | `src/app/` | `Application`: renderer-independent route state, dialog requests, preferences, media-tool discovery, source intake, interactive frame coordination, queue. |
-| `src/ui/legacy/` | `ApolloApp`: egui composition, ordered background updates, renderer-dependent editors and existing feature actions. |
+| `src/ui/legacy/` | Retained egui adapter contracts, editors, worker coordination and tests awaiting migration. |
 | `src/ui/` | Operation views, shared widgets, queue and batch views, layout, themes and typography. |
 | `src/media/` | Source inspection, media models, tool discovery, process lifecycle, progress and output publication. |
 | `src/queue/` | Queued requests, job identity and execution order. |
@@ -22,15 +22,23 @@ This guide describes the egui implementation in the current checkout.
 | `src/file_dialog.rs`, `src/native.rs` | Native dialog service, parent window handles and shell folder actions. |
 | `src/progress_repaint.rs` | Callback-based progress notifications. |
 
-The library exports the application core and UI modules through `src/lib.rs`. The native binary configures the window and constructs the egui adapter, which owns exactly one core. The core does not import UI or native adapters. Keep operation policy in its domain module and use the shared media and queue owners. Views display state and collect input; repainting must not start probes or processing.
+The library exports the application core and UI modules through `src/lib.rs`. The native binary creates one GPUI root with exactly one core. The core does not import UI or native adapters. Keep operation policy in its domain module and use the shared media and queue owners. Views display state and collect input; repainting must not start probes or processing.
+
+The retained presentation modules have explicit migration owners: U01.2 replaces theme, layout, fonts and shared widgets; U01.3 replaces background wake and shutdown coordination; U01.4 replaces native-dialog routing and preferences; U01.5 and U01.6 replace intake and workspace navigation; U02 replaces queue presentation; U03–U05 replace operation forms and frame capture; U06 replaces batch presentation; U07 replaces settings presentation. Keep the existing regression tests until equivalent GPUI or core behavior tests cover their contracts.
+
+## Native GPUI foundation
+
+The entry uses the official [`gpui` 0.2.2 release](https://docs.rs/crate/gpui/0.2.2), not a fork or moving Git ref. It requests a centered 730 × 489 logical-pixel window and a 400 × 260 minimum, with native chrome and title. The Win32 icon comes from the existing executable resource. No second renderer entry or feature switch is provided.
+
+The pinned API provides `WindowOptions` for sizing and titlebar configuration, `Window::on_window_should_close` for close interception, `Window`'s `HasWindowHandle` implementation for native dialogs, `ExternalPaths` and element drop handlers for intake, `TextSystem::add_fonts` for font registration, and entity `Context::notify` and `spawn` for background-driven presentation. The corresponding integration belongs to the later shell phases; their existence does not mean those surfaces are already active. Native sizing, icon behavior and the full GPUI dependency graph still require Windows acceptance.
 
 ## Composition and navigation
 
 `src/app/navigation.rs` owns `Operation`, routes and return origins for queue and batch flows. Route transitions do not require an egui context. The adapter commits these transitions after the existing source, editor and queue actions succeed; it retains renderer-dependent editor presentation and worker coordination. Queue return and batch submission preserve the original source operation. Queue history changes remain with `MediaQueue`.
 
-`src/ui/legacy/mod.rs` constructs the application, installs the existing font and theme definitions and coordinates background updates and shutdown. `render.rs` dispatches the active route and draws the shell. `shutdown.rs` intercepts native close requests and presents the exit decision and settlement status. `source.rs` handles source actions and presentation settlement. The four ordinary operation adapters (`audio_mix.rs`, `upscale.rs`, `remux.rs` and `audio_extract.rs`) own their ready surfaces and translate form actions into queue submissions. `dialogs.rs` routes native completions; `frame_capture.rs` routes frame actions and uploads textures; `queue.rs` translates queue effects into native actions and presentation updates; `batch.rs` presents batch setup and fixed-source editors and routes native actions; `workflows.rs` retains shared route and lifecycle helpers; `state.rs` retains adapter-specific presentation.
+`src/ui/legacy/mod.rs` retains the existing egui adapter and its background and shutdown contracts for tests. `render.rs` dispatches the active route and draws the shell. `shutdown.rs` intercepts native close requests and presents the exit decision and settlement status. `source.rs` handles source actions and presentation settlement. The four ordinary operation adapters (`audio_mix.rs`, `upscale.rs`, `remux.rs` and `audio_extract.rs`) own their ready surfaces and translate form actions into queue submissions. `dialogs.rs` routes native completions; `frame_capture.rs` routes frame actions and uploads textures; `queue.rs` translates queue effects into native actions and presentation updates; `batch.rs` presents batch setup and fixed-source editors and routes native actions; `workflows.rs` retains shared route and lifecycle helpers; `state.rs` retains adapter-specific presentation.
 
-Each root update first polls media-tool discovery and queue events. While base tools are checking or unavailable, it renders that status and returns. Once ready, the update polls dialogs, source inspection, batch inspection, frame preview, frame index and clipboard in that order before handling drops and rendering the active route. Normal close is intercepted in the egui logic pass, even when the window is hidden. With unfinished queue work, one confirmation precedes cancellation. Declining leaves the current route, drafts and queue intact. On acceptance, `Application` enters closing, stops advancement through `MediaQueue::cancel_queue`, rejects new submissions and queue actions, and polls terminal notifications until the active execution settles. The renderer requests actual closure only after settlement and after any pending native dialog returns. A failed active job, including a cleanup failure, is reported and must be acknowledged before exit. Dropping an active file execution remains a defensive fallback that stops and joins its child before discarding staged output; forced OS termination is not graceful shutdown.
+In the retained adapter, each root update first polls media-tool discovery and queue events. While base tools are checking or unavailable, it renders that status and returns. Once ready, the update polls dialogs, source inspection, batch inspection, frame preview, frame index and clipboard in that order before handling drops and rendering the active route. Normal close is intercepted in the egui logic pass, even when the window is hidden. With unfinished queue work, one confirmation precedes cancellation. Declining leaves the current route, drafts and queue intact. On acceptance, `Application` enters closing, stops advancement through `MediaQueue::cancel_queue`, rejects new submissions and queue actions, and polls terminal notifications until the active execution settles. The renderer requests actual closure only after settlement and after any pending native dialog returns. A failed active job, including a cleanup failure, is reported and must be acknowledged before exit. Dropping an active file execution remains a defensive fallback that stops and joins its child before discarding staged output; forced OS termination is not graceful shutdown.
 
 ## Source intake and execution
 

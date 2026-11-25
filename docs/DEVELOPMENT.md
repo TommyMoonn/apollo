@@ -11,11 +11,30 @@ Required development tools:
 
 - Git
 - Rust toolchain pinned by `rust-toolchain.toml`
+- Visual Studio C++ build tools (MSVC x64) and Windows SDK, including the resource compiler and `fxc.exe`
 - PowerShell 7 for repository scripts
 - Just 1.33 or later for development recipes
 - FFmpeg and FFprobe for media inspection, processing, and runtime smoke tests
 
 Rustup is the recommended way to install the pinned Rust toolchain. From the repository root, the toolchain file should select the required version automatically.
+
+### GPUI build requirements
+
+Apollo uses the official GPUI 0.2.2 crate with its Windows manifest feature. Linux GUI backends are not enabled; the application executable targets Windows x64. The existing Rust 1.97.1 pin is retained pending verification of the complete locked GPUI graph. The migration shell intentionally does not start media work until background and shutdown integration is in place.
+
+GPUI compiles HLSL shaders in release builds. Install a Windows SDK with x64 `fxc.exe`. If it is not discoverable by GPUI, set `GPUI_FXC_PATH` to its full path in your development shell. For example, to locate the newest installed SDK compiler:
+
+```powershell
+$fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" -File |
+    Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+    Select-Object -First 1
+if (-not $fxc) { throw 'Install the Windows SDK with the x64 HLSL compiler.' }
+$env:GPUI_FXC_PATH = $fxc.FullName
+```
+
+The Windows packaging workflow sets this path explicitly before its release build. Debug checks and coverage retain their existing commands. The upstream build embeds the Windows manifest and release shaders; Apollo retains its own icon and version resource.
+
+Owner-managed offline bundles must be refreshed after resolving the new lockfile: include the official GPUI package and all transitive sources for the locked graph, not only the existing egui dependency graph. Windows release builds also need the installed Windows SDK; the Rust archive does not supply it.
 
 FFmpeg and FFprobe run as separate processes. The Windows release packages include the pinned pair; `cargo build` does not download or copy media tools. Apollo discovers and validates them through one shared application owner rather than feature-specific checks. The queue owns file execution, using operation-specific preparation and shared settlement code; see [Architecture](ARCHITECTURE.md#source-intake-and-execution) for the execution boundaries.
 

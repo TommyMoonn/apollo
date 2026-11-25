@@ -5,20 +5,17 @@ use egui::{
 
 use super::{fonts, theme};
 
-/// Reference outer-window geometry selected by `.project/design/LAYOUT.md`.
-pub const REFERENCE_WINDOW_SIZE: Vec2 = Vec2::new(730.0, 520.0);
-
-/// Native window chrome accounted for by the selected reference geometry.
-pub const WINDOW_CHROME_HEIGHT: f32 = 31.0;
-
-/// Eframe's viewport size is the drawable content area, excluding native window chrome.
+/// Reference drawable geometry shared with the GPUI native window.
 pub const REFERENCE_CONTENT_SIZE: Vec2 = Vec2::new(
-    REFERENCE_WINDOW_SIZE.x,
-    REFERENCE_WINDOW_SIZE.y - WINDOW_CHROME_HEIGHT,
+    super::REFERENCE_CONTENT_DIMENSIONS.0,
+    super::REFERENCE_CONTENT_DIMENSIONS.1,
 );
 
-/// Preserve the existing minimum drawable area while keeping it under one layout owner.
-pub const MINIMUM_CONTENT_SIZE: Vec2 = Vec2::new(400.0, 260.0);
+/// Minimum drawable area shared with the GPUI native window.
+pub const MINIMUM_CONTENT_SIZE: Vec2 = Vec2::new(
+    super::MINIMUM_CONTENT_DIMENSIONS.0,
+    super::MINIMUM_CONTENT_DIMENSIONS.1,
+);
 
 /// Quiet Focus content inset on every edge of the application surface.
 pub const CONTENT_PADDING: i8 = 28;
@@ -29,7 +26,7 @@ pub const ACTION_BAR_VERTICAL_PADDING: i8 = 10;
 /// Maximum width for bounded sparse content at the reference window size after content insets.
 ///
 /// File intake keeps this reference-width bound. Ready/configuration surfaces intentionally do not.
-pub const MAX_CONTENT_WIDTH: f32 = REFERENCE_WINDOW_SIZE.x - 2.0 * CONTENT_PADDING as f32;
+pub const MAX_CONTENT_WIDTH: f32 = REFERENCE_CONTENT_SIZE.x - 2.0 * CONTENT_PADDING as f32;
 
 /// Minimum comfortable width for each field in a responsive two-field row.
 pub const FIELD_PAIR_MIN_COLUMN_WIDTH: f32 = 180.0;

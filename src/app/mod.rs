@@ -85,6 +85,7 @@ impl Application {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn with_settings(settings: crate::settings::AppSettings) -> Self {
         Self {
             settings,

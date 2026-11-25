@@ -63,7 +63,7 @@ license file alone is not evidence that this review has been completed.
 
 ## Rust dependency inventory
 
-The following packages are reachable as non-proc-macro runtime dependencies for the locked Windows x64 Apollo application graph. License expressions are reproduced from package metadata.
+The following table records the pre-GPUI locked Windows x64 runtime dependency inventory, plus the newly pinned GPUI release. GPUI's transitive graph and corresponding notices must be reconciled after dependency resolution and before distributing the migrated application. License expressions are reproduced from package metadata.
 
 | Package | Version | License expression | Upstream source |
 | --- | --- | --- | --- |
@@ -111,6 +111,7 @@ The following packages are reachable as non-proc-macro runtime dependencies for 
 | `form_urlencoded` | `1.2.2` | `MIT OR Apache-2.0` | https://github.com/servo/rust-url |
 | `getrandom` | `0.3.4` | `MIT OR Apache-2.0` | https://github.com/rust-random/getrandom |
 | `glifo` | `0.2.0` | `Apache-2.0 OR MIT` | https://github.com/linebender/vello |
+| `gpui` | `0.2.2` | `Apache-2.0` | https://github.com/zed-industries/zed |
 | `glow` | `0.17.0` | `MIT OR Apache-2.0 OR Zlib` | https://github.com/grovesNL/glow |
 | `glutin` | `0.32.3` | `Apache-2.0` | https://github.com/rust-windowing/glutin |
 | `glutin-winit` | `0.5.0` | `MIT` | https://github.com/rust-windowing/glutin |

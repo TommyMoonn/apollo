@@ -124,6 +124,15 @@ jobs:
           $actual = (& $makensis /VERSION).Trim()
           if ($actual -cne "v$env:NSIS_VERSION") { throw "Unexpected NSIS version: $actual" }
           "MAKENSIS_PATH=$makensis" >> $env:GITHUB_ENV
+      - name: Locate Windows SDK shader compiler
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" -File |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1
+          if (-not $fxc) { throw 'The Windows SDK x64 HLSL compiler (fxc.exe) is required by GPUI.' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+          Write-Host "GPUI shader compiler: $($fxc.FullName)"
       - name: Build Windows release once
         run: cargo build --locked --release --target x86_64-pc-windows-msvc
       - name: Stage Windows artifacts

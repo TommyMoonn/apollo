@@ -1,4 +1,5 @@
-//! Legacy egui composition. The library core owns route and non-rendering state.
+//! Retained egui presentation and behavior contracts for later migration phases.
+//! The GPUI executable does not construct this adapter.
 
 mod audio_extract;
 mod audio_mix;
@@ -21,10 +22,9 @@ use egui::{Context, Ui};
 use crate::app::dialogs::InputDialogOrigin;
 use crate::app::{Application, discovery::MediaToolsState};
 use crate::file_dialog::FileDialogOwner;
-use crate::native::WindowOwner;
 use crate::progress_repaint::MediaProgressRepaintOwner;
+#[cfg(test)]
 use crate::settings::AppSettings;
-use crate::ui::{fonts, theme};
 
 use state::{EditorPresentation, LegacyEditorState};
 
@@ -51,28 +51,7 @@ fn completion_wake(context: &Context) -> impl Fn() + Clone + Send + 'static {
 }
 
 impl ApolloApp {
-    pub fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
-        fonts::install(&creation_context.egui_ctx);
-        theme::install(&creation_context.egui_ctx);
-
-        let egui_context = creation_context.egui_ctx.clone();
-        let native_window_owner = WindowOwner::from_window(creation_context);
-        #[cfg(target_os = "windows")]
-        let clipboard_owner = native_window_owner
-            .as_ref()
-            .ok()
-            .copied()
-            .map(WindowOwner::native_handle);
-        #[cfg(not(target_os = "windows"))]
-        let clipboard_owner = None;
-        let file_dialog = FileDialogOwner::new(completion_wake(&egui_context), native_window_owner);
-        let settings = preferences::load(creation_context.storage);
-        let mut app =
-            Self::with_adapters(egui_context.clone(), file_dialog, clipboard_owner, settings);
-        app.retry_media_tools();
-        app
-    }
-
+    #[cfg(test)]
     fn with_adapters(
         egui_context: Context,
         file_dialog: FileDialogOwner,
