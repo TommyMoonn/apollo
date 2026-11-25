@@ -361,6 +361,24 @@ impl Application {
         }
     }
 
+    /// Record the result of the native folder action at the same boundary as other queue errors.
+    pub(crate) fn settle_open_folder(
+        &mut self,
+        directory: &Path,
+        result: std::io::Result<()>,
+    ) -> bool {
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.queue_action_error = Some(format!(
+                    "Could not open output folder {}: {error}. Check that the folder still exists and retry.",
+                    directory.display()
+                ));
+                false
+            }
+        }
+    }
+
     pub(crate) fn queue_edit(&self) -> Option<&QueueEditState> {
         self.queue_edit.as_ref()
     }

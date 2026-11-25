@@ -9,7 +9,6 @@ mod upscale;
 mod batch;
 mod dialogs;
 mod frame_capture;
-mod preferences;
 mod queue;
 mod render;
 mod shutdown;
@@ -126,10 +125,6 @@ impl eframe::App for ApolloApp {
         } else {
             self.show_root(ui);
         }
-    }
-
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        preferences::save(&self.core.settings, storage);
     }
 }
 

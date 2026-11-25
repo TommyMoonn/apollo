@@ -47,3 +47,13 @@ fn queue_wakes_are_observable_before_notification_and_retired_events_are_drained
     current.notify(MediaProcessEvent::Progress);
     assert!(!workflow.drain_current_events(None));
 }
+
+#[test]
+fn output_folder_failure_is_reported_as_queue_action_feedback() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("missing output");
+    let mut app = Application::default();
+    assert!(!app.settle_open_folder(&missing, crate::native::open_folder(&missing)));
+    let message = app.queue_action_error.as_deref().unwrap();
+    assert!(message.contains(&missing.to_string_lossy().to_string()));
+}

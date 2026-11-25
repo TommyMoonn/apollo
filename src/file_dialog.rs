@@ -1,14 +1,20 @@
 use std::{
     fmt,
-    path::PathBuf,
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
-    thread,
+    sync::mpsc::{Receiver, TryRecvError},
 };
 
 #[cfg(any(target_os = "windows", test))]
 use crate::app::dialogs::OutputFormat;
 use crate::app::dialogs::{DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogRequest};
+#[cfg(windows)]
 use crate::native::WindowOwner;
+#[cfg(any(windows, test))]
+use std::{path::PathBuf, sync::mpsc};
+#[cfg(test)]
+use std::{
+    sync::mpsc::{SyncSender, TrySendError},
+    thread,
+};
 
 #[cfg(target_os = "windows")]
 const MEDIA_FILTER_NAME: &str = "Video files";
@@ -62,6 +68,7 @@ impl OutputFormat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileDialogStartError {
     AlreadyPending,
+    #[cfg(windows)]
     WindowOwnerUnavailable(String),
     WorkerUnavailable(String),
 }
@@ -70,31 +77,60 @@ impl fmt::Display for FileDialogStartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyPending => formatter.write_str("a file dialog is already open"),
+            #[cfg(windows)]
             Self::WindowOwnerUnavailable(diagnostic) => formatter.write_str(diagnostic),
             Self::WorkerUnavailable(diagnostic) => formatter.write_str(diagnostic),
         }
     }
 }
 
+type DialogDispatch = Box<dyn Fn(FileDialogRequest) -> Result<(), FileDialogStartError>>;
+
 pub(crate) struct FileDialogOwner {
-    request_sender: Option<SyncSender<FileDialogRequest>>,
+    dispatch: Option<DialogDispatch>,
     completion_receiver: Receiver<FileDialogCompletion>,
     pending_target: Option<DialogTarget>,
     unavailable: Option<FileDialogStartError>,
 }
 
 impl FileDialogOwner {
-    #[allow(dead_code, reason = "Native dialog integration resumes in U01.4")]
+    #[cfg(windows)]
     pub(crate) fn new(
-        wake: impl Fn() + Send + 'static,
+        wake: impl Fn() + Clone + Send + 'static,
         owner: Result<WindowOwner, String>,
+        executor: gpui::ForegroundExecutor,
     ) -> Self {
-        match owner {
-            Ok(owner) => Self::spawn(wake, move || native_dialog_runner(owner)),
-            Err(error) => Self::unavailable(FileDialogStartError::WindowOwnerUnavailable(error)),
+        let owner = match owner {
+            Ok(owner) => owner,
+            Err(error) => {
+                return Self::unavailable(FileDialogStartError::WindowOwnerUnavailable(error));
+            }
+        };
+        let (sender, completion_receiver) = mpsc::sync_channel(1);
+        Self {
+            dispatch: Some(Box::new(move |request| {
+                let sender = sender.clone();
+                let wake = wake.clone();
+                // Like GPUI's Windows prompt implementation, run the modal COM call on
+                // the foreground executor, outside a borrowed App/Window/entity update.
+                executor
+                    .spawn(async move {
+                        let mut runner = native_dialog_runner(owner);
+                        let completion = run_request(&request, &mut runner);
+                        if sender.send(completion).is_ok() {
+                            wake();
+                        }
+                    })
+                    .detach();
+                Ok(())
+            })),
+            completion_receiver,
+            pending_target: None,
+            unavailable: None,
         }
     }
 
+    #[cfg(test)]
     fn spawn<F, R>(wake: impl Fn() + Send + 'static, runner_factory: F) -> Self
     where
         F: FnOnce() -> Result<R, String> + Send + 'static,
@@ -108,13 +144,23 @@ impl FileDialogOwner {
                 run_dialog_service(request_receiver, completion_sender, wake, runner_factory);
             }) {
             Ok(_) => Self {
-                request_sender: Some(request_sender),
+                dispatch: Some(Box::new(move |request| {
+                    match request_sender.try_send(request) {
+                        Ok(()) => Ok(()),
+                        Err(TrySendError::Full(_)) => Err(FileDialogStartError::AlreadyPending),
+                        Err(TrySendError::Disconnected(_)) => {
+                            Err(FileDialogStartError::WorkerUnavailable(
+                                "The native file dialog service disconnected.".into(),
+                            ))
+                        }
+                    }
+                })),
                 completion_receiver,
                 pending_target: None,
                 unavailable: None,
             },
             Err(error) => Self {
-                request_sender: None,
+                dispatch: None,
                 completion_receiver,
                 pending_target: None,
                 unavailable: Some(FileDialogStartError::WorkerUnavailable(error.to_string())),
@@ -131,10 +177,11 @@ impl FileDialogOwner {
         Self::spawn(wake, runner_factory)
     }
 
+    #[cfg(windows)]
     fn unavailable(error: FileDialogStartError) -> Self {
         let (_, completion_receiver) = mpsc::sync_channel(1);
         Self {
-            request_sender: None,
+            dispatch: None,
             completion_receiver,
             pending_target: None,
             unavailable: Some(error),
@@ -153,21 +200,14 @@ impl FileDialogOwner {
         }
 
         let target = request.target();
-        let Some(sender) = self.request_sender.as_ref() else {
+        let Some(dispatch) = self.dispatch.as_ref() else {
             return Err(FileDialogStartError::WorkerUnavailable(
                 "The native file dialog service is unavailable.".to_owned(),
             ));
         };
-        match sender.try_send(request) {
-            Ok(()) => {
-                self.pending_target = Some(target);
-                Ok(())
-            }
-            Err(TrySendError::Full(_)) => Err(FileDialogStartError::AlreadyPending),
-            Err(TrySendError::Disconnected(_)) => Err(FileDialogStartError::WorkerUnavailable(
-                "The native file dialog service disconnected.".to_owned(),
-            )),
-        }
+        dispatch(request)?;
+        self.pending_target = Some(target);
+        Ok(())
     }
 
     pub(crate) fn poll(&mut self) -> Option<FileDialogCompletion> {
@@ -195,6 +235,7 @@ impl FileDialogOwner {
     }
 }
 
+#[cfg(test)]
 fn run_dialog_service<F, R>(
     request_receiver: Receiver<FileDialogRequest>,
     completion_sender: SyncSender<FileDialogCompletion>,
@@ -206,31 +247,8 @@ fn run_dialog_service<F, R>(
 {
     let mut runner = runner_factory();
     while let Ok(request) = request_receiver.recv() {
-        let target = request.target();
-        let outcome = match runner.as_mut() {
-            Ok(runner) => {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if matches!(request, FileDialogRequest::OpenSources { .. }) {
-                        runner.run_many(&request).map(|paths| {
-                            paths.map_or(DialogOutcome::Cancelled, DialogOutcome::SelectedMany)
-                        })
-                    } else {
-                        runner.run(&request).map(|path| {
-                            path.map_or(DialogOutcome::Cancelled, DialogOutcome::Selected)
-                        })
-                    }
-                })) {
-                    Ok(Ok(outcome)) => outcome,
-                    Ok(Err(error)) => DialogOutcome::Failed(error),
-                    Err(_) => DialogOutcome::Failed(
-                        "The native file dialog stopped unexpectedly.".to_owned(),
-                    ),
-                }
-            }
-            Err(error) => DialogOutcome::Failed(error.clone()),
-        };
         if completion_sender
-            .send(FileDialogCompletion { target, outcome })
+            .send(run_request(&request, &mut runner))
             .is_err()
         {
             break;
@@ -239,6 +257,38 @@ fn run_dialog_service<F, R>(
     }
 }
 
+#[cfg(any(windows, test))]
+fn run_request<R: DialogBackend>(
+    request: &FileDialogRequest,
+    runner: &mut Result<R, String>,
+) -> FileDialogCompletion {
+    let target = request.target();
+    let outcome = match runner.as_mut() {
+        Ok(runner) => {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if matches!(request, FileDialogRequest::OpenSources { .. }) {
+                    runner.run_many(request).map(|paths| {
+                        paths.map_or(DialogOutcome::Cancelled, DialogOutcome::SelectedMany)
+                    })
+                } else {
+                    runner
+                        .run(request)
+                        .map(|path| path.map_or(DialogOutcome::Cancelled, DialogOutcome::Selected))
+                }
+            })) {
+                Ok(Ok(outcome)) => outcome,
+                Ok(Err(error)) => DialogOutcome::Failed(error),
+                Err(_) => {
+                    DialogOutcome::Failed("The native file dialog stopped unexpectedly.".to_owned())
+                }
+            }
+        }
+        Err(error) => DialogOutcome::Failed(error.clone()),
+    };
+    FileDialogCompletion { target, outcome }
+}
+
+#[cfg(any(windows, test))]
 pub(crate) trait DialogBackend {
     fn run(&mut self, request: &FileDialogRequest) -> Result<Option<PathBuf>, String>;
 
@@ -247,6 +297,7 @@ pub(crate) trait DialogBackend {
     }
 }
 
+#[cfg(test)]
 impl<F> DialogBackend for F
 where
     F: FnMut(&FileDialogRequest) -> Result<Option<PathBuf>, String>,
@@ -275,14 +326,6 @@ fn native_dialog_runner(owner: WindowOwner) -> Result<NativeDialogBackend, Strin
     native_windows::DialogSession::new(owner)
         .map(NativeDialogBackend)
         .map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_os = "windows"))]
-type UnsupportedDialogRunner = fn(&FileDialogRequest) -> Result<Option<PathBuf>, String>;
-
-#[cfg(not(target_os = "windows"))]
-fn native_dialog_runner(_owner: WindowOwner) -> Result<UnsupportedDialogRunner, String> {
-    Err("Native file dialogs are currently available on Windows.".to_owned())
 }
 
 #[cfg(target_os = "windows")]
@@ -517,7 +560,7 @@ mod native_windows {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, path::PathBuf, sync::mpsc, time::Duration};
+    use std::{path::PathBuf, sync::mpsc, time::Duration};
 
     use super::{
         DialogBackend, DialogOutcome, DialogTarget, FileDialogOwner, FileDialogRequest,
@@ -577,8 +620,8 @@ mod tests {
     #[test]
     fn multi_open_request_preserves_every_selected_path_in_native_order() {
         let paths = vec![
-            PathBuf::from(r"C:\media\first.mp4"),
-            PathBuf::from(r"C:\media\second.mkv"),
+            PathBuf::from(r"C:\media files\第一.mp4"),
+            PathBuf::from(r"C:\media files\thứ hai.mkv"),
         ];
         let expected = paths.clone();
         let (callback, wake) = dialog_wake();
@@ -701,45 +744,6 @@ mod tests {
             wait_for_completion(&mut owner, &wake).outcome,
             DialogOutcome::Failed("native dialog diagnostic".to_owned())
         );
-    }
-
-    #[test]
-    fn dialog_service_reuses_initialized_backend_for_multiple_requests() {
-        let paths = [
-            PathBuf::from("media/first.mp4"),
-            PathBuf::from("output/second.mkv"),
-        ];
-        let mut results = VecDeque::from(paths.clone());
-        let (requests, request_rx) = mpsc::sync_channel(1);
-        let (completion_tx, completions) = mpsc::sync_channel(1);
-        let (initializations, initialized) = mpsc::channel();
-        let (threads, observed) = mpsc::channel();
-        std::thread::spawn(move || {
-            super::run_dialog_service(
-                request_rx,
-                completion_tx,
-                || {},
-                move || {
-                    initializations.send(()).unwrap();
-                    Ok(move |_: &FileDialogRequest| {
-                        threads.send(std::thread::current().id()).unwrap();
-                        Ok(results.pop_front())
-                    })
-                },
-            );
-        });
-        initialized.recv_timeout(COMPLETION_TIMEOUT).unwrap();
-        let mut worker_thread = None;
-        for path in paths {
-            requests.send(open_request()).unwrap();
-            let completion = completions.recv_timeout(COMPLETION_TIMEOUT).unwrap();
-            assert_eq!(completion.target, DialogTarget::MediaInput);
-            assert_eq!(completion.outcome, DialogOutcome::Selected(path));
-            let thread = observed.recv_timeout(COMPLETION_TIMEOUT).unwrap();
-            assert_ne!(thread, std::thread::current().id());
-            assert_eq!(*worker_thread.get_or_insert(thread), thread);
-        }
-        assert!(initialized.try_recv().is_err());
     }
 
     fn wait_for_completion(

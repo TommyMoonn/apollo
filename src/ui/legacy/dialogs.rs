@@ -56,22 +56,10 @@ impl ApolloApp {
     pub(super) fn settle_file_dialog(&mut self, completion: FileDialogCompletion) {
         let FileDialogCompletion { target, outcome } = completion;
         if let Some((operation, session_id)) = target.output() {
-            // Independent editors have unique session IDs; settle at most one owner.
-            let editor = match self.core.navigation() {
-                NavigationState::QueueEdit { .. } => {
-                    self.core.queue_edit_mut().map(|edit| &mut edit.editor)
-                }
-                NavigationState::BatchEdit => {
-                    self.core.batch_edit.as_mut().map(|edit| &mut edit.editor)
-                }
-                _ => None,
-            }
-            .filter(|edit| edit.session_id == session_id);
-            let selected = if let Some(editor) = editor {
-                settle_editor_output(editor, operation, &outcome)
-            } else {
-                settle_output_file_dialog(&mut self.state, target, &outcome)
-            };
+            let selected = self
+                .core
+                .settle_independent_output(operation, session_id, &outcome)
+                || settle_output_file_dialog(&mut self.state, target, &outcome);
             if selected && let DialogOutcome::Selected(path) = outcome {
                 self.core.settings.remember_output(&path);
             }
@@ -128,31 +116,6 @@ impl ApolloApp {
         } else {
             self.start_batch_paths(paths);
         }
-    }
-}
-
-fn settle_editor_output(
-    edit: &mut OperationEditorState,
-    operation: Operation,
-    outcome: &DialogOutcome,
-) -> bool {
-    match outcome {
-        DialogOutcome::Selected(path) => {
-            match operation {
-                Operation::AudioMix => edit.audio_mix.set_custom_output_path(path.clone()),
-                Operation::VideoUpscale => edit.upscale.set_custom_output_path(path.clone()),
-                Operation::Remux => edit.remux.set_custom_output_path(path.clone()),
-                Operation::AudioExtract => edit.audio_extract.set_custom_output_path(path.clone()),
-                Operation::FrameCapture => edit.frame_capture.set_custom_output_path(path.clone()),
-            }
-            true
-        }
-        DialogOutcome::Failed(diagnostic) if edit.active_operation == operation => {
-            edit.error = Some(MediaError::output_picker_unavailable(diagnostic.clone()));
-            edit.error_details_open = false;
-            false
-        }
-        _ => false,
     }
 }
 

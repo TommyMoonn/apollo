@@ -76,10 +76,11 @@ impl ApolloApp {
             }
             QueueEffect::Edit(id, origin) => self.begin_queue_edit(id, origin),
             QueueEffect::OpenFolder(directory) => {
-                if let Err(error) = open_folder(&directory) {
-                    eprintln!("Queue output folder could not be opened: {error}");
-                }
-                true
+                let opened = self
+                    .core
+                    .settle_open_folder(&directory, open_folder(&directory));
+                self.egui_context.request_repaint();
+                opened
             }
             QueueEffect::PreviewFrame(id, output) => {
                 self.queue_frame_preview = Some(QueueFramePreview::new(

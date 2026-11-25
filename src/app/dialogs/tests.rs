@@ -128,3 +128,183 @@ fn upscale_save_request_preserves_custom_directory_and_authoritative_extension()
     assert_eq!(options.file_name, "output.mp4");
     assert_eq!(options.format, OutputFormat::Mp4);
 }
+
+#[test]
+fn native_input_results_preserve_the_accepted_source_and_directory_on_cancel_failure_or_stale() {
+    use crate::{
+        app::{
+            QueueOrigin,
+            discovery::{MediaToolsDiscovery, MediaToolsState},
+        },
+        media::{error::MediaErrorKind, intake::SourceIdentity, tools::MediaTools},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source file.mkv");
+    std::fs::write(&source, b"fixture").unwrap();
+    let mut app = Application {
+        discovery: MediaToolsDiscovery::with_state(MediaToolsState::Ready(MediaTools::new(
+            "missing-ffmpeg",
+            "missing-ffprobe",
+        ))),
+        ..Application::default()
+    };
+    let mut retained = media();
+    retained.path = source.clone();
+    app.source
+        .restore(SourceIdentity::read(&source).unwrap(), retained);
+    app.enter_workspace(Operation::Remux);
+    let session = app.source.session_id();
+    let origin = InputDialogOrigin::capture(&app);
+    let complete = |app: &mut Application, outcome| {
+        app.settle_native_dialog(
+            origin,
+            FileDialogCompletion {
+                target: DialogTarget::BatchInput,
+                outcome,
+            },
+            || {},
+        )
+    };
+    complete(&mut app, DialogOutcome::Cancelled);
+    assert_eq!(app.source.session_id(), session);
+    assert!(app.settings.source_directory().is_none());
+    complete(&mut app, DialogOutcome::Failed("picker error".into()));
+    assert_eq!(
+        app.source.error().unwrap().kind(),
+        MediaErrorKind::FilePickerUnavailable
+    );
+    assert_eq!(app.source.session_id(), session);
+    assert!(app.settings.source_directory().is_none());
+    // Re-selecting the unchanged source must reuse its inspection, rather than launching another probe.
+    complete(&mut app, DialogOutcome::SelectedMany(vec![source.clone()]));
+    assert_eq!(app.source.session_id(), session);
+    assert_eq!(app.source.current().unwrap().path, source);
+    assert!(!app.source.is_inspecting());
+    assert!(app.source.error().is_none());
+    assert_eq!(
+        app.settings.source_directory().as_deref(),
+        Some(root.path())
+    );
+    app.show_queue(QueueOrigin::SourceWorkspace {
+        active_operation: Operation::Remux,
+    });
+    app.return_from_queue();
+    let replacement = root.path().join("other");
+    std::fs::create_dir(&replacement).unwrap();
+    let replacement = replacement.join("stale.mkv");
+    complete(&mut app, DialogOutcome::SelectedMany(vec![replacement]));
+    assert_eq!(app.source.session_id(), session);
+    assert_eq!(
+        app.settings.source_directory().as_deref(),
+        Some(root.path())
+    );
+    assert!(app.source.error().is_none());
+}
+
+#[test]
+fn native_multi_selection_retains_every_path_in_batch_order() {
+    use crate::app::discovery::{MediaToolsDiscovery, MediaToolsState};
+    use crate::media::tools::MediaTools;
+    let root = tempfile::tempdir().unwrap();
+    let paths = vec![
+        root.path().join("nguồn một.mkv"),
+        root.path().join("source two.mp4"),
+    ];
+    for path in &paths {
+        std::fs::write(path, b"fixture").unwrap();
+    }
+    let mut app = Application {
+        discovery: MediaToolsDiscovery::with_state(MediaToolsState::Ready(MediaTools::new(
+            "missing-ffmpeg",
+            "missing-ffprobe",
+        ))),
+        ..Application::default()
+    };
+    let origin = InputDialogOrigin::capture(&app);
+    app.settle_native_dialog(
+        origin,
+        FileDialogCompletion {
+            target: DialogTarget::BatchInput,
+            outcome: DialogOutcome::SelectedMany(paths.clone()),
+        },
+        || {},
+    );
+    assert_eq!(app.navigation(), crate::app::NavigationState::BatchSetup);
+    let batch = app.batch_setup.as_ref().unwrap();
+    assert_eq!(
+        batch
+            .items
+            .iter()
+            .map(|item| item.path.clone())
+            .collect::<Vec<_>>(),
+        paths
+    );
+    assert!(app.source.current().is_none());
+    assert_eq!(
+        app.settings.source_directory().as_deref(),
+        Some(root.path())
+    );
+    app.retire_batch();
+}
+
+#[test]
+fn native_output_completion_targets_the_original_editor_and_clears_picker_failure_on_success() {
+    use crate::app::{
+        batch::{BatchEditState, BatchEditTarget, BatchItemId},
+        editor::OperationEditorState,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let mut app = Application::default();
+    let editor = OperationEditorState::new(1, None, media(), Operation::Remux);
+    let before = editor.remux.output_path();
+    app.batch_edit = Some(BatchEditState {
+        target: BatchEditTarget::Item(BatchItemId(0)),
+        editor,
+    });
+    app.show_batch_edit();
+    let origin = InputDialogOrigin::capture(&app);
+    let complete = |app: &mut Application, session_id, outcome| {
+        app.settle_native_dialog(
+            origin,
+            FileDialogCompletion {
+                target: DialogTarget::RemuxOutput { session_id },
+                outcome,
+            },
+            || {},
+        )
+    };
+    complete(&mut app, 1, DialogOutcome::Cancelled);
+    assert_eq!(app.batch_edit.as_ref().unwrap().remux.output_path(), before);
+    complete(
+        &mut app,
+        1,
+        DialogOutcome::Failed("save picker unavailable".into()),
+    );
+    assert!(app.batch_edit.as_ref().unwrap().error.is_some());
+    assert_eq!(app.batch_edit.as_ref().unwrap().remux.output_path(), before);
+    assert!(
+        app.settings
+            .output_directory(Path::new("missing"))
+            .is_none()
+    );
+    let selected = root.path().join("sortie vidéo.mkv");
+    complete(&mut app, 99, DialogOutcome::Selected(selected.clone()));
+    assert_eq!(app.batch_edit.as_ref().unwrap().remux.output_path(), before);
+    assert!(
+        app.settings
+            .output_directory(Path::new("missing"))
+            .is_none()
+    );
+    complete(&mut app, 1, DialogOutcome::Selected(selected.clone()));
+    assert_eq!(
+        app.batch_edit.as_ref().unwrap().remux.output_path(),
+        selected
+    );
+    assert!(app.batch_edit.as_ref().unwrap().error.is_none());
+    assert_eq!(
+        app.settings
+            .output_directory(Path::new("missing"))
+            .as_deref(),
+        Some(root.path())
+    );
+}

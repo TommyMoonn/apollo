@@ -1,6 +1,6 @@
 //! GPUI application root and foreground worker settlement.
 
-use std::{borrow::Cow, cell::Cell, process::ExitCode, rc::Rc};
+use std::{borrow::Cow, cell::Cell, path::PathBuf, process::ExitCode, rc::Rc};
 
 use gpui::{
     App, Application as GpuiApplication, Bounds, Context, FocusHandle, FontWeight, Task,
@@ -8,8 +8,15 @@ use gpui::{
 };
 
 use crate::app::{Application, NavigationState, background, discovery::MediaToolsState};
-use crate::native;
 use crate::progress_wake::MediaProgressWakeOwner;
+use crate::{
+    app::dialogs::{
+        DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogRequest, InputDialogOrigin,
+    },
+    file_dialog::{FileDialogOwner, FileDialogStartError},
+    native::{self, WindowOwner},
+    settings::{self, AppSettings},
+};
 
 use super::{
     MINIMUM_CONTENT_DIMENSIONS, REFERENCE_CONTENT_DIMENSIONS,
@@ -31,6 +38,13 @@ struct ApolloRoot {
     dialog_focus: FocusHandle,
     retry_focus: FocusHandle,
     previous_focus: Option<FocusHandle>,
+    open_focus: FocusHandle,
+    picker_focus: Option<FocusHandle>,
+    file_dialog: FileDialogOwner,
+    dialog_origin: Option<InputDialogOrigin>,
+    settings_path: Option<PathBuf>,
+    settings_error: Option<String>,
+    settings_dirty: bool,
     exit: ExitState,
     wake: async_channel::Sender<()>,
     progress_wake: MediaProgressWakeOwner,
@@ -53,8 +67,29 @@ impl ApolloRoot {
         });
         let focus = cx.focus_handle();
         window.focus(&focus);
+        let (settings_path, preferences, settings_error) = match settings::settings_path() {
+            Ok(path) => {
+                let (preferences, error) = AppSettings::load(&path);
+                (Some(path), preferences, error)
+            }
+            Err(error) => (None, AppSettings::default(), Some(error)),
+        };
+        let core = Application::with_settings(preferences);
+        let dialog_wake = wake.clone();
+        let file_dialog = FileDialogOwner::new(
+            move || background::notify(&dialog_wake),
+            WindowOwner::from_window(window),
+            cx.foreground_executor().clone(),
+        );
         let mut root = Self {
-            core: Application::default(),
+            core,
+            open_focus: cx.focus_handle().tab_stop(true).tab_index(0),
+            picker_focus: None,
+            file_dialog,
+            dialog_origin: None,
+            settings_path,
+            settings_error,
+            settings_dirty: false,
             focus,
             dialog_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             retry_focus: cx.focus_handle().tab_stop(true).tab_index(0),
@@ -92,13 +127,113 @@ impl ApolloRoot {
         true
     }
 
+    fn can_open_files(&self) -> bool {
+        self.exit == ExitState::Open
+            && !self.file_dialog.is_pending()
+            && self.core.discovery.ready().is_some()
+            && self.core.batch_origin().is_some()
+            && !self.core.source.is_inspecting()
+            && !self.core.frame_work.copy_active()
+    }
+
+    fn start_file_dialog(
+        &mut self,
+        request: FileDialogRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.exit != ExitState::Open || self.file_dialog.is_pending() {
+            return;
+        }
+        let request = self.core.prepare_file_dialog_request(request);
+        let target = request.target();
+        let origin = InputDialogOrigin::capture(&self.core);
+        match self.file_dialog.request(request) {
+            Ok(()) => {
+                self.dialog_origin = Some(origin);
+                self.picker_focus = window.focused(cx).or_else(|| Some(self.open_focus.clone()));
+            }
+            Err(FileDialogStartError::AlreadyPending) => return,
+            Err(error) => self.apply_dialog(
+                origin,
+                FileDialogCompletion {
+                    target,
+                    outcome: DialogOutcome::Failed(error.to_string()),
+                },
+            ),
+        }
+        cx.notify();
+    }
+
+    fn apply_dialog(&mut self, origin: InputDialogOrigin, completion: FileDialogCompletion) {
+        let before = self.core.settings.clone();
+        let wake = self.wake.clone();
+        self.core
+            .settle_native_dialog(origin, completion, move || background::notify(&wake));
+        if self.core.settings != before {
+            self.settings_dirty = true;
+            self.persist_settings();
+        }
+    }
+
+    fn persist_settings(&mut self) {
+        if !self.settings_dirty {
+            return;
+        }
+        if self.settings_path.is_none() {
+            match settings::settings_path() {
+                Ok(path) => self.settings_path = Some(path),
+                Err(error) => {
+                    self.settings_error = Some(error);
+                    return;
+                }
+            }
+        }
+        match self.core.settings.save(
+            self.settings_path
+                .as_deref()
+                .expect("settings path resolved"),
+        ) {
+            Ok(()) => {
+                self.settings_dirty = false;
+                self.settings_error = None;
+            }
+            Err(error) => self.settings_error = Some(error),
+        }
+    }
+
+    fn poll_file_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(completion) = self.file_dialog.poll() else {
+            return;
+        };
+        let origin = self.dialog_origin.take();
+        if let Some(origin) = origin.filter(|_| !self.core.is_closing()) {
+            self.apply_dialog(origin, completion);
+        }
+        if let Some(focus) = self.picker_focus.take() {
+            if self.exit == ExitState::Open {
+                // Restore the initiating control when still actionable; otherwise use the root.
+                if self.can_open_files() || focus != self.open_focus {
+                    window.focus(&focus);
+                } else {
+                    window.focus(&self.focus);
+                }
+            } else if self.exit == ExitState::Confirming {
+                self.previous_focus = Some(focus);
+                window.focus(&self.dialog_focus);
+            }
+        }
+        cx.notify();
+    }
+
     fn settle_background(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.exit == ExitState::Failed {
             return;
         }
+        self.poll_file_dialog(window, cx);
         let progress = &mut self.progress_wake;
         if self.core.is_closing() {
-            if self.core.poll_shutdown(|| progress.begin()) {
+            if self.core.poll_shutdown(|| progress.begin()) && !self.file_dialog.is_pending() {
                 if self.core.shutdown_failure().is_some() {
                     self.exit = ExitState::Failed;
                     window.focus(&self.dialog_focus);
@@ -136,8 +271,9 @@ impl ApolloRoot {
             .take()
             .unwrap_or_else(|| self.focus.clone());
         // The retry action may have disappeared while background discovery settled.
-        if focus == self.retry_focus
-            && !matches!(self.core.discovery.state(), MediaToolsState::Unavailable(_))
+        if (focus == self.retry_focus
+            && !matches!(self.core.discovery.state(), MediaToolsState::Unavailable(_)))
+            || (focus == self.open_focus && !self.can_open_files())
         {
             window.focus(&self.focus);
         } else {
@@ -251,12 +387,41 @@ impl ApolloRoot {
 impl Render for ApolloRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let message = match self.core.navigation() {
-            NavigationState::NoSource => "Opening files is unavailable during the UI migration.",
+            NavigationState::NoSource => "Choose a media file. The source view is being migrated.",
+            NavigationState::BatchSetup | NavigationState::BatchEdit => {
+                "Batch configuration is unavailable during the UI migration."
+            }
             _ => "This view is unavailable during the UI migration.",
         };
 
         let palette = Palette::DARK;
-        let open = Button::new("open-files", "Open files", Tone::Primary).render(palette, window);
+        let mut open = Button::new("open-files", "Open files", Tone::Primary);
+        open.alternate_labels = &["Opening files…"];
+        if self.file_dialog.is_pending() {
+            open.label = "Opening files…";
+            open.state = ActionState::Busy;
+        } else if self.can_open_files() {
+            open.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                if !root.can_open_files() {
+                    return;
+                }
+                window.focus(&root.open_focus);
+                root.start_file_dialog(
+                    FileDialogRequest::OpenSources {
+                        initial_directory: None,
+                        target: DialogTarget::BatchInput,
+                    },
+                    window,
+                    cx,
+                );
+            })));
+        }
+        let open = open.render(palette, window);
+        let open = if self.can_open_files() {
+            open.track_focus(&self.open_focus)
+        } else {
+            open
+        };
         let queue_label = super::queue_count_label(self.core.queue.scheduler().pending_count());
         let queue = Button::new("queue", &queue_label, Tone::Standard).render(palette, window);
         let scheduler = self.core.queue.scheduler();
@@ -290,6 +455,41 @@ impl Render for ApolloRoot {
                 )
                 .child(components::separator(palette))
                 .child(self.discovery_view(palette, window, cx))
+                .children(
+                    self.core
+                        .source
+                        .is_inspecting()
+                        .then(|| components::pending("Checking file…", palette)),
+                )
+                .children(self.core.source.error().map(|error| {
+                    let message = format!(
+                        "{} {}",
+                        error.message(),
+                        error.guidance().unwrap_or_default()
+                    );
+                    components::inline_message(message, palette)
+                }))
+                .children(self.settings_error.as_ref().map(|error| {
+                    let mut feedback = div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(M.related))
+                        .child(components::inline_message(error.clone(), palette));
+                    if self.settings_dirty && !self.file_dialog.is_pending() {
+                        let mut retry = Button::new(
+                            "retry-settings",
+                            "Retry saving preferences",
+                            Tone::Standard,
+                        );
+                        retry.state =
+                            ActionState::Enabled(Box::new(cx.listener(|root, _, _, cx| {
+                                root.persist_settings();
+                                cx.notify();
+                            })));
+                        feedback = feedback.child(retry.render(palette, window));
+                    }
+                    feedback
+                }))
                 .children(work)
                 .child(
                     div()

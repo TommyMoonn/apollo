@@ -70,6 +70,10 @@ impl FileDialogRequest {
     }
 }
 
+#[cfg_attr(
+    not(any(windows, test)),
+    allow(dead_code, reason = "Native selections are produced only on Windows")
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DialogOutcome {
     Selected(PathBuf),
@@ -127,7 +131,17 @@ impl Application {
             | FileDialogRequest::OpenSources {
                 initial_directory, ..
             } => {
-                *initial_directory = self.settings.source_directory();
+                *initial_directory = self
+                    .settings
+                    .source_directory()
+                    .or_else(|| initial_directory.take().filter(|path| path.is_dir()))
+                    .or_else(|| {
+                        self.source
+                            .current()
+                            .and_then(|media| media.path.parent())
+                            .filter(|path| path.is_dir())
+                            .map(Path::to_path_buf)
+                    });
             }
             FileDialogRequest::SaveOutput { options, .. } => {
                 let fallback = options
@@ -210,3 +224,140 @@ impl OutputDraft<'_> {
 
 #[cfg(test)]
 mod tests;
+
+impl Application {
+    /// A native selection is applied only to its still-current input context.
+    #[cfg(any(windows, test))]
+    pub(crate) fn settle_native_dialog(
+        &mut self,
+        origin: InputDialogOrigin,
+        completion: FileDialogCompletion,
+        wake: impl Fn() + Clone + Send + 'static,
+    ) {
+        use crate::{
+            app::NavigationState,
+            media::{error::MediaError, intake::MediaLoadStart},
+        };
+        if self.is_closing() {
+            return;
+        }
+        let FileDialogCompletion { target, outcome } = completion;
+        if let Some((operation, session_id)) = target.output() {
+            if self.settle_independent_output(operation, session_id, &outcome)
+                && let DialogOutcome::Selected(path) = outcome
+            {
+                self.settings.remember_output(&path);
+            }
+            return;
+        }
+        if !origin.is_current(self) {
+            return;
+        }
+        if target == DialogTarget::BatchAppend
+            && (self.navigation() != NavigationState::BatchSetup || self.batch_setup.is_none())
+        {
+            return;
+        }
+        let paths = match outcome {
+            DialogOutcome::Selected(path) => vec![path],
+            DialogOutcome::SelectedMany(paths) => paths,
+            DialogOutcome::Cancelled => return,
+            DialogOutcome::Failed(diagnostic) => {
+                let error = MediaError::file_picker_unavailable(diagnostic);
+                if target == DialogTarget::BatchAppend {
+                    self.set_batch_append_error(error);
+                } else {
+                    self.source.set_error(error);
+                }
+                return;
+            }
+        };
+        let Some(path) = paths.first() else {
+            return;
+        };
+        if target != DialogTarget::BatchAppend
+            && (self.source.is_inspecting()
+                || self.frame_work.copy_active()
+                || self.batch_origin().is_none())
+        {
+            return;
+        }
+        self.settings.remember_source(path);
+        if target == DialogTarget::BatchAppend {
+            self.append_batch_paths(paths, wake);
+            return;
+        }
+        if paths.len() > 1 {
+            self.start_batch_paths(paths, wake);
+            return;
+        }
+        let Some(tools) = self.discovery.ready().cloned() else {
+            return;
+        };
+        self.queue_confirmation = None;
+        self.operation_action_error = None;
+        match self.source.begin_load(path) {
+            Some(MediaLoadStart::Reused) => {
+                self.enter_workspace(self.active_operation().unwrap_or(Operation::AudioMix))
+            }
+            Some(MediaLoadStart::Probe(request)) => {
+                self.source.start_inspection(tools, request, wake)
+            }
+            None => {}
+        }
+    }
+
+    /// Shared output settlement for fixed-source queue and batch editors.
+    pub(crate) fn settle_independent_output(
+        &mut self,
+        operation: Operation,
+        session_id: u64,
+        outcome: &DialogOutcome,
+    ) -> bool {
+        use super::NavigationState;
+        let editor = match self.navigation() {
+            NavigationState::QueueEdit { .. } => self.queue_edit_mut().map(|edit| &mut edit.editor),
+            NavigationState::BatchEdit => self.batch_edit.as_mut().map(|edit| &mut edit.editor),
+            _ => None,
+        };
+        let Some(editor) = editor.filter(|edit| edit.session_id == session_id) else {
+            return false;
+        };
+        settle_editor_output(editor, operation, outcome)
+    }
+}
+
+fn settle_editor_output(
+    edit: &mut super::editor::OperationEditorState,
+    operation: Operation,
+    outcome: &DialogOutcome,
+) -> bool {
+    match outcome {
+        DialogOutcome::Selected(path) => {
+            match operation {
+                Operation::AudioMix => edit.audio_mix.set_custom_output_path(path.clone()),
+                Operation::VideoUpscale => edit.upscale.set_custom_output_path(path.clone()),
+                Operation::Remux => edit.remux.set_custom_output_path(path.clone()),
+                Operation::AudioExtract => edit.audio_extract.set_custom_output_path(path.clone()),
+                Operation::FrameCapture => edit.frame_capture.set_custom_output_path(path.clone()),
+            }
+            if edit.active_operation == operation
+                && edit.error.as_ref().is_some_and(|error| {
+                    error.kind() == crate::media::error::MediaErrorKind::OutputPickerUnavailable
+                })
+            {
+                edit.error = None;
+                edit.error_details_open = false;
+            }
+            true
+        }
+        DialogOutcome::Failed(diagnostic) if edit.active_operation == operation => {
+            edit.error = Some(crate::media::error::MediaError::output_picker_unavailable(
+                diagnostic.clone(),
+            ));
+            edit.error_details_open = false;
+            false
+        }
+        _ => false,
+    }
+}

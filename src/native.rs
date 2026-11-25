@@ -33,6 +33,12 @@ impl WindowOwner {
 }
 
 pub(crate) fn open_folder(path: &Path) -> io::Result<()> {
+    if !path.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "The output directory is unavailable",
+        ));
+    }
     #[cfg(target_os = "windows")]
     let mut command = Command::new("explorer");
     #[cfg(target_os = "macos")]
@@ -108,5 +114,21 @@ pub(crate) fn report_startup_error(message: &str) {
             title.as_ptr(),
             MB_OK | MB_ICONERROR,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn folder_open_rejects_missing_paths_and_regular_files_before_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("video file.mkv");
+        std::fs::write(&file, b"fixture").unwrap();
+        for path in [file, root.path().join("missing folder")] {
+            assert_eq!(
+                super::open_folder(&path).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+        }
     }
 }

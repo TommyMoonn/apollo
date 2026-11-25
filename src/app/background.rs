@@ -3,8 +3,7 @@ use super::{Application, Operation, source::SourceSettlement};
 use crate::media::process::MediaProcessWake;
 
 impl Application {
-    /// Called for a worker wake, never from rendering. Frame editor and native dialog
-    /// results retain their adapter-specific routing until those surfaces are migrated.
+    /// Called for a worker wake, never from rendering. Frame editor results retain their adapter-specific routing until those surfaces are migrated.
     pub(crate) fn poll_background(&mut self, wake: impl FnMut() -> MediaProcessWake) -> bool {
         debug_assert!(!self.is_closing());
         let had_tools = self.discovery.ready().is_some();

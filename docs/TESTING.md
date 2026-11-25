@@ -40,7 +40,7 @@ Operation draft tests live under each operation’s `draft.rs`; they cover typed
 
 Interactive Frame Capture tests cover editor identity, preview and index generations, and retirement. Adapter regressions in `src/ui/legacy/tests/frame_capture.rs` cover exact stepping, debounce, cache reuse, temporary navigation and texture reuse. Clipboard tests coordinate decode and publication through explicit notifications, including retirement before publication.
 
-Dialog request tests exercise the typed draft formats in `src/app/dialogs/`. Native dialog service tests cover single-flight ownership, cancellation and worker notifications. Legacy dialog tests cover target routing, stale completions and directory history; settings tests cover JSON compatibility, defaults and directory fallback. The eframe preferences adapter has a storage round-trip regression that also checks unchanged values remain intact.
+Dialog request and settlement tests in `src/app/dialogs/` cover typed formats, input identity, multi-file order and editor isolation. The dialog backend seam covers single-flight ownership, cancellation, failure and publication before notification. Settings tests use disposable directories to check first launch, independent directory history, Unicode paths, malformed data, fallback and failed atomic publication. Native folder tests reject missing paths before starting the shell. On Windows, verify that the picker is modal to Apollo, repeated activation is blocked, Cancel restores focus and leaves drafts intact, multi-select and save return the intended paths, preferences survive restart, and folder opening reports errors. Use disposable files and do not modify a real user preference file during automated testing.
 
 ```powershell
 cargo test --locked --test remux
