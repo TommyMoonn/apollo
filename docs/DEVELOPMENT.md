@@ -20,7 +20,7 @@ Rustup is the recommended way to install the pinned Rust toolchain. From the rep
 
 ### GPUI build requirements
 
-Apollo uses the official GPUI 0.2.2 crate with its Windows manifest feature. Linux GUI backends are not enabled; the application executable targets Windows x64. The existing Rust 1.97.1 pin is retained pending verification of the complete locked GPUI graph. The migration shell intentionally does not start media work until background and shutdown integration is in place.
+Apollo uses the official GPUI 0.2.2 crate with its Windows manifest feature. Linux GUI backends are not enabled; the application executable targets Windows x64. The existing Rust 1.97.1 pin is retained pending verification of the complete locked GPUI graph. The migration shell starts tool discovery and accepts worker wakes independently of rendering. File-processing actions remain disabled until their feature surfaces migrate.
 
 Before the first Windows build, ensure the pinned Geist Variable file is present as documented in [font assets](../assets/fonts/README.md). The [UI design guide](DESIGN.md) defines the shared presentation contracts.
 

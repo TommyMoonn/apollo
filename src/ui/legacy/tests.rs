@@ -108,7 +108,10 @@ fn running_queue_resumes_on_discovery_completion_without_process_notification() 
         },
     ));
     wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-    app.poll_background_work();
+    assert!(
+        app.core
+            .poll_background(|| panic!("no process should start before the queue"))
+    );
     assert!(app.core.discovery.is_pending());
     app.enter_queue();
     assert!(app.handle_queue_action(QueueAction::Start));
@@ -125,9 +128,17 @@ fn running_queue_resumes_on_discovery_completion_without_process_notification() 
     assert!(!app.core.clipboard_start_allowed());
     assert!(!app.handle_queue_action(QueueAction::Start));
 
+    app.core.return_from_queue();
+    let route = app.core.navigation();
     release_tx.send(()).unwrap();
     wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-    app.poll_background_work();
+    let progress = &mut app.progress_wake;
+    assert!(app.core.poll_background(|| progress.begin()));
+    assert_eq!(app.core.navigation(), route);
+    assert!(
+        !app.core
+            .poll_background(|| panic!("settled queue must not launch"))
+    );
     assert!(!app.core.discovery.is_pending());
     let queue = app.core.queue.scheduler();
     assert!(matches!(

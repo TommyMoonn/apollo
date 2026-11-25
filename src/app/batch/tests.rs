@@ -331,7 +331,7 @@ fn inspected(path: &Path) -> Result<crate::media::batch::BatchInspectedMedia, St
 fn settle_inspections(app: &mut Application, wakes: &mpsc::Receiver<()>) {
     let deadline = Instant::now() + TIMEOUT;
     while app.batch_inspecting() {
-        app.poll_batch_inspection();
+        app.poll_background(|| panic!("batch inspection must not start a stopped queue"));
         if app.batch_inspecting() {
             wakes
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))

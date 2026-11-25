@@ -22,7 +22,7 @@ use egui::{Context, Ui};
 use crate::app::dialogs::InputDialogOrigin;
 use crate::app::{Application, discovery::MediaToolsState};
 use crate::file_dialog::FileDialogOwner;
-use crate::progress_repaint::MediaProgressRepaintOwner;
+use crate::progress_wake::MediaProgressWakeOwner;
 #[cfg(test)]
 use crate::settings::AppSettings;
 
@@ -37,7 +37,7 @@ pub struct ApolloApp {
     queue_frame_preview: Option<queue::QueueFramePreview>,
     batch_editor_presentation: Option<EditorPresentation>,
     batch_append_error_details_open: bool,
-    progress_repaint: MediaProgressRepaintOwner,
+    progress_wake: MediaProgressWakeOwner,
     file_dialog: FileDialogOwner,
     clipboard_owner: Option<isize>,
     input_dialog_origin: Option<InputDialogOrigin>,
@@ -67,7 +67,7 @@ impl ApolloApp {
             queue_frame_preview: None,
             batch_editor_presentation: None,
             batch_append_error_details_open: false,
-            progress_repaint: MediaProgressRepaintOwner::new(completion_wake(&egui_context)),
+            progress_wake: MediaProgressWakeOwner::new(completion_wake(&egui_context)),
             file_dialog,
             clipboard_owner,
             input_dialog_origin: None,
@@ -87,7 +87,7 @@ impl ApolloApp {
         ) {
             self.queue_frame_preview = None;
         }
-        let progress = &mut self.progress_repaint;
+        let progress = &mut self.progress_wake;
         self.core.poll_media_queue(|| progress.begin());
         if !matches!(self.core.discovery.state(), MediaToolsState::Ready(_)) {
             return;

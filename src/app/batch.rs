@@ -254,20 +254,20 @@ impl Application {
         true
     }
 
-    pub(crate) fn poll_batch_inspection(&mut self) {
+    pub(crate) fn poll_batch_inspection(&mut self) -> bool {
         let Some(owner) = self.batch_inspection.as_mut() else {
-            return;
+            return false;
         };
         let results = owner.owner.poll();
         let complete = owner.owner.is_complete();
         if results.is_empty() && !complete {
-            return;
+            return false;
         }
         let item_ids = &owner.item_ids;
         let capabilities = self.discovery.upscale_capabilities();
         let Some(batch) = self.batch_setup.as_mut() else {
             self.batch_inspection = None;
-            return;
+            return false;
         };
         for result in results {
             let Some(id) = item_ids.get(result.index) else {
@@ -317,6 +317,7 @@ impl Application {
         if complete {
             self.batch_inspection = None;
         }
+        true
     }
 
     pub(crate) fn append_batch_paths(

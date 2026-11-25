@@ -10,5 +10,5 @@ pub mod upscale;
 
 mod file_dialog;
 mod native;
-mod progress_repaint;
+mod progress_wake;
 mod settings;

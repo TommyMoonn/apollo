@@ -1,5 +1,7 @@
 //! Renderer-independent application composition and workflow state.
 
+#[cfg(any(windows, test))]
+pub(crate) mod background;
 pub(crate) mod batch;
 pub use batch::{BatchAction, BatchAvailability, BatchItemId, BatchReadiness};
 pub(crate) mod dialogs;

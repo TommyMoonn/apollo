@@ -62,11 +62,11 @@ fn accept(owner: &mut SourceSession, path: &Path) {
 fn inspection_completion_notifies_owner_without_polling() {
     let fixture = Fixture::new();
     let path = fixture.file("video.mkv");
-    let mut owner = SourceSession::default();
-    let pending = request(&mut owner, &path);
+    let mut app = crate::app::Application::default();
+    let pending = request(&mut app.source, &path);
     let (sender, receiver) = mpsc::sync_channel(1);
     let inspected = media(&path);
-    owner.start_inspection_with(
+    app.source.start_inspection_with(
         pending,
         move || {
             let _ = sender.send(());
@@ -74,10 +74,14 @@ fn inspection_completion_notifies_owner_without_polling() {
         move || Ok(inspected),
     );
     receiver.recv_timeout(TIMEOUT).unwrap();
-    assert_eq!(owner.poll(), SourceSettlement::Published);
-    assert_eq!(owner.current().unwrap().path, path);
-    assert!(!owner.is_inspecting());
-    assert_eq!(owner.poll(), SourceSettlement::Unchanged);
+    assert!(app.poll_background(|| panic!("source inspection must not launch queue work")));
+    assert_eq!(
+        app.active_operation(),
+        Some(crate::app::Operation::AudioMix)
+    );
+    assert_eq!(app.source.current().unwrap().path, path);
+    assert!(!app.source.is_inspecting());
+    assert!(!app.poll_background(|| panic!("idle queue must not launch")));
 }
 
 #[test]

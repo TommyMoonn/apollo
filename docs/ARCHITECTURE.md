@@ -5,7 +5,7 @@
 
 Apollo is a native Windows x64 media utility written in Rust. GPUI is the native application entry, and FFmpeg and FFprobe run as separate child processes. Media stays on the user's machine. The application has no web frontend, server or account dependency.
 
-The GPUI migration is in progress. The initial window owns the existing `Application` and displays an explicit unavailable state. It does not start discovery, dialogs, source inspection, queue work or frame workers until their presentation and settlement paths are connected. The retained egui implementation below describes the existing behavior contracts and regression tests, not an alternative runnable application.
+The GPUI migration is in progress. The root owns one `Application`, starts media-tool discovery and settles worker notifications on the UI thread regardless of navigation. Its shell displays discovery, queue activity and shutdown state. File intake, queue actions and operation forms remain disabled until their presentation phases. The retained egui implementation below describes the existing behavior contracts and regression tests, not an alternative runnable application.
 
 ## Module boundaries
 
@@ -20,7 +20,8 @@ The GPUI migration is in progress. The initial window owns the existing `Applica
 | `src/audio_mix/`, `src/upscale/`, `src/remux/`, `src/audio_extract/`, `src/frame_capture/` | Operation requests, validation, command construction and execution. |
 | `src/settings.rs` | Typed remembered-directory preferences, JSON conversion and fallback policy. |
 | `src/file_dialog.rs`, `src/native.rs` | Native dialog service, parent window handles and shell folder actions. |
-| `src/progress_repaint.rs` | Callback-based progress notifications. |
+| `src/app/background.rs` | Foreground worker settlement and bounded wake channel. |
+| `src/progress_wake.rs` | Renderer-neutral progress coalescing. |
 
 The library exports the application core and UI modules through `src/lib.rs`. The native binary creates one GPUI root with exactly one core. The core does not import UI or native adapters. Keep operation policy in its domain module and use the shared media and queue owners. Views display state and collect input; repainting must not start probes or processing.
 
@@ -32,13 +33,15 @@ The retained presentation modules have explicit migration owners: U01.2 establis
 
 The entry uses the official [`gpui` 0.2.2 release](https://docs.rs/crate/gpui/0.2.2), not a fork or moving Git ref. It requests a centered 730 × 489 logical-pixel window and a 400 × 260 minimum, with native chrome and title. The Win32 icon comes from the existing executable resource. No second renderer entry or feature switch is provided.
 
-The pinned API provides `WindowOptions` for sizing and titlebar configuration, `Window::on_window_should_close` for close interception, `Window`'s `HasWindowHandle` implementation for native dialogs, `ExternalPaths` and element drop handlers for intake, `TextSystem::add_fonts` for font registration, and entity `Context::notify` and `spawn` for background-driven presentation. The corresponding integration belongs to the later shell phases; their existence does not mean those surfaces are already active. Native sizing, icon behavior and the full GPUI dependency graph still require Windows acceptance.
+The pinned API provides `WindowOptions` for sizing and titlebar configuration, `Window::on_window_should_close` for close interception, `Window`'s `HasWindowHandle` implementation for native dialogs, `ExternalPaths` and element drop handlers for intake, `TextSystem::add_fonts` for font registration, and entity `Context::notify` and `spawn` for background-driven presentation. Background settlement and native close interception are connected. Native file dialogs and intake remain later shell phases. Native sizing, icon behavior and the full GPUI dependency graph still require Windows acceptance.
 
 ## Composition and navigation
 
 `src/app/navigation.rs` owns `Operation`, routes and return origins for queue and batch flows. Route transitions do not require an egui context. The adapter commits these transitions after the existing source, editor and queue actions succeed; it retains renderer-dependent editor presentation and worker coordination. Queue return and batch submission preserve the original source operation. Queue history changes remain with `MediaQueue`.
 
 `src/ui/legacy/mod.rs` retains the existing egui adapter and its background and shutdown contracts for tests. `render.rs` dispatches the active route and draws the shell. `shutdown.rs` intercepts native close requests and presents the exit decision and settlement status. `source.rs` handles source actions and presentation settlement. The four ordinary operation adapters (`audio_mix.rs`, `upscale.rs`, `remux.rs` and `audio_extract.rs`) own their ready surfaces and translate form actions into queue submissions. `dialogs.rs` routes native completions; `frame_capture.rs` routes frame actions and uploads textures; `queue.rs` translates queue effects into native actions and presentation updates; `batch.rs` presents batch setup and fixed-source editors and routes native actions; `workflows.rs` retains shared route and lifecycle helpers; `state.rs` retains adapter-specific presentation.
+
+The GPUI root subscribes to a capacity-one asynchronous wake channel with a window-scoped foreground task and weak entity handle. The core settles discovery, source inspection, batch inspection and queue notifications without waiting for a render pass. The same shutdown owner cancels and settles workers before window removal. During confirmation, existing work continues; dismissal restores focus. The failure acknowledgement is shown only after all active owners settle. Native dialog and interactive frame presentation routing remain with their retained adapters until the corresponding GPUI surfaces migrate.
 
 In the retained adapter, each root update first polls media-tool discovery and queue events. While base tools are checking or unavailable, it renders that status and returns. Once ready, the update polls dialogs, source inspection, batch inspection, frame preview, frame index and clipboard in that order before handling drops and rendering the active route. Normal close is intercepted in the egui logic pass, even when the window is hidden. With unfinished queue work, one confirmation precedes cancellation. Declining leaves the current route, drafts and queue intact. On acceptance, `Application` enters closing, stops advancement through `MediaQueue::cancel_queue`, rejects new submissions and queue actions, and polls terminal notifications until the active execution settles. The renderer requests actual closure only after settlement and after any pending native dialog returns. A failed active job, including a cleanup failure, is reported and must be acknowledged before exit. Dropping an active file execution remains a defensive fallback that stops and joins its child before discarding staged output; forced OS termination is not graceful shutdown.
 
@@ -90,7 +93,7 @@ One background worker validates the base tools, publishes their paths, then chec
 
 ## Worker notifications
 
-Workers publish results to their existing channels before invoking a completion callback. When a panic is reported through disconnection, the worker drops its result sender before notifying. The callback carries no application state; the owner consumes and validates the result on the application side. The egui adapter supplies a repaint callback for discovery, inspection, preview decoding, native dialogs and clipboard completion. `MediaProcessWake` carries process progress and terminal events. `MediaProgressRepaintOwner` coalesces progress notifications at 34 ms, rejects stale operation generations and wakes immediately on terminal events. Idle workers do not schedule periodic repaints. Frame Capture returns debounce deadlines to the adapter, which schedules delayed repaints.
+Workers publish results to their existing channels before invoking a completion callback. When a panic is reported through disconnection, the worker drops its result sender before notifying. The callback carries no application state; the owner consumes and validates the result on the application side. GPUI workers signal the bounded wake channel; retained egui consumers still supply their repaint callback. `MediaProcessWake` carries process progress and terminal events. `MediaProgressWakeOwner` coalesces progress notifications at 34 ms, rejects stale operation generations and wakes immediately on terminal events. The bounded channel retains a pending signal rather than a result; each owner retains and validates the actual result. A full channel already guarantees a pending wake, and a closed channel safely discards the notification. Idle workers do not schedule periodic scans. Frame Capture returns debounce deadlines to the adapter, which schedules delayed repaints.
 
 ## Queue and batch ownership
 
@@ -125,7 +128,7 @@ Scaling uses `scale=<width>:<height>:flags=lanczos`. Encoder selection does not 
 
 Lower quality numbers favor quality over file size. CRF and CQ are not interchangeable scales. State retains values independently for each codec/backend, alongside the last custom boundary and manual output name.
 
-The shared media-tool owner checks compiled NVENC availability and runs bounded, hidden, minimal real encode probes off the egui thread. H.264 and H.265 results are independent and cached for the resolved FFmpeg identity. Base tool discovery can finish before these probes: normal workspace use and CPU Upscale remain available while Auto and explicit NVENC show checking state. Auto selects NVENC only after success; explicit unavailable NVENC retains diagnostics and never silently falls back. Do not probe on repaint or command construction.
+The shared media-tool owner checks compiled NVENC availability and runs bounded, hidden, minimal real encode probes off the UI thread. H.264 and H.265 results are independent and cached for the resolved FFmpeg identity. Base tool discovery can finish before these probes: normal workspace use and CPU Upscale remain available while Auto and explicit NVENC show checking state. Auto selects NVENC only after success; explicit unavailable NVENC retains diagnostics and never silently falls back. Do not probe on repaint or command construction.
 
 The measured NVIDIA baseline and API version are recorded in [the media-tool acceptance record](../distribution/media-tools-acceptance.md). Encoder inventory alone cannot prove runtime driver compatibility. If initialization fails, Auto resolves to CPU; explicit NVIDIA selection retains the real probe error. An error after an encode has started remains a job failure, not a silent CPU rerun.
 
@@ -143,7 +146,7 @@ The probe retains pixel format, derivable bit depth, range, matrix, transfer, an
 
 `src/ui/layout.rs`, `src/ui/widgets.rs`, `src/ui/theme.rs` and `src/ui/fonts.rs` provide the shared layout, controls, appearance and typography. IBM Plex Sans is the primary interface font; Fira Code is used for the Apollo wordmark and compact technical metadata. Both are embedded at compile time from `assets/fonts/`. Missing assets fail the build. Preserve the font licenses and asset identities documented in [the font notes](../assets/fonts/README.md).
 
-Keep source inspection, preview decoding and media processing off the UI thread. `MediaProgressRepaintOwner` coordinates progress notifications; retained state should drive the interface between updates.
+Keep source inspection, preview decoding and media processing off the UI thread. `MediaProgressWakeOwner` coordinates progress notifications; retained state should drive the interface between updates.
 
 `src/ui/icon.rs` embeds `assets/apollo-logo.png` for the native window. On Windows, `build.rs` compiles `assets/apollo.rc` using Cargo's package version. The resource script embeds `assets/apollo.ico` and the executable's Windows version information. The NSIS installer also consumes the ICO. Documentation artwork in `assets/docs/` is not used by the application build.
 

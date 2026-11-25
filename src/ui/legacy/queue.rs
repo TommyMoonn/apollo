@@ -59,7 +59,7 @@ impl ApolloApp {
         {
             return false;
         }
-        let progress = &mut self.progress_repaint;
+        let progress = &mut self.progress_wake;
         match self.core.queue_action(action, || progress.begin()) {
             QueueEffect::Handled(changed) => {
                 if changed || self.core.queue_action_error.is_some() {

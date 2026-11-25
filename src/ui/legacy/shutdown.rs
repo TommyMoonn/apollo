@@ -56,7 +56,7 @@ impl ApolloApp {
             self.request_close();
         }
         if self.core.is_closing() {
-            let progress = &mut self.progress_repaint;
+            let progress = &mut self.progress_wake;
             let settled = self.core.poll_shutdown(|| progress.begin());
             // Native dialogs own the window handle until they return. Do not apply their
             // results or initiate a new inspection while closing.
@@ -71,7 +71,7 @@ impl ApolloApp {
         } else if self.exit == ExitPresentation::Confirm {
             // Existing work may settle or advance while the user decides. No new UI
             // actions are dispatched until they dismiss or accept the confirmation.
-            let progress = &mut self.progress_repaint;
+            let progress = &mut self.progress_wake;
             self.core.poll_media_queue(|| progress.begin());
         }
     }

@@ -201,27 +201,26 @@ impl Application {
             && self.queue_start_allowed()
     }
 
-    pub(crate) fn poll_media_queue(&mut self, wake: impl FnMut() -> MediaProcessWake) {
-        let before = (!self.is_closing() && self.batch_setup.is_some()).then(|| {
-            (
-                self.queue.scheduler().pending_count(),
-                self.queue.scheduler().active_job(),
-            )
-        });
+    pub(crate) fn poll_media_queue(&mut self, wake: impl FnMut() -> MediaProcessWake) -> bool {
+        let before = self.queue.scheduler();
+        let pending = before.pending_count();
+        let active = before.active_job();
+        let run_state = before.run_state();
+        let progress = before.active_progress().cloned();
         self.queue.poll(
             self.discovery.ready(),
             self.discovery.settled_capabilities().is_some(),
             wake,
         );
-        if before.is_some_and(|before| {
-            before
-                != (
-                    self.queue.scheduler().pending_count(),
-                    self.queue.scheduler().active_job(),
-                )
-        }) {
+        let after = self.queue.scheduler();
+        let jobs_changed = pending != after.pending_count() || active != after.active_job();
+        let changed = jobs_changed
+            || run_state != after.run_state()
+            || progress.as_ref() != after.active_progress();
+        if jobs_changed && !self.is_closing() && self.batch_setup.is_some() {
             self.refresh_batch_admission();
         }
+        changed
     }
 
     pub(crate) fn queue_action(

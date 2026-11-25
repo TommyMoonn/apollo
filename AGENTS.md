@@ -37,7 +37,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 - `src/media/` handles media intake, probing, tool discovery, stream models, child processes, output publication and progress parsing.
 - `src/queue/` handles queued requests, execution order and job state.
 - `src/audio_mix/`, `src/upscale/`, `src/remux/`, `src/audio_extract/` and `src/frame_capture/` contain editable drafts, operation requests, validation, command construction and execution. Frame Capture also handles frame indexing, previews and clipboard extraction. `src/app/frame_capture.rs` owns interactive editor state and worker settlement; `src/ui/legacy/frame_capture.rs` routes editor actions and uploads textures. Keep exact position, session identity and request generation separate from renderer resources.
-- `src/settings.rs` owns remembered-directory preferences and their JSON contract. The legacy preferences adapter owns eframe storage. `src/file_dialog.rs` handles native file dialogs; `src/app/dialogs.rs` builds requests and `src/ui/legacy/dialogs.rs` routes completions. `src/native.rs` owns window handles and shell folder actions. `src/progress_repaint.rs` coordinates repaints in response to progress updates.
+- `src/settings.rs` owns remembered-directory preferences and their JSON contract. The legacy preferences adapter owns eframe storage. `src/file_dialog.rs` handles native file dialogs; `src/app/dialogs.rs` builds requests and `src/ui/legacy/dialogs.rs` routes completions. `src/native.rs` owns window handles and shell folder actions. `src/progress_wake.rs` coalesces renderer-neutral progress notifications. `src/app/background.rs` settles worker results from a bounded GPUI wake channel.
 - `tests/` contains Rust integration tests, FFprobe fixtures, the optional tooling smoke check and Windows release acceptance support. Rust unit tests live alongside the implementation.
 - `scripts/` contains repository and release tooling. `distribution/` contains media-tool version pins and acceptance records. `installer/` contains Windows installer sources. `docs/` contains engineering guides.
 
@@ -77,7 +77,7 @@ Check affected source, queue and batch views at supported window sizes when chan
 
 Keep media discovery, probing, preview decoding and processing off the UI thread. Reuse existing background workers, bound concurrent work and preserve cancellation and stale-result checks when sources, requests or active jobs change.
 
-Do not probe media, access output files or launch processes just because a view repaints. Reuse retained inspection and capability results while they remain valid. Pass completion callbacks to workers and settle their results in the owning application state. Use `MediaProcessWake` and `MediaProgressRepaintOwner` for process notifications so progress and terminal results appear promptly without continuous repainting.
+Do not probe media, access output files or launch processes just because a view repaints. Reuse retained inspection and capability results while they remain valid. Pass completion callbacks to workers and settle their results in the owning application state. Use `MediaProcessWake` and `MediaProgressWakeOwner` for process notifications so progress and terminal results arrive promptly without continuous polling. The GPUI foreground task owns settlement; rendering reads accepted state.
 
 Guard actions that mutate files or start background work against repeated activation. Cancellation must stop only the process owned by the operation and leave its state consistent.
 
