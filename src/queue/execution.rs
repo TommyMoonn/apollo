@@ -2278,14 +2278,19 @@ mod tests {
         let (media_identity, media) = media(&directory, "source.mkv");
         let output = directory.path().join("output.mkv");
         let mut queue = MediaQueue::new();
+        let label = |queue: &MediaQueue| crate::ui::queue_count_label(queue.pending_count());
+        assert_eq!(label(&queue), "Queue");
         queue
             .enqueue(&media_identity, &media, remux(&media, output.clone()))
             .unwrap();
+        assert_eq!(label(&queue), "Queue (1)"); // Waiting only.
         let process = FakeProcessControl::running();
         let handle = process.clone();
         let mut process = Some(process);
         let mut launcher = move |_, _| Ok(process.take().expect("one process launch"));
         assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
+        assert!(queue.active_job().is_some());
+        assert_eq!(label(&queue), "Queue (1)"); // Active only.
         fs::write(queue.temporary_output_path().unwrap(), b"published").unwrap();
         handle.set_state(MediaProcessState::Completed);
 
@@ -2298,6 +2303,7 @@ mod tests {
             queue.jobs()[0].state(),
             QueueJobState::Completed { output: completed } if completed == &output
         ));
+        assert_eq!(label(&queue), "Queue"); // Terminal history only.
         assert_eq!(queue.clear_finished(), 1);
         assert!(queue.jobs().is_empty());
     }

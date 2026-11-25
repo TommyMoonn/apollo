@@ -2,21 +2,12 @@
 use std::{borrow::Cow, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt, App, AssetSource, ClickEvent, Div, ElementId, Font, FontFallbacks,
-    FontWeight, Pixels, SharedString, Stateful, TextRun, Transformation, Window, div, font,
-    percentage, prelude::*, px, rgba, svg,
+    Animation, AnimationExt, App, AssetSource, ClickEvent, Div, ElementId, Pixels, SharedString,
+    Stateful, TextRun, Transformation, Window, WindowTextSystem, div, percentage, prelude::*, px,
+    rgba, svg,
 };
 
-use super::design::{DESTRUCTIVE_BORDER, FONT_FAMILY, METRICS as M, Palette, SPINNER_CYCLE_MS};
-
-pub fn ui_font() -> Font {
-    let mut font = font(FONT_FAMILY);
-    font.fallbacks = Some(FontFallbacks::from_fonts(vec![
-        "Segoe UI".into(),
-        "Segoe UI Symbol".into(),
-    ]));
-    font
-}
+use super::design::{DESTRUCTIVE_BORDER, METRICS as M, Palette, SPINNER_CYCLE_MS, TextRole};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -57,16 +48,54 @@ impl<'a> Button<'a> {
     }
 
     pub fn measured_width(&self, window: &Window) -> Pixels {
-        let padding = if self.tone == Tone::Quiet {
+        self.measured_width_with(window.text_system(), None)
+    }
+
+    fn horizontal_padding(&self) -> f32 {
+        if self.tone == Tone::Quiet {
             M.tight
         } else {
             M.related
+        }
+    }
+
+    fn minimum_height(&self) -> Pixels {
+        let minimum = if self.tone == Tone::Primary {
+            M.primary_height
+        } else {
+            M.compact_height
         };
-        label_width(window, self.label, self.alternate_labels, padding)
+        px(minimum.max(TextRole::Control.resolve().line_height + 2. * (M.tight + M.rule)))
+    }
+
+    fn measured_width_with(&self, text: &WindowTextSystem, icon: Option<&str>) -> Pixels {
+        let icon_width = if icon.is_some() {
+            M.icon_size + M.tight
+        } else {
+            0.
+        };
+        label_width(
+            text,
+            self.label,
+            self.alternate_labels,
+            self.horizontal_padding(),
+        ) + px(icon_width)
     }
 
     pub fn render(self, palette: Palette, window: &Window) -> Stateful<Div> {
-        let width = (!self.alternate_labels.is_empty()).then(|| self.measured_width(window));
+        self.render_with_icon(palette, window, None)
+    }
+
+    fn render_with_icon(
+        self,
+        palette: Palette,
+        window: &Window,
+        icon: Option<&str>,
+    ) -> Stateful<Div> {
+        let width = (!self.alternate_labels.is_empty())
+            .then(|| self.measured_width_with(window.text_system(), icon));
+        let height = self.minimum_height();
+        let padding = self.horizontal_padding();
         let selected = matches!(&self.state, ActionState::Selected(_));
         let busy = matches!(&self.state, ActionState::Busy);
         let click = match self.state {
@@ -76,7 +105,6 @@ impl<'a> Button<'a> {
         let enabled = click.is_some();
         let primary = self.tone == Tone::Primary && !selected;
         let quiet = self.tone == Tone::Quiet;
-        let padding = if quiet { M.tight } else { M.related };
         let foreground = if busy {
             palette.secondary()
         } else if !enabled {
@@ -100,32 +128,37 @@ impl<'a> Button<'a> {
         } else {
             palette.border()
         };
-        let mut element = div()
-            .id(self.id)
-            .flex()
-            .items_center()
-            .justify_center()
-            .flex_shrink_0()
-            .min_h(px(if primary {
-                M.primary_height
-            } else {
-                M.compact_height
-            }))
-            .px(px(padding))
-            .py(px(M.tight))
-            .rounded(px(M.radius))
-            // The focused border replaces the idle border; compensate padding to preserve size.
-            .border(px(M.rule))
-            .border_color(rgba(if quiet { 0 } else { border }))
-            .bg(rgba(background))
-            .text_color(rgba(foreground))
-            .font(ui_font())
-            .text_size(px(M.body))
-            .whitespace_nowrap();
+        let mut element = TextRole::Control.apply(
+            div()
+                .id(self.id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_shrink_0()
+                .min_h(height)
+                .px(px(padding))
+                .py(px(M.tight))
+                .rounded(px(M.radius))
+                // The focused border replaces the idle border; compensate padding to preserve size.
+                .border(px(M.rule))
+                .border_color(rgba(if quiet { 0 } else { border }))
+                .bg(rgba(background))
+                .text_color(rgba(foreground))
+                .whitespace_nowrap(),
+        );
         if let Some(width) = width {
             element = element.min_w(width);
         }
-        let element = element.child(self.label.to_owned());
+        let element = element
+            .child(self.label.to_owned())
+            .children(icon.map(|icon| {
+                div()
+                    .ml(px(M.tight))
+                    .w(px(M.icon_size))
+                    .flex_shrink_0()
+                    .text_center()
+                    .child(icon.to_owned())
+            }));
         let Some(click) = click else {
             return element;
         };
@@ -183,23 +216,37 @@ impl<'a> Button<'a> {
     }
 }
 
-fn label_width(window: &Window, label: &str, alternatives: &[&str], padding: f32) -> Pixels {
+fn label_width(
+    text: &WindowTextSystem,
+    label: &str,
+    alternatives: &[&str],
+    padding: f32,
+) -> Pixels {
+    let typography = TextRole::Control.resolve();
+    reserve_label_width(label, alternatives, padding, |label| {
+        let run = TextRun {
+            len: label.len(),
+            font: typography.font(),
+            color: rgba(Palette::DARK.foreground).into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        text.layout_line(label, px(typography.size), &[run], None)
+            .width
+    })
+}
+
+fn reserve_label_width(
+    label: &str,
+    alternatives: &[&str],
+    padding: f32,
+    mut measure: impl FnMut(&str) -> Pixels,
+) -> Pixels {
     std::iter::once(label)
         .chain(alternatives.iter().copied())
-        .map(|label| {
-            let run = TextRun {
-                len: label.len(),
-                font: ui_font(),
-                color: rgba(Palette::DARK.foreground).into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            window
-                .text_system()
-                .layout_line(label, px(M.body), &[run], None)
-                .width
-        })
+        // GPUI rounds intrinsic text width up to logical pixels.
+        .map(|label| measure(label).ceil())
         .fold(px(0.), |a, b| a.max(b))
         + px(2. * (padding + M.rule))
 }
@@ -211,15 +258,7 @@ pub fn icon_action(
     palette: Palette,
     window: &Window,
 ) -> Stateful<Div> {
-    // The icon is supplemental; the action never relies on an unlabeled glyph.
-    button.render(palette, window).child(
-        div()
-            .ml(px(M.tight))
-            .w(px(M.body))
-            .flex_shrink_0()
-            .text_center()
-            .child(icon.to_owned()),
-    )
+    button.render_with_icon(palette, window, Some(icon))
 }
 
 pub fn selector(items: impl IntoIterator<Item = Stateful<Div>>) -> Div {
@@ -240,10 +279,11 @@ pub fn selectable_row(button: Button<'_>, palette: Palette, window: &Window) -> 
 }
 
 pub fn heading(label: impl Into<gpui::SharedString>) -> Div {
-    div()
-        .text_size(px(M.body))
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(label.into())
+    TextRole::SectionHeading.apply(div()).child(label.into())
+}
+
+pub fn page_title(label: impl Into<SharedString>) -> Div {
+    TextRole::PageTitle.apply(div()).child(label.into())
 }
 
 pub fn separator(palette: Palette) -> Div {
@@ -265,16 +305,15 @@ pub fn status(
         .flex_shrink_0()
         .gap(px(M.compact))
         .whitespace_nowrap()
-        .text_size(px(M.body))
         .text_color(rgba(palette.foreground))
-        .child(label.into())
+        .child(TextRole::Status.apply(div()).child(label.into()))
         .children(details)
 }
 
 pub fn inline_message(message: impl Into<gpui::SharedString>, palette: Palette) -> Div {
-    div()
+    TextRole::Body
+        .apply(div())
         .text_color(rgba(palette.secondary()))
-        .text_size(px(M.body))
         .w_full()
         .min_w_0()
         .whitespace_normal()
@@ -288,7 +327,7 @@ pub fn empty_state(title: &str, message: &str, palette: Palette) -> Div {
         .w_full()
         .min_w_0()
         .gap(px(M.related))
-        .child(status(title.to_owned(), palette, None))
+        .child(heading(title.to_owned()).text_color(rgba(palette.foreground)))
         .child(inline_message(message.to_owned(), palette))
 }
 
@@ -320,7 +359,7 @@ impl AssetSource for Assets {
 pub fn spinner(id: impl Into<ElementId>, label: &str, palette: Palette, animate: bool) -> Div {
     let icon = svg()
         .path(SPINNER_PATH)
-        .size(px(M.body))
+        .size(px(M.icon_size))
         .flex_shrink_0()
         .text_color(rgba(palette.foreground));
     let row = div()
@@ -337,7 +376,7 @@ pub fn spinner(id: impl Into<ElementId>, label: &str, palette: Palette, animate:
     } else {
         row.child(icon)
     };
-    row.child(label.to_owned())
+    row.child(TextRole::Status.apply(div()).child(label.to_owned()))
 }
 
 pub fn progress(fraction: f32, palette: Palette) -> Div {
@@ -349,7 +388,11 @@ pub fn progress(fraction: f32, palette: Palette) -> Div {
         .flex()
         .flex_col()
         .gap(px(M.tight))
-        .child(format!("{:.0}%", fraction * 100.))
+        .child(
+            TextRole::Status
+                .apply(div())
+                .child(format!("{:.0}%", fraction * 100.)),
+        )
         .child(
             div()
                 .w_full()
@@ -379,4 +422,92 @@ pub fn action_bar(palette: Palette, actions: impl IntoIterator<Item = Stateful<D
                 .gap(px(M.action_gap))
                 .children(actions),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_font_requests_medium_and_tabular_figures() {
+        let font = TextRole::Control.resolve().font();
+        assert_eq!(font.family.as_str(), "Geist");
+        assert_eq!(font.weight, gpui::FontWeight::MEDIUM);
+        assert!(
+            font.features
+                .tag_value_list()
+                .iter()
+                .any(|(tag, value)| tag == "tnum" && *value == 1)
+        );
+        let brand = TextRole::Wordmark.resolve().font();
+        assert_eq!(brand.family.as_str(), "Fira Code");
+        assert_eq!(brand.weight, gpui::FontWeight::NORMAL);
+        assert!(brand.features.tag_value_list().is_empty());
+    }
+
+    #[test]
+    fn reserved_width_uses_widest_complete_label_and_rounds_up() {
+        let measure = |label: &str| match label {
+            "Open files" => px(61.2),
+            "Opening files…" => px(89.5),
+            "変更ファイル 🗂" => px(116.1),
+            _ => panic!("unexpected label"),
+        };
+        let alternatives = ["Open files", "Opening files…", "変更ファイル 🗂"];
+        for label in alternatives {
+            let width = reserve_label_width(label, &alternatives, M.related, measure);
+            assert_eq!(width, px(117. + 2. * (M.related + M.rule)));
+        }
+        assert_eq!(
+            reserve_label_width("Open files", &[], M.related, measure),
+            px(62. + 2. * (M.related + M.rule))
+        );
+    }
+
+    #[test]
+    fn queue_label_reservation_is_stable_until_the_count_needs_more_space() {
+        // Distinct sample widths exercise the reservation policy, not a particular font's metrics.
+        let measure = |label: &str| match label {
+            "Queue" => px(40.3),
+            "Queue (1)" => px(60.8),
+            "Queue (99)" => px(69.4),
+            "Queue (1000)" => px(84.1),
+            _ => panic!("unexpected label"),
+        };
+        let alternatives = ["Queue", "Queue (99)"];
+        let reserved = reserve_label_width("Queue", &alternatives, M.related, measure);
+        for count in [0, 1, 99] {
+            let label = crate::ui::queue_count_label(count);
+            assert_eq!(
+                reserve_label_width(&label, &alternatives, M.related, measure),
+                reserved
+            );
+        }
+        let label = crate::ui::queue_count_label(1000);
+        assert!(reserve_label_width(&label, &alternatives, M.related, measure) > reserved);
+    }
+
+    #[test]
+    fn button_height_fits_line_and_padding_in_every_state() {
+        for tone in [
+            Tone::Primary,
+            Tone::Standard,
+            Tone::Quiet,
+            Tone::Destructive,
+        ] {
+            let mut button = Button::new("test", "Label", tone);
+            let height = button.minimum_height();
+            assert!(
+                height >= px(TextRole::Control.resolve().line_height + 2. * (M.tight + M.rule))
+            );
+            for state in [
+                ActionState::Busy,
+                ActionState::Enabled(Box::new(|_, _, _| {})),
+                ActionState::Selected(Box::new(|_, _, _| {})),
+            ] {
+                button.state = state;
+                assert_eq!(button.minimum_height(), height);
+            }
+        }
+    }
 }

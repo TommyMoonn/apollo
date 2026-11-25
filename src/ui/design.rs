@@ -51,6 +51,80 @@ impl Palette {
 
 pub const DESTRUCTIVE_BORDER: u32 = 0x7e3030ff;
 pub const FONT_FAMILY: &str = "Geist";
+pub const WORDMARK_FAMILY: &str = "Fira Code";
+
+/// Default typography roles at 100% UI zoom. Native chrome is OS-owned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextRole {
+    Wordmark,
+    PageTitle,
+    SectionHeading,
+    Body,
+    Control,
+    Status,
+    Secondary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Typography {
+    pub family: &'static str,
+    pub weight: u16,
+    pub size: f32,
+    pub line_height: f32,
+    pub tabular_numbers: bool,
+}
+
+impl TextRole {
+    pub const fn resolve(self) -> Typography {
+        let (family, weight, size, line_height, tabular_numbers) = match self {
+            Self::Wordmark => (WORDMARK_FAMILY, 400, 26., 32., false),
+            Self::PageTitle => (FONT_FAMILY, 600, 20., 26., false),
+            Self::SectionHeading => (FONT_FAMILY, 600, 14., 20., false),
+            Self::Body => (FONT_FAMILY, 400, 14., 20., false),
+            Self::Control | Self::Status => (FONT_FAMILY, 500, 14., 20., true),
+            Self::Secondary => (FONT_FAMILY, 400, 12., 16., false),
+        };
+        Typography {
+            family,
+            weight,
+            size,
+            line_height,
+            tabular_numbers,
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn apply<E: gpui::Styled>(self, element: E) -> E {
+        let typography = self.resolve();
+        element
+            .font(typography.font())
+            .text_size(gpui::px(typography.size))
+            .line_height(gpui::px(typography.line_height))
+    }
+}
+
+#[cfg(windows)]
+impl Typography {
+    /// Use the same requested face and fallback chain for shaping and painting.
+    pub fn font(self) -> gpui::Font {
+        let mut font = gpui::font(self.family);
+        font.weight = gpui::FontWeight(f32::from(self.weight));
+        if self.tabular_numbers {
+            // Keep counters stable without changing the typeface or shaping digits ourselves.
+            static TABULAR: std::sync::LazyLock<gpui::FontFeatures> =
+                std::sync::LazyLock::new(|| {
+                    gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
+                });
+            font.features = TABULAR.clone();
+        }
+        font.fallbacks = Some(gpui::FontFallbacks::from_fonts(vec![
+            "Segoe UI".into(),
+            "Segoe UI Symbol".into(),
+        ]));
+        font
+    }
+}
+
 pub const SPINNER_CYCLE_MS: u64 = 900;
 
 /// Logical pixels; GPUI handles display scaling. Text-scale preferences arrive in U07.
@@ -73,9 +147,7 @@ pub struct Metrics {
     pub rule: f32,
     pub focus_width: f32,
     pub focus_offset: f32,
-    pub body: f32,
-    pub secondary: f32,
-    pub title: f32,
+    pub icon_size: f32,
 }
 
 pub const METRICS: Metrics = Metrics {
@@ -96,9 +168,7 @@ pub const METRICS: Metrics = Metrics {
     rule: 1.,
     focus_width: 2.,
     focus_offset: 2.,
-    body: 14.,
-    secondary: 12.,
-    title: 20.,
+    icon_size: 14.,
 };
 
 pub const SURFACE_MOTION_MS: u64 = 120;
@@ -108,6 +178,30 @@ pub const HOVER_MOTION_MS: u64 = 85;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typography_resolves_the_default_role_contract() {
+        for (role, family, weight, size, line_height, tabular_numbers) in [
+            (TextRole::Wordmark, "Fira Code", 400, 26., 32., false),
+            (TextRole::PageTitle, "Geist", 600, 20., 26., false),
+            (TextRole::SectionHeading, "Geist", 600, 14., 20., false),
+            (TextRole::Body, "Geist", 400, 14., 20., false),
+            (TextRole::Control, "Geist", 500, 14., 20., true),
+            (TextRole::Status, "Geist", 500, 14., 20., true),
+            (TextRole::Secondary, "Geist", 400, 12., 16., false),
+        ] {
+            assert_eq!(
+                role.resolve(),
+                Typography {
+                    family,
+                    weight,
+                    size,
+                    line_height,
+                    tabular_numbers,
+                }
+            );
+        }
+    }
 
     fn luminance(value: f64) -> f64 {
         if value <= 0.04045 {

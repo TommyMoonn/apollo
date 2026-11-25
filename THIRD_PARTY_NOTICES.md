@@ -39,12 +39,14 @@ license file alone is not evidence that this review has been completed.
 
 ### Geist Variable (Sans)
 
-- File: `assets/fonts/Geist-Variable.ttf` (local asset acquisition pending)
-- Pinned source package: `geist` version `1.7.2`, https://www.npmjs.com/package/geist/v/1.7.2
+- File: `assets/fonts/Geist-Variable.ttf`
+- Embedded font version: `1.800`; variable weight axis 100–900 (default 400)
+- Documented acquisition package: `geist` version `1.7.2`, https://www.npmjs.com/package/geist/v/1.7.2
 - Upstream: https://github.com/vercel/geist-font
-- Copyright: Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font.git); created by Vercel in collaboration with Basement Studio.
+- Copyright: Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font).
 - License: `OFL-1.1`, see [SIL Open Font License 1.1](#sil-open-font-license-11).
-- SHA-256 and exact embedded font metadata must be recorded after acquisition and before release.
+- SHA-256 (embedded file): `cdcc4815cbf5f9882fa74e48f8ab410a0495781a58ff7316570f664e7e987753`
+- The local asset metadata and checksum have been inspected. Independent comparison with the documented acquisition package remains pending.
 
 ### IBM Plex Sans Regular
 

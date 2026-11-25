@@ -22,7 +22,7 @@ use crate::{
 use super::{
     MINIMUM_CONTENT_DIMENSIONS, REFERENCE_CONTENT_DIMENSIONS,
     components::{self, ActionState, Button, Tone},
-    design::{FONT_FAMILY, METRICS as M, Palette},
+    design::{FONT_FAMILY, METRICS as M, Palette, TextRole, WORDMARK_FAMILY},
     file_intake, shell,
 };
 
@@ -484,11 +484,15 @@ impl ApolloRoot {
                         "Check the diagnostic before exiting. Existing output files are kept.",
                         palette,
                     ))
-                    .children(
-                        self.core
-                            .shutdown_failure()
-                            .map(|error| components::inline_message(error.to_string(), palette)),
-                    )
+                    .children(self.core.shutdown_failure().map(|error| {
+                        TextRole::Secondary
+                            .apply(div())
+                            .text_color(rgba(palette.secondary()))
+                            .w_full()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .child(error.to_string())
+                    }))
                     .child(
                         div().child(exit.render(palette, window).track_focus(&self.dialog_focus)),
                     )
@@ -666,7 +670,7 @@ impl Render for ApolloRoot {
                     .child(back.render(palette, window))
                     .child(shell::navigation_actions(queue, settings, palette, window));
                 (
-                    components::heading(format!("{count} files selected")),
+                    components::page_title(format!("{count} files selected")),
                     surface,
                     footer,
                 )
@@ -684,13 +688,13 @@ impl Render for ApolloRoot {
                     )
                 };
                 (
-                    components::heading(title),
+                    components::page_title(title),
                     components::inline_message(message, palette),
                     components::action_bar(palette, [back.render(palette, window)]),
                 )
             }
             NavigationState::QueueEdit { .. } | NavigationState::BatchEdit => (
-                components::heading("Editor"),
+                components::page_title("Editor"),
                 components::inline_message(
                     "This editor is unavailable during the UI migration.",
                     palette,
@@ -778,15 +782,14 @@ impl Render for ApolloRoot {
             )
         };
 
-        let root = div()
+        let root = TextRole::Body
+            .apply(div())
             .id("apollo-root")
             .tab_group()
             .track_focus(&self.focus)
             .size_full()
             .bg(rgba(palette.background))
             .text_color(rgba(palette.foreground))
-            .font(components::ui_font())
-            .text_size(px(M.body))
             .on_key_down(cx.listener(|root, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && root.exit == ExitState::Confirming {
                     root.dismiss_close(window, cx);
@@ -864,7 +867,7 @@ fn open_root(cx: &mut App) -> Result<(), String> {
         ])
         .map_err(|error| format!("Could not register Apollo's fonts: {error:#}"))?;
     let names = fonts.all_font_names();
-    for family in [FONT_FAMILY, file_intake::WORDMARK_FAMILY] {
+    for family in [FONT_FAMILY, WORDMARK_FAMILY] {
         if !names.iter().any(|name| name == family) {
             return Err(format!(
                 "The bundled {family} font family could not be resolved."

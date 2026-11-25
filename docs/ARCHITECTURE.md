@@ -29,7 +29,7 @@ The retained presentation modules have explicit migration owners: U01.2 establis
 
 ## Native GPUI foundation
 
-`src/ui/design.rs` owns GPUI color and geometry roles. `src/ui/components.rs` implements reusable stateless controls, and `src/ui/shell.rs` owns shared page geometry and scroll fallback, and `src/ui/root.rs` composes the active route. The [UI design guide](DESIGN.md) defines their contracts. The older egui `theme`, `fonts`, `layout` and `widgets` modules remain solely for retained views and tests.
+`src/ui/design.rs` owns GPUI color, typography and geometry roles. `src/ui/components.rs` implements reusable stateless controls, and `src/ui/shell.rs` owns shared page geometry and scroll fallback, and `src/ui/root.rs` composes the active route. The [UI design guide](DESIGN.md) defines their contracts. The older egui `theme`, `fonts`, `layout` and `widgets` modules remain solely for retained views and tests.
 
 The entry uses official Zed [`gpui` and `gpui_platform` at v1.29.3 (d01b134)](https://github.com/zed-industries/zed/tree/d01b134cddf5e4f71964deb2d6f81cdb38fcf1e7), pinned to the same Git commit rather than a fork or moving branch. `gpui_platform::application()` selects the native Windows backend. The window is opaque and text rendering follows the platform default, allowing DirectWrite ClearType subpixel antialiasing when Windows recommends it. It requests a centered 730 × 489 logical-pixel window and a 400 × 260 minimum, with native chrome and title. The Win32 icon comes from the existing executable resource. No second renderer entry or feature switch is provided.
 
@@ -146,7 +146,7 @@ The probe retains pixel format, derivable bit depth, range, matrix, transfer, an
 
 ## Native interface and resources
 
-`src/ui/layout.rs`, `src/ui/widgets.rs`, `src/ui/theme.rs` and `src/ui/fonts.rs` provide the shared layout, controls, appearance and typography. IBM Plex Sans is the primary interface font; Fira Code is used for the Apollo wordmark and compact technical metadata. Both are embedded at compile time from `assets/fonts/`. Missing assets fail the build. Preserve the font licenses and asset identities documented in [the font notes](../assets/fonts/README.md).
+GPUI resolves the shared typography roles in `src/ui/design.rs` and registers Geist Variable and Fira Code Regular at startup. Geist is the UI family; Fira Code is the fixed lowercase wordmark family. The retained egui `src/ui/fonts.rs` embeds IBM Plex Sans and Fira Code for its remaining views and tests. Missing compile-time font assets fail the build. Keep Fira Code after legacy rendering is removed, and preserve the licenses and asset identities documented in [the font notes](../assets/fonts/README.md).
 
 Keep source inspection, preview decoding and media processing off the UI thread. `MediaProgressWakeOwner` coordinates progress notifications; retained state should drive the interface between updates.
 

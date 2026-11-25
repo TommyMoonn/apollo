@@ -1,19 +1,13 @@
 //! Source-first GPUI presentation. Actions are supplied by the root.
-use gpui::{Div, FontWeight, Stateful, div, prelude::*, px, rgba};
+use gpui::{Div, Stateful, div, prelude::*, px, rgba};
 
 use super::{
-    components,
-    design::{METRICS as M, Palette},
+    design::{METRICS as M, Palette, TextRole},
     workspace::WorkspacePresentation,
 };
 
-pub const WORDMARK_FAMILY: &str = "Fira Code";
-
 pub fn wordmark() -> Div {
-    div()
-        .font_family(WORDMARK_FAMILY)
-        .text_size(px(M.title))
-        .child("apollo")
+    TextRole::Wordmark.apply(div()).child("apollo")
 }
 
 pub fn landing(
@@ -36,12 +30,16 @@ pub fn landing(
         .child(open)
         .child(
             div()
-                .text_size(px(M.secondary))
+                .flex()
+                .items_center()
+                .min_h(px(TextRole::Status.resolve().line_height))
                 .text_color(rgba(palette.secondary()))
                 .child(if inspecting {
-                    "Checking file…"
+                    TextRole::Status.apply(div()).child("Checking file…")
                 } else {
-                    "or drop videos anywhere"
+                    TextRole::Secondary
+                        .apply(div())
+                        .child("or drop videos anywhere")
                 }),
         )
         .child(
@@ -61,8 +59,8 @@ pub fn summary(presentation: WorkspacePresentation, path: String, palette: Palet
         .w_full()
         .gap(px(M.tight))
         .child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
+            TextRole::SectionHeading
+                .apply(div())
                 .id("source-name")
                 .w_full()
                 .truncate()
@@ -73,20 +71,20 @@ pub fn summary(presentation: WorkspacePresentation, path: String, palette: Palet
                 }),
         )
         .children(presentation.metadata.map(|metadata| {
-            div()
-                .text_size(px(M.secondary))
+            TextRole::Secondary
+                .apply(div())
                 .text_color(rgba(palette.secondary()))
                 .truncate()
                 .child(metadata)
         }))
         .child(
-            div()
+            TextRole::Secondary
+                .apply(div())
                 .id("source-path")
                 .w_full()
                 .text_ellipsis_middle()
                 .whitespace_nowrap()
                 .overflow_hidden()
-                .text_size(px(M.secondary))
                 .text_color(rgba(palette.secondary()))
                 .child(path.clone())
                 .tooltip(move |_, cx| cx.new(|_| SourcePath(path.clone(), palette)).into()),
@@ -104,6 +102,12 @@ impl gpui::Render for SourcePath {
             .bg(rgba(self.1.background))
             .border(px(M.rule))
             .border_color(rgba(self.1.border()))
-            .child(components::inline_message(self.0.clone(), self.1))
+            .child(
+                TextRole::Secondary
+                    .apply(div())
+                    .text_color(rgba(self.1.secondary()))
+                    .whitespace_normal()
+                    .child(self.0.clone()),
+            )
     }
 }
