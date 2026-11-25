@@ -50,13 +50,14 @@ pub fn summary(
             div()
                 .flex()
                 .items_center()
+                .flex_wrap()
                 .gap(px(M.related))
                 .child(
                     TextRole::SectionHeading
                         .apply(div())
                         .id("source-name")
                         .flex_1()
-                        .min_w_0()
+                        .min_w(px(120.))
                         .truncate()
                         .child(presentation.file_name.clone())
                         .tooltip(move |_, cx| {
@@ -69,7 +70,7 @@ pub fn summary(
                             .into()
                         }),
                 )
-                .child(actions.flex_shrink_0()),
+                .child(actions.flex_shrink_0().max_w_full().ml_auto()),
         )
         .children(presentation.metadata.map(|metadata| {
             TextRole::Secondary

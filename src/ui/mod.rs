@@ -5,6 +5,8 @@ pub mod batch;
 pub mod components;
 pub mod design;
 #[cfg(windows)]
+mod dropdown;
+#[cfg(windows)]
 pub mod file_intake;
 pub mod fonts;
 pub mod frame_capture;

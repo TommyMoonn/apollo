@@ -19,6 +19,7 @@ use crate::app::{
     Application, NavigationState, Operation, QueueAction, background, discovery::MediaToolsState,
     queue::QueueEffect,
 };
+use crate::media::container::MediaContainer;
 use crate::progress_wake::MediaProgressWakeOwner;
 use crate::queue::JobId;
 use crate::{
@@ -97,9 +98,13 @@ fn queue_progress_state(
     }
 }
 
-struct RemuxFilename {
+const REMUX_FORMATS: [MediaContainer; 2] = [MediaContainer::Mp4, MediaContainer::Matroska];
+
+struct RemuxControls {
     session: u64,
     input: gpui::Entity<super::text_input::TextInput>,
+    format: gpui::Entity<super::dropdown::Dropdown>,
+    _format_subscription: gpui::Subscription,
     _subscription: gpui::Subscription,
     _observation: gpui::Subscription,
 }
@@ -121,7 +126,7 @@ struct ApolloRoot {
     open_focus: FocusHandle,
     picker_focus: Option<FocusHandle>,
     drag_origin: Option<DropContext>,
-    remux_filename: Option<RemuxFilename>,
+    remux_controls: Option<RemuxControls>,
     browse_focus: FocusHandle,
     browse_pending: bool,
     file_dialog: FileDialogOwner,
@@ -170,7 +175,7 @@ impl ApolloRoot {
             open_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             picker_focus: None,
             drag_origin: None,
-            remux_filename: None,
+            remux_controls: None,
             browse_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             browse_pending: false,
             file_dialog,
@@ -627,14 +632,12 @@ impl ApolloRoot {
         cx: &mut Context<Self>,
     ) -> (gpui::Div, gpui::Div) {
         use super::{
+            dropdown::{Dropdown, Selected},
             output,
             remux::{RemuxPresentation, remux_ready_feedback},
             text_input::{Changed, TextInput},
         };
-        use crate::{
-            app::{dialogs::OutputDraft, queue::QueueSubmission},
-            media::container::MediaContainer,
-        };
+        use crate::app::{dialogs::OutputDraft, queue::QueueSubmission};
         let Some((session, media, draft)) = self.core.remux_context() else {
             return (
                 components::inline_message("The source is no longer available.", palette),
@@ -648,6 +651,7 @@ impl ApolloRoot {
                 .unwrap_or_else(|| error.to_string())
         });
         let current_container = draft.container();
+        let format_index = usize::from(current_container == MediaContainer::Matroska);
         let directory = draft.output_directory().to_path_buf();
         let stem = draft.output_filename_stem().to_string_lossy().into_owned();
         let editable_name = draft.output_filename_stem().to_str().is_some();
@@ -655,7 +659,7 @@ impl ApolloRoot {
             && !self.core.source.is_inspecting()
             && self.core.discovery.ready().is_some();
         if self
-            .remux_filename
+            .remux_controls
             .as_ref()
             .is_none_or(|field| field.session != session)
         {
@@ -670,15 +674,29 @@ impl ApolloRoot {
             });
             // Composition can change action readiness even before the typed value changes.
             let observation = cx.observe(&input, |_, _, cx| cx.notify());
-            self.remux_filename = Some(RemuxFilename {
+            let format = cx.new(|cx| Dropdown::new(&["MP4", "MKV"], format_index, cx));
+            let format_subscription =
+                cx.subscribe(&format, move |root, _, change: &Selected, cx| {
+                    if root.can_navigate()
+                        && !root.remux_composing(session, cx)
+                        && let Some(&container) = REMUX_FORMATS.get(change.0)
+                        && let Some(draft) = root.core.remux_draft_mut(session)
+                    {
+                        draft.set_container(container);
+                        cx.notify();
+                    }
+                });
+            self.remux_controls = Some(RemuxControls {
                 session,
                 input,
+                format,
+                _format_subscription: format_subscription,
                 _subscription: subscription,
                 _observation: observation,
             });
         }
         let input = self
-            .remux_filename
+            .remux_controls
             .as_ref()
             .expect("filename for current session")
             .input
@@ -688,26 +706,14 @@ impl ApolloRoot {
         });
         let composing = input.read(cx).composing();
         let actions_enabled = enabled && !composing;
-        let choices = [MediaContainer::Mp4, MediaContainer::Matroska].map(|container| {
-            let label = super::remux::container_label(container);
-            let mut button = Button::new(label, label, Tone::Standard);
-            if actions_enabled {
-                let select = Box::new(cx.listener(move |root, _, _, cx| {
-                    if root.can_navigate()
-                        && !root.remux_composing(session, cx)
-                        && let Some(draft) = root.core.remux_draft_mut(session)
-                    {
-                        draft.set_container(container);
-                        cx.notify();
-                    }
-                }));
-                button.state = if container == current_container {
-                    ActionState::Selected(select)
-                } else {
-                    ActionState::Enabled(select)
-                };
-            }
-            button
+        let format = self
+            .remux_controls
+            .as_ref()
+            .expect("controls for current session")
+            .format
+            .clone();
+        format.update(cx, |format, cx| {
+            format.sync(format_index, actions_enabled, palette, cx)
         });
         let mut browse = Button::new("browse-output", "Browse", Tone::Standard);
         browse.alternate_labels = &["Browse"];
@@ -751,19 +757,17 @@ impl ApolloRoot {
             .gap(px(M.related))
             .w_full()
             .min_w_0()
-            .child(components::inline_message(
-                "Change container without re-encoding.",
-                palette,
-            ))
-            .child(output::output_row(
-                choices,
-                input,
-                current_container.extension(),
-                &directory,
-                browse,
-                palette,
-                window,
-            ))
+            .child(
+                output::OutputRow {
+                    format: div().flex_shrink_0().child(format),
+                    filename: input,
+                    extension: current_container.extension(),
+                    extensions: &REMUX_FORMATS.map(MediaContainer::extension),
+                    directory: &directory,
+                    browse,
+                }
+                .render(palette, window),
+            )
             .children((!editable_name).then(|| {
                 components::inline_message(
                     "This filename cannot be represented as text. Use Browse to choose a new name.",
@@ -851,7 +855,7 @@ impl ApolloRoot {
     }
 
     fn remux_composing(&self, session: u64, cx: &App) -> bool {
-        self.remux_filename
+        self.remux_controls
             .as_ref()
             .is_some_and(|field| field.session == session && field.input.read(cx).composing())
     }
@@ -1172,10 +1176,10 @@ impl ApolloRoot {
 impl Render for ApolloRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::DARK;
-        if self.remux_filename.as_ref().is_some_and(|field| {
+        if self.remux_controls.as_ref().is_some_and(|field| {
             self.core.remux_context().map(|context| context.0) != Some(field.session)
         }) {
-            self.remux_filename = None;
+            self.remux_controls = None;
         }
         if !cx.has_active_drag() {
             self.drag_origin = None;
@@ -1290,25 +1294,21 @@ impl Render for ApolloRoot {
                         file_intake::summary(
                             super::workspace::WorkspacePresentation::new(media),
                             media.path.to_string_lossy().into_owned(),
-                            components::selector([open, close]).flex_nowrap(),
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .justify_end()
+                                .gap(px(M.action_gap))
+                                .child(components::selector([open, close]).flex_nowrap())
+                                .child(shell::navigation_actions(queue, settings, palette, window)),
                             palette,
                         )
                     }))
                     .child(selector)
                     .child(components::separator(palette));
-                let navigation = shell::navigation_actions(queue, settings, palette, window);
                 if active_operation == Operation::Remux && self.core.discovery.ready().is_some() {
                     let (body, actions) = self.remux_form(palette, window, cx);
-                    (
-                        header,
-                        body,
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(M.related))
-                            .child(actions)
-                            .child(navigation),
-                    )
+                    (header, body, actions)
                 } else {
                     let surface = if self.core.discovery.ready().is_none() {
                         self.discovery_view(palette, window, cx)
@@ -1319,7 +1319,7 @@ impl Render for ApolloRoot {
                             palette,
                         )
                     };
-                    (header, surface, navigation)
+                    (header, surface, div())
                 }
             }
             NavigationState::BatchSetup => {
