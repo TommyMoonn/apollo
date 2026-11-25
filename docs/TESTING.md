@@ -164,3 +164,7 @@ For pin changes, repeat the relevant checks in [the media-tool acceptance record
 ## Reporting results
 
 Record the commands, platform, actual results and any skipped or unavailable cases. For artifact acceptance, record the date, revision and local changes, Windows build, artifact and executable hashes, and media-tool manifest hash; include GPU and driver information for NVIDIA checks. Do not report an ignored test, simulated process or an earlier artifact's results as current runtime acceptance.
+
+### GPUI Remux (U03.1)
+
+Run `cargo test --locked --lib remux` and `cargo test --locked --test remux` for draft, admission, dialog and stream-copy coverage. On Windows, verify normal and queue-edit forms at reference and minimum widths, container changes, Unicode text entry and selection, native Browse acceptance/cancellation, invalid stems, compatibility feedback, both submission modes and Save/Cancel without losing the original source draft. Verify focus restoration and IME entry on the native window.

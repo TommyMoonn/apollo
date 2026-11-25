@@ -211,7 +211,7 @@ fn show_container_selector(ui: &mut Ui, state: &mut RemuxDraft) {
     }
 }
 
-fn remux_ready_feedback(
+pub(super) fn remux_ready_feedback(
     error: &RemuxValidationError,
     presentation: &RemuxPresentation,
 ) -> Option<String> {

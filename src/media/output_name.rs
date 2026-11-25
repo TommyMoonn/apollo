@@ -23,6 +23,10 @@ impl OutputNameState {
         }
     }
 
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     pub(crate) fn stem(&self) -> &OsStr {
         &self.stem
     }

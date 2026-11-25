@@ -1728,8 +1728,8 @@ mod tests {
         };
         let tools = tools(&directory);
         let stopped = WaitingControls::for_job(&queue, first).unwrap();
-        assert!(!stopped.allows(Action::Edit));
-        assert!(stopped.edit_blocked.unwrap().contains("migrated"));
+        assert!(stopped.allows(Action::Edit));
+        assert!(stopped.edit_blocked.is_none());
         assert!(queue.start_with_launcher(&tools, true, &mut launcher));
         assert_eq!(queue.active_job(), Some(active));
         assert!(WaitingControls::for_job(&queue, active).is_none());
@@ -1796,9 +1796,9 @@ mod tests {
         let remaining = WaitingControls::for_job(&queue, second).unwrap();
         assert_eq!(
             Action::ALL.map(|action| remaining.allows(action)),
-            [false, false, false, true]
+            [false, false, true, true]
         );
-        assert!(remaining.edit_blocked.unwrap().contains("migrated"));
+        assert!(remaining.edit_blocked.is_none());
         assert!(queue.start_with_launcher(&tools, true, &mut launcher));
         assert_eq!(queue.active_job(), Some(second));
         assert_eq!(launched, [active, second]);

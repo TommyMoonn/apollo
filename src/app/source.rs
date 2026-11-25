@@ -22,6 +22,7 @@ pub(crate) struct SourceSession {
     error: Option<MediaError>,
     session_id: Option<u64>,
     next_session_id: u64,
+    pub(crate) remux: Option<crate::remux::draft::RemuxDraft>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +161,7 @@ impl SourceSession {
 
     fn publish(&mut self) {
         self.session_id = Some(self.allocate_session_id());
+        self.remux = self.current().map(crate::remux::draft::RemuxDraft::new);
         self.clear_error();
     }
 
@@ -173,6 +175,7 @@ impl SourceSession {
         self.inspection = None;
         self.intake.close_source();
         self.session_id = None;
+        self.remux = None;
         self.clear_error();
     }
 

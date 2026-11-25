@@ -97,6 +97,13 @@ fn queue_progress_state(
     }
 }
 
+struct RemuxFilename {
+    session: u64,
+    input: gpui::Entity<super::text_input::TextInput>,
+    _subscription: gpui::Subscription,
+    _observation: gpui::Subscription,
+}
+
 struct ApolloRoot {
     core: Application,
     focus: FocusHandle,
@@ -114,6 +121,9 @@ struct ApolloRoot {
     open_focus: FocusHandle,
     picker_focus: Option<FocusHandle>,
     drag_origin: Option<DropContext>,
+    remux_filename: Option<RemuxFilename>,
+    browse_focus: FocusHandle,
+    browse_pending: bool,
     file_dialog: FileDialogOwner,
     dialog_origin: Option<InputDialogOrigin>,
     settings_path: Option<PathBuf>,
@@ -160,6 +170,9 @@ impl ApolloRoot {
             open_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             picker_focus: None,
             drag_origin: None,
+            remux_filename: None,
+            browse_focus: cx.focus_handle().tab_stop(true).tab_index(0),
+            browse_pending: false,
             file_dialog,
             dialog_origin: None,
             settings_path,
@@ -607,6 +620,264 @@ impl ApolloRoot {
         }
     }
 
+    fn remux_form(
+        &mut self,
+        palette: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (gpui::Div, gpui::Div) {
+        use super::{
+            output,
+            remux::{RemuxPresentation, remux_ready_feedback},
+            text_input::{Changed, TextInput},
+        };
+        use crate::{
+            app::{dialogs::OutputDraft, queue::QueueSubmission},
+            media::container::MediaContainer,
+        };
+        let Some((session, media, draft)) = self.core.remux_context() else {
+            return (
+                components::inline_message("The source is no longer available.", palette),
+                div(),
+            );
+        };
+        let editing = matches!(self.core.navigation(), NavigationState::QueueEdit { .. });
+        let validation = draft.validation(media);
+        let feedback = validation.as_ref().err().map(|error| {
+            remux_ready_feedback(error, &RemuxPresentation::new(media))
+                .unwrap_or_else(|| error.to_string())
+        });
+        let current_container = draft.container();
+        let directory = draft.output_directory().to_path_buf();
+        let stem = draft.output_filename_stem().to_string_lossy().into_owned();
+        let editable_name = draft.output_filename_stem().to_str().is_some();
+        let enabled = self.can_navigate()
+            && !self.core.source.is_inspecting()
+            && self.core.discovery.ready().is_some();
+        if self
+            .remux_filename
+            .as_ref()
+            .is_none_or(|field| field.session != session)
+        {
+            let input = cx.new(|cx| TextInput::new(stem.clone(), cx));
+            let subscription = cx.subscribe(&input, move |root, _, change: &Changed, cx| {
+                if root.can_navigate()
+                    && let Some(draft) = root.core.remux_draft_mut(session)
+                {
+                    draft.set_output_filename_stem(change.0.clone().into());
+                    cx.notify();
+                }
+            });
+            // Composition can change action readiness even before the typed value changes.
+            let observation = cx.observe(&input, |_, _, cx| cx.notify());
+            self.remux_filename = Some(RemuxFilename {
+                session,
+                input,
+                _subscription: subscription,
+                _observation: observation,
+            });
+        }
+        let input = self
+            .remux_filename
+            .as_ref()
+            .expect("filename for current session")
+            .input
+            .clone();
+        input.update(cx, |input, _| {
+            input.sync(&stem, enabled && editable_name, palette)
+        });
+        let composing = input.read(cx).composing();
+        let actions_enabled = enabled && !composing;
+        let choices = [MediaContainer::Mp4, MediaContainer::Matroska].map(|container| {
+            let label = super::remux::container_label(container);
+            let mut button = Button::new(label, label, Tone::Standard);
+            if actions_enabled {
+                let select = Box::new(cx.listener(move |root, _, _, cx| {
+                    if root.can_navigate()
+                        && !root.remux_composing(session, cx)
+                        && let Some(draft) = root.core.remux_draft_mut(session)
+                    {
+                        draft.set_container(container);
+                        cx.notify();
+                    }
+                }));
+                button.state = if container == current_container {
+                    ActionState::Selected(select)
+                } else {
+                    ActionState::Enabled(select)
+                };
+            }
+            button
+        });
+        let mut browse = Button::new("browse-output", "Browse", Tone::Standard);
+        browse.alternate_labels = &["Browse"];
+        if self.file_dialog.is_pending() && self.browse_pending {
+            browse.state = ActionState::Busy;
+        } else if actions_enabled {
+            browse.state =
+                ActionState::Enabled(Box::new(cx.listener(move |root, _, window, cx| {
+                    if !root.can_navigate() || root.core.source.is_inspecting() {
+                        return;
+                    }
+                    let Some((id, _, draft)) = root.core.remux_context() else {
+                        return;
+                    };
+                    if id != session || root.remux_composing(session, cx) {
+                        return;
+                    }
+                    let request = OutputDraft::Remux(draft).request(id);
+                    window.focus(&root.browse_focus, cx);
+                    root.start_file_dialog(request, window, cx);
+                })));
+        }
+        let browse_enabled = matches!(&browse.state, ActionState::Enabled(_));
+        let browse = browse
+            .render(palette, window)
+            .when(browse_enabled, |button| {
+                button.track_focus(&self.browse_focus)
+            });
+        let error = if editing {
+            self.core.queue_edit().and_then(|edit| edit.error.as_ref())
+        } else {
+            self.core
+                .operation_action_error
+                .as_ref()
+                .filter(|(operation, _)| *operation == Operation::Remux)
+                .map(|(_, error)| error)
+        };
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(M.related))
+            .w_full()
+            .min_w_0()
+            .child(components::inline_message(
+                "Change container without re-encoding.",
+                palette,
+            ))
+            .child(output::output_row(
+                choices,
+                input,
+                current_container.extension(),
+                &directory,
+                browse,
+                palette,
+                window,
+            ))
+            .children((!editable_name).then(|| {
+                components::inline_message(
+                    "This filename cannot be represented as text. Use Browse to choose a new name.",
+                    palette,
+                )
+            }))
+            .children(feedback.map(|text| components::inline_message(text, palette)))
+            .children(error.map(|error| {
+                components::inline_message(
+                    format!(
+                        "{} {} {}",
+                        error.message(),
+                        error.guidance().unwrap_or_default(),
+                        error.diagnostic().unwrap_or_default()
+                    ),
+                    palette,
+                )
+            }));
+        let ready = actions_enabled && validation.is_ok();
+        let mut actions = Vec::new();
+        if editing {
+            let mut cancel = Button::new(
+                "cancel-queue-edit",
+                super::CANCEL_QUEUE_EDIT_LABEL,
+                Tone::Standard,
+            );
+            if self.can_navigate() {
+                cancel.state =
+                    ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                        root.finish_queue_edit(false, window, cx)
+                    })));
+            }
+            let mut save = Button::new(
+                "save-queue-edit",
+                super::SAVE_QUEUE_CHANGES_LABEL,
+                Tone::Primary,
+            );
+            if ready && self.core.queue.scheduler().can_edit() {
+                save.state =
+                    ActionState::Enabled(Box::new(cx.listener(move |root, _, window, cx| {
+                        if root.core.remux_context().map(|context| context.0) == Some(session)
+                            && !root.remux_composing(session, cx)
+                        {
+                            root.finish_queue_edit(true, window, cx);
+                        }
+                    })));
+            }
+            actions.extend([cancel.render(palette, window), save.render(palette, window)]);
+        } else {
+            let process_now = self.core.process_now_allowed();
+            let mut add = Button::new(
+                "add-to-queue",
+                if self.core.queue_confirmation == Some(Operation::Remux) {
+                    super::ADDED_TO_QUEUE_LABEL
+                } else {
+                    super::ADD_TO_QUEUE_LABEL
+                },
+                if process_now {
+                    Tone::Standard
+                } else {
+                    Tone::Primary
+                },
+            );
+            add.alternate_labels = &[super::ADD_TO_QUEUE_LABEL, super::ADDED_TO_QUEUE_LABEL];
+            if ready {
+                add.state =
+                    ActionState::Enabled(Box::new(cx.listener(move |root, _, window, cx| {
+                        root.submit_remux(session, QueueSubmission::AddToQueue, window, cx)
+                    })));
+            }
+            if process_now {
+                let mut process =
+                    Button::new("process-now", super::PROCESS_NOW_LABEL, Tone::Primary);
+                if ready {
+                    process.state =
+                        ActionState::Enabled(Box::new(cx.listener(move |root, _, window, cx| {
+                            root.submit_remux(session, QueueSubmission::ProcessNow, window, cx)
+                        })));
+                }
+                actions.push(process.render(palette, window));
+            }
+            actions.push(add.render(palette, window));
+        }
+        (body, components::action_bar(palette, actions))
+    }
+
+    fn remux_composing(&self, session: u64, cx: &App) -> bool {
+        self.remux_filename
+            .as_ref()
+            .is_some_and(|field| field.session == session && field.input.read(cx).composing())
+    }
+
+    fn submit_remux(
+        &mut self,
+        session: u64,
+        submission: crate::app::queue::QueueSubmission,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_navigate() || self.remux_composing(session, cx) {
+            return;
+        }
+        let progress = &mut self.progress_wake;
+        if self
+            .core
+            .submit_remux(session, submission, || progress.begin())
+            && submission == crate::app::queue::QueueSubmission::ProcessNow
+        {
+            self.invalidate_drag();
+            window.focus(&self.queue_back_focus, cx);
+        }
+        cx.notify();
+    }
+
     fn start_file_dialog(
         &mut self,
         request: FileDialogRequest,
@@ -623,6 +894,7 @@ impl ApolloRoot {
         match self.file_dialog.request(request) {
             Ok(()) => {
                 self.dialog_origin = Some(origin);
+                self.browse_pending = target.output().is_some();
                 self.picker_focus = window.focused(cx).or_else(|| Some(self.open_focus.clone()));
             }
             Err(FileDialogStartError::AlreadyPending) => return,
@@ -682,6 +954,7 @@ impl ApolloRoot {
         let Some(completion) = self.file_dialog.poll() else {
             return;
         };
+        self.browse_pending = false;
         let origin = self.dialog_origin.take();
         if let Some(origin) = origin.filter(|_| !self.core.is_closing()) {
             self.apply_dialog(origin, completion);
@@ -899,6 +1172,11 @@ impl ApolloRoot {
 impl Render for ApolloRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::DARK;
+        if self.remux_filename.as_ref().is_some_and(|field| {
+            self.core.remux_context().map(|context| context.0) != Some(field.session)
+        }) {
+            self.remux_filename = None;
+        }
         if !cx.has_active_drag() {
             self.drag_origin = None;
         }
@@ -917,7 +1195,7 @@ impl Render for ApolloRoot {
             Tone::Standard,
         );
         open.alternate_labels = &["Open files", "Change file"];
-        if self.file_dialog.is_pending() || (has_source && inspecting) {
+        if (self.file_dialog.is_pending() && !self.browse_pending) || (has_source && inspecting) {
             open.state = ActionState::Busy;
         } else if self.can_open_files() {
             open.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
@@ -1018,20 +1296,31 @@ impl Render for ApolloRoot {
                     }))
                     .child(selector)
                     .child(components::separator(palette));
-                let surface = if self.core.discovery.ready().is_none() {
-                    self.discovery_view(palette, window, cx)
-                } else {
-                    components::empty_state(
-                        active_operation.label(),
-                        "This operation is unavailable during the UI migration.",
-                        palette,
+                let navigation = shell::navigation_actions(queue, settings, palette, window);
+                if active_operation == Operation::Remux && self.core.discovery.ready().is_some() {
+                    let (body, actions) = self.remux_form(palette, window, cx);
+                    (
+                        header,
+                        body,
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(M.related))
+                            .child(actions)
+                            .child(navigation),
                     )
-                };
-                (
-                    header,
-                    surface,
-                    shell::navigation_actions(queue, settings, palette, window),
-                )
+                } else {
+                    let surface = if self.core.discovery.ready().is_none() {
+                        self.discovery_view(palette, window, cx)
+                    } else {
+                        components::empty_state(
+                            active_operation.label(),
+                            "This operation is unavailable during the UI migration.",
+                            palette,
+                        )
+                    };
+                    (header, surface, navigation)
+                }
             }
             NavigationState::BatchSetup => {
                 let count = self
@@ -1274,34 +1563,7 @@ impl Render for ApolloRoot {
                 components::action_bar(palette, [back.render(palette, window)]),
             ),
             NavigationState::QueueEdit { .. } => {
-                let mut cancel = Button::new(
-                    "cancel-queue-edit",
-                    super::CANCEL_QUEUE_EDIT_LABEL,
-                    Tone::Standard,
-                );
-                let mut save = Button::new(
-                    "save-queue-edit",
-                    super::SAVE_QUEUE_CHANGES_LABEL,
-                    Tone::Primary,
-                );
-                if self.can_navigate() {
-                    cancel.state =
-                        ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
-                            root.finish_queue_edit(false, window, cx)
-                        })));
-                }
                 let edit = self.core.queue_edit();
-                // U03–U05 replace this migration gap with the normal operation form in QueueEdit mode.
-                // No form is admitted before it supports that mode.
-                if self.can_navigate()
-                    && self.core.queue.scheduler().can_edit()
-                    && edit.is_some_and(|edit| queue::editor_migrated(edit.active_operation))
-                {
-                    save.state =
-                        ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
-                            root.finish_queue_edit(true, window, cx)
-                        })));
-                }
                 let header = div()
                     .flex()
                     .flex_col()
@@ -1317,28 +1579,30 @@ impl Render for ApolloRoot {
                         .child(components::heading(edit.active_operation.label()))
                     }))
                     .child(components::separator(palette));
-                let surface = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(M.related))
-                    .children(edit.and_then(|edit| edit.error.as_ref()).map(|error| {
+                if edit.is_some_and(|edit| edit.active_operation == Operation::Remux) {
+                    let (body, actions) = self.remux_form(palette, window, cx);
+                    (header, body, actions)
+                } else {
+                    let mut cancel = Button::new(
+                        "cancel-queue-edit",
+                        super::CANCEL_QUEUE_EDIT_LABEL,
+                        Tone::Standard,
+                    );
+                    if self.can_navigate() {
+                        cancel.state =
+                            ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                                root.finish_queue_edit(false, window, cx)
+                            })));
+                    }
+                    (
+                        header,
                         components::inline_message(
-                            error.diagnostic().unwrap_or(error.message()).to_owned(),
+                            "This operation editor is unavailable during the UI migration.",
                             palette,
-                        )
-                    }))
-                    .child(components::inline_message(
-                        "This operation editor is unavailable during the UI migration.",
-                        palette,
-                    ));
-                (
-                    header,
-                    surface,
-                    components::action_bar(
-                        palette,
-                        [cancel.render(palette, window), save.render(palette, window)],
-                    ),
-                )
+                        ),
+                        components::action_bar(palette, [cancel.render(palette, window)]),
+                    )
+                }
             }
             NavigationState::BatchEdit => (
                 components::page_title("Editor"),

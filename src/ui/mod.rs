@@ -12,6 +12,8 @@ pub mod layout;
 pub mod legacy;
 pub mod media_error;
 mod media_lifecycle;
+#[cfg(windows)]
+mod output;
 pub mod queue;
 pub mod remux;
 #[cfg(windows)]
@@ -19,6 +21,8 @@ pub mod root;
 #[cfg(windows)]
 mod shell;
 pub mod source_presentation;
+#[cfg(windows)]
+mod text_input;
 pub mod theme;
 pub mod upscale;
 pub mod widgets;

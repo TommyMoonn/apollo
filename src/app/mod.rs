@@ -8,6 +8,8 @@ pub(crate) mod dialogs;
 pub(crate) mod discovery;
 pub(crate) mod editor;
 pub(crate) mod queue;
+#[cfg(any(windows, test))]
+pub(crate) mod remux;
 pub use queue::QueueAction;
 pub(crate) mod frame_capture;
 mod navigation;

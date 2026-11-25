@@ -5,7 +5,7 @@
 
 Apollo is a native Windows x64 media utility written in Rust. GPUI is the native application entry, and FFmpeg and FFprobe run as separate child processes. Media stays on the user's machine. The application has no web frontend, server or account dependency.
 
-The GPUI migration is in progress. The root owns one `Application`, starts media-tool discovery and settles worker notifications on the UI thread regardless of navigation. Its shared shell integrates source intake, operation selection, Queue and Settings navigation, discovery, queue activity and shutdown state. Queue controls, operation forms, batch configuration and appearance settings remain disabled until their presentation phases. The retained egui implementation below describes the existing behavior contracts and regression tests, not an alternative runnable application.
+The GPUI migration is in progress. The root owns one `Application`, starts media-tool discovery and settles worker notifications on the UI thread regardless of navigation. Its shared shell integrates source intake, operation selection, Queue and Settings navigation, discovery, queue activity and shutdown state. Queue controls and Remux are available. Other operation forms, batch configuration and appearance settings remain disabled until their presentation phases. The retained egui implementation below describes the existing behavior contracts and regression tests, not an alternative runnable application.
 
 ## Module boundaries
 
@@ -24,6 +24,8 @@ The GPUI migration is in progress. The root owns one `Application`, starts media
 | `src/progress_wake.rs` | Renderer-neutral progress coalescing. |
 
 The library exports the application core and UI modules through `src/lib.rs`. The native binary creates one GPUI root with exactly one core. The core does not import UI or native adapters. Keep operation policy in its domain module and use the shared media and queue owners. Views display state and collect input; repainting must not start probes or processing.
+
+The GPUI Remux form uses the accepted source session’s typed `RemuxDraft`, or the fixed queue editor’s draft. The shared output row presents a single-line filename stem, fixed extension, container choice and native destination picker. `app/remux.rs` routes normal admission and session-scoped draft updates through existing queue and dialog owners; no media probing or filesystem admission occurs during rendering. The retained egui Remux adapter still serves batch and regression consumers.
 
 The retained presentation modules have explicit migration owners: U01.2 establishes GPUI theme, layout, fonts and shared controls without removing the retained egui consumers; U01.3 replaces background wake and shutdown coordination; U01.4 replaces native-dialog routing and preferences; U01.5 and U01.6 replace intake and workspace navigation; U02 replaces queue presentation; U03–U05 replace operation forms and frame capture; U06 replaces batch presentation; U07 replaces settings presentation. Keep the existing regression tests until equivalent GPUI or core behavior tests cover their contracts.
 

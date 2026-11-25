@@ -160,6 +160,10 @@ pub(crate) enum OutputDraft<'a> {
 
 impl OutputDraft<'_> {
     pub(crate) fn request(self, session_id: u64) -> FileDialogRequest {
+        let directory = match &self {
+            Self::Remux(draft) => Some(draft.output_directory().to_path_buf()),
+            _ => None,
+        };
         let (target, output, format): (DialogTarget, PathBuf, OutputFormat) = match self {
             Self::AudioMix(draft) => (
                 DialogTarget::AudioMixOutput { session_id },
@@ -200,8 +204,9 @@ impl OutputDraft<'_> {
                 },
             ),
         };
-        let initial_directory = output
-            .parent()
+        let initial_directory = directory
+            .as_deref()
+            .or_else(|| output.parent())
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or(Path::new("."))
             .to_path_buf();
@@ -234,7 +239,12 @@ impl Application {
         }
         let FileDialogCompletion { target, outcome } = completion;
         if let Some((operation, session_id)) = target.output() {
-            if self.settle_independent_output(operation, session_id, &outcome)
+            if !origin.is_current(self) {
+                return;
+            }
+            if ((operation == Operation::Remux
+                && self.settle_source_remux_output(session_id, &outcome))
+                || self.settle_independent_output(operation, session_id, &outcome))
                 && let DialogOutcome::Selected(path) = outcome
             {
                 self.settings.remember_output(&path);
