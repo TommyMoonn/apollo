@@ -1,5 +1,9 @@
-//! Single-line native text input for operation filenames. GPUI owns IME delivery.
-use super::design::{METRICS as M, Palette, TextRole};
+//! Single-line native text input for operation filenames and mixer gains. GPUI owns IME delivery.
+use super::{
+    audio_mix::{parse_track_gain, stepped_track_gain},
+    design::{METRICS as M, Palette, TextRole},
+};
+use crate::audio_mix::model::TrackGain;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, GlobalElementId, InspectorElementId,
@@ -13,6 +17,9 @@ pub(super) struct Changed(pub String);
 
 pub(super) struct TextInput {
     focus: FocusHandle,
+    label: String,
+    gain: Option<TrackGain>,
+    _gain_blur: Option<gpui::Subscription>,
     content: SharedString,
     committed: SharedString,
     anchor: usize,
@@ -32,6 +39,9 @@ impl TextInput {
         let content: SharedString = value.into();
         Self {
             focus: cx.focus_handle().tab_stop(true).tab_index(0),
+            label: "Filename stem".to_owned(),
+            gain: None,
+            _gain_blur: None,
             committed: content.clone(),
             content,
             anchor: end,
@@ -42,6 +52,51 @@ impl TextInput {
             selecting: false,
             enabled: true,
             palette: Palette::DARK,
+        }
+    }
+    pub(super) fn new_gain(
+        gain: TrackGain,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut input = Self::new(gain_text(gain), cx);
+        input.label = label;
+        input.gain = Some(gain);
+        input._gain_blur = Some(cx.on_blur(&input.focus, window, |input, window, cx| {
+            input.selecting = false;
+            input.restore_gain();
+            window.notify_text_input_changed(&input.focus);
+            cx.notify();
+        }));
+        input
+    }
+    pub(super) fn sync_gain(
+        &mut self,
+        gain: TrackGain,
+        enabled: bool,
+        palette: Palette,
+        window: &Window,
+    ) {
+        self.enabled = enabled;
+        self.palette = palette;
+        if self.gain != Some(gain) || !enabled || !self.focus.is_focused(window) {
+            self.gain = Some(gain);
+            self.restore_gain();
+        }
+    }
+    fn restore_gain(&mut self) {
+        if let Some(gain) = self.gain {
+            let value = gain_text(gain);
+            if self.content.as_ref() != value || self.marked.is_some() {
+                self.content = value.into();
+                self.cursor = self.content.len();
+                self.anchor = self.cursor;
+                self.marked = None;
+                self.layout = None;
+                self.scroll = px(0.);
+            }
+            self.committed = self.content.clone();
         }
     }
     pub(super) fn sync(&mut self, value: &str, enabled: bool, palette: Palette) {
@@ -109,7 +164,14 @@ impl TextInput {
         cx.notify();
     }
     fn publish(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if self.content != self.committed {
+        if let Some(previous) = self.gain {
+            if let Some(gain) = parse_track_gain(&self.content)
+                && gain != previous
+            {
+                self.gain = Some(gain);
+                cx.emit(Changed(gain_text(gain)));
+            }
+        } else if self.content != self.committed {
             self.committed = self.content.clone();
             cx.emit(Changed(self.content.to_string()));
         }
@@ -162,6 +224,23 @@ impl TextInput {
             }
         } else if !modifiers.control && !modifiers.alt && !modifiers.platform {
             match key.key.as_str() {
+                "up" | "down" if self.gain.is_some() => {
+                    let gain = self.gain.expect("gain input");
+                    let step = if key.key == "up" { 5 } else { -5 };
+                    let next = stepped_track_gain(gain.tenths_db() + step);
+                    if next != gain {
+                        self.gain = Some(next);
+                        cx.emit(Changed(gain_text(next)));
+                    }
+                    self.restore_gain();
+                    window.notify_text_input_changed(&self.focus);
+                    cx.notify();
+                }
+                "enter" | "escape" if self.gain.is_some() => {
+                    self.restore_gain();
+                    window.notify_text_input_changed(&self.focus);
+                    cx.notify();
+                }
                 "left" => self.select(
                     if !modifiers.shift && !selection.is_empty() {
                         selection.start
@@ -480,14 +559,32 @@ impl Element for InputLine {
         });
     }
 }
+fn gain_text(gain: TrackGain) -> String {
+    format!("{:.1}", f64::from(gain.tenths_db()) / 10.)
+}
+
 impl Render for TextInput {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.gain.is_some() && !self.focus.is_focused(window) {
+            self.restore_gain();
+        }
         let palette = self.palette;
         TextRole::Control
             .apply(div())
-            .id("filename-stem")
+            .id(if self.gain.is_some() {
+                "track-gain"
+            } else {
+                "filename-stem"
+            })
             .role(Role::TextInput)
-            .aria_label("Filename stem")
+            .aria_label(self.label.clone())
+            .when_some(self.gain, |element, _| {
+                element.aria_description(if parse_track_gain(&self.content).is_some() {
+                    "Gain in dB. Use Up and Down to adjust by 0.5 dB, or type a value."
+                } else {
+                    "Invalid gain. Enter a number between -60 and 12 dB."
+                })
+            })
             .aria_value(self.content.clone())
             .flex()
             .items_center()
@@ -499,11 +596,15 @@ impl Render for TextInput {
             .border(px(M.rule))
             .rounded(px(M.radius))
             .border_color(rgba(palette.border()))
-            .text_color(rgba(if self.enabled {
-                palette.foreground
-            } else {
-                palette.disabled()
-            }))
+            .text_color(rgba(
+                if self.enabled
+                    && (self.gain.is_none() || parse_track_gain(&self.content).is_some())
+                {
+                    palette.foreground
+                } else {
+                    palette.disabled()
+                },
+            ))
             .when(self.enabled, |element| {
                 element
                     .track_focus(&self.focus)

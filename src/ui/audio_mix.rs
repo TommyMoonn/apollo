@@ -49,7 +49,7 @@ pub enum AudioMixSelectionAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioMixPresentation {
-    tracks: Vec<TrackPresentation>,
+    pub(super) tracks: Vec<TrackPresentation>,
 }
 
 impl AudioMixPresentation {
@@ -61,10 +61,10 @@ impl AudioMixPresentation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TrackPresentation {
-    stream_index: u32,
-    title: String,
-    metadata: Option<String>,
+pub(super) struct TrackPresentation {
+    pub(super) stream_index: u32,
+    pub(super) title: String,
+    pub(super) metadata: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,10 +263,30 @@ fn track_gain_control(ui: &mut Ui, title: &str, gain: TrackGain) -> (Response, T
     (response, TrackGain::from_tenths_db(tenths_db))
 }
 
-fn stepped_track_gain(tenths_db: i16) -> TrackGain {
+pub(super) fn stepped_track_gain(tenths_db: i16) -> TrackGain {
     let tenths_db = ((f64::from(tenths_db) / 5.0).round() as i16 * 5)
         .clamp(TrackGain::MIN.tenths_db(), TrackGain::MAX.tenths_db());
     TrackGain::from_tenths_db(tenths_db)
+}
+
+/// Match the legacy half-decibel interaction step and clamping contract.
+#[cfg(any(windows, test))]
+pub(super) fn parse_track_gain(text: &str) -> Option<TrackGain> {
+    let text = text.trim();
+    let value = text
+        .strip_suffix("dB")
+        .unwrap_or(text)
+        .trim()
+        .parse::<f64>()
+        .ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+    let tenths = (value * 10.).clamp(
+        f64::from(TrackGain::MIN.tenths_db()),
+        f64::from(TrackGain::MAX.tenths_db()),
+    );
+    Some(stepped_track_gain(tenths.round() as i16))
 }
 
 fn show_track_header(ui: &mut Ui, media: &MediaFile, state: &mut AudioMixDraft) {
@@ -803,6 +823,26 @@ mod tests {
         assert_eq!(stepped_track_gain(117), TrackGain::from_tenths_db(115));
         assert_eq!(stepped_track_gain(123), TrackGain::MAX);
         assert_eq!(stepped_track_gain(-603), TrackGain::MIN);
+    }
+
+    #[test]
+    fn typed_gain_rejects_incomplete_and_nonfinite_text_and_clamps_to_half_db() {
+        for text in ["", "-", ".", "abc", "NaN", "inf", "-inf"] {
+            assert_eq!(super::parse_track_gain(text), None, "{text}");
+        }
+        for (text, expected) in [
+            ("-1000", -600),
+            ("1000", 120),
+            ("-6.3 dB", -65),
+            ("11.7", 115),
+            ("0", 0),
+        ] {
+            assert_eq!(
+                super::parse_track_gain(text),
+                Some(TrackGain::from_tenths_db(expected)),
+                "{text}"
+            );
+        }
     }
 
     #[test]

@@ -109,6 +109,16 @@ struct RemuxControls {
     _observation: gpui::Subscription,
 }
 
+struct MixerTrackControl {
+    presentation: super::audio_mix::TrackPresentation,
+    metadata: String,
+    gain: gpui::Entity<super::text_input::TextInput>,
+    _subscription: gpui::Subscription,
+}
+struct MixerControls {
+    session: u64,
+    tracks: Vec<MixerTrackControl>,
+}
 struct ApolloRoot {
     core: Application,
     focus: FocusHandle,
@@ -127,6 +137,7 @@ struct ApolloRoot {
     picker_focus: Option<FocusHandle>,
     drag_origin: Option<DropContext>,
     remux_controls: Option<RemuxControls>,
+    mixer_controls: Option<MixerControls>,
     browse_focus: FocusHandle,
     browse_pending: bool,
     file_dialog: FileDialogOwner,
@@ -176,6 +187,7 @@ impl ApolloRoot {
             picker_focus: None,
             drag_origin: None,
             remux_controls: None,
+            mixer_controls: None,
             browse_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             browse_pending: false,
             file_dialog,
@@ -623,6 +635,253 @@ impl ApolloRoot {
         if self.drag_origin.is_some() {
             self.drag_origin = Some(DropContext::Blocked);
         }
+    }
+
+    fn mixer_tracks(
+        &mut self,
+        palette: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        use super::{
+            audio_mix::{AudioMixPresentation, parse_track_gain},
+            text_input::{Changed, TextInput},
+        };
+        use crate::app::audio_mix::TrackAction;
+        let Some((session, media, draft)) = self.core.audio_mix_context() else {
+            return components::inline_message("The source is no longer available.", palette);
+        };
+        let enabled = self.can_navigate() && !self.core.source.is_inspecting();
+        if self
+            .mixer_controls
+            .as_ref()
+            .is_none_or(|controls| controls.session != session)
+        {
+            let tracks = AudioMixPresentation::new(media)
+                .tracks
+                .into_iter()
+                .map(|presentation| {
+                    let id = presentation.stream_index;
+                    let label = format!("{} (stream {id}) gain", presentation.title);
+                    let gain = cx.new(|cx| {
+                        TextInput::new_gain(
+                            draft.track_gain(id).unwrap_or_default(),
+                            label,
+                            window,
+                            cx,
+                        )
+                    });
+                    let subscription = cx.subscribe(&gain, move |root, _, change: &Changed, cx| {
+                        if root.can_navigate()
+                            && let Some(value) = parse_track_gain(&change.0)
+                            && root
+                                .core
+                                .edit_audio_mix_tracks(session, TrackAction::Gain(id, value))
+                        {
+                            cx.notify();
+                        }
+                    });
+                    let metadata = match &presentation.metadata {
+                        Some(metadata) => format!("Stream {id} · {metadata}"),
+                        None => format!("Stream {id}"),
+                    };
+                    MixerTrackControl {
+                        presentation,
+                        metadata,
+                        gain,
+                        _subscription: subscription,
+                    }
+                })
+                .collect();
+            self.mixer_controls = Some(MixerControls { session, tracks });
+        }
+        let controls = self
+            .mixer_controls
+            .as_ref()
+            .expect("controls for current source");
+        let action = |id, label, action, allowed: bool| {
+            let mut button = Button::new(id, label, Tone::Quiet);
+            if enabled && allowed {
+                button.state =
+                    ActionState::Enabled(Box::new(cx.listener(move |root, _, _, cx| {
+                        if root.can_navigate() && root.core.edit_audio_mix_tracks(session, action) {
+                            cx.notify();
+                        }
+                    })));
+            }
+            button.render(palette, window)
+        };
+        let selected_count = draft.selected_count();
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .flex_wrap()
+            .gap(px(M.compact))
+            .child(components::heading("Audio tracks"))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(M.compact))
+                    .child(action(
+                        "select-all-tracks",
+                        "Select all",
+                        TrackAction::SelectAll,
+                        selected_count < controls.tracks.len(),
+                    ))
+                    .child(action(
+                        "clear-tracks",
+                        "Clear",
+                        TrackAction::Clear,
+                        selected_count > 0,
+                    )),
+            );
+        let footer = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .flex_wrap()
+            .gap(px(M.compact))
+            .child(
+                TextRole::Secondary
+                    .apply(div())
+                    .text_color(rgba(palette.secondary()))
+                    .child(format!("{selected_count} selected")),
+            )
+            .child(action(
+                "reset-track-gains",
+                "Reset gains",
+                TrackAction::ResetGains,
+                !controls.tracks.is_empty(),
+            ));
+        let narrow = window.viewport_size().width < px(480.);
+        let rows = controls
+            .tracks
+            .iter()
+            .map(|track| {
+                let info = &track.presentation;
+                let id = info.stream_index;
+                let selected = draft.is_selected(id);
+                track.gain.update(cx, |field, _| {
+                    field.sync_gain(
+                        draft.track_gain(id).unwrap_or_default(),
+                        enabled,
+                        palette,
+                        window,
+                    )
+                });
+                let metadata = track.metadata.clone();
+                let title = info.title.clone();
+                let accessible = format!("{title}, {metadata}");
+                let marker = div()
+                    .size(px(16.))
+                    .flex_shrink_0()
+                    .rounded(px(M.radius))
+                    .border_1()
+                    .border_color(rgba(if selected {
+                        palette.foreground
+                    } else {
+                        palette.border()
+                    }))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |marker| {
+                        marker
+                            .bg(rgba(palette.foreground))
+                            .text_color(rgba(palette.background))
+                            .child("✓")
+                    });
+                let identity = div()
+                    .id(("select-track", id as usize))
+                    .role(gpui::Role::CheckBox)
+                    .aria_label(accessible.clone())
+                    .aria_toggled(if selected {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .flex()
+                    .items_center()
+                    .gap(px(M.compact))
+                    .min_w_0()
+                    .flex_1()
+                    .rounded(px(M.radius))
+                    .border_1()
+                    .border_color(rgba(0))
+                    .p(px(M.tight))
+                    .when(narrow, |row| row.w_full())
+                    .when(enabled, |row| {
+                        row.tab_index(0)
+                            .cursor_pointer()
+                            .focus_visible(move |style| {
+                                style.border_color(rgba(palette.foreground))
+                            })
+                            .on_click(cx.listener(move |root, _, _, cx| {
+                                if root.can_navigate()
+                                    && root
+                                        .core
+                                        .edit_audio_mix_tracks(session, TrackAction::Toggle(id))
+                                {
+                                    cx.notify();
+                                }
+                            }))
+                    })
+                    .child(marker)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .flex_1()
+                            .child(TextRole::Body.apply(div()).truncate().child(title))
+                            .child(
+                                TextRole::Secondary
+                                    .apply(div())
+                                    .text_color(rgba(palette.secondary()))
+                                    .truncate()
+                                    .child(metadata),
+                            ),
+                    )
+                    .tooltip(components::tooltip(accessible, palette));
+                let gain = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(M.tight))
+                    .w(px(super::theme::TRACK_GAIN_CONTROL_WIDTH))
+                    .flex_shrink_0()
+                    .child(div().flex_1().min_w_0().child(track.gain.clone()))
+                    .child(TextRole::Secondary.apply(div()).flex_shrink_0().child("dB"));
+                div()
+                    .id(("audio-track", id as usize))
+                    .flex()
+                    .gap(px(M.compact))
+                    .p(px(M.tight))
+                    .rounded(px(M.radius))
+                    .when(selected, |row| row.bg(rgba(palette.hover())))
+                    .when(enabled, |row| {
+                        row.hover(move |style| style.bg(rgba(palette.hover())))
+                    })
+                    .when(narrow, |row| row.flex_col().items_start())
+                    .when(!narrow, |row| row.items_center())
+                    .child(identity)
+                    .child(gain)
+            })
+            .collect::<Vec<_>>();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(M.compact))
+            .w_full()
+            .min_w_0()
+            .child(header)
+            .child(components::separator(palette))
+            .when(rows.is_empty(), |body| {
+                body.child(components::inline_message("No audio tracks.", palette))
+            })
+            .children(rows)
+            .child(components::separator(palette))
+            .child(footer)
     }
 
     fn remux_form(
@@ -1188,6 +1447,11 @@ impl Render for ApolloRoot {
         }) {
             self.remux_controls = None;
         }
+        if self.mixer_controls.as_ref().is_some_and(|controls| {
+            self.core.audio_mix_context().map(|context| context.0) != Some(controls.session)
+        }) {
+            self.mixer_controls = None;
+        }
         if !cx.has_active_drag() {
             self.drag_origin = None;
         }
@@ -1316,6 +1580,10 @@ impl Render for ApolloRoot {
                 if active_operation == Operation::Remux && self.core.discovery.ready().is_some() {
                     let (body, actions) = self.remux_form(palette, window, cx);
                     (header, body, actions)
+                } else if active_operation == Operation::AudioMix
+                    && self.core.discovery.ready().is_some()
+                {
+                    (header, self.mixer_tracks(palette, window, cx), div())
                 } else {
                     let surface = if self.core.discovery.ready().is_none() {
                         self.discovery_view(palette, window, cx)
