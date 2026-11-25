@@ -34,36 +34,12 @@ pub fn landing(open: Stateful<Div>, palette: Palette) -> Div {
         )
 }
 
-/// Reserve the cancellation row above and below the center so it does not pull the indicator off center.
-pub fn inspecting(cancel: Stateful<Div>, palette: Palette, animate: bool) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .w_full()
-        .min_h(px(3. * M.compact_height + 2. * M.compact))
-        .items_center()
-        .justify_center()
-        .gap(px(M.compact))
-        .child(div().h(px(M.compact_height)).flex_shrink_0())
-        .child(super::components::spinner(
-            "source-inspection",
-            "Checking file",
-            palette,
-            animate,
-        ))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .h(px(M.compact_height))
-                .flex_shrink_0()
-                .child(cancel),
-        )
-}
-
-pub fn summary(presentation: WorkspacePresentation, path: String, palette: Palette) -> Div {
+pub fn summary(
+    presentation: WorkspacePresentation,
+    path: String,
+    actions: Div,
+    palette: Palette,
+) -> Div {
     div()
         .flex()
         .flex_col()
@@ -71,16 +47,24 @@ pub fn summary(presentation: WorkspacePresentation, path: String, palette: Palet
         .w_full()
         .gap(px(M.tight))
         .child(
-            TextRole::SectionHeading
-                .apply(div())
-                .id("source-name")
-                .w_full()
-                .truncate()
-                .child(presentation.file_name.clone())
-                .tooltip(move |_, cx| {
-                    cx.new(|_| SourcePath(presentation.file_name.clone(), palette))
-                        .into()
-                }),
+            div()
+                .flex()
+                .items_center()
+                .gap(px(M.related))
+                .child(
+                    TextRole::SectionHeading
+                        .apply(div())
+                        .id("source-name")
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(presentation.file_name.clone())
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| SourcePath(presentation.file_name.clone(), palette))
+                                .into()
+                        }),
+                )
+                .child(actions.flex_shrink_0()),
         )
         .children(presentation.metadata.map(|metadata| {
             TextRole::Secondary

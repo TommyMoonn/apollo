@@ -214,7 +214,7 @@ impl ApolloRoot {
             || self.file_dialog.is_pending()
             || !matches!(
                 self.core.navigation(),
-                NavigationState::NoSource | NavigationState::SourceWorkspace { .. }
+                NavigationState::SourceWorkspace { .. }
             )
         {
             return;
@@ -595,23 +595,6 @@ impl Render for ApolloRoot {
         } else {
             open
         };
-        let mut close = Button::new(
-            "close-source",
-            if has_source {
-                "Close source"
-            } else {
-                "Cancel inspection"
-            },
-            Tone::Quiet,
-        );
-        if self.exit == ExitState::Open && !self.file_dialog.is_pending() {
-            close.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
-                if root.core.source.current().is_some() || root.core.source.is_inspecting() {
-                    root.close_source(window, cx);
-                }
-            })));
-        }
-        let close = close.render(palette, window);
         let queue_label = super::queue_count_label(self.core.queue.scheduler().pending_count());
         let mut queue = Button::new("queue", &queue_label, Tone::Standard);
         queue.alternate_labels = &["Queue", "Queue (99)"];
@@ -637,7 +620,12 @@ impl Render for ApolloRoot {
             NavigationState::NoSource => (
                 div().flex().justify_center().child(file_intake::wordmark()),
                 match landing_content(&self.core) {
-                    LandingContent::Inspecting => file_intake::inspecting(close, palette, animate),
+                    LandingContent::Inspecting => components::centered_spinner(
+                        "source-inspection",
+                        "Checking file",
+                        palette,
+                        animate,
+                    ),
                     LandingContent::Discovering | LandingContent::ToolsUnavailable => {
                         self.discovery_view(palette, window, cx)
                     }
@@ -646,6 +634,14 @@ impl Render for ApolloRoot {
                 shell::navigation_actions(queue, settings, palette, window),
             ),
             NavigationState::SourceWorkspace { active_operation } => {
+                let mut close = Button::new("close-source", "Close source", Tone::Standard);
+                if self.exit == ExitState::Open && !self.file_dialog.is_pending() {
+                    close.state =
+                        ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                            root.close_source(window, cx);
+                        })));
+                }
+                let close = close.render(palette, window);
                 let selector = components::selector(Operation::ALL.map(|operation| {
                     let mut button =
                         Button::new(operation.label(), operation.label(), Tone::Standard);
@@ -666,23 +662,14 @@ impl Render for ApolloRoot {
                     .flex()
                     .flex_col()
                     .gap(px(M.related))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(M.related))
-                            .children(self.core.source.current().map(|media| {
-                                div().flex_1().min_w(px(M.source_identity_min_width)).child(
-                                    file_intake::summary(
-                                        super::workspace::WorkspacePresentation::new(media),
-                                        media.path.to_string_lossy().into_owned(),
-                                        palette,
-                                    ),
-                                )
-                            }))
-                            .child(components::selector([open, close])),
-                    )
+                    .children(self.core.source.current().map(|media| {
+                        file_intake::summary(
+                            super::workspace::WorkspacePresentation::new(media),
+                            media.path.to_string_lossy().into_owned(),
+                            components::selector([open, close]).flex_nowrap(),
+                            palette,
+                        )
+                    }))
                     .child(selector)
                     .child(components::separator(palette));
                 let surface = if self.core.discovery.ready().is_none() {
