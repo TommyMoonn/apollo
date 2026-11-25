@@ -2,9 +2,9 @@
 use std::{borrow::Cow, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt, App, AssetSource, ClickEvent, Div, ElementId, Pixels, SharedString,
-    Stateful, TextRun, Transformation, Window, WindowTextSystem, div, percentage, prelude::*, px,
-    rgba, svg,
+    Animation, AnimationExt, App, AssetSource, ClickEvent, Div, ElementId, Pixels, Role,
+    SharedString, Stateful, TextRun, Transformation, Window, WindowTextSystem, div, percentage,
+    prelude::*, px, rgba, svg,
 };
 
 use super::design::{DESTRUCTIVE_BORDER, METRICS as M, Palette, SPINNER_CYCLE_MS, TextRole};
@@ -74,12 +74,15 @@ impl<'a> Button<'a> {
         } else {
             0.
         };
-        label_width(
+        (label_width(
             text,
             self.label,
             self.alternate_labels,
             self.horizontal_padding(),
-        ) + px(icon_width)
+        ) + px(icon_width))
+        .max(px(
+            M.spinner_size + 2. * (self.horizontal_padding() + M.rule)
+        ))
     }
 
     pub fn render(self, palette: Palette, window: &Window) -> Stateful<Div> {
@@ -92,12 +95,12 @@ impl<'a> Button<'a> {
         window: &Window,
         icon: Option<&str>,
     ) -> Stateful<Div> {
-        let width = (!self.alternate_labels.is_empty())
+        let busy = matches!(&self.state, ActionState::Busy);
+        let width = (busy || !self.alternate_labels.is_empty())
             .then(|| self.measured_width_with(window.text_system(), icon));
         let height = self.minimum_height();
         let padding = self.horizontal_padding();
         let selected = matches!(&self.state, ActionState::Selected(_));
-        let busy = matches!(&self.state, ActionState::Busy);
         let click = match self.state {
             ActionState::Enabled(click) | ActionState::Selected(click) => Some(click),
             ActionState::Disabled | ActionState::Busy => None,
@@ -105,9 +108,7 @@ impl<'a> Button<'a> {
         let enabled = click.is_some();
         let primary = self.tone == Tone::Primary && !selected;
         let quiet = self.tone == Tone::Quiet;
-        let foreground = if busy {
-            palette.secondary()
-        } else if !enabled {
+        let foreground = if !enabled && !busy {
             palette.disabled()
         } else if primary {
             palette.background
@@ -116,12 +117,12 @@ impl<'a> Button<'a> {
         };
         let background = if selected {
             palette.pressed()
-        } else if primary && enabled {
+        } else if primary && (enabled || busy) {
             palette.foreground
         } else {
             palette.background
         };
-        let border = if !enabled {
+        let border = if !enabled && !busy {
             palette.disabled()
         } else if selected || primary {
             palette.foreground
@@ -131,6 +132,8 @@ impl<'a> Button<'a> {
         let mut element = TextRole::Control.apply(
             div()
                 .id(self.id)
+                .role(Role::Button)
+                .aria_label(self.label.to_owned())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -146,8 +149,13 @@ impl<'a> Button<'a> {
                 .text_color(rgba(foreground))
                 .whitespace_nowrap(),
         );
-        if let Some(width) = width {
-            element = element.min_w(width);
+        element = element.min_w(width.unwrap_or(px(M.spinner_size + 2. * (padding + M.rule))));
+        if busy {
+            return element.aria_description("In progress").child(spinner_icon(
+                "busy-icon",
+                foreground,
+                true,
+            ));
         }
         let element = element
             .child(self.label.to_owned())
@@ -331,11 +339,6 @@ pub fn empty_state(title: &str, message: &str, palette: Palette) -> Div {
         .child(inline_message(message.to_owned(), palette))
 }
 
-/// Pending text does not schedule idle frames. An indeterminate operation never shows a percentage.
-pub fn pending(label: &str, palette: Palette) -> Div {
-    status(format!("{label}…"), palette, None).min_h(px(M.compact_height))
-}
-
 const SPINNER_PATH: &str = "icons/spinner.svg";
 
 /// Keep the one bundled icon in the executable, rather than relying on the current directory.
@@ -355,56 +358,139 @@ impl AssetSource for Assets {
     }
 }
 
-/// Only callers with actual pending work render this indicator. The static variant respects reduced motion.
-pub fn spinner(id: impl Into<ElementId>, label: &str, palette: Palette, animate: bool) -> Div {
+/// The shared icon has a stable animation ID scoped to its owning element.
+/// GPUI also stops animation when the application enables reduced motion.
+fn spinner_icon(id: impl Into<ElementId>, color: u32, animate: bool) -> gpui::AnyElement {
     let icon = svg()
         .path(SPINNER_PATH)
-        .size(px(M.icon_size))
+        .size(px(M.spinner_size))
         .flex_shrink_0()
-        .text_color(rgba(palette.foreground));
-    let row = div()
-        .flex()
-        .items_center()
-        .gap(px(M.compact))
-        .min_h(px(M.compact_height));
-    let row = if animate {
-        row.child(icon.with_animation(
+        .text_color(rgba(color));
+    if animate {
+        icon.with_animation(
             id,
             Animation::new(Duration::from_millis(SPINNER_CYCLE_MS)).repeat(),
             |icon, delta| icon.with_transformation(Transformation::rotate(percentage(delta))),
-        ))
+        )
+        .into_any_element()
     } else {
-        row.child(icon)
-    };
-    row.child(TextRole::Status.apply(div()).child(label.to_owned()))
+        icon.into_any_element()
+    }
 }
 
-pub fn progress(fraction: f32, palette: Palette) -> Div {
-    if !fraction.is_finite() {
-        return pending("Processing", palette);
-    }
-    let fraction = fraction.clamp(0., 1.);
+/// Render only for outstanding work. The name remains available to assistive technology.
+pub fn spinner(
+    id: impl Into<ElementId>,
+    label: &str,
+    palette: Palette,
+    animate: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .role(Role::ProgressIndicator)
+        .aria_label(label.to_owned())
+        .aria_description("In progress")
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(M.compact))
+        .min_h(px(M.compact_height))
+        .child(spinner_icon("spin", palette.foreground, animate))
+        .child(TextRole::Status.apply(div()).child(label.to_owned()))
+}
+
+/// Center first-content loading within the same flex region used by its ready view.
+pub fn centered_spinner(
+    id: impl Into<ElementId>,
+    label: &str,
+    palette: Palette,
+    animate: bool,
+) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(M.tight))
-        .child(
+        .flex_1()
+        .w_full()
+        .min_w_0()
+        .min_h(px(M.compact_height))
+        .items_center()
+        .justify_center()
+        .child(spinner(id, label, palette, animate))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ProgressState<'a> {
+    Idle,
+    Waiting(&'a str),
+    Active {
+        label: &'a str,
+        fraction: Option<f32>,
+    },
+}
+
+fn determinate_fraction(fraction: Option<f32>) -> Option<f32> {
+    fraction
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0., 1.))
+}
+
+/// Allocate the same footprint for idle, waiting, indeterminate and determinate progress.
+pub fn progress(
+    id: impl Into<ElementId>,
+    state: ProgressState<'_>,
+    palette: Palette,
+    animate: bool,
+) -> Div {
+    let region = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .flex_shrink_0()
+        .h(px(M.progress_height))
+        .justify_center();
+    match state {
+        ProgressState::Idle => region,
+        ProgressState::Waiting(label) => region.child(
             TextRole::Status
                 .apply(div())
-                .child(format!("{:.0}%", fraction * 100.)),
-        )
-        .child(
-            div()
-                .w_full()
-                .h(px(M.tight))
-                .bg(rgba(palette.separator()))
-                .child(
-                    div()
-                        .h_full()
-                        .w(gpui::relative(fraction))
-                        .bg(rgba(palette.foreground)),
-                ),
-        )
+                .text_center()
+                .child(label.to_owned()),
+        ),
+        ProgressState::Active { label, fraction } => match determinate_fraction(fraction) {
+            None => region.child(spinner(id, label, palette, animate)),
+            Some(fraction) => region.child(
+                div()
+                    .id(id)
+                    .role(Role::ProgressIndicator)
+                    .aria_label(label.to_owned())
+                    .aria_numeric_value(f64::from(fraction) * 100.)
+                    .aria_min_numeric_value(0.)
+                    .aria_max_numeric_value(100.)
+                    .flex()
+                    .flex_col()
+                    .gap(px(M.tight))
+                    .w_full()
+                    .child(
+                        TextRole::Status
+                            .apply(div())
+                            .text_center()
+                            .child(format!("{label} · {:.0}%", fraction * 100.)),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(M.tight))
+                            .bg(rgba(palette.separator()))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(gpui::relative(fraction))
+                                    .bg(rgba(palette.foreground)),
+                            ),
+                    ),
+            ),
+        },
+    }
 }
 
 pub fn action_bar(palette: Palette, actions: impl IntoIterator<Item = Stateful<Div>>) -> Div {
@@ -449,11 +535,11 @@ mod tests {
     fn reserved_width_uses_widest_complete_label_and_rounds_up() {
         let measure = |label: &str| match label {
             "Open files" => px(61.2),
-            "Opening files…" => px(89.5),
+            "Change file" => px(89.5),
             "変更ファイル 🗂" => px(116.1),
             _ => panic!("unexpected label"),
         };
-        let alternatives = ["Open files", "Opening files…", "変更ファイル 🗂"];
+        let alternatives = ["Open files", "Change file", "変更ファイル 🗂"];
         for label in alternatives {
             let width = reserve_label_width(label, &alternatives, M.related, measure);
             assert_eq!(width, px(117. + 2. * (M.related + M.rule)));
@@ -485,6 +571,21 @@ mod tests {
         }
         let label = crate::ui::queue_count_label(1000);
         assert!(reserve_label_width(&label, &alternatives, M.related, measure) > reserved);
+    }
+
+    #[test]
+    fn progress_uses_only_finite_measured_fractions() {
+        for fraction in [
+            None,
+            Some(f32::NAN),
+            Some(f32::INFINITY),
+            Some(f32::NEG_INFINITY),
+        ] {
+            assert_eq!(determinate_fraction(fraction), None);
+        }
+        for (input, expected) in [(-0.1, 0.), (0., 0.), (0.42, 0.42), (1.1, 1.)] {
+            assert_eq!(determinate_fraction(Some(input)), Some(expected));
+        }
     }
 
     #[test]

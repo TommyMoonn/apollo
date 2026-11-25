@@ -21,7 +21,7 @@ use crate::{
 
 use super::{
     MINIMUM_CONTENT_DIMENSIONS, REFERENCE_CONTENT_DIMENSIONS,
-    components::{self, ActionState, Button, Tone},
+    components::{self, ActionState, Button, ProgressState, Tone},
     design::{FONT_FAMILY, METRICS as M, Palette, TextRole, WORDMARK_FAMILY},
     file_intake, shell,
 };
@@ -38,6 +38,48 @@ enum ExitState {
 enum DropContext {
     Eligible(InputDialogOrigin),
     Blocked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LandingContent {
+    Discovering,
+    ToolsUnavailable,
+    Inspecting,
+    Ready,
+}
+
+fn landing_content(core: &Application) -> LandingContent {
+    if core.source.is_inspecting() {
+        return LandingContent::Inspecting;
+    }
+    match core.discovery.state() {
+        MediaToolsState::Checking => LandingContent::Discovering,
+        MediaToolsState::Unavailable(_) => LandingContent::ToolsUnavailable,
+        MediaToolsState::Ready(_) => LandingContent::Ready,
+    }
+}
+
+/// The active job owns progress through cancellation settlement, even after the queue is stopped.
+fn queue_progress_state(
+    run_state: crate::queue::QueueRunState,
+    active: bool,
+    cancelling: bool,
+    fraction: Option<f32>,
+) -> ProgressState<'static> {
+    if active || cancelling {
+        ProgressState::Active {
+            label: if cancelling {
+                "Cancelling queue job"
+            } else {
+                "Processing queue"
+            },
+            fraction,
+        }
+    } else if run_state != crate::queue::QueueRunState::Stopped {
+        ProgressState::Waiting("Waiting to process queue")
+    } else {
+        ProgressState::Idle
+    }
 }
 
 struct ApolloRoot {
@@ -398,7 +440,12 @@ impl ApolloRoot {
 
     fn discovery_view(&self, palette: Palette, window: &Window, cx: &Context<Self>) -> gpui::Div {
         match self.core.discovery.state() {
-            MediaToolsState::Checking => components::pending("Checking media tools", palette),
+            MediaToolsState::Checking => components::centered_spinner(
+                "discovery",
+                "Checking media tools",
+                palette,
+                !cx.reduce_motion(),
+            ),
             MediaToolsState::Ready(_) => div(),
             MediaToolsState::Unavailable(error) => {
                 let mut retry = Button::new("retry-tools", "Retry", Tone::Standard);
@@ -416,6 +463,8 @@ impl ApolloRoot {
                 div()
                     .flex()
                     .flex_col()
+                    .w_full()
+                    .min_w_0()
                     .gap(px(M.related))
                     .child(components::status("Media tools unavailable", palette, None))
                     .child({
@@ -464,13 +513,12 @@ impl ApolloRoot {
                         ],
                     ))
             }
-            ExitState::Settling => content
-                .child(components::empty_state(
-                    "Closing Apollo…",
-                    "Waiting for background work to settle.",
-                    palette,
-                ))
-                .child(components::pending("Settling background work", palette)),
+            ExitState::Settling => components::centered_spinner(
+                "shutdown",
+                "Closing Apollo",
+                palette,
+                !cx.reduce_motion(),
+            ),
             ExitState::Failed => {
                 let mut exit = Button::new("acknowledge-close", "Exit", Tone::Standard);
                 exit.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, _| {
@@ -522,19 +570,8 @@ impl Render for ApolloRoot {
             },
             Tone::Standard,
         );
-        open.alternate_labels = &[
-            "Open files",
-            "Change file",
-            "Opening files…",
-            "Checking file…",
-        ];
-        if self.file_dialog.is_pending() {
-            open.label = "Opening files…";
-            open.state = ActionState::Busy;
-        } else if inspecting {
-            if has_source {
-                open.label = "Checking file…";
-            }
+        open.alternate_labels = &["Open files", "Change file"];
+        if self.file_dialog.is_pending() || (has_source && inspecting) {
             open.state = ActionState::Busy;
         } else if self.can_open_files() {
             open.state = ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
@@ -595,10 +632,17 @@ impl Render for ApolloRoot {
         }
         let route = self.core.navigation();
         let landing = route == NavigationState::NoSource;
+        let animate = !cx.reduce_motion();
         let (header, surface, footer) = match route {
             NavigationState::NoSource => (
                 div().flex().justify_center().child(file_intake::wordmark()),
-                file_intake::landing(open, inspecting.then_some(close), inspecting, palette),
+                match landing_content(&self.core) {
+                    LandingContent::Inspecting => file_intake::inspecting(close, palette, animate),
+                    LandingContent::Discovering | LandingContent::ToolsUnavailable => {
+                        self.discovery_view(palette, window, cx)
+                    }
+                    LandingContent::Ready => file_intake::landing(open, palette),
+                },
                 shell::navigation_actions(queue, settings, palette, window),
             ),
             NavigationState::SourceWorkspace { active_operation } => {
@@ -641,11 +685,15 @@ impl Render for ApolloRoot {
                     )
                     .child(selector)
                     .child(components::separator(palette));
-                let surface = components::empty_state(
-                    active_operation.label(),
-                    "This operation is unavailable during the UI migration.",
-                    palette,
-                );
+                let surface = if self.core.discovery.ready().is_none() {
+                    self.discovery_view(palette, window, cx)
+                } else {
+                    components::empty_state(
+                        active_operation.label(),
+                        "This operation is unavailable during the UI migration.",
+                        palette,
+                    )
+                };
                 (
                     header,
                     surface,
@@ -658,9 +706,19 @@ impl Render for ApolloRoot {
                     .batch_setup
                     .as_ref()
                     .map_or(0, |batch| batch.items.len());
-                let surface = div().flex().flex_col().gap(px(M.related))
-                    .children(self.core.batch_inspecting().then(|| components::pending("Checking files", palette)))
-                    .child(components::inline_message("Batch configuration and submission are unavailable during the UI migration.", palette));
+                let surface = if self.core.batch_inspecting() {
+                    components::centered_spinner(
+                        "batch-inspection",
+                        "Checking files",
+                        palette,
+                        animate,
+                    )
+                } else {
+                    components::inline_message(
+                        "Batch configuration and submission are unavailable during the UI migration.",
+                        palette,
+                    )
+                };
                 let footer = div()
                     .flex()
                     .flex_wrap()
@@ -703,21 +761,26 @@ impl Render for ApolloRoot {
             ),
         };
         let scheduler = self.core.queue.scheduler();
-        let work = scheduler.is_started().then(|| {
-            if let Some(fraction) = scheduler
-                .active_progress()
-                .and_then(|progress| progress.fraction)
-            {
-                components::progress(fraction, palette)
-            } else {
-                let label = if scheduler.is_running() {
-                    "Processing queue"
-                } else {
-                    "Waiting to process queue"
-                };
-                components::pending(label, palette)
-            }
-        });
+        let work = components::progress(
+            "queue-progress",
+            queue_progress_state(
+                scheduler.run_state(),
+                scheduler.is_running(),
+                scheduler.cancellation_pending(),
+                scheduler
+                    .active_progress()
+                    .and_then(|progress| progress.fraction),
+            ),
+            palette,
+            animate,
+        );
+        // Keep the queue indicator's footprint outside the route body, including when idle.
+        let footer = div()
+            .flex()
+            .flex_col()
+            .gap(px(M.tight))
+            .child(work)
+            .child(footer);
         let body = if self.exit == ExitState::Open {
             let surface = div()
                 .flex()
@@ -725,15 +788,12 @@ impl Render for ApolloRoot {
                 .w_full()
                 .min_w_0()
                 .gap(px(M.related))
-                .when(landing, |surface| surface.items_center().justify_center())
-                .child(surface)
-                .children(
-                    self.core
-                        .discovery
-                        .ready()
-                        .is_none()
-                        .then(|| self.discovery_view(palette, window, cx)),
+                .when(
+                    landing
+                        || (route == NavigationState::BatchSetup && self.core.batch_inspecting()),
+                    |surface| surface.items_center().justify_center(),
                 )
+                .child(surface)
                 .children(
                     (landing || has_source)
                         .then(|| self.core.source.error())
@@ -767,8 +827,7 @@ impl Render for ApolloRoot {
                         feedback = feedback.child(retry.render(palette, window));
                     }
                     feedback
-                }))
-                .children(work);
+                }));
             shell::page(header, surface, footer, self.whole_page_scroll.clone())
         } else {
             div().id("exit-page").size_full().overflow_y_scroll().child(
@@ -910,6 +969,7 @@ pub fn run() -> ExitCode {
         .run(move |cx: &mut App| {
             // Respect the OS text-smoothing preference instead of forcing ClearType.
             cx.set_text_rendering_mode(TextRenderingMode::PlatformDefault);
+            cx.set_reduce_motion(native::reduce_motion());
             cx.on_window_closed(|cx, _window_id| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -927,5 +987,153 @@ pub fn run() -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        app::discovery::MediaToolsDiscovery,
+        media::{
+            intake::MediaLoadStart,
+            probe::{MediaProbeError, parse_ffprobe_json},
+            tools::{MediaTools, MediaToolsError},
+        },
+        queue::QueueRunState,
+    };
+    use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn landing_discovery_failure_retry_and_base_readiness() {
+        let mut core = Application::default();
+        let (wake, wakes) = mpsc::channel();
+        let failure_wake = wake.clone();
+        assert!(core.discovery.start_with(
+            move || {
+                let _ = failure_wake.send(());
+            },
+            || Err(MediaToolsError::MissingFfprobe),
+            |_| unreachable!()
+        ));
+        assert_eq!(landing_content(&core), LandingContent::Discovering);
+        let timeout = Duration::from_secs(10);
+        wakes.recv_timeout(timeout).unwrap();
+        assert!(core.poll_background(|| panic!("idle queue must not launch")));
+        assert_eq!(landing_content(&core), LandingContent::ToolsUnavailable);
+        let (release, gate) = mpsc::channel();
+        assert!(core.discovery.start_with(
+            move || {
+                let _ = wake.send(());
+            },
+            || Ok(MediaTools::new("ffmpeg", "ffprobe")),
+            move |_| {
+                gate.recv_timeout(timeout).unwrap();
+                Default::default()
+            }
+        ));
+        assert_eq!(landing_content(&core), LandingContent::Discovering);
+        wakes.recv_timeout(timeout).unwrap();
+        assert!(core.poll_background(|| panic!("idle queue must not launch")));
+        assert!(
+            core.discovery.is_pending(),
+            "encoder discovery is independent of base readiness"
+        );
+        assert_eq!(landing_content(&core), LandingContent::Ready);
+        release.send(()).unwrap();
+        wakes.recv_timeout(timeout).unwrap();
+        assert!(core.poll_background(|| panic!("idle queue must not launch")));
+        assert!(!core.discovery.is_pending());
+        assert_eq!(landing_content(&core), LandingContent::Ready);
+    }
+
+    #[test]
+    fn initial_inspection_reveals_only_accepted_results_and_recovers_after_failure_or_cancel() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.mkv");
+        std::fs::write(&path, b"media fixture").unwrap();
+        let mut core = Application::default();
+        core.discovery = MediaToolsDiscovery::with_state(MediaToolsState::Ready(MediaTools::new(
+            "ffmpeg", "ffprobe",
+        )));
+        for outcome in ["failure", "cancel", "success"] {
+            let Some(MediaLoadStart::Probe(request)) = core.source.begin_load(&path) else {
+                panic!("expected a fresh probe")
+            };
+            let (sender, receiver) = mpsc::sync_channel(1);
+            core.source.attach_inspection(request, receiver);
+            assert_eq!(landing_content(&core), LandingContent::Inspecting);
+            assert!(core.source.current().is_none());
+            match outcome {
+                "failure" => {
+                    sender
+                        .send(Err(MediaProbeError::LaunchFailed(
+                            std::io::ErrorKind::NotFound,
+                        )))
+                        .unwrap();
+                    assert!(core.poll_background(|| panic!("idle queue must not launch")));
+                    assert!(core.source.error().is_some());
+                }
+                "cancel" => {
+                    core.close_source();
+                    let media = parse_ffprobe_json(
+                        &path,
+                        include_bytes!("../../tests/fixtures/ffprobe/complete_inventory.json"),
+                    )
+                    .unwrap();
+                    assert!(sender.send(Ok(media)).is_err());
+                    assert!(!core.poll_background(|| panic!("idle queue must not launch")));
+                    assert!(core.source.current().is_none());
+                }
+                _ => {
+                    let media = parse_ffprobe_json(
+                        &path,
+                        include_bytes!("../../tests/fixtures/ffprobe/complete_inventory.json"),
+                    )
+                    .unwrap();
+                    sender.send(Ok(media)).unwrap();
+                    assert!(core.poll_background(|| panic!("idle queue must not launch")));
+                    assert!(matches!(
+                        core.navigation(),
+                        NavigationState::SourceWorkspace { .. }
+                    ));
+                    assert_eq!(core.source.current().unwrap().path, path);
+                }
+            }
+            assert_eq!(landing_content(&core), LandingContent::Ready);
+        }
+    }
+
+    #[test]
+    fn queue_indicator_follows_active_work_not_pending_count_or_last_progress() {
+        let stale = Some(0.5);
+        assert_eq!(
+            queue_progress_state(QueueRunState::Stopped, false, false, stale),
+            ProgressState::Idle
+        );
+        assert_eq!(
+            queue_progress_state(QueueRunState::Running, false, false, stale),
+            ProgressState::Waiting("Waiting to process queue")
+        );
+        for fraction in [None, Some(0.42)] {
+            assert_eq!(
+                queue_progress_state(QueueRunState::Running, true, false, fraction),
+                ProgressState::Active {
+                    label: "Processing queue",
+                    fraction
+                }
+            );
+            assert_eq!(
+                queue_progress_state(QueueRunState::Stopped, true, true, fraction),
+                ProgressState::Active {
+                    label: "Cancelling queue job",
+                    fraction
+                }
+            );
+        }
+        assert_eq!(
+            queue_progress_state(QueueRunState::Stopped, false, false, None),
+            ProgressState::Idle
+        );
     }
 }

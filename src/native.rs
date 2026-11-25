@@ -97,6 +97,20 @@ pub(crate) fn set_application_icon(window: &impl HasWindowHandle) -> Result<(), 
     Ok(())
 }
 
+/// Read the Windows animation preference once at startup. GPUI applies this to its animations.
+#[cfg(windows)]
+pub(crate) fn reduce_motion() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+    };
+    let mut enabled: i32 = 1;
+    // The query writes one Win32 BOOL into the supplied buffer.
+    let ok = unsafe {
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut enabled).cast(), 0)
+    };
+    ok != 0 && enabled == 0
+}
+
 /// Release builds have no console, so also show recoverable startup errors natively.
 #[cfg(windows)]
 pub(crate) fn report_startup_error(message: &str) {

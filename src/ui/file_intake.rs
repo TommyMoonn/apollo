@@ -10,12 +10,7 @@ pub fn wordmark() -> Div {
     TextRole::Wordmark.apply(div()).child("apollo")
 }
 
-pub fn landing(
-    open: Stateful<Div>,
-    cancel: Option<Stateful<Div>>,
-    inspecting: bool,
-    palette: Palette,
-) -> Div {
+pub fn landing(open: Stateful<Div>, palette: Palette) -> Div {
     div()
         .flex()
         .flex_col()
@@ -24,9 +19,6 @@ pub fn landing(
         .gap(px(M.compact))
         .w_full()
         .max_w(px(super::REFERENCE_CONTENT_DIMENSIONS.0 - 2. * M.inset))
-        // Balance the reserved cancellation row so the focal action does not
-        // shift when inspection starts or finishes.
-        .child(div().h(px(M.compact_height)).flex_shrink_0())
         .child(open)
         .child(
             div()
@@ -34,20 +26,40 @@ pub fn landing(
                 .items_center()
                 .min_h(px(TextRole::Status.resolve().line_height))
                 .text_color(rgba(palette.secondary()))
-                .child(if inspecting {
-                    TextRole::Status.apply(div()).child("Checking file…")
-                } else {
+                .child(
                     TextRole::Secondary
                         .apply(div())
-                        .child("or drop videos anywhere")
-                }),
+                        .child("or drop videos anywhere"),
+                ),
         )
+}
+
+/// Reserve the cancellation row above and below the center so it does not pull the indicator off center.
+pub fn inspecting(cancel: Stateful<Div>, palette: Palette, animate: bool) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .w_full()
+        .min_h(px(3. * M.compact_height + 2. * M.compact))
+        .items_center()
+        .justify_center()
+        .gap(px(M.compact))
+        .child(div().h(px(M.compact_height)).flex_shrink_0())
+        .child(super::components::spinner(
+            "source-inspection",
+            "Checking file",
+            palette,
+            animate,
+        ))
         .child(
             div()
                 .flex()
+                .items_center()
                 .justify_center()
-                .min_h(px(M.compact_height))
-                .children(cancel),
+                .h(px(M.compact_height))
+                .flex_shrink_0()
+                .child(cancel),
         )
 }
 

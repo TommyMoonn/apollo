@@ -148,6 +148,8 @@ pub struct Metrics {
     pub focus_width: f32,
     pub focus_offset: f32,
     pub icon_size: f32,
+    pub spinner_size: f32,
+    pub progress_height: f32,
 }
 
 pub const METRICS: Metrics = Metrics {
@@ -169,6 +171,8 @@ pub const METRICS: Metrics = Metrics {
     focus_width: 2.,
     focus_offset: 2.,
     icon_size: 14.,
+    spinner_size: 16.,
+    progress_height: 30.,
 };
 
 pub const SURFACE_MOTION_MS: u64 = 120;
