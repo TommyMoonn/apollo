@@ -11,7 +11,6 @@ const DEFAULTS_LABEL: &str = "Edit shared settings";
 const ADD_FILES_LABEL: &str = "Add files";
 const EDIT_LABEL: &str = "Edit settings";
 const SKIP_LABEL: &str = "Skip";
-const DETAILS_LABEL: &str = "Details";
 const INCLUDE_LABEL: &str = "Include";
 const BACK_LABEL: &str = "Back";
 
@@ -112,22 +111,6 @@ pub fn show(
                 ui.add_space(theme::SPACING.compact);
             }
             widgets::separator(ui);
-            let unresolved = items
-                .iter()
-                .filter(|item| item.included && item.readiness != BatchReadiness::Ready)
-                .count();
-            if unresolved > 0 {
-                ui.add_space(theme::SPACING.related);
-                let _ = widgets::inline_status(
-                    ui,
-                    &if unresolved == 1 {
-                        "1 included file needs review or inspection.".to_owned()
-                    } else {
-                        format!("{unresolved} included files need review or inspection.")
-                    },
-                    widgets::InlineStatusKind::Error,
-                );
-            }
             if let Some(error) = feedback.status {
                 ui.add_space(theme::SPACING.related);
                 let _ = widgets::inline_status(ui, error, widgets::InlineStatusKind::Error);
@@ -316,10 +299,7 @@ fn show_stacked_item(
     show_identity_cell(ui, identity, item);
     ui.add_space(theme::SPACING.compact);
     ui.allocate_ui_with_layout(
-        vec2(
-            ui.available_width(),
-            widgets::plain_button_intrinsic_size(ui, DETAILS_LABEL).y,
-        ),
+        vec2(ui.available_width(), theme::COMPACT_CONTROL_HEIGHT),
         Layout::left_to_right(Align::Center),
         |ui| show_status(ui, item),
     );
@@ -388,37 +368,39 @@ fn show_identity(ui: &mut Ui, item: &BatchItemView<'_>) {
 }
 
 fn show_status(ui: &mut Ui, item: &BatchItemView<'_>) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::INLINE_ACTION_GAP;
-        ui.add(
-            egui::Label::new(
-                RichText::new(item.status())
-                    .text_style(TextStyle::Button)
-                    .color(theme::SECONDARY),
-            )
-            .extend()
-            .selectable(false),
-        );
-        if let Some(reason) = item.reason.filter(|reason| !reason.is_empty()) {
-            let id = ui
-                .id()
-                .with(("batch-reason", item.id.0, item.source, reason));
-            if widgets::plain_button(ui, DETAILS_LABEL).clicked() {
-                ui.data_mut(|data| data.insert_temp(id, true));
-            }
-            if ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false)) {
-                let modal = egui::Modal::new(id).show(ui.ctx(), |ui| {
-                    ui.set_max_width(400.0);
-                    ui.heading(item.status());
-                    media_lifecycle::diagnostic_viewport(ui, reason);
-                    widgets::secondary_button(ui, "Close").clicked()
-                });
-                if modal.inner || modal.should_close() {
-                    ui.data_mut(|data| data.remove::<bool>(id));
-                }
-            }
+    let status = RichText::new(item.status())
+        .text_style(TextStyle::Button)
+        .color(theme::SECONDARY);
+    let Some(reason) = item.reason.filter(|reason| !reason.is_empty()) else {
+        ui.add(egui::Label::new(status).extend().selectable(false));
+        return;
+    };
+
+    let id = ui
+        .id()
+        .with(("batch-reason", item.id.0, item.source, reason));
+    // The status is a local diagnostic link, not a navigation or browser action.
+    let response = ui
+        .scope(|ui| {
+            ui.style_mut().interaction.selectable_labels = false;
+            ui.visuals_mut().hyperlink_color = theme::SECONDARY;
+            ui.link(status)
+        })
+        .inner;
+    if response.clicked() {
+        ui.data_mut(|data| data.insert_temp(id, true));
+    }
+    if ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false)) {
+        let modal = egui::Modal::new(id).show(ui.ctx(), |ui| {
+            ui.set_max_width(400.0);
+            ui.heading(item.status());
+            media_lifecycle::diagnostic_viewport(ui, reason);
+            widgets::secondary_button(ui, "Close").clicked()
+        });
+        if modal.inner || modal.should_close() {
+            ui.data_mut(|data| data.remove::<bool>(id));
         }
-    });
+    }
 }
 
 fn action_sizes(ui: &Ui) -> (egui::Vec2, egui::Vec2) {
@@ -502,12 +484,7 @@ fn batch_state_width(ui: &Ui) -> f32 {
             .x
     })
     .fold(0.0, f32::max);
-    (width
-        + theme::INLINE_ACTION_GAP
-        + widgets::plain_button_intrinsic_size(ui, DETAILS_LABEL).x
-        + theme::FOCUS_OFFSET
-        + theme::FOCUS_STROKE_WIDTH)
-        .ceil()
+    width.ceil()
 }
 
 fn show_column_guide(ui: &mut Ui, plan: layout::BatchRowPlan) {
@@ -707,7 +684,95 @@ mod tests {
     }
 
     #[test]
-    fn mixed_batch_rows_keep_status_details_and_toggle_slots_aligned() {
+    fn diagnostic_status_opens_reason_on_click_without_a_details_action() {
+        let reason = "No audio tracks.";
+        let item = BatchItemView {
+            id: crate::app::BatchItemId(0),
+            source: Path::new("silent.mp4"),
+            output: None,
+            readiness: BatchReadiness::NeedsAttention,
+            reason: Some(reason),
+            included: true,
+            can_edit: true,
+            overridden: false,
+            inspection_failed: false,
+            can_toggle_included: true,
+        };
+        let context = egui::Context::default();
+        fonts::install(&context);
+        theme::install(&context);
+        let render = |events| {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.set_width(730.0);
+                    let _ = show(
+                        ui,
+                        Operation::AudioExtract,
+                        std::slice::from_ref(&item),
+                        crate::app::BatchAvailability {
+                            can_configure: true,
+                            can_add_files: true,
+                            can_enqueue: false,
+                        },
+                        0,
+                        true,
+                        BatchFeedback {
+                            status: None,
+                            append_error: None,
+                            append_error_details_open: &mut false,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        fn status_underlined(shape: &egui::Shape) -> bool {
+            match shape {
+                egui::Shape::Text(text) => {
+                    text.galley.job.text == "Needs review" && text.underline.width > 0.0
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().any(status_underlined),
+                _ => false,
+            }
+        }
+        let underlined = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .any(|shape| status_underlined(&shape.shape))
+        };
+        let idle = render(vec![]);
+        let status = output_text_rects(&idle, "Needs review")[0].center();
+        assert!(output_text_rects(&idle, "Details").is_empty());
+        assert!(output_text_rects(&idle, "1 included file needs review or inspection.").is_empty());
+        assert!(output_text_rects(&idle, reason).is_empty());
+        assert!(!underlined(&idle));
+        let hovered = render(vec![egui::Event::PointerMoved(status)]);
+        assert!(underlined(&hovered));
+        assert_eq!(
+            hovered.platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand
+        );
+        for pressed in [true, false] {
+            render(vec![egui::Event::PointerButton {
+                pos: status,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        let opened = render(vec![]);
+        assert!(!output_text_rects(&opened, reason).is_empty());
+        assert!(!output_text_rects(&opened, "Close").is_empty());
+    }
+
+    #[test]
+    fn mixed_batch_rows_keep_status_and_toggle_slots_aligned() {
         use super::{action_sizes, batch_action_width, batch_state_width, show_item};
         use crate::app::{BatchAction, BatchItemId};
         use crate::ui::layout;
@@ -755,19 +820,13 @@ mod tests {
             item.included = true;
             let included = render(&item);
             let status = output_text_rects(&included, "Needs review")[0];
-            let details = output_text_rects(&included, "Details")[0];
             let edit = output_text_rects(&included, "Edit settings")[0];
             let skip = output_text_rects(&included, "Skip")[0];
             assert!(
-                details.left() >= status.right(),
-                "{width}: {status:?}, {details:?}"
+                status.right() <= edit.left(),
+                "{width}: {status:?}, {edit:?}"
             );
-            assert!(
-                (output_text_baseline(&included, "Needs review").unwrap()
-                    - output_text_baseline(&included, "Details").unwrap())
-                .abs()
-                    <= 1.0
-            );
+            assert!(output_text_rects(&included, "Details").is_empty());
             assert!(edit.right() <= skip.left());
             item.included = false;
             let skipped = render(&item);
@@ -779,7 +838,7 @@ mod tests {
             );
             assert!((edit.center() - edit_after.center()).length() <= 1.0);
             assert_eq!(output_text_rects(&skipped, "Skipped").len(), 1);
-            assert_eq!(output_text_rects(&skipped, "Details").len(), 1);
+            assert!(output_text_rects(&skipped, "Details").is_empty());
         }
     }
 }
