@@ -202,8 +202,7 @@ pub(crate) fn prepare_upscale_operation(
     let dimensions = calculate_output_dimensions(width, height, request.target)
         .map_err(UpscaleStartError::Sizing)?;
 
-    let output =
-        MediaOutput::prepare(&request.input, &request.output).map_err(UpscaleStartError::Output)?;
+    let output = MediaOutput::prepare(&request.output).map_err(UpscaleStartError::Output)?;
     let mut staged_request = request.clone();
     staged_request.output = output.temporary_path().to_path_buf();
     let invocation = build_upscale_invocation(&staged_request, media, dimensions)
@@ -240,13 +239,12 @@ mod tests {
             error::MediaErrorKind,
             execution::ProcessControl,
             model::{AudioStream, MediaFile, VideoStream},
-            output::MediaOutputError,
             process::{MediaProcessFailure, MediaProcessState},
             tools::{MediaTools, VideoEncoderCapability},
         },
         upscale::{
             model::{UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec},
-            validation::{UpscaleValidationError, validate_upscale_request},
+            validation::UpscaleValidationError,
         },
     };
 
@@ -355,33 +353,6 @@ mod tests {
         assert_eq!(launches.load(Ordering::Relaxed), 0);
         assert_eq!(executor.state(), &UpscaleExecutionState::Idle);
         assert!(!executor.is_running());
-    }
-
-    #[test]
-    fn output_appearing_after_request_validation_is_rejected_before_launch() {
-        let directory = TestDirectory::new("late-output-preflight");
-        let (request, media) = valid_request_and_media(&directory);
-        let tools = fake_tools(&directory);
-        let launches = Arc::new(AtomicUsize::new(0));
-        let launch_count = Arc::clone(&launches);
-        let mut executor = UpscaleExecutor::new();
-
-        assert_eq!(validate_upscale_request(&request, &media), Ok(()));
-        fs::write(&request.output, b"occupied").unwrap();
-
-        let error = executor
-            .start_with_launcher(&tools, &media, &request, move |_| {
-                launch_count.fetch_add(1, Ordering::Relaxed);
-                Ok(FakeProcessControl::running())
-            })
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            UpscaleStartError::Output(MediaOutputError::OutputAlreadyExists(_))
-        ));
-        assert_eq!(launches.load(Ordering::Relaxed), 0);
-        assert_eq!(executor.state(), &UpscaleExecutionState::Idle);
     }
 
     #[test]

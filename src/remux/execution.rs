@@ -175,8 +175,7 @@ pub(crate) fn prepare_remux_operation(
 ) -> Result<PreparedMediaOperation, RemuxStartError> {
     validate_remux_request(request, media).map_err(RemuxStartError::Validation)?;
 
-    let output =
-        MediaOutput::prepare(&request.input, &request.output).map_err(RemuxStartError::Output)?;
+    let output = MediaOutput::prepare(&request.output).map_err(RemuxStartError::Output)?;
     let mut staged_request = request.clone();
     staged_request.output = output.temporary_path().to_path_buf();
     let invocation = build_remux_invocation(&staged_request);
@@ -290,31 +289,12 @@ mod tests {
     }
 
     #[test]
-    fn destination_preflight_rejects_existing_output_before_launch() {
-        let directory = TestDirectory::new("existing-output");
-        let (request, media) = valid_request_and_media(&directory);
-        fs::write(&request.output, b"occupied").unwrap();
-        let tools = fake_tools(&directory);
-        let launches = Arc::new(AtomicUsize::new(0));
-        let launch_count = Arc::clone(&launches);
-        let mut executor = RemuxExecutor::new();
-
-        let error = executor
-            .start_with_launcher(&tools, &media, &request, move |_| {
-                launch_count.fetch_add(1, Ordering::Relaxed);
-                Ok(FakeProcessControl::running())
-            })
-            .unwrap_err();
-
-        assert!(matches!(error, RemuxStartError::Output(_)));
-        assert_eq!(launches.load(Ordering::Relaxed), 0);
-        assert_eq!(executor.state(), &RemuxExecutionState::Idle);
-    }
-
-    #[test]
-    fn successful_process_publishes_final_output() {
+    fn successful_process_publishes_numbered_output_without_replacing_source() {
         let directory = TestDirectory::new("success-publishes");
-        let (request, media) = valid_request_and_media(&directory);
+        let (mut request, media) = valid_request_and_media(&directory);
+        request.container = MediaContainer::Matroska;
+        request.output = request.input.clone();
+        let actual_output = directory.path().join("source (1).mkv");
         let tools = fake_tools(&directory);
         let process = FakeProcessControl::running();
         let process_handle = process.clone();
@@ -329,10 +309,11 @@ mod tests {
         assert_eq!(
             executor.poll(),
             &RemuxExecutionState::Completed {
-                output: request.output.clone(),
+                output: actual_output.clone(),
             }
         );
-        assert_eq!(fs::read(&request.output).unwrap(), b"complete remux");
+        assert_eq!(fs::read(&request.input).unwrap(), b"source");
+        assert_eq!(fs::read(actual_output).unwrap(), b"complete remux");
         assert!(!executor.is_running());
     }
 

@@ -74,8 +74,8 @@ use crate::{
         SourceAction, audio_extract::AudioExtractSelectionAction,
         audio_mix::AudioMixSelectionAction, file_intake::FileIntakeAction, fonts,
         frame_capture::FrameCaptureSelectionAction,
-        frame_capture_progress::FrameCaptureThumbnailState, layout, media_error,
-        remux::RemuxSelectionAction, theme, upscale::UpscaleSelectionAction,
+        frame_capture_progress::FrameCaptureThumbnailState, layout, remux::RemuxSelectionAction,
+        theme, upscale::UpscaleSelectionAction,
     },
     upscale::{
         execution::UpscaleExecutionState,
@@ -1038,67 +1038,8 @@ fn invalid_ready_request_cannot_be_enqueued_by_direct_intent() {
 }
 
 #[test]
-fn duplicate_queued_destination_is_truthful_operation_local_feedback() {
-    let (directory, path) = temp_file("queue-confirmation");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-
-    app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested)
-        .unwrap();
-
-    assert_eq!(app.core.queue.scheduler().pending_count(), 1);
-    let output_path = app.core.queue.scheduler().jobs()[0]
-        .operation()
-        .output()
-        .to_path_buf();
-    assert!(!output_path.exists());
-    assert_eq!(app.core.queue_confirmation, Some(Operation::AudioMix));
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-    let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
-    assert!(output_contains_text(&output, "Added to queue"));
-    output.textures_delta.clear();
-
-    app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested)
-        .unwrap();
-    assert_eq!(app.core.queue.scheduler().pending_count(), 1);
-    assert!(!output_path.exists());
-    assert_eq!(app.core.queue_confirmation, None);
-    assert!(app.core.source.error().is_none());
-    assert!(matches!(
-        app.core.operation_action_error,
-        Some((Operation::AudioMix, ref error))
-            if error.kind() == MediaErrorKind::QueueDestinationReserved
-                && error.diagnostic().is_some_and(|diagnostic| diagnostic.contains("queue job 1"))
-    ));
-
-    let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
-    assert!(output_contains_text(
-        &output,
-        "Another queued job already targets this output."
-    ));
-    output.textures_delta.clear();
-
-    let error = app
-        .core
-        .operation_action_error
-        .as_ref()
-        .map(|(_, error)| error.clone())
-        .unwrap();
-    let mut details_open = true;
-    let mut output = context.run_ui(Default::default(), |ui| {
-        media_error::show_inline(ui, &error, &mut details_open)
-    });
-    assert!(output_contains_text(&output, "queue job 1"));
-    output.textures_delta.clear();
-
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn genuine_existing_output_keeps_filesystem_output_exists_feedback() {
-    let (directory, path) = temp_file("queue-existing-output");
+fn repeated_output_requests_are_accepted_without_touching_existing_files() {
+    let (directory, path) = temp_file("queue-shared-destination");
     let existing_output = directory.join("already-there.mp4");
     fs::write(&existing_output, b"existing output").unwrap();
     let mut app = app();
@@ -1108,18 +1049,15 @@ fn genuine_existing_output_keeps_filesystem_output_exists_feedback() {
         .as_mut()
         .unwrap()
         .selection
-        .set_custom_output_path(existing_output);
-
-    app.enqueue_from_ready_surface(Operation::AudioMix);
-
-    assert!(app.core.queue.scheduler().jobs().is_empty());
+        .set_custom_output_path(existing_output.clone());
+    for count in 1..=2 {
+        app.enqueue_from_ready_surface(Operation::AudioMix);
+        assert_eq!(app.core.queue.scheduler().pending_count(), count);
+        assert_eq!(app.core.queue_confirmation, Some(Operation::AudioMix));
+        assert!(app.core.operation_action_error.is_none());
+    }
     assert!(app.core.source.error().is_none());
-    assert!(matches!(
-        app.core.operation_action_error,
-        Some((Operation::AudioMix, ref error))
-            if error.kind() == MediaErrorKind::OutputExists
-                && error.guidance() == Some("Choose another output path or move the existing file.")
-    ));
+    assert_eq!(fs::read(existing_output).unwrap(), b"existing output");
     fs::remove_dir_all(directory).unwrap();
 }
 

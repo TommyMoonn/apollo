@@ -55,7 +55,7 @@ For concurrency tests, hold work at a controlled boundary and release it explici
 
 For application and UI tests, drive lifecycle events with explicit timestamps or completion signals. Check interaction, selection, focus, clipping, non-overlap and reachability at narrow and normal widths; avoid exact paint snapshots, copied theme constants and incidental pixel geometry. Retain renderer-specific regressions until their replacement proves the same behavior.
 
-For filesystem and processing changes, verify that cancellation, output collisions, failed processes and stale results preserve existing files and cannot publish an incomplete result. For queue changes, cover job transitions, destination reservations and atomic batch insertion at their owning layer.
+For filesystem and processing changes, verify that cancellation, output collisions, failed processes and stale results preserve existing files and cannot publish an incomplete result. For queue changes, cover job transitions, numbered output publication and atomic batch insertion at their owning layer.
 
 ## Real media tests
 
@@ -87,9 +87,9 @@ For queue changes, exercise empty and mixed-state queues, each job state and lon
 
 Also verify both queue-edit entry points with same-source duplicate jobs and different sources; Save and Cancel return to the correct origin; changing operation preserves the queued source; retained queued media opens without FFprobe; and successful single-item enqueue keeps its source workspace with `Added to queue` feedback and an updated pending count.
 
-For batch changes, exercise native multi-select, multi-file drop and Add files. Check duplicate detection, shared defaults, Ready Override, Needs attention Review, inspection failures, Include/Exclude and atomic enqueue. Confirm that appending preserves existing state, each active inspection session never exceeds two concurrent probes, and failed or incompatible sources expose no inert actions.
+For batch changes, exercise native multi-select, multi-file drop and Add files. Check repeated-source selection, shared defaults, Ready Override, Needs attention Review, inspection failures, Include/Exclude and atomic enqueue. Confirm that appending preserves existing state, each active inspection session never exceeds two concurrent probes, and failed or incompatible sources expose no inert actions.
 
-Exercise duplicate queued destinations, genuine existing output files, invalid requests, changed or missing sources, and short and long diagnostics. Concise corrective guidance must remain visible without opening Details, while expanded diagnostics use only the required height up to the shared maximum.
+Exercise repeated queued destinations and existing files: verify numbered publication, the actual completed filename and unchanged original bytes. Also check invalid requests, changed or missing sources, and short and long diagnostics. Concise corrective guidance must remain visible without opening Details, while expanded diagnostics use only the required height up to the shared maximum.
 
 For Upscale changes, exercise preset and custom sizing, CPU and both NVENC codecs where available, Auto fallback, explicit unavailable NVENC and supported or unsupported pixel formats. Check output dimensions and color metadata with FFprobe. Inspect representative output for visual regressions; metadata alone does not establish visual fidelity or full HDR preservation.
 

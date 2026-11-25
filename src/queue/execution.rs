@@ -2,7 +2,7 @@ use crate::media::{
     execution::{MediaExecution, MediaExecutionStartError, MediaExecutionState, ProcessControl},
     intake::SourceIdentity,
     model::MediaFile,
-    output::{normalized_output_destination, output_paths_equal},
+    output::preflight_output_destination,
     process::{MediaProcess, MediaProcessCommand, MediaProcessStartError, MediaProcessWake},
     progress::MediaProgress,
     tools::MediaTools,
@@ -95,12 +95,7 @@ impl MediaQueue {
             return Err(QueueEnqueueError::SourceDoesNotMatchMedia);
         }
 
-        let normalized_output =
-            normalized_output_destination(operation.input(), operation.output())
-                .map_err(QueueEnqueueError::Output)?;
-        if let Some(existing_job) = self.duplicate_destination(&normalized_output, None) {
-            return Err(QueueEnqueueError::DuplicateDestination { existing_job });
-        }
+        preflight_output_destination(operation.output()).map_err(QueueEnqueueError::Output)?;
 
         let id = JobId::new(raw_id);
         self.next_job_id = raw_id.checked_add(1);
@@ -109,7 +104,6 @@ impl MediaQueue {
             source_identity,
             media.clone(),
             operation,
-            normalized_output,
         ));
         Ok(id)
     }
@@ -123,15 +117,8 @@ impl MediaQueue {
         }
         let raw_start = self.next_job_id.ok_or(BatchEnqueueError::JobIdExhausted)?;
         let mut prepared = Vec::with_capacity(items.len());
-        let mut batch_outputs: Vec<std::path::PathBuf> = Vec::with_capacity(items.len());
 
         for (index, (media, operation)) in items.iter().enumerate() {
-            if !output_paths_equal(operation.input(), &media.path) {
-                return Err(BatchEnqueueError::Item {
-                    index,
-                    error: QueueEnqueueError::SourceDoesNotMatchMedia,
-                });
-            }
             let source_identity = SourceIdentity::read(operation.input()).map_err(|error| {
                 BatchEnqueueError::Item {
                     index,
@@ -149,32 +136,13 @@ impl MediaQueue {
                     error: QueueEnqueueError::SourceDoesNotMatchMedia,
                 });
             }
-            let normalized_output =
-                normalized_output_destination(operation.input(), operation.output()).map_err(
-                    |error| BatchEnqueueError::Item {
-                        index,
-                        error: QueueEnqueueError::Output(error),
-                    },
-                )?;
-            if let Some(existing_job) = self.duplicate_destination(&normalized_output, None) {
-                return Err(BatchEnqueueError::Item {
+            preflight_output_destination(operation.output()).map_err(|error| {
+                BatchEnqueueError::Item {
                     index,
-                    error: QueueEnqueueError::DuplicateDestination { existing_job },
-                });
-            }
-            if let Some(first_index) = batch_outputs
-                .iter()
-                .position(|output| output_paths_equal(output, &normalized_output))
-            {
-                return Err(BatchEnqueueError::DuplicateDestination { index, first_index });
-            }
-            batch_outputs.push(normalized_output.clone());
-            prepared.push((
-                media.clone(),
-                operation.clone(),
-                source_identity,
-                normalized_output,
-            ));
+                    error: QueueEnqueueError::Output(error),
+                }
+            })?;
+            prepared.push((media.clone(), operation.clone(), source_identity));
         }
 
         let mut raw_ids = Vec::with_capacity(items.len());
@@ -186,13 +154,12 @@ impl MediaQueue {
         }
 
         let ids = raw_ids.iter().copied().map(JobId::new).collect::<Vec<_>>();
-        for (raw_id, (media, operation, identity, output)) in raw_ids.into_iter().zip(prepared) {
+        for (raw_id, (media, operation, identity)) in raw_ids.into_iter().zip(prepared) {
             self.jobs.push(QueuedJob::new(
                 JobId::new(raw_id),
                 identity,
                 media,
                 operation,
-                output,
             ));
         }
         self.next_job_id = next;
@@ -266,14 +233,8 @@ impl MediaQueue {
             return Err(QueueMutationError::SourceChanged);
         }
 
-        let normalized_output =
-            normalized_output_destination(operation.input(), operation.output())
-                .map_err(QueueMutationError::Output)?;
-        if let Some(existing_job) = self.duplicate_destination(&normalized_output, Some(id)) {
-            return Err(QueueMutationError::DuplicateDestination { existing_job });
-        }
-
-        self.jobs[index].replace_operation(operation, normalized_output);
+        preflight_output_destination(operation.output()).map_err(QueueMutationError::Output)?;
+        self.jobs[index].replace_operation(operation);
         Ok(())
     }
 
@@ -456,21 +417,6 @@ impl MediaQueue {
         Ok(index)
     }
 
-    fn duplicate_destination(
-        &self,
-        normalized_output: &std::path::Path,
-        excluded_job: Option<JobId>,
-    ) -> Option<JobId> {
-        self.jobs
-            .iter()
-            .find(|job| {
-                Some(job.id()) != excluded_job
-                    && !job.state().is_terminal()
-                    && output_paths_equal(job.normalized_output(), normalized_output)
-            })
-            .map(QueuedJob::id)
-    }
-
     fn cancel_for_shutdown(&mut self) {
         let _ = self.cancel_queue();
     }
@@ -573,47 +519,35 @@ mod tests {
         assert_eq!(queue.jobs()[1].media().path, second_media.path);
 
         let count = queue.jobs().len();
-        let error = queue.enqueue_batch(&[
+        let result = queue.enqueue_batch(&[
             (
                 first_media.clone(),
                 remux(&first_media, directory.path().join("third-output.mkv")),
             ),
             (
                 second_media.clone(),
-                remux(&second_media, directory.path().join("third-output.mkv")),
+                remux(
+                    &second_media,
+                    directory.path().join("missing").join("invalid.mkv"),
+                ),
             ),
         ]);
         assert!(matches!(
-            error,
-            Err(crate::queue::BatchEnqueueError::DuplicateDestination {
+            result,
+            Err(crate::queue::BatchEnqueueError::Item {
                 index: 1,
-                first_index: 0
+                error: QueueEnqueueError::Output(_)
             })
         ));
         assert_eq!(queue.jobs().len(), count);
-    }
-
-    #[test]
-    fn batch_enqueue_rejects_existing_destination_and_input_mismatch_without_mutation() {
-        let directory = TestDirectory::new("batch-validation");
-        let first_media = media(&directory, "first.mkv");
-        let second_media = media(&directory, "second.mkv");
-        let reserved = directory.path().join("reserved.mkv");
-        let mut queue = MediaQueue::new();
-        queue
-            .enqueue(&first_media, remux(&first_media, reserved.clone()))
-            .unwrap();
-        let count = queue.jobs().len();
-
-        assert!(
-            queue
-                .enqueue_batch(&[(second_media.clone(), remux(&second_media, reserved))])
-                .is_err()
-        );
-        assert_eq!(queue.jobs().len(), count);
-
-        let wrong_input = remux(&first_media, directory.path().join("new.mkv"));
-        assert!(queue.enqueue_batch(&[(second_media, wrong_input)]).is_err());
+        let mismatched = remux(&first_media, directory.path().join("new.mkv"));
+        assert!(matches!(
+            queue.enqueue_batch(&[(second_media, mismatched)]),
+            Err(crate::queue::BatchEnqueueError::Item {
+                index: 0,
+                error: QueueEnqueueError::SourceDoesNotMatchMedia
+            })
+        ));
         assert_eq!(queue.jobs().len(), count);
     }
 
@@ -632,24 +566,6 @@ mod tests {
             queue.enqueue(&media, remux(&media, directory.path().join("wrapped.mkv"))),
             Err(QueueEnqueueError::JobIdExhausted)
         );
-    }
-
-    #[test]
-    fn normalized_duplicate_pending_destination_is_rejected() {
-        let directory = TestDirectory::new("duplicate-output");
-        let media = media(&directory, "source.mkv");
-        let output = directory.path().join("result.mkv");
-        let equivalent = directory.path().join(".").join("result.mkv");
-        let mut queue = MediaQueue::new();
-        let first = queue.enqueue(&media, remux(&media, output)).unwrap();
-
-        assert_eq!(
-            queue.enqueue(&media, remux(&media, equivalent)),
-            Err(QueueEnqueueError::DuplicateDestination {
-                existing_job: first
-            })
-        );
-        assert_eq!(queue.jobs().len(), 1);
     }
 
     #[test]
@@ -734,8 +650,6 @@ mod tests {
             .enqueue(&source_media, remux(&source_media, second_output.clone()))
             .unwrap();
         let original_operation = queue.jobs()[0].operation().clone();
-        let original_normalized_output = queue.jobs()[0].normalized_output().to_path_buf();
-
         assert_eq!(
             queue.replace_waiting_operation(
                 first,
@@ -744,36 +658,22 @@ mod tests {
             Err(QueueMutationError::SourceChanged)
         );
         assert_eq!(queue.jobs()[0].operation(), &original_operation);
-        assert_eq!(
-            queue.jobs()[0].normalized_output(),
-            original_normalized_output
-        );
-
-        assert_eq!(
-            queue.replace_waiting_operation(first, remux(&source_media, second_output)),
-            Err(QueueMutationError::DuplicateDestination {
-                existing_job: second
-            })
-        );
-        assert_eq!(queue.jobs()[0].operation(), &original_operation);
-        assert_eq!(
-            queue.jobs()[0].normalized_output(),
-            original_normalized_output
-        );
-
-        assert_eq!(
-            queue.replace_waiting_operation(first, remux(&source_media, source_media.path.clone())),
-            Err(QueueMutationError::Output(
-                crate::media::output::MediaOutputError::SameInputAndOutput(
-                    source_media.path.clone()
+        assert!(matches!(
+            queue.replace_waiting_operation(
+                first,
+                remux(
+                    &source_media,
+                    directory.path().join("missing").join("invalid.mkv")
                 )
-            ))
-        );
+            ),
+            Err(QueueMutationError::Output(_))
+        ));
         assert_eq!(queue.jobs()[0].operation(), &original_operation);
-        assert_eq!(
-            queue.jobs()[0].normalized_output(),
-            original_normalized_output
-        );
+        queue
+            .replace_waiting_operation(first, remux(&source_media, second_output.clone()))
+            .unwrap();
+        assert_eq!(queue.jobs()[0].operation().output(), second_output);
+        assert_eq!(queue.jobs()[1].id(), second);
 
         queue
             .replace_waiting_operation(first, remux(&source_media, first_output))
@@ -906,31 +806,47 @@ mod tests {
     }
 
     #[test]
-    fn destination_collision_after_enqueue_fails_job_and_advances() {
-        let directory = TestDirectory::new("late-output");
-        let first_media = media(&directory, "first-source.mkv");
-        let second_media = media(&directory, "second-source.mkv");
-        let first_output = directory.path().join("first-output.mkv");
+    fn shared_destinations_publish_distinct_outputs_and_advance() {
+        let directory = TestDirectory::new("shared-output");
+        let source = media(&directory, "source.mkv");
+        let output = directory.path().join("result.mkv");
         let mut queue = MediaQueue::new();
         let first = queue
-            .enqueue(&first_media, remux(&first_media, first_output.clone()))
+            .enqueue(&source, remux(&source, output.clone()))
             .unwrap();
-        let second = queue
-            .enqueue(
-                &second_media,
-                remux(&second_media, directory.path().join("second-output.mkv")),
-            )
+        let ids = queue
+            .enqueue_batch(&[(source.clone(), remux(&source, output.clone()))])
             .unwrap();
-        fs::write(first_output, b"external output").unwrap();
-        let mut launcher = |_, _| Ok(FakeProcessControl::running());
-
+        fs::write(&output, b"external output").unwrap();
+        let first_process = FakeProcessControl::running();
+        let second_process = FakeProcessControl::running();
+        let mut processes = VecDeque::from([first_process.clone(), second_process.clone()]);
+        let mut launcher = |_, _| Ok(processes.pop_front().unwrap());
         assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
-        assert_eq!(queue.active_job(), Some(second));
-        assert_eq!(queue.jobs()[0].id(), first);
-        assert!(matches!(
-            queue.jobs()[0].state(),
-            QueueJobState::Failed(QueueJobFailure::Preparation(_))
-        ));
+        for (id, process, bytes, suffix) in [
+            (first, first_process, b"first".as_slice(), 1),
+            (ids[0], second_process, b"second".as_slice(), 2),
+        ] {
+            assert_eq!(queue.active_job(), Some(id));
+            fs::write(queue.temporary_output_path().unwrap(), bytes).unwrap();
+            process.set_state(MediaProcessState::Completed);
+            queue.poll_with_launcher(&tools(&directory), &mut launcher);
+            let actual = directory.path().join(format!("result ({suffix}).mkv"));
+            assert_eq!(
+                queue
+                    .jobs()
+                    .iter()
+                    .find(|job| job.id() == id)
+                    .unwrap()
+                    .state(),
+                &QueueJobState::Completed {
+                    output: actual.clone()
+                }
+            );
+            assert_eq!(fs::read(actual).unwrap(), bytes);
+        }
+        assert_eq!(fs::read(output).unwrap(), b"external output");
+        assert!(!queue.is_running());
     }
 
     #[test]

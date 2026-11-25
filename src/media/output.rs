@@ -20,13 +20,11 @@ pub enum MediaOutputDisposition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaOutputError {
     InvalidOutputPath(PathBuf),
-    SameInputAndOutput(PathBuf),
     OutputParentUnavailable {
         path: PathBuf,
         kind: io::ErrorKind,
     },
     OutputParentNotDirectory(PathBuf),
-    OutputAlreadyExists(PathBuf),
     TemporaryDirectoryCreationFailed {
         path: PathBuf,
         kind: io::ErrorKind,
@@ -52,9 +50,6 @@ impl fmt::Display for MediaOutputError {
             Self::InvalidOutputPath(path) => {
                 write!(f, "output path has no file name: {}", path.display())
             }
-            Self::SameInputAndOutput(path) => {
-                write!(f, "input and output must differ: {}", path.display())
-            }
             Self::OutputParentUnavailable { path, kind } => {
                 write!(
                     f,
@@ -64,9 +59,6 @@ impl fmt::Display for MediaOutputError {
             }
             Self::OutputParentNotDirectory(path) => {
                 write!(f, "output parent is not a directory: {}", path.display())
-            }
-            Self::OutputAlreadyExists(path) => {
-                write!(f, "output already exists: {}", path.display())
             }
             Self::TemporaryDirectoryCreationFailed { path, kind } => write!(
                 f,
@@ -124,23 +116,11 @@ pub fn validate_output_path(output: &Path) -> Result<(), MediaOutputError> {
 }
 
 /// Perform the filesystem-backed destination safety preflight without creating staging state.
-pub fn preflight_output_destination(input: &Path, output: &Path) -> Result<(), MediaOutputError> {
-    validated_output_destination(input, output).map(|_| ())
-}
-
-pub(crate) fn normalized_output_destination(
-    input: &Path,
-    output: &Path,
-) -> Result<PathBuf, MediaOutputError> {
-    validated_output_destination(input, output).map(|destination| destination.final_path)
-}
-
-pub(crate) fn output_paths_equal(left: &Path, right: &Path) -> bool {
-    paths_equal(left, right)
+pub fn preflight_output_destination(output: &Path) -> Result<(), MediaOutputError> {
+    validated_output_destination(output).map(|_| ())
 }
 
 fn validated_output_destination(
-    input: &Path,
     output: &Path,
 ) -> Result<ValidatedOutputDestination, MediaOutputError> {
     validate_output_path(output)?;
@@ -167,26 +147,6 @@ fn validated_output_destination(
         }
     })?;
     let final_path = parent.join(&file_name);
-    let input_path =
-        comparison_path(input).map_err(|error| MediaOutputError::OutputParentUnavailable {
-            path: input.to_path_buf(),
-            kind: error.kind(),
-        })?;
-    let output_path = comparison_path(&final_path).map_err(|error| {
-        MediaOutputError::OutputParentUnavailable {
-            path: final_path.clone(),
-            kind: error.kind(),
-        }
-    })?;
-
-    if paths_equal(&input_path, &output_path) {
-        return Err(MediaOutputError::SameInputAndOutput(final_path));
-    }
-
-    if path_exists_without_following(&final_path)? {
-        return Err(MediaOutputError::OutputAlreadyExists(final_path));
-    }
-
     Ok(ValidatedOutputDestination {
         parent,
         file_name,
@@ -195,8 +155,8 @@ fn validated_output_destination(
 }
 
 impl MediaOutput {
-    pub fn prepare(input: &Path, output: &Path) -> Result<Self, MediaOutputError> {
-        let destination = validated_output_destination(input, output)?;
+    pub fn prepare(output: &Path) -> Result<Self, MediaOutputError> {
+        let destination = validated_output_destination(output)?;
         let staging_directory = create_staging_directory(&destination.parent)?;
         let temporary_path = staging_directory.join(&destination.file_name);
 
@@ -232,13 +192,6 @@ impl MediaOutput {
     }
 
     fn publish(&mut self) -> Result<MediaOutputDisposition, MediaOutputError> {
-        if path_exists_without_following(&self.final_path)? {
-            let _ = self.cleanup_owned_temporary_output();
-            return Err(MediaOutputError::OutputAlreadyExists(
-                self.final_path.clone(),
-            ));
-        }
-
         let temporary_metadata = match fs::symlink_metadata(&self.temporary_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -261,22 +214,25 @@ impl MediaOutput {
             ));
         }
 
-        match publish_file_no_replace(&self.temporary_path, &self.final_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let _ = self.cleanup_owned_temporary_output();
-                return Err(MediaOutputError::OutputAlreadyExists(
-                    self.final_path.clone(),
-                ));
-            }
-            Err(error) => {
-                return Err(MediaOutputError::PublishFailed {
-                    from: self.temporary_path.clone(),
-                    to: self.final_path.clone(),
-                    kind: error.kind(),
-                });
+        // The filesystem decides whether each name is available. Never check then replace:
+        // another process could create the destination between those operations.
+        let mut candidate = self.final_path.clone();
+        for index in 1_u64.. {
+            match publish_file_no_replace(&self.temporary_path, &candidate) {
+                Ok(()) => break,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    candidate = numbered_output_path(&self.final_path, index);
+                }
+                Err(error) => {
+                    return Err(MediaOutputError::PublishFailed {
+                        from: self.temporary_path.clone(),
+                        to: candidate,
+                        kind: error.kind(),
+                    });
+                }
             }
         }
+        self.final_path = candidate;
 
         self.settled = true;
         let _ = remove_empty_staging_directory(&self.staging_directory);
@@ -330,14 +286,6 @@ fn output_parent(output: &Path) -> PathBuf {
     }
 }
 
-fn comparison_path(path: &Path) -> io::Result<PathBuf> {
-    match fs::canonicalize(path) {
-        Ok(path) => Ok(path),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => absolute_lexical(path),
-        Err(error) => Err(error),
-    }
-}
-
 fn absolute_lexical(path: &Path) -> io::Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -358,28 +306,14 @@ fn absolute_lexical(path: &Path) -> io::Result<PathBuf> {
     Ok(normalized)
 }
 
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        left.to_string_lossy()
-            .eq_ignore_ascii_case(&right.to_string_lossy())
+fn numbered_output_path(path: &Path, index: u64) -> PathBuf {
+    let mut name = path.file_stem().unwrap_or_default().to_os_string();
+    name.push(format!(" ({index})"));
+    if let Some(extension) = path.extension() {
+        name.push(".");
+        name.push(extension);
     }
-
-    #[cfg(not(windows))]
-    {
-        left == right
-    }
-}
-
-fn path_exists_without_following(path: &Path) -> Result<bool, MediaOutputError> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(MediaOutputError::OutputParentUnavailable {
-            path: path.to_path_buf(),
-            kind: error.kind(),
-        }),
-    }
+    path.with_file_name(name)
 }
 
 fn create_staging_directory(parent: &Path) -> Result<PathBuf, MediaOutputError> {
@@ -530,17 +464,6 @@ mod tests {
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn same_input_and_output_is_rejected_before_existing_output_check() {
-        let directory = TestDirectory::new("same-path");
-        let input = directory.path().join("movie.mp4");
-        fs::write(&input, b"input").unwrap();
-
-        let error = MediaOutput::prepare(&input, &input).unwrap_err();
-
-        assert!(matches!(error, MediaOutputError::SameInputAndOutput(_)));
-    }
-
-    #[test]
     fn output_path_validation_is_filesystem_independent() {
         let output = PathBuf::from("missing-parent").join("output.mp4");
 
@@ -552,27 +475,13 @@ mod tests {
     }
 
     #[test]
-    fn canonical_equivalent_input_and_output_are_rejected() {
-        let directory = TestDirectory::new("canonical-same-path");
-        let nested = directory.path().join("nested");
-        fs::create_dir(&nested).unwrap();
-        let input = directory.path().join("movie.mp4");
-        fs::write(&input, b"input").unwrap();
-        let output = nested.join("..").join("movie.mp4");
-
-        let error = preflight_output_destination(&input, &output).unwrap_err();
-
-        assert!(matches!(error, MediaOutputError::SameInputAndOutput(_)));
-    }
-
-    #[test]
     fn nonexistent_output_parent_is_rejected() {
         let directory = TestDirectory::new("missing-parent");
         let input = directory.path().join("input.mkv");
         fs::write(&input, b"input").unwrap();
         let output = directory.path().join("missing").join("output.mp4");
 
-        let error = MediaOutput::prepare(&input, &output).unwrap_err();
+        let error = MediaOutput::prepare(&output).unwrap_err();
 
         assert!(matches!(
             error,
@@ -592,61 +501,12 @@ mod tests {
         fs::write(&parent_file, b"file").unwrap();
         let output = parent_file.join("output.mp4");
 
-        let error = MediaOutput::prepare(&input, &output).unwrap_err();
+        let error = MediaOutput::prepare(&output).unwrap_err();
 
         assert!(matches!(
             error,
             MediaOutputError::OutputParentNotDirectory(_)
         ));
-    }
-
-    #[test]
-    fn preexisting_output_is_protected() {
-        let directory = TestDirectory::new("existing-output");
-        let input = directory.path().join("input.mkv");
-        let output = directory.path().join("output.mp4");
-        fs::write(&input, b"input").unwrap();
-        fs::write(&output, b"existing").unwrap();
-
-        let error = MediaOutput::prepare(&input, &output).unwrap_err();
-
-        assert!(matches!(error, MediaOutputError::OutputAlreadyExists(_)));
-        assert_eq!(fs::read(&output).unwrap(), b"existing");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn dangling_output_symlink_is_treated_as_an_existing_destination() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TestDirectory::new("dangling-output-symlink");
-        let input = directory.path().join("input.mkv");
-        let output = directory.path().join("output.mp4");
-        fs::write(&input, b"input").unwrap();
-        symlink(directory.path().join("missing-target"), &output).unwrap();
-
-        let error = preflight_output_destination(&input, &output).unwrap_err();
-
-        assert!(matches!(error, MediaOutputError::OutputAlreadyExists(_)));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlink_alias_to_input_is_rejected_as_the_same_file() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TestDirectory::new("symlink-input-alias");
-        let real_parent = directory.path().join("real");
-        let alias_parent = directory.path().join("alias");
-        fs::create_dir(&real_parent).unwrap();
-        symlink(&real_parent, &alias_parent).unwrap();
-        let input = real_parent.join("movie.mp4");
-        let output = alias_parent.join("movie.mp4");
-        fs::write(&input, b"input").unwrap();
-
-        let error = preflight_output_destination(&input, &output).unwrap_err();
-
-        assert!(matches!(error, MediaOutputError::SameInputAndOutput(_)));
     }
 
     #[test]
@@ -656,7 +516,7 @@ mod tests {
         let output = directory.path().join("output.mp4");
         fs::write(&input, b"input").unwrap();
 
-        assert_eq!(preflight_output_destination(&input, &output), Ok(()));
+        assert_eq!(preflight_output_destination(&output), Ok(()));
         assert!(!output.exists());
         assert!(
             fs::read_dir(directory.path())
@@ -675,7 +535,7 @@ mod tests {
         let input = directory.path().join("input.mkv");
         let output = directory.path().join("movie final.mp4");
         fs::write(&input, b"input").unwrap();
-        let prepared = MediaOutput::prepare(&input, &output).unwrap();
+        let prepared = MediaOutput::prepare(&output).unwrap();
 
         assert_eq!(prepared.temporary_path().file_name(), output.file_name());
         assert_eq!(prepared.final_path(), output);
@@ -685,7 +545,7 @@ mod tests {
         );
         assert!(!prepared.temporary_path().exists());
         assert!(!prepared.final_path().exists());
-        let second = MediaOutput::prepare(&input, &output).unwrap();
+        let second = MediaOutput::prepare(&output).unwrap();
         assert_ne!(prepared.temporary_path(), second.temporary_path());
     }
 
@@ -695,7 +555,7 @@ mod tests {
         let input = directory.path().join("input.mkv");
         let output = directory.path().join("output.mp4");
         fs::write(&input, b"input").unwrap();
-        let mut prepared = MediaOutput::prepare(&input, &output).unwrap();
+        let mut prepared = MediaOutput::prepare(&output).unwrap();
         let temporary = prepared.temporary_path().to_path_buf();
         let staging = temporary.parent().unwrap().to_path_buf();
         fs::write(&temporary, b"complete-output").unwrap();
@@ -717,7 +577,7 @@ mod tests {
         let input = directory.path().join("input.mkv");
         let output = directory.path().join("output.mp4");
         fs::write(&input, b"input").unwrap();
-        let mut prepared = MediaOutput::prepare(&input, &output).unwrap();
+        let mut prepared = MediaOutput::prepare(&output).unwrap();
         let temporary = prepared.temporary_path().to_path_buf();
         let staging = temporary.parent().unwrap().to_path_buf();
         fs::write(&temporary, b"partial").unwrap();
@@ -741,7 +601,7 @@ mod tests {
         let input = directory.path().join("input.mkv");
         let output = directory.path().join("output.mp4");
         fs::write(&input, b"input").unwrap();
-        let mut prepared = MediaOutput::prepare(&input, &output).unwrap();
+        let mut prepared = MediaOutput::prepare(&output).unwrap();
         let temporary = prepared.temporary_path().to_path_buf();
         fs::write(&temporary, b"partial").unwrap();
 
@@ -759,7 +619,7 @@ mod tests {
         let input = directory.path().join("input.mkv");
         let output = directory.path().join("output.mp4");
         fs::write(&input, b"input").unwrap();
-        let mut prepared = MediaOutput::prepare(&input, &output).unwrap();
+        let mut prepared = MediaOutput::prepare(&output).unwrap();
         fs::write(prepared.temporary_path(), b"partial").unwrap();
         let unrelated = prepared
             .temporary_path()
@@ -780,7 +640,7 @@ mod tests {
         let input = directory.path().join("入力 source file.mkv");
         let output = directory.path().join("結果 final movie.mp4");
         fs::write(&input, b"input").unwrap();
-        let mut prepared = MediaOutput::prepare(&input, &output).unwrap();
+        let mut prepared = MediaOutput::prepare(&output).unwrap();
         fs::write(prepared.temporary_path(), b"unicode-output").unwrap();
 
         prepared.settle(&MediaProcessState::Completed).unwrap();
@@ -794,7 +654,7 @@ mod tests {
         let input = directory.path().join("input.mkv");
         let output = directory.path().join("output.mp4");
         fs::write(&input, b"input").unwrap();
-        let mut prepared = MediaOutput::prepare(&input, &output).unwrap();
+        let mut prepared = MediaOutput::prepare(&output).unwrap();
         fs::write(prepared.temporary_path(), b"partial").unwrap();
 
         assert_eq!(
@@ -811,7 +671,7 @@ mod tests {
         let input = directory.path().join("input.mkv");
         let output = directory.path().join("output.mp4");
         fs::write(&input, b"input").unwrap();
-        let prepared = MediaOutput::prepare(&input, &output).unwrap();
+        let prepared = MediaOutput::prepare(&output).unwrap();
         let temporary = prepared.temporary_path().to_path_buf();
         let unrelated = prepared
             .temporary_path()
@@ -837,20 +697,47 @@ mod tests {
     }
 
     #[test]
-    fn output_created_after_prepare_is_not_overwritten() {
-        let directory = TestDirectory::new("late-existing-output");
-        let input = directory.path().join("input.mkv");
-        let output = directory.path().join("output.mp4");
-        fs::write(&input, b"input").unwrap();
-        let mut prepared = MediaOutput::prepare(&input, &output).unwrap();
+    fn collisions_publish_numbered_files_without_replacing_existing_bytes() {
+        let directory = TestDirectory::new("numbered-output");
+        let output = directory.path().join("movie final.mp4");
+        let first = directory.path().join("movie final (1).mp4");
+        let second = directory.path().join("movie final (2).mp4");
+        fs::write(&output, b"original source or existing output").unwrap();
+        let mut prepared = MediaOutput::prepare(&output).unwrap();
         fs::write(prepared.temporary_path(), b"complete").unwrap();
-        fs::write(&output, b"someone-else").unwrap();
-
-        let error = prepared.settle(&MediaProcessState::Completed).unwrap_err();
-
-        assert!(matches!(error, MediaOutputError::OutputAlreadyExists(_)));
-        assert_eq!(fs::read(&output).unwrap(), b"someone-else");
+        // Occupy the first suffix after preparation, not before.
+        fs::write(&first, b"concurrent owner").unwrap();
+        assert_eq!(
+            prepared.settle(&MediaProcessState::Completed).unwrap(),
+            MediaOutputDisposition::Published(second.clone())
+        );
+        assert_eq!(
+            fs::read(&output).unwrap(),
+            b"original source or existing output"
+        );
+        assert_eq!(fs::read(&first).unwrap(), b"concurrent owner");
+        assert_eq!(fs::read(&second).unwrap(), b"complete");
         assert!(!prepared.temporary_path().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_is_not_replaced() {
+        use std::os::unix::fs::symlink;
+        let directory = TestDirectory::new("dangling-output");
+        let output = directory.path().join("result.mp4");
+        let target = directory.path().join("absent");
+        symlink(&target, &output).unwrap();
+        let mut prepared = MediaOutput::prepare(&output).unwrap();
+        fs::write(prepared.temporary_path(), b"complete").unwrap();
+        let numbered = directory.path().join("result (1).mp4");
+        assert_eq!(
+            prepared.settle(&MediaProcessState::Completed).unwrap(),
+            MediaOutputDisposition::Published(numbered.clone())
+        );
+        assert_eq!(fs::read_link(&output).unwrap(), target);
+        assert!(!target.exists());
+        assert_eq!(fs::read(numbered).unwrap(), b"complete");
     }
 
     struct TestDirectory {

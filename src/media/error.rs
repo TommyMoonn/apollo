@@ -32,8 +32,6 @@ pub enum MediaErrorKind {
     MissingStream,
     Mp4Incompatibility,
     EncoderUnavailable,
-    OutputExists,
-    QueueDestinationReserved,
     OutputNotWritable,
     FilePickerUnavailable,
     OutputPickerUnavailable,
@@ -71,10 +69,6 @@ impl MediaError {
             MediaErrorKind::MissingStream => "A required media stream is missing or unsupported.",
             MediaErrorKind::Mp4Incompatibility => "A source stream cannot be written into MP4.",
             MediaErrorKind::EncoderUnavailable => "The required encoder is unavailable.",
-            MediaErrorKind::OutputExists => "The output file already exists.",
-            MediaErrorKind::QueueDestinationReserved => {
-                "Another queued job already targets this output."
-            }
             MediaErrorKind::OutputNotWritable => "The output location is not writable.",
             MediaErrorKind::FilePickerUnavailable => "The file picker could not be opened.",
             MediaErrorKind::OutputPickerUnavailable => "The output picker could not be opened.",
@@ -123,12 +117,6 @@ impl MediaError {
             }
             MediaErrorKind::EncoderUnavailable => {
                 Some("Use an FFmpeg build that includes the required encoder.")
-            }
-            MediaErrorKind::OutputExists => {
-                Some("Choose another output path or move the existing file.")
-            }
-            MediaErrorKind::QueueDestinationReserved => {
-                Some("Choose another output, or edit or remove the queued job.")
             }
             MediaErrorKind::OutputNotWritable => {
                 Some("Choose a writable output folder and try again.")
@@ -180,14 +168,6 @@ impl MediaError {
 
     pub fn source_unavailable(diagnostic: impl Into<String>) -> Self {
         Self::with_diagnostic(MediaErrorKind::SourceUnavailable, diagnostic)
-    }
-
-    pub fn output_exists(diagnostic: impl Into<String>) -> Self {
-        Self::with_diagnostic(MediaErrorKind::OutputExists, diagnostic)
-    }
-
-    pub fn queue_destination_reserved(diagnostic: impl Into<String>) -> Self {
-        Self::with_diagnostic(MediaErrorKind::QueueDestinationReserved, diagnostic)
     }
 
     pub fn output_not_writable(diagnostic: impl Into<String>) -> Self {
@@ -265,13 +245,11 @@ impl MediaError {
 
     pub fn from_output_error(error: &MediaOutputError) -> Self {
         let kind = match error {
-            MediaOutputError::OutputAlreadyExists(_) => MediaErrorKind::OutputExists,
             MediaOutputError::OutputParentUnavailable { .. }
             | MediaOutputError::TemporaryDirectoryCreationFailed { .. }
             | MediaOutputError::PublishFailed { .. }
             | MediaOutputError::CleanupFailed { .. } => MediaErrorKind::OutputNotWritable,
             MediaOutputError::InvalidOutputPath(_)
-            | MediaOutputError::SameInputAndOutput(_)
             | MediaOutputError::OutputParentNotDirectory(_)
             | MediaOutputError::TemporaryOutputMissing(_)
             | MediaOutputError::TemporaryOutputNotFile(_)
@@ -390,12 +368,11 @@ fn bound_diagnostic(diagnostic: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{io, path::PathBuf};
+    use std::path::PathBuf;
 
     use super::{MediaError, MediaErrorKind, MediaOutputContainer};
     use crate::media::{
         execution::MediaExecutionFailure,
-        output::MediaOutputError,
         probe::MediaProbeError,
         process::{
             DEFAULT_DIAGNOSTIC_STDERR_LIMIT_BYTES, MediaProcessFailure, MediaProcessStartError,
@@ -484,48 +461,6 @@ mod tests {
             assert_eq!(error.diagnostic(), Some(diagnostic));
             assert!(error.guidance().is_some());
         }
-    }
-
-    #[test]
-    fn output_exists_and_not_writable_are_distinct() {
-        assert_eq!(
-            MediaError::from_output_error(&MediaOutputError::OutputAlreadyExists(PathBuf::from(
-                "output.mp4"
-            )))
-            .kind(),
-            MediaErrorKind::OutputExists
-        );
-        assert_eq!(
-            MediaError::from_output_error(&MediaOutputError::TemporaryDirectoryCreationFailed {
-                path: PathBuf::from("C:/readonly"),
-                kind: io::ErrorKind::PermissionDenied,
-            })
-            .kind(),
-            MediaErrorKind::OutputNotWritable
-        );
-    }
-
-    #[test]
-    fn queued_destination_reservation_has_truthful_copy_distinct_from_an_existing_file() {
-        let error =
-            MediaError::queue_destination_reserved("queue job 7 already targets this output");
-        assert_eq!(error.kind(), MediaErrorKind::QueueDestinationReserved);
-        assert!(
-            error
-                .guidance()
-                .is_some_and(|guidance| guidance.contains("queued job"))
-        );
-        assert_eq!(
-            error.diagnostic(),
-            Some("queue job 7 already targets this output")
-        );
-
-        let existing = MediaError::from_output_error(&MediaOutputError::OutputAlreadyExists(
-            PathBuf::from("output.mp4"),
-        ));
-        assert_eq!(existing.kind(), MediaErrorKind::OutputExists);
-        assert_ne!(error.message(), existing.message());
-        assert_ne!(error.guidance(), existing.guidance());
     }
 
     #[test]

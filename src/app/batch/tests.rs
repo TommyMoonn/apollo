@@ -5,6 +5,7 @@ use crate::{
 };
 use std::{
     fs,
+    path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc,
@@ -250,48 +251,6 @@ fn batch_override_cancel_is_non_mutating_and_save_updates_only_the_item() {
 }
 
 #[test]
-fn batch_append_ignores_duplicates_without_mutating_existing_configuration() {
-    let (directory, path) = temp_file("batch-append-duplicate");
-    let source = media(&path);
-    let operation =
-        QueuedOperation::Remux(crate::remux::draft::RemuxDraft::new(&source).request(&source));
-    let mut app = app();
-    app.batch_setup = Some(BatchSetupState {
-        origin: BatchOrigin::NoSource,
-        operation: Operation::Remux,
-        defaults: Some(BatchDefaults::Remux {
-            container: MediaContainer::Matroska,
-        }),
-        items: vec![BatchItem {
-            id: BatchItemId(0),
-            path: path.clone(),
-            included: true,
-            source: ready_batch_source(source),
-            operation: Some(operation.clone()),
-            readiness: BatchReadiness::Ready,
-            reason: None,
-            overridden: true,
-        }],
-        error: None,
-        append_error: None,
-    });
-
-    app.show_batch_setup();
-    assert!(!app.append_batch_paths(vec![path.clone(), path.clone()], || {}));
-    let batch = app.batch_setup.as_ref().unwrap();
-    assert_eq!(batch.items.len(), 1);
-    assert_eq!(batch.items[0].operation, Some(operation));
-    assert!(batch.items[0].overridden);
-    assert_eq!(
-        batch.error.as_deref(),
-        Some("Ignored 2 files that are already in this batch.")
-    );
-    assert!(!app.batch_inspecting());
-    assert!(app.queue.scheduler().jobs().is_empty());
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn frame_capture_defaults_apply_before_per_source_timestamp_validation() {
     let (first_directory, first_path) = temp_file("batch-short-video-first");
     let (second_directory, second_path) = temp_file("batch-long-video-second");
@@ -454,7 +413,14 @@ fn inspection_append_and_atomic_enqueue_preserve_item_identity() {
     let alias = first_dir.join(".").join(first.file_name().unwrap());
     assert!(
         app.append_batch_paths_with(vec![alias, last.clone(), last.clone()], |paths| {
-            assert_eq!(paths, vec![last.clone()]);
+            assert_eq!(
+                paths,
+                vec![
+                    first_dir.join(".").join(first.file_name().unwrap()),
+                    last.clone(),
+                    last.clone()
+                ]
+            );
             let wake = wake_tx.clone();
             BatchInspectionOwner::spawn_with(
                 paths,
@@ -467,7 +433,7 @@ fn inspection_append_and_atomic_enqueue_preserve_item_identity() {
     );
     settle_inspections(&mut app, &wake_rx);
     let batch = app.batch_setup.as_ref().unwrap();
-    assert_eq!(batch.items.len(), 3);
+    assert_eq!(batch.items.len(), 5);
     assert_eq!(batch.items[1], retained);
     assert_eq!(batch.items[2].id, BatchItemId(2));
     assert_eq!(
@@ -485,19 +451,15 @@ fn inspection_append_and_atomic_enqueue_preserve_item_identity() {
         .remux
         .set_custom_output_path(output.clone());
     assert!(app.save_batch_edit());
-    assert!(!app.enqueue_batch());
-    assert_no_batch_execution(&app);
-    let batch = app.batch_setup.as_ref().unwrap();
-    assert_eq!(batch.items[1], retained);
-    assert_eq!(batch.items[2].readiness, BatchReadiness::NeedsAttention);
-    assert!(!batch.can_enqueue());
-    app.toggle_batch_item(BatchItemId(2));
-    assert!(app.batch_setup.as_ref().unwrap().can_enqueue());
     assert!(app.enqueue_batch());
     assert!(app.batch_setup.is_none());
-    assert_eq!(app.queue.scheduler().jobs().len(), 1);
-    assert_eq!(app.queue.scheduler().jobs()[0].operation().input(), first);
-    assert_eq!(app.queue.scheduler().jobs()[0].operation().output(), output);
+    let jobs = app.queue.scheduler().jobs();
+    assert_eq!(jobs.len(), 4);
+    assert_eq!(jobs[0].operation().input(), first);
+    assert_eq!(jobs[0].operation().output(), output);
+    assert_eq!(jobs[1].operation().output(), output);
+    assert_eq!(jobs[2].operation().input(), last);
+    assert_eq!(jobs[3].operation().input(), last);
     assert_eq!(
         app.queue.scheduler().run_state(),
         crate::queue::QueueRunState::Stopped

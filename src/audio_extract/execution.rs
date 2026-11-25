@@ -180,8 +180,7 @@ pub(crate) fn prepare_audio_extract_operation(
         .map(AudioExtractMetadata::from)
         .unwrap_or_default();
 
-    let output = MediaOutput::prepare(&request.input, &request.output)
-        .map_err(AudioExtractStartError::Output)?;
+    let output = MediaOutput::prepare(&request.output).map_err(AudioExtractStartError::Output)?;
     let mut staged_request = request.clone();
     staged_request.output = output.temporary_path().to_path_buf();
     let invocation = build_audio_extract_invocation(&staged_request, &metadata);
@@ -305,10 +304,10 @@ mod tests {
     }
 
     #[test]
-    fn destination_preflight_rejects_existing_output_before_launch() {
-        let directory = TestDirectory::new("existing-output");
-        let (request, media) = valid_request_and_media(&directory);
-        fs::write(&request.output, b"occupied").unwrap();
+    fn destination_preflight_rejects_missing_parent_before_launch() {
+        let directory = TestDirectory::new("missing-parent");
+        let (mut request, media) = valid_request_and_media(&directory);
+        request.output = directory.path().join("missing").join("audio.m4a");
         let tools = fake_tools(&directory);
         let launches = Arc::new(AtomicUsize::new(0));
         let launch_count = Arc::clone(&launches);

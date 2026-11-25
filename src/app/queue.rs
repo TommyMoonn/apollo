@@ -369,9 +369,6 @@ fn media_error_from_queue_enqueue(error: &QueueEnqueueError) -> MediaError {
             MediaError::source_unavailable(error.to_string())
         }
         QueueEnqueueError::Output(error) => MediaError::from_output_error(error),
-        QueueEnqueueError::DuplicateDestination { .. } => {
-            MediaError::queue_destination_reserved(error.to_string())
-        }
         QueueEnqueueError::JobIdExhausted => MediaError::invalid_request(error.to_string()),
     }
 }

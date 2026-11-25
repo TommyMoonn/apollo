@@ -190,7 +190,6 @@ pub enum QueueEnqueueError {
     Source(MediaIntakeError),
     SourceDoesNotMatchMedia,
     Output(MediaOutputError),
-    DuplicateDestination { existing_job: JobId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,10 +199,6 @@ pub enum BatchEnqueueError {
         index: usize,
         error: QueueEnqueueError,
     },
-    DuplicateDestination {
-        index: usize,
-        first_index: usize,
-    },
 }
 
 impl fmt::Display for BatchEnqueueError {
@@ -211,10 +206,6 @@ impl fmt::Display for BatchEnqueueError {
         match self {
             Self::JobIdExhausted => formatter.write_str("queue job identifiers are exhausted"),
             Self::Item { index, error } => write!(formatter, "batch item {index}: {error}"),
-            Self::DuplicateDestination { index, first_index } => write!(
-                formatter,
-                "batch item {index} duplicates the destination of item {first_index}"
-            ),
         }
     }
 }
@@ -235,10 +226,6 @@ impl fmt::Display for QueueEnqueueError {
                 )
             }
             Self::Output(error) => write!(formatter, "queue output is invalid: {error}"),
-            Self::DuplicateDestination { existing_job } => write!(
-                formatter,
-                "queue job {existing_job} already targets this output"
-            ),
         }
     }
 }
@@ -253,7 +240,6 @@ pub enum QueueMutationError {
     SourceUnavailable(MediaIntakeError),
     SourceChanged,
     Output(MediaOutputError),
-    DuplicateDestination { existing_job: JobId },
 }
 
 impl fmt::Display for QueueMutationError {
@@ -269,10 +255,6 @@ impl fmt::Display for QueueMutationError {
             }
             Self::SourceChanged => formatter.write_str("queued source changed"),
             Self::Output(error) => write!(formatter, "replacement output is invalid: {error}"),
-            Self::DuplicateDestination { existing_job } => write!(
-                formatter,
-                "queue job {existing_job} already targets this output"
-            ),
         }
     }
 }
@@ -299,7 +281,6 @@ pub struct QueuedJob {
     source_identity: SourceIdentity,
     media: MediaFile,
     operation: QueuedOperation,
-    normalized_output: std::path::PathBuf,
     state: QueueJobState,
 }
 
@@ -309,14 +290,12 @@ impl QueuedJob {
         source_identity: SourceIdentity,
         media: MediaFile,
         operation: QueuedOperation,
-        normalized_output: std::path::PathBuf,
     ) -> Self {
         Self {
             id,
             source_identity,
             media,
             operation,
-            normalized_output,
             state: QueueJobState::Waiting,
         }
     }
@@ -347,21 +326,12 @@ impl QueuedJob {
         &self.source_identity
     }
 
-    pub(crate) fn normalized_output(&self) -> &Path {
-        &self.normalized_output
-    }
-
     pub(crate) fn set_state(&mut self, state: QueueJobState) {
         self.state = state;
     }
 
-    pub(crate) fn replace_operation(
-        &mut self,
-        operation: QueuedOperation,
-        normalized_output: std::path::PathBuf,
-    ) {
+    pub(crate) fn replace_operation(&mut self, operation: QueuedOperation) {
         debug_assert!(matches!(self.state, QueueJobState::Waiting));
         self.operation = operation;
-        self.normalized_output = normalized_output;
     }
 }

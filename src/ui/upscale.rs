@@ -681,9 +681,9 @@ mod tests {
             target_width: 3840,
             target_height: 2160,
         };
-        let output_error = UpscaleValidationError::Output(MediaOutputError::OutputAlreadyExists(
-            PathBuf::from("existing.mp4"),
-        ));
+        let output_error = UpscaleValidationError::Output(
+            MediaOutputError::OutputParentNotDirectory(PathBuf::from("not-a-directory")),
+        );
 
         assert_eq!(upscale_ready_feedback(&target_error), None);
         assert_eq!(upscale_ready_feedback(&output_error), None);

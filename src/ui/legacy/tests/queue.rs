@@ -64,7 +64,7 @@ fn stopped_queue_surface_exposes_edit_remove_and_bounded_reorder_controls() {
 }
 
 #[test]
-fn queue_edit_failed_replacement_keeps_original_job_and_editor() {
+fn queue_edit_accepts_shared_destination_and_keeps_job_identity() {
     let (directory, path) = temp_file("queue-edit-failure");
     let mut app = app();
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
@@ -83,7 +83,6 @@ fn queue_edit_failed_replacement_keeps_original_job_and_editor() {
         .enqueue_current_operation(Operation::Remux)
         .unwrap()
         .unwrap();
-    let original = app.core.queue.scheduler().jobs()[0].operation().clone();
     let duplicate_output = app.core.queue.scheduler().jobs()[1]
         .operation()
         .output()
@@ -94,18 +93,15 @@ fn queue_edit_failed_replacement_keeps_original_job_and_editor() {
         .queue_edit_mut()
         .unwrap()
         .remux
-        .set_custom_output_path(duplicate_output);
-
-    assert!(!app.save_queue_edit());
-
+        .set_custom_output_path(duplicate_output.clone());
+    assert!(app.save_queue_edit());
     assert_eq!(app.core.queue.scheduler().jobs()[0].id(), first);
-    assert_eq!(app.core.queue.scheduler().jobs()[0].operation(), &original);
+    assert_eq!(
+        app.core.queue.scheduler().jobs()[0].operation().output(),
+        duplicate_output
+    );
     assert_eq!(app.core.queue.scheduler().jobs()[1].id(), second);
-    assert!(app.core.queue_edit().unwrap().error.is_some());
-    assert!(matches!(
-        app.core.navigation(),
-        NavigationState::QueueEdit { .. }
-    ));
+    assert!(app.core.queue_edit().is_none());
     fs::remove_dir_all(directory).unwrap();
 }
 

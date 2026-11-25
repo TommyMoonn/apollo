@@ -184,8 +184,7 @@ pub(crate) fn prepare_frame_capture_operation(
         .expect("validated frame capture media owns a video stream")
         .stream_index;
 
-    let output = MediaOutput::prepare(&request.input, &request.output)
-        .map_err(FrameCaptureStartError::Output)?;
+    let output = MediaOutput::prepare(&request.output).map_err(FrameCaptureStartError::Output)?;
     let mut staged_request = request.clone();
     staged_request.output = output.temporary_path().to_path_buf();
     let invocation = build_frame_capture_invocation(&staged_request, primary_video_stream_index);
@@ -279,16 +278,16 @@ mod tests {
     }
 
     #[test]
-    fn invalid_request_and_existing_destination_never_launch() {
-        for existing_output in [false, true] {
-            let directory = TestDirectory::new(if existing_output {
-                "existing-output"
+    fn invalid_request_and_missing_destination_parent_never_launch() {
+        for missing_parent in [false, true] {
+            let directory = TestDirectory::new(if missing_parent {
+                "missing-parent"
             } else {
                 "invalid-request"
             });
             let (mut request, media) = valid_request_and_media(&directory);
-            if existing_output {
-                fs::write(&request.output, b"occupied").unwrap();
+            if missing_parent {
+                request.output = directory.path().join("missing").join("frame.png");
             } else {
                 request.position = FrameTimestamp::from_milliseconds(-1).into();
             }
@@ -304,7 +303,7 @@ mod tests {
                 })
                 .unwrap_err();
 
-            if existing_output {
+            if missing_parent {
                 assert!(matches!(error, FrameCaptureStartError::Output(_)));
             } else {
                 assert!(matches!(error, FrameCaptureStartError::Validation(_)));

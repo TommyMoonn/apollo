@@ -429,7 +429,7 @@ mod native_windows {
             unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)? };
         unsafe {
             dialog.SetTitle(&HSTRING::from("Choose output destination"))?;
-            // FOS_OVERWRITEPROMPT is intentionally omitted. Apollo validates destinations.
+            // FOS_OVERWRITEPROMPT is intentionally omitted. Publication never replaces an existing file.
             dialog.SetOptions(
                 FOS_FORCEFILESYSTEM
                     | FOS_PATHMUSTEXIST

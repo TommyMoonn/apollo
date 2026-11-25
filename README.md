@@ -48,7 +48,7 @@ See the [latest release notes](https://github.com/TommyMoonn/apollo/releases/lat
 - **Audio extraction:** Export a selected audio track as MKA, AAC, or FLAC.
 - **Frame capture:** Save a frame at a timestamp as PNG or JPEG.
 - **Queue and batch processing:** Queue jobs, reorder or edit waiting jobs, and process batches with shared settings and per-file overrides.
-- **Output handling:** Choose the output filename and destination. Apollo publishes the final file only after processing succeeds.
+- **Output handling:** Choose the output filename and destination. Apollo publishes the final file only after processing succeeds, adding a numbered suffix if the name is already in use.
 
 ## Requirements
 

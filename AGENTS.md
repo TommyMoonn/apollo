@@ -14,7 +14,7 @@ Never sacrifice correctness, input validation, data integrity, error handling, s
 
 ## Protect user data
 
-Treat source media and existing destination files as user-owned content. Preserve source files, reject input/output collisions and account for destinations reserved by queued jobs.
+Treat source media and existing destination files as user-owned content. Preserve source files and existing destinations. Repeated output names are allowed; publish under the next available numbered filename without overwriting.
 
 Use `MediaOutput` to validate destinations, manage temporary output and publish files without overwriting existing content. Publish results only after the process succeeds. If a job fails or is cancelled, remove only its own temporary output and keep existing files intact.
 
@@ -35,7 +35,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 - `src/main.rs` starts the native app. `src/app/` owns renderer-independent application state and route transitions.
 - `src/ui/` contains operation screens, queue and batch views, shared controls, layout, typography and themes. `src/ui/legacy/` hosts the egui application adapter, its editor state and feature coordination.
 - `src/media/` handles media intake, probing, tool discovery, stream models, child processes, output publication and progress parsing.
-- `src/queue/` handles queued requests, destination reservations, execution order and job state.
+- `src/queue/` handles queued requests, execution order and job state.
 - `src/audio_mix/`, `src/upscale/`, `src/remux/`, `src/audio_extract/` and `src/frame_capture/` contain editable drafts, operation requests, validation, command construction and execution. Frame Capture also handles frame indexing, previews and clipboard extraction. `src/app/frame_capture.rs` owns interactive editor state and worker settlement; `src/ui/legacy/frame_capture.rs` routes editor actions and uploads textures. Keep exact position, session identity and request generation separate from renderer resources.
 - `src/settings.rs` owns remembered-directory preferences and their JSON contract. The legacy preferences adapter owns eframe storage. `src/file_dialog.rs` handles native file dialogs; `src/app/dialogs.rs` builds requests and `src/ui/legacy/dialogs.rs` routes completions. `src/native.rs` owns window handles and shell folder actions. `src/progress_repaint.rs` coordinates repaints in response to progress updates.
 - `tests/` contains Rust integration tests, FFprobe fixtures, the optional tooling smoke check and Windows release acceptance support. Rust unit tests live alongside the implementation.
@@ -47,7 +47,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 
 `SourceSession` in `src/app/source.rs` owns source acceptance, worker settlement and session retirement. `MediaIntake` remains responsible for source identity, retained probe results and pending requests. Keep accepted source presentation and drafts intact until replacement succeeds. `src/app/batch.rs` owns batch setup, stable item identity, defaults, overrides, inspection settlement and atomic submission. `BatchInspectionOwner` manages probing and limits each active inspection session to two concurrent probes. Preserve request identity checks so results from an earlier request cannot replace the current source or batch state.
 
-`src/app/queue.rs` owns queue actions, edit transactions and active-job notifications. `src/app/editor.rs` holds the shared fixed-source typed editor. Keep native actions and editor presentation in the adapter. `MediaQueue` owns queued jobs, `JobId` values, destination reservations, source revalidation and sequential execution. Only Waiting jobs can be edited or reordered, subject to the queue run state. Keep batch insertion atomic. Preserve the difference between cancelling the current job, stopping after it and cancelling the queue. Batch setup remains temporary until the queue accepts the requests. Keep inclusion and item overrides separate from shared defaults, and keep batch presentation in the legacy adapter.
+`src/app/queue.rs` owns queue actions, edit transactions and active-job notifications. `src/app/editor.rs` holds the shared fixed-source typed editor. Keep native actions and editor presentation in the adapter. `MediaQueue` owns queued jobs, `JobId` values, source revalidation and sequential execution. Only Waiting jobs can be edited or reordered, subject to the queue run state. Keep batch insertion atomic. Preserve the difference between cancelling the current job, stopping after it and cancelling the queue. Batch setup remains temporary until the queue accepts the requests. Keep inclusion and item overrides separate from shared defaults, and keep batch presentation in the legacy adapter.
 
 `MediaExecution` manages processing and finalizes staged output for file-producing operations. Operation executors prepare validated requests and structured commands. `MediaProcess` manages child processes and diagnostics. Frame preview and clipboard extraction have their own owners in `src/frame_capture/`. Extend these execution paths instead of creating competing workers or output publishers.
 

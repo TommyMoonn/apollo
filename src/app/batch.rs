@@ -16,7 +16,7 @@ use crate::{
 };
 use std::{
     ops::{Deref, DerefMut},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -348,29 +348,8 @@ impl Application {
         let Some(batch) = self.batch_setup.as_ref() else {
             return false;
         };
-        let mut known = batch
-            .items
-            .iter()
-            .map(|item| normalized_source_key(&item.path))
-            .collect::<std::collections::HashSet<_>>();
-        let mut unique = Vec::new();
-        let mut duplicate_count = 0;
-        for path in paths {
-            if known.insert(normalized_source_key(&path)) {
-                unique.push(path);
-            } else {
-                duplicate_count += 1;
-            }
-        }
-        if unique.is_empty() {
-            if let Some(batch) = self.batch_setup.as_mut() {
-                batch.append_error = None;
-                batch.error = Some(duplicate_source_message(duplicate_count));
-            }
-            return false;
-        }
         let offset = batch.items.len();
-        let owner = match spawn(unique.clone()) {
+        let owner = match spawn(paths.clone()) {
             Ok(owner) => owner,
             Err(error) => {
                 if let Some(batch) = self.batch_setup.as_mut() {
@@ -381,9 +360,9 @@ impl Application {
         };
         let batch = self.batch_setup.as_mut().expect("batch remains active");
         batch.append_error = None;
-        let item_ids = (offset..offset + unique.len()).map(BatchItemId).collect();
+        let item_ids = (offset..offset + paths.len()).map(BatchItemId).collect();
         batch.items.extend(
-            unique
+            paths
                 .into_iter()
                 .enumerate()
                 .map(|(index, path)| BatchItem {
@@ -397,7 +376,7 @@ impl Application {
                     overridden: false,
                 }),
         );
-        batch.error = (duplicate_count > 0).then(|| duplicate_source_message(duplicate_count));
+        batch.error = None;
         self.batch_inspection = Some(BatchInspectionSession { owner, item_ids });
         true
     }
@@ -555,10 +534,6 @@ impl Application {
                     crate::queue::BatchEnqueueError::Item { index, error } => {
                         (source_ids.get(*index).copied(), error.to_string())
                     }
-                    crate::queue::BatchEnqueueError::DuplicateDestination { index, .. } => (
-                        source_ids.get(*index).copied(),
-                        "Output duplicates another included file.".to_owned(),
-                    ),
                     crate::queue::BatchEnqueueError::JobIdExhausted => (None, error.to_string()),
                 };
                 if let Some(index) = batch_id
@@ -803,28 +778,6 @@ pub(crate) fn refresh_batch_items(
                 );
             }
         }
-    }
-}
-
-// Input deduplication is path-based, not a destination reservation or file-version comparison.
-#[cfg(windows)]
-fn normalized_source_key(path: &Path) -> String {
-    std::fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .to_ascii_lowercase()
-}
-
-#[cfg(not(windows))]
-fn normalized_source_key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn duplicate_source_message(count: usize) -> String {
-    if count == 1 {
-        "Ignored 1 file that is already in this batch.".to_owned()
-    } else {
-        format!("Ignored {count} files that are already in this batch.")
     }
 }
 

@@ -448,12 +448,16 @@ fn show_identity(ui: &mut Ui, job: &QueuedJob) {
             .color(source_color),
         &job.media().path,
     );
+    let output = match job.state() {
+        QueueJobState::Completed { output } => output.as_path(),
+        _ => job.operation().output(),
+    };
     let _ = widgets::truncated_identity(
         ui,
-        RichText::new(format!("→ {}", file_name(job.operation().output())))
+        RichText::new(format!("→ {}", file_name(output)))
             .text_style(fonts::technical_text_style())
             .color(theme::SECONDARY_FAINT),
-        job.operation().output(),
+        output,
     );
 }
 
@@ -659,10 +663,9 @@ mod tests {
                     media.clone(),
                     QueuedOperation::Remux(RemuxRequest {
                         input: source.clone(),
-                        output: output.clone(),
+                        output,
                         container: MediaContainer::Matroska,
                     }),
-                    output,
                 )
             })
             .collect();
@@ -700,10 +703,9 @@ mod tests {
                     media,
                     QueuedOperation::Remux(RemuxRequest {
                         input: source,
-                        output: output.clone(),
+                        output,
                         container: MediaContainer::Matroska,
                     }),
-                    output,
                 )
             })
             .collect();
@@ -1053,7 +1055,7 @@ mod tests {
     fn populated_running_queue_retains_back_beside_process_controls() {
         let (directory, mut jobs) = waiting_jobs(6);
         jobs[0].set_state(QueueJobState::Running);
-        let completed_output = jobs[3].operation().output().to_path_buf();
+        let completed_output = directory.join("result (1).mkv");
         jobs[3].set_state(QueueJobState::Completed {
             output: completed_output,
         });
@@ -1079,8 +1081,12 @@ mod tests {
         let cancel_current = output_text_rect(&output, CANCEL_LABEL).unwrap();
         let stop = output_text_rect(&output, STOP_AFTER_CURRENT_LABEL).unwrap();
         let cancel_queue = output_text_rect(&output, CANCEL_QUEUE_LABEL).unwrap();
+        let published_name_visible = output_text_rect(&output, "→ result (1).mkv").is_some();
+        let requested_name_visible = output_text_rect(&output, "→ nice portal-4.mkv").is_some();
         output.textures_delta.clear();
 
+        assert!(published_name_visible);
+        assert!(!requested_name_visible);
         assert_eq!(back.top(), cancel_current.top());
         assert_eq!(cancel_current.top(), stop.top());
         assert_eq!(stop.top(), cancel_queue.top());
