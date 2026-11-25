@@ -83,6 +83,20 @@ impl Application {
         self.navigation
     }
 
+    pub(crate) fn navigation_revision(&self) -> u64 {
+        self.navigation_revision
+    }
+
+    fn set_navigation(&mut self, navigation: NavigationState) {
+        if self.navigation != navigation {
+            self.navigation_revision = self
+                .navigation_revision
+                .checked_add(1)
+                .expect("Apollo navigation revision space is exhausted");
+            self.navigation = navigation;
+        }
+    }
+
     pub fn active_operation(&self) -> Option<Operation> {
         match self.navigation {
             NavigationState::SourceWorkspace { active_operation } => Some(active_operation),
@@ -96,11 +110,11 @@ impl Application {
     }
 
     pub(crate) fn show_workspace(&mut self, active_operation: Operation) {
-        self.navigation = NavigationState::SourceWorkspace { active_operation };
+        self.set_navigation(NavigationState::SourceWorkspace { active_operation });
     }
 
     pub(crate) fn show_no_source(&mut self) {
-        self.navigation = NavigationState::NoSource;
+        self.set_navigation(NavigationState::NoSource);
     }
 
     pub(crate) fn enter_queue(&mut self) {
@@ -126,7 +140,7 @@ impl Application {
     }
 
     pub(crate) fn show_queue(&mut self, origin: QueueOrigin) {
-        self.navigation = NavigationState::Queue { origin };
+        self.set_navigation(NavigationState::Queue { origin });
     }
 
     pub(crate) fn queue_origin(&self) -> Option<QueueOrigin> {
@@ -158,7 +172,7 @@ impl Application {
     }
 
     pub(crate) fn enter_queue_edit(&mut self, origin: QueueEditOrigin) {
-        self.navigation = NavigationState::QueueEdit { origin };
+        self.set_navigation(NavigationState::QueueEdit { origin });
         self.queue_confirmation = None;
         self.operation_action_error = None;
     }
@@ -182,11 +196,11 @@ impl Application {
     }
 
     pub(crate) fn show_batch_setup(&mut self) {
-        self.navigation = NavigationState::BatchSetup;
+        self.set_navigation(NavigationState::BatchSetup);
     }
 
     pub(crate) fn show_batch_edit(&mut self) {
-        self.navigation = NavigationState::BatchEdit;
+        self.set_navigation(NavigationState::BatchEdit);
     }
 
     pub(crate) fn return_from_batch(&mut self, origin: BatchOrigin) {

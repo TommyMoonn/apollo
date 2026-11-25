@@ -1,6 +1,7 @@
 //! Renderer-independent application state. Native adapters coordinate the existing
 //! feature workflows until their dedicated owners are extracted.
 
+pub(crate) mod dialogs;
 pub(crate) mod discovery;
 mod navigation;
 pub(crate) mod source;
@@ -19,6 +20,8 @@ use crate::{
 #[derive(Default)]
 pub struct Application {
     navigation: NavigationState,
+    navigation_revision: u64,
+    pub(crate) settings: crate::settings::AppSettings,
     pub(crate) discovery: discovery::MediaToolsDiscovery,
     pub(crate) source: source::SourceSession,
     pub(crate) audio_mix_executor: AudioMixExecutor,
@@ -32,6 +35,13 @@ pub struct Application {
 }
 
 impl Application {
+    pub(crate) fn with_settings(settings: crate::settings::AppSettings) -> Self {
+        Self {
+            settings,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn media_operation_running(&self) -> bool {
         self.audio_mix_executor.is_running()
             || self.upscale_executor.is_running()

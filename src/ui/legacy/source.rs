@@ -8,8 +8,8 @@ use super::{
     ApolloApp, completion_wake,
     state::{FrameCaptureEditorState, FrameCaptureToolState},
 };
+use crate::app::dialogs::{DialogTarget, FileDialogRequest};
 use crate::app::{Operation, QueueEditOrigin, source::SourceSettlement};
-use crate::file_dialog::{DialogTarget, FileDialogRequest};
 use crate::media::intake::{MediaIntakeRequest, MediaLoadStart};
 #[cfg(test)]
 use crate::media::{model::MediaFile, probe::MediaProbeError};

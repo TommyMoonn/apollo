@@ -372,12 +372,25 @@ fn open_dialog_selected_path_starts_the_shared_intake_route() {
     let (directory, path) = temp_file("dialog-open-route");
     let mut app = app();
 
-    app.settle_file_dialog(FileDialogCompletion {
-        target: DialogTarget::MediaInput,
-        outcome: DialogOutcome::Selected(path.clone()),
+    let (wake_tx, wake_rx) = mpsc::channel();
+    let selected = path.clone();
+    app.file_dialog = FileDialogOwner::new_for_test(
+        move || {
+            let _ = wake_tx.send(());
+        },
+        move || Ok(move |_: &FileDialogRequest| Ok(Some(selected.clone()))),
+    );
+    app.start_file_dialog(FileDialogRequest::OpenSource {
+        initial_directory: None,
     });
-
+    wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    app.poll_file_dialog();
     assert_eq!(app.core.source.inspection_path(), Some(path.as_path()));
+    assert_eq!(
+        app.core.settings.source_directory(),
+        Some(directory.clone())
+    );
+    assert!(!app.file_dialog.is_pending());
     fs::remove_dir_all(directory).unwrap();
 }
 

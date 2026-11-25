@@ -1,12 +1,14 @@
 //! Remux integration for the legacy renderer. The operation domain owns the editable draft.
 
 use super::ApolloApp;
-use super::workflows::{open_folder, remux_output_dialog_request, shows_remux_lifecycle};
+use super::workflows::shows_remux_lifecycle;
 use crate::app::Operation;
+use crate::app::dialogs::OutputDraft;
 use crate::media::{
     error::{MediaError, MediaErrorKind},
     model::MediaFile,
 };
+use crate::native::open_folder;
 use crate::remux::{draft::RemuxDraft, execution::RemuxStartError};
 use crate::ui::remux::RemuxSelectionAction;
 use crate::ui::remux_progress::{RemuxLifecycleAction, RemuxLifecycleUiState};
@@ -148,7 +150,9 @@ impl ApolloApp {
                 let Some(session) = self.state.remux.as_ref() else {
                     return Ok(());
                 };
-                self.start_file_dialog(remux_output_dialog_request(session));
+                self.start_file_dialog(
+                    OutputDraft::Remux(&session.selection).request(session.session_id),
+                );
             }
             RemuxSelectionAction::QueueRequested => {
                 self.enqueue_from_ready_surface(Operation::Remux);

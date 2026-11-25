@@ -1,14 +1,14 @@
 use std::{
-    ffi::OsString,
     fmt,
     path::PathBuf,
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     thread,
 };
 
-use raw_window_handle::HasWindowHandle;
-#[cfg(target_os = "windows")]
-use raw_window_handle::RawWindowHandle;
+#[cfg(any(target_os = "windows", test))]
+use crate::app::dialogs::OutputFormat;
+use crate::app::dialogs::{DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogRequest};
+use crate::native::WindowOwner;
 
 #[cfg(target_os = "windows")]
 const MEDIA_FILTER_NAME: &str = "Video files";
@@ -19,55 +19,8 @@ const ALL_FILES_FILTER_NAME: &str = "All files";
 #[cfg(target_os = "windows")]
 const ALL_FILES_FILTER_PATTERN: &str = "*.*";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DialogTarget {
-    MediaInput,
-    BatchInput,
-    BatchAppend,
-    AudioMixOutput { session_id: u64 },
-    UpscaleOutput { session_id: u64 },
-    RemuxOutput { session_id: u64 },
-    AudioExtractOutput { session_id: u64 },
-    FrameCaptureOutput { session_id: u64 },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WindowOwner {
-    #[cfg(target_os = "windows")]
-    hwnd: isize,
-}
-
-impl WindowOwner {
-    pub(crate) fn from_window(window: &impl HasWindowHandle) -> Result<Self, String> {
-        let handle = window.window_handle().map_err(|error| error.to_string())?;
-        match handle.as_raw() {
-            #[cfg(target_os = "windows")]
-            RawWindowHandle::Win32(handle) => Ok(Self {
-                hwnd: handle.hwnd.get(),
-            }),
-            _ => Err("Apollo's native window handle is unavailable on this platform.".to_owned()),
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    pub(crate) const fn native_handle(self) -> isize {
-        self.hwnd
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutputFormat {
-    Mp4,
-    Mkv,
-    Mka,
-    M4a,
-    Flac,
-    Png,
-    Jpeg,
-}
-
+#[cfg(any(target_os = "windows", test))]
 impl OutputFormat {
-    #[cfg(any(target_os = "windows", test))]
     pub(crate) const fn extension(self) -> &'static str {
         match self {
             Self::Mp4 => "mp4",
@@ -93,7 +46,6 @@ impl OutputFormat {
         }
     }
 
-    #[cfg(any(target_os = "windows", test))]
     const fn filter_pattern(self) -> &'static str {
         match self {
             Self::Mp4 => "*.mp4",
@@ -105,52 +57,6 @@ impl OutputFormat {
             Self::Jpeg => "*.jpg",
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SaveDialogOptions {
-    pub(crate) initial_directory: Option<PathBuf>,
-    pub(crate) file_name: OsString,
-    pub(crate) format: OutputFormat,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FileDialogRequest {
-    OpenSource {
-        initial_directory: Option<PathBuf>,
-    },
-    OpenSources {
-        initial_directory: Option<PathBuf>,
-        target: DialogTarget,
-    },
-    SaveOutput {
-        target: DialogTarget,
-        options: SaveDialogOptions,
-    },
-}
-
-impl FileDialogRequest {
-    pub(crate) fn target(&self) -> DialogTarget {
-        match self {
-            Self::OpenSource { .. } => DialogTarget::MediaInput,
-            Self::OpenSources { target, .. } => *target,
-            Self::SaveOutput { target, .. } => *target,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DialogOutcome {
-    Selected(PathBuf),
-    SelectedMany(Vec<PathBuf>),
-    Cancelled,
-    Failed(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FileDialogCompletion {
-    pub(crate) target: DialogTarget,
-    pub(crate) outcome: DialogOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -401,8 +307,9 @@ mod native_windows {
 
     use super::{
         ALL_FILES_FILTER_NAME, ALL_FILES_FILTER_PATTERN, FileDialogRequest, MEDIA_FILTER_NAME,
-        MEDIA_FILTER_PATTERN, SaveDialogOptions, WindowOwner,
+        MEDIA_FILTER_PATTERN, WindowOwner,
     };
+    use crate::app::dialogs::SaveDialogOptions;
 
     struct ComApartment;
 
@@ -499,7 +406,8 @@ mod native_windows {
             )?;
             set_initial_folder_if_available(&dialog, initial_directory);
         }
-        let shown = unsafe { dialog.Show(Some(HWND(owner.hwnd as *mut core::ffi::c_void))) };
+        let shown =
+            unsafe { dialog.Show(Some(HWND(owner.native_handle() as *mut core::ffi::c_void))) };
         if let Err(error) = shown {
             if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
                 return Ok(None);
@@ -582,7 +490,7 @@ mod native_windows {
     }
 
     fn show(dialog: IFileDialog, owner: WindowOwner) -> Result<Option<PathBuf>> {
-        let owner = HWND(owner.hwnd as *mut core::ffi::c_void);
+        let owner = HWND(owner.native_handle() as *mut core::ffi::c_void);
         let shown = unsafe { dialog.Show(Some(owner)) };
         if let Err(error) = shown {
             if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
@@ -612,8 +520,10 @@ mod tests {
 
     use super::{
         DialogBackend, DialogOutcome, DialogTarget, FileDialogOwner, FileDialogRequest,
-        FileDialogStartError, OutputFormat, SaveDialogOptions,
+        FileDialogStartError, OutputFormat,
     };
+
+    use crate::app::dialogs::SaveDialogOptions;
 
     struct MultiSelectBackend(Vec<PathBuf>);
 

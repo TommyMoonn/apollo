@@ -1,12 +1,14 @@
 //! Upscale integration for the legacy renderer. The operation domain owns the editable draft.
 
 use super::ApolloApp;
-use super::workflows::{open_folder, shows_upscale_lifecycle, upscale_output_dialog_request};
+use super::workflows::shows_upscale_lifecycle;
 use crate::app::Operation;
+use crate::app::dialogs::OutputDraft;
 use crate::media::{
     error::{MediaError, MediaErrorKind},
     model::MediaFile,
 };
+use crate::native::open_folder;
 use crate::ui::upscale::UpscaleSelectionAction;
 use crate::ui::upscale_progress::{UpscaleLifecycleAction, UpscaleLifecycleUiState};
 use crate::ui::{
@@ -150,7 +152,7 @@ impl ApolloApp {
                 let Some(session) = self.state.upscale.as_ref() else {
                     return Ok(());
                 };
-                let request = upscale_output_dialog_request(session);
+                let request = OutputDraft::Upscale(&session.selection).request(session.session_id);
                 self.start_file_dialog(request);
             }
             UpscaleSelectionAction::QueueRequested => {

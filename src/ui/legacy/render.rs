@@ -1,11 +1,12 @@
 //! Root surface dispatch and egui rendering.
 
+use super::dialogs::editor_output_dialog_request;
 use std::time::Instant;
 
 use egui::{CentralPanel, Ui};
 
+use crate::app::dialogs::{DialogTarget, FileDialogRequest};
 use crate::app::{NavigationState, Operation, operation_workspace_visible};
-use crate::file_dialog::{DialogTarget, FileDialogRequest};
 use crate::frame_capture::clipboard::copy_frame_action_eligible;
 use crate::media::error::{MediaError, MediaErrorKind};
 use crate::queue::{QueueRunState, QueuedOperation};
@@ -31,8 +32,7 @@ use super::state::{
     QueueEditAction, frame_navigation_availability,
 };
 use super::workflows::{
-    batch_defaults_from_editor, editor_output_dialog_request, refresh_batch_items,
-    shows_frame_capture_lifecycle,
+    batch_defaults_from_editor, refresh_batch_items, shows_frame_capture_lifecycle,
 };
 use crate::app::discovery::MediaToolsState;
 

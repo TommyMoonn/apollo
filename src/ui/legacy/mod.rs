@@ -5,6 +5,8 @@ mod audio_mix;
 mod remux;
 mod upscale;
 
+mod dialogs;
+mod preferences;
 mod render;
 mod source;
 mod state;
@@ -14,11 +16,13 @@ use std::sync::mpsc::{self, Receiver};
 
 use egui::{Context, Ui};
 
+use crate::app::dialogs::InputDialogOrigin;
 use crate::app::{Application, discovery::MediaToolsState};
-use crate::file_dialog::{FileDialogOwner, WindowOwner};
+use crate::file_dialog::FileDialogOwner;
 use crate::frame_capture::clipboard::{CopyFrameExtractionOwner, CopyFrameWorker};
 use crate::frame_capture::frame_index::FrameIndexQueryOwner;
 use crate::frame_capture::preview::PreviewExtractionOwner;
+use crate::native::WindowOwner;
 use crate::progress_repaint::MediaProgressRepaintOwner;
 use crate::settings::AppSettings;
 use crate::ui::{fonts, theme};
@@ -47,7 +51,7 @@ pub struct ApolloApp {
     progress_repaint: MediaProgressRepaintOwner,
     file_dialog: FileDialogOwner,
     clipboard_owner: Option<isize>,
-    settings: AppSettings,
+    input_dialog_origin: Option<InputDialogOrigin>,
     egui_context: Context,
     tools_error_details_open: bool,
 }
@@ -73,7 +77,7 @@ impl ApolloApp {
         #[cfg(not(target_os = "windows"))]
         let clipboard_owner = None;
         let file_dialog = FileDialogOwner::new(completion_wake(&egui_context), native_window_owner);
-        let settings = AppSettings::load(creation_context.storage);
+        let settings = preferences::load(creation_context.storage);
         let mut app =
             Self::with_adapters(egui_context.clone(), file_dialog, clipboard_owner, settings);
         app.retry_media_tools();
@@ -88,7 +92,7 @@ impl ApolloApp {
     ) -> Self {
         let (queue_event_sender, queue_event_receiver) = mpsc::channel();
         Self {
-            core: Application::default(),
+            core: Application::with_settings(settings),
             state: LegacyEditorState::default(),
             queue_edit: None,
             batch_setup: None,
@@ -106,7 +110,7 @@ impl ApolloApp {
             progress_repaint: MediaProgressRepaintOwner::new(completion_wake(&egui_context)),
             file_dialog,
             clipboard_owner,
-            settings,
+            input_dialog_origin: None,
             egui_context,
             tools_error_details_open: false,
         }
@@ -153,7 +157,7 @@ impl eframe::App for ApolloApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        self.settings.save(storage);
+        preferences::save(&self.core.settings, storage);
     }
 }
 

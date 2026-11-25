@@ -1,15 +1,15 @@
 //! AudioExtract integration for the legacy renderer. The operation domain owns the editable draft.
 
 use super::ApolloApp;
-use super::workflows::{
-    audio_extract_output_dialog_request, open_folder, shows_audio_extract_lifecycle,
-};
+use super::workflows::shows_audio_extract_lifecycle;
 use crate::app::Operation;
+use crate::app::dialogs::OutputDraft;
 use crate::audio_extract::{draft::AudioExtractDraft, execution::AudioExtractStartError};
 use crate::media::{
     error::{MediaError, MediaErrorKind},
     model::MediaFile,
 };
+use crate::native::open_folder;
 use crate::ui::audio_extract::AudioExtractSelectionAction;
 use crate::ui::audio_extract_progress::{
     AudioExtractLifecycleAction, AudioExtractLifecycleUiState,
@@ -158,7 +158,9 @@ impl ApolloApp {
                 let Some(session) = self.state.audio_extract.as_ref() else {
                     return Ok(());
                 };
-                self.start_file_dialog(audio_extract_output_dialog_request(session));
+                self.start_file_dialog(
+                    OutputDraft::AudioExtract(&session.selection).request(session.session_id),
+                );
             }
             AudioExtractSelectionAction::QueueRequested => {
                 self.enqueue_from_ready_surface(Operation::AudioExtract);

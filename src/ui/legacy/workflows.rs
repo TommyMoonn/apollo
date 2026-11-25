@@ -1,46 +1,36 @@
 //! Existing feature actions and worker coordination. Extracted incrementally by their owning phases.
 
-use super::audio_extract::AudioExtractToolState;
-use super::audio_mix::AudioMixToolState;
-use super::remux::RemuxToolState;
-use super::upscale::UpscaleToolState;
-
-use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
 use std::time::Instant;
 
 use egui::{ColorImage, TextureOptions};
 
+use crate::app::dialogs::OutputDraft;
+use crate::app::dialogs::{DialogTarget, FileDialogRequest};
 use crate::app::{NavigationState, Operation, ProcessExecutionArbitration, QueueEditOrigin};
 use crate::audio_extract::draft::AudioExtractDraft;
 use crate::audio_extract::execution::AudioExtractExecutionState;
-use crate::audio_extract::model::AudioExtractFormat;
 use crate::audio_mix::draft::AudioMixDraft;
 use crate::audio_mix::execution::AudioMixExecutionState;
-use crate::audio_mix::model::{LoudnessNormalization, OutputContainer};
-use crate::file_dialog::{
-    DialogOutcome, DialogTarget, FileDialogCompletion, FileDialogRequest, FileDialogStartError,
-    OutputFormat, SaveDialogOptions,
-};
+use crate::audio_mix::model::LoudnessNormalization;
 use crate::frame_capture::clipboard::{CopyFrameError, CopyFrameRequest, CopyFrameWorker};
 use crate::frame_capture::draft::FrameCaptureDraft;
 use crate::frame_capture::execution::{FrameCaptureExecutionState, FrameCaptureStartError};
 use crate::frame_capture::frame_index::{
     FrameDirection, FrameIndexError, FrameIndexRequest, FrameIndexState, FrameNavigation,
 };
-use crate::frame_capture::model::{FrameCaptureFormat, FramePosition};
+use crate::frame_capture::model::FramePosition;
 use crate::frame_capture::preview::{
     PREVIEW_DEBOUNCE, PreviewExtractionError, PreviewImage, PreviewRequest, PreviewState,
 };
 use crate::media::batch::BatchInspectionOwner;
-use crate::media::container::MediaContainer;
 use crate::media::error::MediaError;
 use crate::media::model::MediaFile;
 use crate::media::process::{MediaProcessEvent, MediaProcessWake};
 use crate::media::tools::MediaTools;
+use crate::native::open_folder;
 use crate::queue::{
     JobId, QueueEnqueueError, QueueJobState, QueueRunState, QueuedOperation, WaitingJobMove,
 };
@@ -59,8 +49,8 @@ use crate::upscale::model::VideoCodec;
 use super::state::{
     BatchDefaults, BatchEditState, BatchEditTarget, BatchInspectionSession, BatchItem,
     BatchSetupState, BatchSourceState, FrameCaptureEditorState, FrameCaptureThumbnailLoad,
-    FrameCaptureToolState, FramePreviewDecode, FramePreviewTexture, LegacyEditorState,
-    OperationEditorState, PendingFrameStep, QueueEditState, QueueExecutionEvent,
+    FramePreviewDecode, FramePreviewTexture, OperationEditorState, PendingFrameStep,
+    QueueEditState, QueueExecutionEvent,
 };
 use super::{ApolloApp, completion_wake};
 
@@ -1381,7 +1371,9 @@ impl ApolloApp {
                 let Some(session) = self.state.frame_capture.as_ref() else {
                     return Ok(());
                 };
-                self.start_file_dialog(frame_capture_output_dialog_request(session));
+                self.start_file_dialog(
+                    OutputDraft::FrameCapture(&session.selection).request(session.session_id),
+                );
             }
             FrameCaptureSelectionAction::QueueRequested => {
                 self.enqueue_from_ready_surface(Operation::FrameCapture);
@@ -1474,403 +1466,6 @@ impl ApolloApp {
                     );
                 }
             }
-        }
-    }
-
-    pub(super) fn prepare_file_dialog_request(
-        &self,
-        mut request: FileDialogRequest,
-    ) -> FileDialogRequest {
-        match &mut request {
-            FileDialogRequest::OpenSource { initial_directory }
-            | FileDialogRequest::OpenSources {
-                initial_directory, ..
-            } => {
-                *initial_directory = self.settings.source_directory();
-            }
-            FileDialogRequest::SaveOutput { options, .. } => {
-                let source_fallback = options
-                    .initial_directory
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("."));
-                options.initial_directory = self.settings.output_directory(&source_fallback);
-            }
-        }
-        request
-    }
-
-    pub(super) fn start_file_dialog(&mut self, request: FileDialogRequest) {
-        let request = self.prepare_file_dialog_request(request);
-        let target = request.target();
-        if let Err(error) = self.file_dialog.request(request)
-            && !matches!(error, FileDialogStartError::AlreadyPending)
-        {
-            self.settle_file_dialog(FileDialogCompletion {
-                target,
-                outcome: DialogOutcome::Failed(error.to_string()),
-            });
-        }
-    }
-
-    pub(super) fn poll_file_dialog(&mut self) {
-        if let Some(completion) = self.file_dialog.poll() {
-            self.settle_file_dialog(completion);
-        }
-    }
-
-    pub(super) fn settle_file_dialog(&mut self, completion: FileDialogCompletion) {
-        if let DialogOutcome::Selected(path) = &completion.outcome {
-            match completion.target {
-                DialogTarget::MediaInput | DialogTarget::BatchInput | DialogTarget::BatchAppend => {
-                    self.settings.remember_source(path)
-                }
-                _ => self.settings.remember_output(path),
-            }
-        } else if let DialogOutcome::SelectedMany(paths) = &completion.outcome
-            && let Some(path) = paths.first()
-        {
-            self.settings.remember_source(path);
-        }
-        match (completion.target, completion.outcome) {
-            (_, DialogOutcome::Cancelled) => {}
-            (DialogTarget::MediaInput, DialogOutcome::Selected(path)) => {
-                self.load_media_path(&path);
-            }
-            (DialogTarget::BatchInput, DialogOutcome::Selected(path)) => {
-                self.start_batch_paths(vec![path]);
-            }
-            (DialogTarget::BatchInput, DialogOutcome::SelectedMany(paths)) => {
-                self.start_batch_paths(paths);
-            }
-            (DialogTarget::BatchAppend, DialogOutcome::Selected(path)) => {
-                self.append_batch_paths(vec![path]);
-            }
-            (DialogTarget::BatchAppend, DialogOutcome::SelectedMany(paths)) => {
-                self.append_batch_paths(paths);
-            }
-            (DialogTarget::BatchAppend, DialogOutcome::Failed(diagnostic)) => {
-                if let Some(batch) = self.batch_setup.as_mut() {
-                    batch.error = None;
-                    batch.append_error = Some(MediaError::file_picker_unavailable(diagnostic));
-                    batch.append_error_details_open = false;
-                }
-            }
-            (
-                DialogTarget::MediaInput | DialogTarget::BatchInput,
-                DialogOutcome::Failed(diagnostic),
-            ) => {
-                self.core
-                    .source
-                    .set_error(MediaError::file_picker_unavailable(diagnostic));
-                self.state.intake_error_details_open = false;
-            }
-            (target, outcome) => {
-                if let Some(edit) = self.queue_edit.as_mut() {
-                    settle_editor_output_file_dialog(
-                        Some(&mut edit.editor),
-                        target,
-                        outcome.clone(),
-                    );
-                }
-                if let Some(edit) = self.batch_edit.as_mut() {
-                    settle_editor_output_file_dialog(
-                        Some(&mut edit.editor),
-                        target,
-                        outcome.clone(),
-                    );
-                }
-                settle_output_file_dialog(
-                    &mut self.state,
-                    ToolExecutionStates {
-                        audio_mix: self.core.audio_mix_executor.state(),
-                        upscale: self.core.upscale_executor.state(),
-                        remux: self.core.remux_executor.state(),
-                        audio_extract: self.core.audio_extract_executor.state(),
-                        frame_capture: self.core.frame_capture_executor.state(),
-                    },
-                    target,
-                    outcome,
-                );
-            }
-        }
-    }
-}
-
-fn settle_editor_output_file_dialog(
-    edit: Option<&mut OperationEditorState>,
-    target: DialogTarget,
-    outcome: DialogOutcome,
-) {
-    let Some(edit) = edit else {
-        return;
-    };
-    let target_session_id = match target {
-        DialogTarget::MediaInput | DialogTarget::BatchInput | DialogTarget::BatchAppend => return,
-        DialogTarget::AudioMixOutput { session_id }
-        | DialogTarget::UpscaleOutput { session_id }
-        | DialogTarget::RemuxOutput { session_id }
-        | DialogTarget::AudioExtractOutput { session_id }
-        | DialogTarget::FrameCaptureOutput { session_id } => session_id,
-    };
-    if target_session_id != edit.session_id {
-        return;
-    }
-    match (target, outcome) {
-        (DialogTarget::AudioMixOutput { .. }, DialogOutcome::Selected(path)) => {
-            edit.audio_mix.set_custom_output_path(path);
-        }
-        (DialogTarget::UpscaleOutput { .. }, DialogOutcome::Selected(path)) => {
-            edit.upscale.set_custom_output_path(path);
-        }
-        (DialogTarget::RemuxOutput { .. }, DialogOutcome::Selected(path)) => {
-            edit.remux.set_custom_output_path(path);
-        }
-        (DialogTarget::AudioExtractOutput { .. }, DialogOutcome::Selected(path)) => {
-            edit.audio_extract.set_custom_output_path(path);
-        }
-        (DialogTarget::FrameCaptureOutput { .. }, DialogOutcome::Selected(path)) => {
-            edit.frame_capture.set_custom_output_path(path);
-        }
-        (_, DialogOutcome::Failed(diagnostic)) => {
-            edit.error = Some(MediaError::output_picker_unavailable(diagnostic));
-            edit.error_details_open = false;
-        }
-        (_, DialogOutcome::Cancelled) => {}
-        (DialogTarget::MediaInput | DialogTarget::BatchInput | DialogTarget::BatchAppend, _) => {}
-        (_, DialogOutcome::SelectedMany(_)) => {}
-    }
-}
-
-pub(super) struct ToolExecutionStates<'a> {
-    pub(super) audio_mix: &'a AudioMixExecutionState,
-    pub(super) upscale: &'a UpscaleExecutionState,
-    pub(super) remux: &'a RemuxExecutionState,
-    pub(super) audio_extract: &'a AudioExtractExecutionState,
-    pub(super) frame_capture: &'a FrameCaptureExecutionState,
-}
-
-pub(super) fn settle_output_file_dialog(
-    state: &mut LegacyEditorState,
-    execution: ToolExecutionStates<'_>,
-    target: DialogTarget,
-    outcome: DialogOutcome,
-) {
-    match (target, outcome) {
-        (DialogTarget::AudioMixOutput { session_id }, DialogOutcome::Selected(path))
-            if matches!(execution.audio_mix, AudioMixExecutionState::Idle) =>
-        {
-            if let Some(session) = state
-                .audio_mix
-                .as_mut()
-                .filter(|session| session.session_id == session_id)
-            {
-                session.selection.set_custom_output_path(path);
-                session.start_error = None;
-                session.start_error_details_open = false;
-            }
-        }
-        (DialogTarget::AudioMixOutput { session_id }, DialogOutcome::Failed(diagnostic))
-            if matches!(execution.audio_mix, AudioMixExecutionState::Idle) =>
-        {
-            if let Some(session) = state
-                .audio_mix
-                .as_mut()
-                .filter(|session| session.session_id == session_id)
-            {
-                session.start_error = Some(MediaError::output_picker_unavailable(diagnostic));
-                session.start_error_details_open = false;
-            }
-        }
-        (DialogTarget::UpscaleOutput { session_id }, DialogOutcome::Selected(path))
-            if matches!(execution.upscale, UpscaleExecutionState::Idle) =>
-        {
-            if let Some(session) = state
-                .upscale
-                .as_mut()
-                .filter(|session| session.session_id == session_id)
-            {
-                session.selection.set_custom_output_path(path);
-                session.start_error = None;
-                session.start_error_details_open = false;
-            }
-        }
-        (DialogTarget::UpscaleOutput { session_id }, DialogOutcome::Failed(diagnostic))
-            if matches!(execution.upscale, UpscaleExecutionState::Idle) =>
-        {
-            if let Some(session) = state
-                .upscale
-                .as_mut()
-                .filter(|session| session.session_id == session_id)
-            {
-                session.start_error = Some(MediaError::output_picker_unavailable(diagnostic));
-                session.start_error_details_open = false;
-            }
-        }
-        (DialogTarget::RemuxOutput { session_id }, DialogOutcome::Selected(path))
-            if matches!(execution.remux, RemuxExecutionState::Idle) =>
-        {
-            if let Some(session) = state
-                .remux
-                .as_mut()
-                .filter(|session| session.session_id == session_id)
-            {
-                session.selection.set_custom_output_path(path);
-                session.start_error = None;
-                session.start_error_details_open = false;
-            }
-        }
-        (DialogTarget::RemuxOutput { session_id }, DialogOutcome::Failed(diagnostic))
-            if matches!(execution.remux, RemuxExecutionState::Idle) =>
-        {
-            if let Some(session) = state
-                .remux
-                .as_mut()
-                .filter(|session| session.session_id == session_id)
-            {
-                session.start_error = Some(MediaError::output_picker_unavailable(diagnostic));
-                session.start_error_details_open = false;
-            }
-        }
-        (DialogTarget::AudioExtractOutput { session_id }, DialogOutcome::Selected(path))
-            if matches!(execution.audio_extract, AudioExtractExecutionState::Idle) =>
-        {
-            if let Some(session) = state
-                .audio_extract
-                .as_mut()
-                .filter(|session| session.session_id == session_id)
-            {
-                session.selection.set_custom_output_path(path);
-                session.start_error = None;
-                session.start_error_details_open = false;
-            }
-        }
-        (DialogTarget::AudioExtractOutput { session_id }, DialogOutcome::Failed(diagnostic))
-            if matches!(execution.audio_extract, AudioExtractExecutionState::Idle) =>
-        {
-            if let Some(session) = state
-                .audio_extract
-                .as_mut()
-                .filter(|session| session.session_id == session_id)
-            {
-                session.start_error = Some(MediaError::output_picker_unavailable(diagnostic));
-                session.start_error_details_open = false;
-            }
-        }
-        (DialogTarget::FrameCaptureOutput { session_id }, DialogOutcome::Selected(path))
-            if matches!(execution.frame_capture, FrameCaptureExecutionState::Idle) =>
-        {
-            if let Some(session) = state
-                .frame_capture
-                .as_mut()
-                .filter(|session| session.session_id == session_id)
-            {
-                session.selection.set_custom_output_path(path);
-                session.start_error = None;
-                session.start_error_details_open = false;
-            }
-        }
-        (DialogTarget::FrameCaptureOutput { session_id }, DialogOutcome::Failed(diagnostic))
-            if matches!(execution.frame_capture, FrameCaptureExecutionState::Idle) =>
-        {
-            if let Some(session) = state
-                .frame_capture
-                .as_mut()
-                .filter(|session| session.session_id == session_id)
-            {
-                session.start_error = Some(MediaError::output_picker_unavailable(diagnostic));
-                session.start_error_details_open = false;
-            }
-        }
-        _ => {}
-    }
-}
-
-fn save_dialog_options(output: &Path, format: OutputFormat) -> SaveDialogOptions {
-    let initial_directory = output
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-    let file_name = output.file_name().unwrap_or_default().to_os_string();
-    SaveDialogOptions {
-        initial_directory: Some(initial_directory),
-        file_name,
-        format,
-    }
-}
-
-fn output_dialog_request(
-    target: DialogTarget,
-    output: &Path,
-    format: OutputFormat,
-) -> FileDialogRequest {
-    FileDialogRequest::SaveOutput {
-        target,
-        options: save_dialog_options(output, format),
-    }
-}
-
-pub(super) fn editor_output_dialog_request(edit: &OperationEditorState) -> FileDialogRequest {
-    match edit.active_operation {
-        Operation::AudioMix => {
-            let format = match edit.audio_mix.container() {
-                OutputContainer::Mp4 => OutputFormat::Mp4,
-                OutputContainer::Mkv => OutputFormat::Mkv,
-            };
-            output_dialog_request(
-                DialogTarget::AudioMixOutput {
-                    session_id: edit.session_id,
-                },
-                &edit.audio_mix.output_path(),
-                format,
-            )
-        }
-        Operation::VideoUpscale => output_dialog_request(
-            DialogTarget::UpscaleOutput {
-                session_id: edit.session_id,
-            },
-            &edit.upscale.output_path(),
-            OutputFormat::Mp4,
-        ),
-        Operation::Remux => {
-            let format = match edit.remux.container() {
-                MediaContainer::Mp4 => OutputFormat::Mp4,
-                MediaContainer::Matroska => OutputFormat::Mkv,
-            };
-            output_dialog_request(
-                DialogTarget::RemuxOutput {
-                    session_id: edit.session_id,
-                },
-                &edit.remux.output_path(),
-                format,
-            )
-        }
-        Operation::AudioExtract => {
-            let format = match edit.audio_extract.format() {
-                AudioExtractFormat::Original => OutputFormat::Mka,
-                AudioExtractFormat::Aac => OutputFormat::M4a,
-                AudioExtractFormat::Flac => OutputFormat::Flac,
-            };
-            output_dialog_request(
-                DialogTarget::AudioExtractOutput {
-                    session_id: edit.session_id,
-                },
-                &edit.audio_extract.output_path(),
-                format,
-            )
-        }
-        Operation::FrameCapture => {
-            let format = match edit.frame_capture.format() {
-                FrameCaptureFormat::Png => OutputFormat::Png,
-                FrameCaptureFormat::Jpeg => OutputFormat::Jpeg,
-            };
-            output_dialog_request(
-                DialogTarget::FrameCaptureOutput {
-                    session_id: edit.session_id,
-                },
-                &edit.frame_capture.output_path(),
-                format,
-            )
         }
     }
 }
@@ -2068,77 +1663,6 @@ pub(super) fn refresh_batch_items(
     }
 }
 
-pub(super) fn audio_mix_output_dialog_request(session: &AudioMixToolState) -> FileDialogRequest {
-    let format = match session.selection.container() {
-        OutputContainer::Mp4 => OutputFormat::Mp4,
-        OutputContainer::Mkv => OutputFormat::Mkv,
-    };
-    output_dialog_request(
-        DialogTarget::AudioMixOutput {
-            session_id: session.session_id,
-        },
-        &session.selection.output_path(),
-        format,
-    )
-}
-
-pub(super) fn upscale_output_dialog_request(session: &UpscaleToolState) -> FileDialogRequest {
-    output_dialog_request(
-        DialogTarget::UpscaleOutput {
-            session_id: session.session_id,
-        },
-        &session.selection.output_path(),
-        OutputFormat::Mp4,
-    )
-}
-
-pub(super) fn remux_output_dialog_request(session: &RemuxToolState) -> FileDialogRequest {
-    let format = match session.selection.container() {
-        MediaContainer::Mp4 => OutputFormat::Mp4,
-        MediaContainer::Matroska => OutputFormat::Mkv,
-    };
-    output_dialog_request(
-        DialogTarget::RemuxOutput {
-            session_id: session.session_id,
-        },
-        &session.selection.output_path(),
-        format,
-    )
-}
-
-pub(super) fn audio_extract_output_dialog_request(
-    session: &AudioExtractToolState,
-) -> FileDialogRequest {
-    let format = match session.selection.format() {
-        AudioExtractFormat::Original => OutputFormat::Mka,
-        AudioExtractFormat::Aac => OutputFormat::M4a,
-        AudioExtractFormat::Flac => OutputFormat::Flac,
-    };
-    output_dialog_request(
-        DialogTarget::AudioExtractOutput {
-            session_id: session.session_id,
-        },
-        &session.selection.output_path(),
-        format,
-    )
-}
-
-pub(super) fn frame_capture_output_dialog_request(
-    session: &FrameCaptureToolState,
-) -> FileDialogRequest {
-    let format = match session.selection.format() {
-        FrameCaptureFormat::Png => OutputFormat::Png,
-        FrameCaptureFormat::Jpeg => OutputFormat::Jpeg,
-    };
-    output_dialog_request(
-        DialogTarget::FrameCaptureOutput {
-            session_id: session.session_id,
-        },
-        &session.selection.output_path(),
-        format,
-    )
-}
-
 pub(super) fn shows_audio_mix_lifecycle(state: &AudioMixExecutionState) -> bool {
     !matches!(state, AudioMixExecutionState::Idle)
 }
@@ -2213,29 +1737,6 @@ fn duplicate_source_message(count: usize) -> String {
         "Ignored 1 file that is already in this batch.".to_owned()
     } else {
         format!("Ignored {count} files that are already in this batch.")
-    }
-}
-
-pub(super) fn open_folder(path: &Path) -> io::Result<()> {
-    #[cfg(target_os = "windows")]
-    let mut command = Command::new("explorer");
-    #[cfg(target_os = "macos")]
-    let mut command = Command::new("open");
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = Command::new("xdg-open");
-
-    #[cfg(any(target_os = "windows", target_os = "macos", unix))]
-    {
-        command.arg(path).spawn().map(|_| ())
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
-    {
-        let _ = path;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "opening folders is not supported on this platform",
-        ))
     }
 }
 

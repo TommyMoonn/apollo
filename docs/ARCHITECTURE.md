@@ -12,14 +12,15 @@ This guide describes the egui implementation in the current checkout.
 | Area | Responsibility |
 | --- | --- |
 | `src/main.rs` | Native entry point and window configuration. |
-| `src/app/` | `Application`: renderer-independent route state, media-tool discovery, source intake, queue and immediate executors. |
+| `src/app/` | `Application`: renderer-independent route state, dialog requests, preferences, media-tool discovery, source intake, queue and immediate executors. |
 | `src/ui/legacy/` | `ApolloApp`: egui composition, ordered background updates, renderer-dependent editors and existing feature actions. |
 | `src/ui/` | Operation views, shared widgets, queue and batch views, layout, themes and typography. |
 | `src/media/` | Source inspection, media models, tool discovery, process lifecycle, progress and output publication. |
 | `src/queue/` | Queued requests, destination reservations, job identity and execution order. |
 | `src/audio_mix/`, `src/upscale/`, `src/remux/`, `src/audio_extract/`, `src/frame_capture/` | Operation requests, validation, command construction and execution. |
-| `src/settings.rs` | Remembers source and output directories using eframe storage (`apollo.settings.v1`). |
-| `src/file_dialog.rs`, `src/progress_repaint.rs` | Native file selection and callback-based progress notifications. |
+| `src/settings.rs` | Typed remembered-directory preferences, JSON conversion and fallback policy. |
+| `src/file_dialog.rs`, `src/native.rs` | Native dialog service, parent window handles and shell folder actions. |
+| `src/progress_repaint.rs` | Callback-based progress notifications. |
 
 The library exports the application core and UI modules through `src/lib.rs`. The native binary configures the window and constructs the egui adapter, which owns exactly one core. The core does not import UI or native adapters. Keep operation policy in its domain module and use the shared media and queue owners. Views display state and collect input; repainting must not start probes or processing.
 
@@ -27,7 +28,7 @@ The library exports the application core and UI modules through `src/lib.rs`. Th
 
 `src/app/navigation.rs` owns `Operation`, routes and return origins for queue and batch flows. Route transitions do not require an egui context. The adapter commits these transitions after the existing source, editor and queue actions succeed; it retains renderer-dependent editor presentation and worker coordination. Queue return and batch submission preserve the original source operation. Queue history changes remain with `MediaQueue`.
 
-`src/ui/legacy/mod.rs` constructs the application, installs the existing font and theme definitions and coordinates background updates and shutdown. `render.rs` dispatches the active route and draws the shell. `source.rs` handles source actions and presentation settlement. The four ordinary operation adapters (`audio_mix.rs`, `upscale.rs`, `remux.rs` and `audio_extract.rs`) own their ready surfaces, immediate actions and lifecycle feedback. `workflows.rs` retains queue, batch, dialog and frame support coordination; `state.rs` retains editor and worker state that still depends on egui.
+`src/ui/legacy/mod.rs` constructs the application, installs the existing font and theme definitions and coordinates background updates and shutdown. `render.rs` dispatches the active route and draws the shell. `source.rs` handles source actions and presentation settlement. The four ordinary operation adapters (`audio_mix.rs`, `upscale.rs`, `remux.rs` and `audio_extract.rs`) own their ready surfaces, immediate actions and lifecycle feedback. `dialogs.rs` routes native completions; `workflows.rs` retains queue, batch and frame support coordination; `state.rs` retains editor and worker state that still depends on egui.
 
 Each root update first polls media-tool discovery and queue events. While base tools are checking or unavailable, it renders that status and returns. Once ready, the update polls dialogs, source inspection, batch inspection, frame preview, frame index, clipboard and thumbnails in that order before handling drops and rendering the active route. Shutdown cancels clipboard work and the queue; owned resources retain their existing cleanup.
 
@@ -44,6 +45,12 @@ The legacy source adapter builds one immutable `SourcePresentation` after accept
 5. `MediaOutput` checks the destination, owns temporary output and publishes it only after successful processing. Failed or cancelled jobs clean up their own temporary output without overwriting the input or an existing destination.
 
 Pass process arguments separately instead of constructing shell commands. Map streams by their probed indexes. Preserve request identity, cancellation and completion routing when adding background work. Frame Capture also has dedicated frame-index, preview and clipboard workers under `src/frame_capture/`; clipboard extraction does not publish a file.
+
+## Native dialogs and preferences
+
+`FileDialogOwner` owns the single pending request, Windows COM dialog service, completion callback and cancellation result. `src/native.rs` supplies the parent window handle (also used by clipboard operations) and native folder opening. `src/app/dialogs.rs` prepares input directories and builds output requests from typed drafts. The legacy dialog adapter routes results to the initiating source, batch or editor. Input requests capture the navigation revision and accepted source identifier; a retired context cannot receive a result even after returning to the same route. Output results target one operation and session, and only accepted selections update the remembered directory. Cancellation, errors and stale results do not change preferences.
+
+`Application` owns `AppSettings`. `src/settings.rs` contains the existing JSON fields and directory fallback policy without eframe dependencies. `src/ui/legacy/preferences.rs` alone reads and writes the `apollo.settings.v1` eframe storage key at the existing persistence location. Missing or malformed values load defaults, unavailable directories fall back without discarding the saved value, and unchanged preferences are not rewritten. Source selections remember the selected directory even if subsequent media inspection fails.
 
 ## Operation contracts
 

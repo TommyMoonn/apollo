@@ -38,6 +38,8 @@ Unit tests live alongside the Rust implementation. Integration tests live under 
 
 Operation draft tests live under each operation’s `draft.rs`; they cover typed request construction, defaults, hydration, output naming and readiness. Form interaction and feedback tests remain in `src/ui/`. The legacy adapter tests exercise normal, queue and batch submission using independent draft snapshots. Queue state, intake identity, output publication, process lifecycle, UI state and settings also have unit tests. The application core has renderer-independent navigation, media-tool discovery and source-session tests. Source inspection tests use completion notifications and existing FFprobe fixtures; the legacy adapter tests retain source replacement, picker cancellation, drag/drop and draft retention coverage. The legacy adapter tests cover editor return flows, root update behavior and pending encoder capability presentation. Choose the module or integration target that owns the behavior.
 
+Dialog request tests exercise the typed draft formats in `src/app/dialogs/`. Native dialog service tests cover single-flight ownership, cancellation and worker notifications. Legacy dialog tests cover target routing, stale completions and directory history; settings tests cover JSON compatibility, defaults and directory fallback. The eframe preferences adapter has a storage round-trip regression that also checks unchanged values remain intact.
+
 ```powershell
 cargo test --locked --test remux
 cargo test --locked --lib queue::

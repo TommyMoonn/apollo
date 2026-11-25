@@ -1,13 +1,15 @@
 //! AudioMix integration for the legacy renderer. The operation domain owns the editable draft.
 
 use super::ApolloApp;
-use super::workflows::{audio_mix_output_dialog_request, open_folder, shows_audio_mix_lifecycle};
+use super::workflows::shows_audio_mix_lifecycle;
 use crate::app::Operation;
+use crate::app::dialogs::OutputDraft;
 use crate::audio_mix::{draft::AudioMixDraft, execution::AudioMixStartError};
 use crate::media::{
     error::{MediaError, MediaErrorKind},
     model::MediaFile,
 };
+use crate::native::open_folder;
 use crate::ui::audio_mix::AudioMixSelectionAction;
 use crate::ui::audio_mix_progress::{AudioMixLifecycleAction, AudioMixLifecycleUiState};
 use crate::ui::{
@@ -151,7 +153,7 @@ impl ApolloApp {
                 let Some(session) = self.state.audio_mix.as_ref() else {
                     return Ok(());
                 };
-                let request = audio_mix_output_dialog_request(session);
+                let request = OutputDraft::AudioMix(&session.selection).request(session.session_id);
                 self.start_file_dialog(request);
             }
             AudioMixSelectionAction::QueueRequested => {

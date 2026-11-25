@@ -37,7 +37,7 @@ Use the Rust toolchain selected by `rust-toolchain.toml` and run Cargo with `--l
 - `src/media/` handles media intake, probing, tool discovery, stream models, child processes, output publication and progress parsing.
 - `src/queue/` handles queued requests, destination reservations, execution order and job state.
 - `src/audio_mix/`, `src/upscale/`, `src/remux/`, `src/audio_extract/` and `src/frame_capture/` contain editable drafts, operation requests, validation, command construction and execution. Frame Capture also handles frame indexing, previews and clipboard extraction.
-- `src/settings.rs` persists remembered source and output directories. `src/file_dialog.rs` handles native file dialogs. `src/progress_repaint.rs` coordinates repaints in response to progress updates.
+- `src/settings.rs` owns remembered-directory preferences and their JSON contract. The legacy preferences adapter owns eframe storage. `src/file_dialog.rs` handles native file dialogs; `src/app/dialogs.rs` builds requests and `src/ui/legacy/dialogs.rs` routes completions. `src/native.rs` owns window handles and shell folder actions. `src/progress_repaint.rs` coordinates repaints in response to progress updates.
 - `tests/` contains Rust integration tests, FFprobe fixtures, the optional tooling smoke check and Windows release acceptance support. Rust unit tests live alongside the implementation.
 - `scripts/` contains repository and release tooling. `distribution/` contains media-tool version pins and acceptance records. `installer/` contains Windows installer sources. `docs/` contains engineering guides.
 

@@ -2,8 +2,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const STORAGE_KEY: &str = "apollo.settings.v1";
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AppSettings {
     last_source_directory: Option<PathBuf>,
@@ -11,17 +9,14 @@ pub(crate) struct AppSettings {
 }
 
 impl AppSettings {
-    pub(crate) fn load(storage: Option<&dyn eframe::Storage>) -> Self {
-        storage
-            .and_then(|storage| storage.get_string(STORAGE_KEY))
-            .and_then(|serialized| serde_json::from_str(&serialized).ok())
+    pub(crate) fn from_serialized(serialized: Option<&str>) -> Self {
+        serialized
+            .and_then(|value| serde_json::from_str(value).ok())
             .unwrap_or_default()
     }
 
-    pub(crate) fn save(&self, storage: &mut dyn eframe::Storage) {
-        if let Ok(serialized) = serde_json::to_string(self) {
-            storage.set_string(STORAGE_KEY, serialized);
-        }
+    pub(crate) fn to_serialized(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
     }
 
     pub(crate) fn source_directory(&self) -> Option<PathBuf> {
@@ -49,36 +44,14 @@ fn existing_directory(path: Option<&Path>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
         fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use eframe::Storage;
-
-    use super::{AppSettings, STORAGE_KEY};
+    use super::AppSettings;
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
-
-    #[derive(Default)]
-    struct MemoryStorage(HashMap<String, String>);
-
-    impl eframe::Storage for MemoryStorage {
-        fn get_string(&self, key: &str) -> Option<String> {
-            self.0.get(key).cloned()
-        }
-
-        fn set_string(&mut self, key: &str, value: String) {
-            self.0.insert(key.to_owned(), value);
-        }
-
-        fn remove_string(&mut self, key: &str) {
-            self.0.remove(key);
-        }
-
-        fn flush(&mut self) {}
-    }
 
     fn temp_directory(name: &str) -> PathBuf {
         let directory = std::env::temp_dir().join(format!(
@@ -99,9 +72,20 @@ mod tests {
         settings.remember_source(&source.join("clip.mp4"));
         settings.remember_output(&output.join("clip.mkv"));
 
-        let mut storage = MemoryStorage::default();
-        settings.save(&mut storage);
-        let restored = AppSettings::load(Some(&storage));
+        let serialized = settings.to_serialized().unwrap();
+        let restored = AppSettings::from_serialized(Some(&serialized));
+        let legacy = serde_json::json!({
+            "last_source_directory": source,
+            "last_output_directory": output,
+        });
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&serialized).unwrap(),
+            legacy
+        );
+        assert_eq!(
+            AppSettings::from_serialized(Some(&legacy.to_string())),
+            settings
+        );
 
         assert_eq!(restored.source_directory(), Some(source.clone()));
         assert_eq!(restored.output_directory(&source), Some(output.clone()));
@@ -126,9 +110,13 @@ mod tests {
 
     #[test]
     fn invalid_persisted_data_uses_clean_defaults() {
-        let mut storage = MemoryStorage::default();
-        storage.set_string(STORAGE_KEY, "not json".to_owned());
-
-        assert_eq!(AppSettings::load(Some(&storage)), AppSettings::default());
+        for value in [
+            None,
+            Some("not json"),
+            Some("{}"),
+            Some(r#"{"last_source_directory":42}"#),
+        ] {
+            assert_eq!(AppSettings::from_serialized(value), AppSettings::default());
+        }
     }
 }
