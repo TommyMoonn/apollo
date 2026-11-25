@@ -40,6 +40,7 @@ impl ApolloApp {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn resolve_queue_cancellation(&mut self, confirmed: bool) {
         if !std::mem::take(&mut self.confirm_cancel_queue) {
             return;

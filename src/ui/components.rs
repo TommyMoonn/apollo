@@ -230,19 +230,24 @@ fn label_width(
     alternatives: &[&str],
     padding: f32,
 ) -> Pixels {
-    let typography = TextRole::Control.resolve();
     reserve_label_width(label, alternatives, padding, |label| {
-        let run = TextRun {
-            len: label.len(),
-            font: typography.font(),
-            color: rgba(Palette::DARK.foreground).into(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        text.layout_line(label, px(typography.size), &[run], None)
-            .width
+        text_width(text, TextRole::Control, label)
     })
+}
+
+pub(super) fn text_width(text: &WindowTextSystem, role: TextRole, label: &str) -> Pixels {
+    let typography = role.resolve();
+    let run = TextRun {
+        len: label.len(),
+        font: typography.font(),
+        color: rgba(Palette::DARK.foreground).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    text.layout_line(label, px(typography.size), &[run], None)
+        .width
+        .ceil()
 }
 
 fn reserve_label_width(
@@ -508,6 +513,27 @@ pub fn action_bar(palette: Palette, actions: impl IntoIterator<Item = Stateful<D
                 .gap(px(M.action_gap))
                 .children(actions),
         )
+}
+
+pub(super) struct PathTooltip(pub String, pub Palette);
+
+impl gpui::Render for PathTooltip {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .max_w(px(340.))
+            .p(px(M.compact))
+            .rounded(px(M.radius))
+            .bg(rgba(self.1.background))
+            .border(px(M.rule))
+            .border_color(rgba(self.1.border()))
+            .child(
+                TextRole::Secondary
+                    .apply(div())
+                    .text_color(rgba(self.1.secondary()))
+                    .whitespace_normal()
+                    .child(self.0.clone()),
+            )
+    }
 }
 
 #[cfg(test)]

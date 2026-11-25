@@ -1,764 +1,69 @@
-use std::{cell::Cell, path::Path};
+//! Queue presentation derived directly from the scheduler's retained records.
 
-use egui::{Align, Label, Layout, Rect, RichText, Sense, Sides, TextStyle, Ui, UiBuilder, vec2};
+#[cfg(any(windows, test))]
+use crate::queue::{QueueJobState, QueuedJob};
+#[cfg(any(windows, test))]
+use std::path::Path;
 
-use crate::{
-    media::progress::MediaProgress,
-    queue::{JobId, QueueJobState, QueueRunState, QueuedJob, QueuedOperation},
-};
-
-use super::{fonts, layout, media_lifecycle, theme, widgets};
-use crate::app::QueueAction;
-
-const TITLE: &str = "Queue";
-const ADD_FILES_LABEL: &str = "Add files";
-const START_LABEL: &str = "Start queue";
-const CANCEL_LABEL: &str = "Cancel job";
-const STOP_AFTER_CURRENT_LABEL: &str = "Stop after current";
-const STOP_QUEUE_LABEL: &str = "Stop queue";
-const CANCEL_QUEUE_LABEL: &str = "Cancel queue";
-const STOPPING_LABEL: &str = "Stopping after current";
-const EDIT_LABEL: &str = "Edit settings";
-const MOVE_EARLIER_LABEL: &str = "↑";
-const MOVE_LATER_LABEL: &str = "↓";
-const MOVE_EARLIER_HELP: &str = "Move up";
-const MOVE_LATER_HELP: &str = "Move down";
-const RETRY_LABEL: &str = "Retry";
-const REMOVE_LABEL: &str = "Remove";
-const CLEAR_LABEL: &str = "Clear finished";
-const BACK_LABEL: &str = "Back";
-const OPEN_FOLDER_LABEL: &str = "Open folder";
-const PREVIEW_LABEL: &str = "Preview";
-const DETAILS_LABEL: &str = "Details";
-
-#[derive(Debug, Clone, Copy)]
-pub struct QueueAvailability<'a> {
-    pub can_start: bool,
-    pub waiting_for_encoder_discovery: bool,
-    pub can_add_files: bool,
-    pub can_edit: bool,
-    pub action_error: Option<&'a str>,
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Section {
+    Processing,
+    Waiting,
+    Finished,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct QueueCapabilities {
-    has_waiting: bool,
-    has_terminal: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct QueueSummary {
-    running: usize,
-    waiting: usize,
-    completed: usize,
-    failed: usize,
-    cancelled: usize,
-}
-
-struct QueueRowContext<'a> {
-    move_capabilities: &'a [WaitingMoveCapability],
-    active_job: Option<JobId>,
-    active_progress: Option<&'a MediaProgress>,
-    cancellation_pending: bool,
-    plan: layout::QueueRowPlan,
-    can_edit: bool,
-    action: &'a Cell<QueueAction>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct WaitingMoveCapability {
-    earlier: bool,
-    later: bool,
-}
-
-impl QueueSummary {
-    fn from_jobs(jobs: &[QueuedJob]) -> Self {
-        let mut summary = Self::default();
-        for job in jobs {
-            match job.state() {
-                QueueJobState::Waiting => summary.waiting += 1,
-                QueueJobState::Running { .. } => summary.running += 1,
-                QueueJobState::Completed { .. } => summary.completed += 1,
-                QueueJobState::Failed(_) => summary.failed += 1,
-                QueueJobState::Cancelled => summary.cancelled += 1,
-            }
-        }
-        summary
-    }
-
-    fn copy(self) -> String {
-        let mut parts = Vec::new();
-        if self.running > 0 {
-            parts.push(format!("{} running", self.running));
-        }
-        if self.waiting > 0 {
-            parts.push(format!("{} waiting", self.waiting));
-        }
-        if self.completed > 0 {
-            parts.push(format!("{} completed", self.completed));
-        }
-        if self.failed > 0 {
-            parts.push(format!("{} failed", self.failed));
-        }
-        if self.cancelled > 0 {
-            parts.push(format!("{} cancelled", self.cancelled));
-        }
-        if parts.is_empty() {
-            "0 jobs".to_owned()
-        } else {
-            parts.join(" · ")
-        }
-    }
-}
-
-impl QueueCapabilities {
-    fn from_jobs(jobs: &[QueuedJob]) -> Self {
-        Self {
-            has_waiting: jobs
-                .iter()
-                .any(|job| matches!(job.state(), QueueJobState::Waiting)),
-            has_terminal: jobs.iter().any(|job| job.state().is_terminal()),
-        }
-    }
-}
-
-pub fn show(
-    ui: &mut Ui,
-    jobs: &[QueuedJob],
-    active_job: Option<JobId>,
-    active_progress: Option<&MediaProgress>,
-    run_state: QueueRunState,
-    availability: QueueAvailability<'_>,
-    cancellation_pending: bool,
-) -> QueueAction {
-    let queue_start_allowed = availability.can_start;
-    let action = Cell::new(QueueAction::None);
-    let capabilities = QueueCapabilities::from_jobs(jobs);
-    let summary = QueueSummary::from_jobs(jobs);
-    let action_rows = queue_action_rows(ui, active_job, capabilities.has_waiting, run_state);
-    let edit_allowed =
-        availability.can_edit && run_state == QueueRunState::Stopped && active_job.is_none();
-    let action_width = row_action_width(ui);
-    let operation_width = crate::app::Operation::ALL
-        .into_iter()
-        .map(|op| text_width(ui, op.label(), TextStyle::Small))
-        .fold(0.0, f32::max)
-        .ceil();
-    let state_width = state_group_width(ui);
-    let row_height = (ui.text_style_height(&TextStyle::Body)
-        + ui.text_style_height(&fonts::technical_text_style())
-        + theme::SPACING.tight)
-        .max(theme::COMPACT_CONTROL_HEIGHT.max(ui.text_style_height(&TextStyle::Button)));
-
-    layout::operation_surface_with_action_rows(
-        ui,
-        action_rows,
-        |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            show_header(
-                ui,
-                &summary.copy(),
-                capabilities.has_terminal,
-                availability.can_add_files,
-                &action,
-            );
-            ui.add_space(theme::SPACING.related);
-            if let Some(error) = availability.action_error {
-                ui.label(error);
-                ui.add_space(theme::SPACING.compact);
-            }
-            if capabilities.has_waiting && !edit_allowed {
-                let guidance = match run_state {
-                    QueueRunState::Running => "Stop after current to edit waiting jobs.",
-                    QueueRunState::StoppingAfterCurrent | QueueRunState::Stopped => {
-                        "Wait for the active job to finish before editing settings."
-                    }
-                };
-                ui.label(guidance);
-                ui.add_space(theme::SPACING.compact);
-            }
-            if active_job.is_none() && availability.waiting_for_encoder_discovery {
-                ui.label("Checking NVIDIA NVENC…");
-                ui.add_space(theme::SPACING.compact);
-            }
-
-            if !jobs.is_empty() {
-                let row_plan = layout::queue_row_plan(
-                    ui.available_width(),
-                    operation_width,
-                    state_width,
-                    action_width,
-                    row_height,
-                );
-                let move_capabilities = waiting_move_capabilities(jobs);
-                let row_context = QueueRowContext {
-                    move_capabilities: &move_capabilities,
-                    active_job,
-                    active_progress,
-                    cancellation_pending,
-                    plan: row_plan,
-                    can_edit: edit_allowed,
-                    action: &action,
-                };
-                if matches!(row_plan.layout, layout::QueueRowLayout::Inline) {
-                    show_column_guide(ui, row_plan);
-                    ui.add_space(theme::SPACING.tight);
-                }
-                for (index, job) in jobs.iter().enumerate() {
-                    widgets::separator(ui);
-                    ui.add_space(theme::SPACING.compact);
-                    ui.push_id(job.id().get(), |ui| {
-                        show_job_row(ui, index, job, &row_context)
-                    });
-                    ui.add_space(theme::SPACING.compact);
-                }
-                widgets::separator(ui);
-            }
-        },
-        |ui| {
-            if action_rows == 1 {
-                show_queue_footer(
-                    ui,
-                    active_job,
-                    run_state,
-                    capabilities,
-                    queue_start_allowed,
-                    cancellation_pending,
-                    &action,
-                );
-            } else {
-                ui.allocate_ui_with_layout(
-                    vec2(ui.available_width(), theme::PRIMARY_CONTROL_HEIGHT),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        if widgets::secondary_button(ui, BACK_LABEL).clicked() {
-                            action.set(QueueAction::Back);
-                        }
-                    },
-                );
-                ui.add_space(theme::SPACING.compact);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    show_queue_controls(
-                        ui,
-                        active_job,
-                        run_state,
-                        capabilities,
-                        queue_start_allowed,
-                        cancellation_pending,
-                        &action,
-                    );
-                });
-            }
-        },
-    );
-
-    action.get()
-}
-
-fn queue_action_rows(
-    ui: &Ui,
-    active_job: Option<JobId>,
-    has_waiting: bool,
-    run_state: QueueRunState,
-) -> usize {
-    let labels: &[&str] = if active_job.is_some() {
-        &[CANCEL_LABEL, STOPPING_LABEL, CANCEL_QUEUE_LABEL, BACK_LABEL]
-    } else if has_waiting && run_state == QueueRunState::Running {
-        &[STOP_QUEUE_LABEL, CANCEL_QUEUE_LABEL, BACK_LABEL]
-    } else if has_waiting {
-        &[START_LABEL, CANCEL_QUEUE_LABEL, BACK_LABEL]
-    } else {
-        return 1;
-    };
-    let widths: Vec<_> = labels
-        .iter()
-        .map(|label| widgets::mode_button_intrinsic_size(ui, label).x)
-        .collect();
-    let content_width = (ui.available_width() - f32::from(layout::CONTENT_PADDING) * 2.0).max(0.0);
-    if matches!(
-        layout::action_layout(content_width, &widths),
-        layout::ActionLayout::Horizontal
-    ) {
-        1
-    } else {
-        2
-    }
-}
-
-fn show_queue_footer(
-    ui: &mut Ui,
-    active_job: Option<JobId>,
-    run_state: QueueRunState,
-    capabilities: QueueCapabilities,
-    queue_start_allowed: bool,
-    cancellation_pending: bool,
-    action: &Cell<QueueAction>,
-) {
-    Sides::new().shrink_left().show(
-        ui,
-        |ui| {
-            if widgets::secondary_button(ui, BACK_LABEL).clicked() {
-                action.set(QueueAction::Back);
-            }
-        },
-        |ui| {
-            ui.spacing_mut().item_spacing.x = theme::FOOTER_ACTION_GAP;
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                show_queue_controls(
-                    ui,
-                    active_job,
-                    run_state,
-                    capabilities,
-                    queue_start_allowed,
-                    cancellation_pending,
-                    action,
-                );
-            });
-        },
-    );
-}
-
-fn show_queue_controls(
-    ui: &mut Ui,
-    active_job: Option<JobId>,
-    run_state: QueueRunState,
-    capabilities: QueueCapabilities,
-    queue_start_allowed: bool,
-    cancellation_pending: bool,
-    action: &Cell<QueueAction>,
-) {
-    if active_job.is_some() {
-        let can_cancel_queue = capabilities.has_waiting || run_state != QueueRunState::Stopped;
-        if widgets::destructive_button_enabled(ui, CANCEL_QUEUE_LABEL, can_cancel_queue).clicked() {
-            action.set(QueueAction::CancelQueue);
-        }
-        let stopping = run_state != QueueRunState::Running;
-        let stop_label = if stopping {
-            STOPPING_LABEL
-        } else {
-            STOP_AFTER_CURRENT_LABEL
-        };
-        if widgets::secondary_button_enabled(ui, stop_label, !stopping).clicked() {
-            action.set(QueueAction::StopAfterCurrent);
-        }
-        if widgets::destructive_button_enabled(
-            ui,
-            CANCEL_LABEL,
-            !cancellation_pending && run_state != QueueRunState::Stopped,
-        )
-        .clicked()
-        {
-            action.set(QueueAction::CancelCurrent);
-        }
-    } else if capabilities.has_waiting && run_state == QueueRunState::Running {
-        if widgets::destructive_button(ui, CANCEL_QUEUE_LABEL).clicked() {
-            action.set(QueueAction::CancelQueue);
-        }
-        if widgets::secondary_button(ui, STOP_QUEUE_LABEL).clicked() {
-            action.set(QueueAction::StopAfterCurrent);
-        }
-    } else if capabilities.has_waiting && run_state == QueueRunState::Stopped {
-        if widgets::destructive_button(ui, CANCEL_QUEUE_LABEL).clicked() {
-            action.set(QueueAction::CancelQueue);
-        }
-        if widgets::primary_button_enabled(ui, START_LABEL, queue_start_allowed).clicked() {
-            action.set(QueueAction::Start);
-        }
-    }
-}
-
-pub(super) fn confirm_cancel(ui: &Ui) -> (bool, bool) {
-    let modal = egui::Modal::new(egui::Id::new("confirm-cancel-queue")).show(ui.ctx(), |ui| {
-        ui.set_max_width(300.0);
-        ui.heading("Cancel queue?");
-        ui.label("Stop the current job and cancel all waiting jobs? Completed files are kept.");
-        ui.add_space(theme::SPACING.related);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let confirm = widgets::destructive_button(ui, CANCEL_QUEUE_LABEL).clicked();
-            let dismiss = widgets::secondary_button(ui, "Keep queue").clicked();
-            (confirm, dismiss)
-        })
-        .inner
-    });
-    (modal.inner.0, modal.inner.1 || modal.should_close())
-}
-
-fn show_header(
-    ui: &mut Ui,
-    summary: &str,
-    can_clear: bool,
-    can_add_files: bool,
-    action: &Cell<QueueAction>,
-) {
-    layout::collection_header(
-        ui,
-        |ui| {
-            let _ = layout::collection_heading(ui, TITLE, summary);
-        },
-        |ui| {
-            if widgets::compact_secondary_button_enabled(ui, ADD_FILES_LABEL, can_add_files)
-                .clicked()
-            {
-                action.set(QueueAction::AddFiles);
-            }
-            if can_clear && widgets::plain_button(ui, CLEAR_LABEL).clicked() {
-                action.set(QueueAction::ClearFinished);
-            }
-        },
-    );
-}
-
-fn show_column_guide(ui: &mut Ui, plan: layout::QueueRowPlan) {
-    let height = ui.text_style_height(&fonts::technical_text_style());
-    let cells = allocate_inline_row(ui, plan, height);
-    exact_cell(
-        ui,
-        cells.identity,
-        Layout::left_to_right(Align::Center),
-        |ui| media_lifecycle::technical_faint(ui, "Source / output"),
-    );
-    exact_cell(
-        ui,
-        cells.operation,
-        Layout::left_to_right(Align::Center),
-        |ui| media_lifecycle::technical_faint(ui, "Operation"),
-    );
-    exact_cell(
-        ui,
-        cells.state,
-        Layout::left_to_right(Align::Center),
-        |ui| media_lifecycle::technical_faint(ui, "Status"),
-    );
-    if let Some(actions) = cells.actions {
-        exact_cell(ui, actions, Layout::right_to_left(Align::Center), |ui| {
-            media_lifecycle::technical_faint(ui, "Actions")
-        });
-    }
-}
-
-fn allocate_inline_row(
-    ui: &mut Ui,
-    plan: layout::QueueRowPlan,
-    height: f32,
-) -> layout::QueueRowColumns {
-    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-    plan.columns(row)
-}
-
-fn exact_cell(ui: &mut Ui, rect: Rect, cell_layout: Layout, add_contents: impl FnOnce(&mut Ui)) {
-    let mut cell = ui.new_child(UiBuilder::new().max_rect(rect).layout(cell_layout));
-    cell.set_min_size(rect.size());
-    cell.set_clip_rect(ui.clip_rect().intersect(rect));
-    add_contents(&mut cell);
-}
-
-fn show_job_row(ui: &mut Ui, job_index: usize, job: &QueuedJob, context: &QueueRowContext<'_>) {
-    let plan = context.plan;
-    let move_capability = context.move_capabilities[job_index];
-    match plan.layout {
-        layout::QueueRowLayout::Inline => show_inline_job_row(ui, move_capability, job, context),
-        layout::QueueRowLayout::Stacked => show_stacked_job_row(ui, move_capability, job, context),
-    }
-
-    if let Some(progress) = bound_active_progress(
-        job.id(),
-        job.state(),
-        context.active_job,
-        context.active_progress,
-    ) {
-        ui.add_space(theme::SPACING.related);
-        media_lifecycle::show_progress(ui, &media_lifecycle::progress_presentation(progress));
-    }
-
-    if ui.data(|data| data.get_temp::<bool>(details_id(job)).unwrap_or(false))
-        && let Some(details) = failure_details(job.state())
-    {
-        ui.add_space(theme::SPACING.tight);
-        media_lifecycle::diagnostic_viewport(ui, &details);
-    }
-}
-
-fn show_inline_job_row(
-    ui: &mut Ui,
-    move_capability: WaitingMoveCapability,
-    job: &QueuedJob,
-    context: &QueueRowContext<'_>,
-) {
-    let plan = context.plan;
-    let cancellation_pending = context.cancellation_pending && context.active_job == Some(job.id());
-    let cells = allocate_inline_row(ui, plan, plan.row_height);
-    exact_cell(
-        ui,
-        cells.identity,
-        Layout::top_down(Align::Min).with_main_align(Align::Center),
-        |ui| show_identity(ui, job),
-    );
-    exact_cell(
-        ui,
-        cells.operation,
-        Layout::left_to_right(Align::Center),
-        |ui| secondary_text(ui, job.operation().display_name()),
-    );
-    exact_cell(
-        ui,
-        cells.state,
-        Layout::left_to_right(Align::Center),
-        |ui| show_status(ui, job, cancellation_pending),
-    );
-    if let Some(actions) = cells.actions {
-        exact_cell(ui, actions, Layout::right_to_left(Align::Center), |ui| {
-            show_row_actions(ui, move_capability, job, context)
-        });
-    }
-}
-
-fn show_stacked_job_row(
-    ui: &mut Ui,
-    move_capability: WaitingMoveCapability,
-    job: &QueuedJob,
-    context: &QueueRowContext<'_>,
-) {
-    let cancellation_pending = context.cancellation_pending && context.active_job == Some(job.id());
-    show_identity(ui, job);
-    ui.add_space(theme::SPACING.compact);
-    let metadata_height =
-        theme::COMPACT_CONTROL_HEIGHT.max(ui.text_style_height(&TextStyle::Button));
-    let (metadata, _) =
-        ui.allocate_exact_size(vec2(ui.available_width(), metadata_height), Sense::hover());
-    let state = Rect::from_min_max(
-        egui::pos2(metadata.right() - context.plan.state_width, metadata.top()),
-        metadata.right_bottom(),
-    );
-    let operation = Rect::from_min_max(
-        metadata.min,
-        egui::pos2(
-            (state.left() - theme::SPACING.related).max(metadata.left()),
-            metadata.bottom(),
-        ),
-    );
-    exact_cell(ui, operation, Layout::left_to_right(Align::Center), |ui| {
-        secondary_text(ui, job.operation().display_name());
-    });
-    exact_cell(ui, state, Layout::left_to_right(Align::Center), |ui| {
-        show_status(ui, job, cancellation_pending);
-    });
-    if has_row_actions(job.state()) {
-        ui.add_space(theme::SPACING.tight);
-        let (actions, _) = ui.allocate_exact_size(
-            vec2(ui.available_width(), theme::COMPACT_CONTROL_HEIGHT),
-            Sense::hover(),
-        );
-        exact_cell(ui, actions, Layout::right_to_left(Align::Center), |ui| {
-            show_row_actions(ui, move_capability, job, context)
-        });
-    }
-}
-
-fn show_identity(ui: &mut Ui, job: &QueuedJob) {
-    ui.spacing_mut().item_spacing.y = theme::SPACING.tight;
-    let source_color = if job.state().is_terminal() {
-        theme::SECONDARY
-    } else {
-        theme::FOREGROUND
-    };
-    let _ = widgets::truncated_identity(
-        ui,
-        RichText::new(file_name(&job.media().path))
-            .text_style(TextStyle::Body)
-            .color(source_color),
-        &job.media().path,
-    );
-    let output = match job.state() {
-        QueueJobState::Running { output } | QueueJobState::Completed { output } => output.as_path(),
-        _ => job.operation().output(),
-    };
-    let _ = widgets::truncated_identity(
-        ui,
-        RichText::new(format!("→ {}", file_name(output)))
-            .text_style(fonts::technical_text_style())
-            .color(theme::SECONDARY_FAINT),
-        output,
-    );
-}
-
-fn show_row_actions(
-    ui: &mut Ui,
-    move_capability: WaitingMoveCapability,
-    job: &QueuedJob,
-    context: &QueueRowContext<'_>,
-) {
-    let action = context.action;
-    ui.spacing_mut().item_spacing.x = theme::INLINE_ACTION_GAP;
-    match job.state() {
-        QueueJobState::Waiting => {
-            if widgets::plain_button(ui, REMOVE_LABEL).clicked() {
-                action.set(QueueAction::Remove(job.id()));
-            }
-            if ui
-                .add_enabled_ui(context.can_edit, |ui| widgets::plain_button(ui, EDIT_LABEL))
-                .inner
-                .clicked()
-            {
-                action.set(QueueAction::Edit(job.id()));
-            }
-            for (label, name, enabled, command) in [
-                (
-                    MOVE_LATER_LABEL,
-                    MOVE_LATER_HELP,
-                    move_capability.later,
-                    QueueAction::MoveLater(job.id()),
-                ),
-                (
-                    MOVE_EARLIER_LABEL,
-                    MOVE_EARLIER_HELP,
-                    move_capability.earlier,
-                    QueueAction::MoveEarlier(job.id()),
-                ),
-            ] {
-                let response = widgets::compact_secondary_button_enabled(ui, label, enabled)
-                    .on_hover_text(name);
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), name)
-                });
-                if response.clicked() {
-                    action.set(command);
-                }
-            }
-        }
-        QueueJobState::Failed(_) | QueueJobState::Cancelled => {
-            if widgets::plain_button(ui, RETRY_LABEL).clicked() {
-                action.set(QueueAction::Retry(job.id()));
-            }
-        }
-        QueueJobState::Completed { .. } => {
-            if widgets::plain_button(ui, OPEN_FOLDER_LABEL).clicked() {
-                action.set(QueueAction::OpenFolder(job.id()));
-            }
-            if matches!(job.operation(), QueuedOperation::FrameCapture(_))
-                && widgets::plain_button(ui, PREVIEW_LABEL).clicked()
-            {
-                action.set(QueueAction::PreviewFrame(job.id()));
-            }
-        }
-        _ => {}
-    }
-}
-
-fn has_row_actions(state: &QueueJobState) -> bool {
-    matches!(
-        state,
-        QueueJobState::Waiting
-            | QueueJobState::Completed { .. }
+#[cfg(any(windows, test))]
+impl Section {
+    const ALL: [Self; 3] = [Self::Processing, Self::Waiting, Self::Finished];
+    fn of(job: &QueuedJob) -> Self {
+        match job.state() {
+            QueueJobState::Running { .. } => Self::Processing,
+            QueueJobState::Waiting => Self::Waiting,
+            QueueJobState::Completed { .. }
             | QueueJobState::Failed(_)
-            | QueueJobState::Cancelled
-    )
-}
-
-fn row_action_width(ui: &Ui) -> f32 {
-    let completed = widgets::plain_button_intrinsic_size(ui, OPEN_FOLDER_LABEL).x
-        + widgets::plain_button_intrinsic_size(ui, PREVIEW_LABEL).x
-        + theme::INLINE_ACTION_GAP;
-    let waiting = widgets::plain_button_intrinsic_size(ui, EDIT_LABEL).x
-        + widgets::compact_secondary_button_intrinsic_size(ui, MOVE_EARLIER_LABEL).x
-        + widgets::compact_secondary_button_intrinsic_size(ui, MOVE_LATER_LABEL).x
-        + widgets::plain_button_intrinsic_size(ui, REMOVE_LABEL).x
-        + theme::INLINE_ACTION_GAP * 3.0;
-    completed.max(waiting).ceil()
-}
-
-fn waiting_move_capabilities(jobs: &[QueuedJob]) -> Vec<WaitingMoveCapability> {
-    let waiting_count = jobs
-        .iter()
-        .filter(|job| matches!(job.state(), QueueJobState::Waiting))
-        .count();
-    let mut seen_waiting = 0;
-    jobs.iter()
-        .map(|job| {
-            if !matches!(job.state(), QueueJobState::Waiting) {
-                return WaitingMoveCapability::default();
-            }
-            let capability = WaitingMoveCapability {
-                earlier: seen_waiting > 0,
-                later: seen_waiting + 1 < waiting_count,
-            };
-            seen_waiting += 1;
-            capability
-        })
-        .collect()
-}
-
-fn secondary_text(ui: &mut Ui, text: &str) {
-    ui.add(
-        Label::new(
-            RichText::new(text)
-                .text_style(TextStyle::Small)
-                .color(theme::SECONDARY),
-        )
-        .truncate()
-        .selectable(false),
-    );
-}
-
-fn text_width(ui: &Ui, text: &str, style: TextStyle) -> f32 {
-    ui.painter()
-        .layout_no_wrap(text.to_owned(), style.resolve(ui.style()), theme::SECONDARY)
-        .size()
-        .x
-}
-
-fn state_group_width(ui: &Ui) -> f32 {
-    let status = |text| text_width(ui, text, TextStyle::Button);
-    ["Waiting", "Running", "Completed", "Cancelled", "Cancelling"]
-        .into_iter()
-        .map(status)
-        .fold(0.0, f32::max)
-        .max(
-            status("Failed")
-                + theme::INLINE_ACTION_GAP
-                + widgets::plain_button_intrinsic_size(ui, DETAILS_LABEL).x,
-        )
-        .ceil()
-}
-
-fn details_id(job: &QueuedJob) -> egui::Id {
-    egui::Id::new(("queue-failure", job.id().get()))
-}
-
-fn show_status(ui: &mut Ui, job: &QueuedJob, cancellation_pending: bool) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::INLINE_ACTION_GAP;
-        ui.add(
-            Label::new(
-                RichText::new(if cancellation_pending {
-                    "Cancelling"
-                } else {
-                    state_label(job.state())
-                })
-                .text_style(TextStyle::Button)
-                .color(theme::SECONDARY),
-            )
-            .extend()
-            .selectable(false),
-        );
-        if matches!(job.state(), QueueJobState::Failed(_))
-            && widgets::plain_button(ui, DETAILS_LABEL).clicked()
-        {
-            let id = details_id(job);
-            ui.data_mut(|data| {
-                let open = data.get_temp::<bool>(id).unwrap_or(false);
-                data.insert_temp(id, !open);
-            });
+            | QueueJobState::Cancelled => Self::Finished,
         }
-    });
-}
-
-fn failure_details(state: &QueueJobState) -> Option<String> {
-    match state {
-        QueueJobState::Failed(error) => Some(error.to_string()),
-        _ => None,
+    }
+    fn jobs(self, jobs: &[QueuedJob]) -> impl Iterator<Item = &QueuedJob> {
+        jobs.iter().filter(move |job| Self::of(job) == self)
+    }
+    fn title(self, count: usize) -> String {
+        match self {
+            Self::Processing => "Processing".to_owned(),
+            Self::Waiting => format!("Waiting ({count})"),
+            Self::Finished => format!("Finished ({count})"),
+        }
     }
 }
 
+#[cfg(any(windows, test))]
+fn summary(jobs: &[QueuedJob]) -> String {
+    let [processing, waiting, finished] = Section::ALL.map(|section| section.jobs(jobs).count());
+    format!("{processing} processing · {waiting} waiting · {finished} finished")
+}
+
+#[cfg(any(windows, test))]
+fn destination(job: &QueuedJob) -> &Path {
+    match job.state() {
+        QueueJobState::Running { output } | QueueJobState::Completed { output } => output,
+        _ => job.operation().output(),
+    }
+}
+
+#[cfg(any(windows, test))]
+fn status(job: &QueuedJob, cancelling: bool) -> &'static str {
+    match job.state() {
+        QueueJobState::Running { .. } if cancelling => "Cancelling",
+        QueueJobState::Running { .. } => "Processing",
+        QueueJobState::Waiting => "Waiting",
+        QueueJobState::Completed { .. } => "Completed",
+        QueueJobState::Failed(_) => "Failed",
+        QueueJobState::Cancelled => "Cancelled",
+    }
+}
+
+#[cfg(any(windows, test))]
 fn file_name(path: &Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -766,690 +71,296 @@ fn file_name(path: &Path) -> String {
         .into_owned()
 }
 
-fn state_label(state: &QueueJobState) -> &'static str {
-    match state {
-        QueueJobState::Waiting => "Waiting",
-        QueueJobState::Running { .. } => "Running",
-        QueueJobState::Completed { .. } => "Completed",
-        QueueJobState::Failed(_) => "Failed",
-        QueueJobState::Cancelled => "Cancelled",
+#[cfg(windows)]
+mod view {
+    use super::*;
+    use crate::{
+        app::Operation,
+        queue::MediaQueue,
+        ui::{
+            components,
+            design::{METRICS as M, Palette, TextRole},
+        },
+    };
+    use gpui::{Div, Pixels, Role, Stateful, Window, div, prelude::*, px, rgba};
+
+    pub(crate) fn header(
+        queue: &MediaQueue,
+        back: Stateful<Div>,
+        add: Stateful<Div>,
+        palette: Palette,
+    ) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(M.related))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(M.related))
+                    .child(back.flex_shrink_0())
+                    .child(components::page_title("Queue").flex_1().min_w_0())
+                    .child(add.flex_shrink_0()),
+            )
+            .child(
+                TextRole::Secondary
+                    .apply(div())
+                    .text_color(rgba(palette.secondary()))
+                    .child(summary(queue.jobs())),
+            )
+            .child(components::separator(palette))
+    }
+    pub(crate) fn body(queue: &MediaQueue, palette: Palette, window: &Window) -> Div {
+        let jobs = queue.jobs();
+        if jobs.is_empty() {
+            return div()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .flex_1()
+                .w_full()
+                .child(components::empty_state(
+                    "No jobs yet",
+                    "Go back to select a source or add files.",
+                    palette,
+                ));
+        }
+        let text = window.text_system();
+        let operation_width = Operation::ALL
+            .into_iter()
+            .map(|operation| components::text_width(text, TextRole::Secondary, operation.label()))
+            .fold(px(0.), Pixels::max);
+        let status_width = [
+            "Processing",
+            "Cancelling",
+            "Waiting",
+            "Completed",
+            "Failed",
+            "Cancelled",
+        ]
+        .into_iter()
+        .map(|label| components::text_width(text, TextRole::Status, label))
+        .fold(px(0.), Pixels::max);
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap(px(M.section))
+            .children(Section::ALL.into_iter().filter_map(|section| {
+                let count = section.jobs(jobs).count();
+                if count == 0 {
+                    return None;
+                }
+                Some(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(M.compact))
+                        .child(components::heading(section.title(count)))
+                        .children(section.jobs(jobs).map(|job| {
+                            row(
+                                job,
+                                queue.active_job() == Some(job.id())
+                                    && queue.cancellation_pending(),
+                                palette,
+                                operation_width,
+                                status_width,
+                            )
+                        })),
+                )
+            }))
+    }
+    fn row(
+        job: &QueuedJob,
+        cancelling: bool,
+        palette: Palette,
+        operation_width: Pixels,
+        status_width: Pixels,
+    ) -> Div {
+        let source = job.operation().input();
+        let output = destination(job);
+        let source_name = file_name(source);
+        let operation = job.operation().display_name();
+        let state = status(job, cancelling);
+        let source_path = source.to_string_lossy().into_owned();
+        let output_path = output.to_string_lossy().into_owned();
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap(px(M.tight))
+            .child(
+                div()
+                    .id(("queue-job", job.id().get()))
+                    .role(Role::Group)
+                    .aria_label(format!("{source_name}, {operation}, {state}"))
+                    .aria_description(format!("Source: {source_path}. Destination: {output_path}"))
+                    .flex()
+                    .items_center()
+                    .gap(px(M.related))
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(M.tight))
+                            .child(
+                                TextRole::Body
+                                    .apply(div())
+                                    .id("source-name")
+                                    .truncate()
+                                    .child(source_name)
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| {
+                                            components::PathTooltip(source_path.clone(), palette)
+                                        })
+                                        .into()
+                                    }),
+                            )
+                            .child(
+                                TextRole::Secondary
+                                    .apply(div())
+                                    .id("destination")
+                                    .text_color(rgba(palette.secondary()))
+                                    .text_ellipsis_middle()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .child(format!("→ {output_path}"))
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| {
+                                            components::PathTooltip(output_path.clone(), palette)
+                                        })
+                                        .into()
+                                    }),
+                            ),
+                    )
+                    .child(
+                        TextRole::Secondary
+                            .apply(div())
+                            .w(operation_width)
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .text_color(rgba(palette.secondary()))
+                            .child(operation),
+                    )
+                    .child(components::status(state, palette, None).w(status_width)),
+            )
+            .child(components::separator(palette))
     }
 }
-
-fn bound_active_progress<'a>(
-    job_id: JobId,
-    state: &QueueJobState,
-    active_job: Option<JobId>,
-    active_progress: Option<&'a MediaProgress>,
-) -> Option<Option<&'a MediaProgress>> {
-    (active_job == Some(job_id) && matches!(state, QueueJobState::Running { .. }))
-        .then_some(active_progress)
-}
+#[cfg(windows)]
+pub(crate) use view::{body, header};
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        sync::atomic::{AtomicUsize, Ordering},
-        time::Duration,
-    };
-
+    use super::*;
     use crate::{
-        media::{
-            container::MediaContainer, intake::SourceIdentity, model::MediaFile,
-            progress::MediaProgress,
-        },
-        queue::{JobId, QueueJobFailure, QueueJobState, QueueRunState, QueuedJob, QueuedOperation},
+        audio_extract::model::{AudioExtractFormat, AudioExtractRequest},
+        media::{container::MediaContainer, intake::SourceIdentity, model::MediaFile},
+        queue::{JobId, QueueJobFailure, QueuedOperation},
         remux::model::RemuxRequest,
-        ui::{fonts, theme},
     };
-
-    use super::{
-        ADD_FILES_LABEL, BACK_LABEL, CANCEL_LABEL, CANCEL_QUEUE_LABEL, DETAILS_LABEL,
-        MOVE_EARLIER_LABEL, MOVE_LATER_LABEL, QueueAvailability, QueueSummary, REMOVE_LABEL,
-        RETRY_LABEL, STOP_AFTER_CURRENT_LABEL, STOPPING_LABEL, bound_active_progress,
-        failure_details, file_name, has_row_actions, show, waiting_move_capabilities,
-    };
-
-    static NEXT_QUEUE_UI_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
-
-    fn waiting_jobs(count: u64) -> (PathBuf, Vec<QueuedJob>) {
-        let directory = std::env::temp_dir().join(format!(
-            "apollo-queue-ui-{}-{}",
-            std::process::id(),
-            NEXT_QUEUE_UI_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        let source = directory.join("nice portal.mp4");
-        fs::write(&source, b"media").unwrap();
-        let identity = SourceIdentity::read(&source).unwrap();
-        let media = MediaFile {
-            path: source.clone(),
-            duration: None,
-            streams: vec![],
-            video_streams: vec![],
-            audio_streams: vec![],
-        };
-        let jobs = (1..=count)
-            .map(|id| {
-                let output = directory.join(format!("nice portal-{id}.mkv"));
-                QueuedJob::new(
-                    JobId::new(id),
-                    identity.clone(),
-                    media.clone(),
-                    QueuedOperation::Remux(RemuxRequest {
-                        input: source.clone(),
-                        output,
-                        container: MediaContainer::Matroska,
-                    }),
-                )
-            })
-            .collect();
-        (directory, jobs)
-    }
-
-    fn waiting_jobs_with_names(names: &[&str]) -> (PathBuf, Vec<QueuedJob>) {
-        let directory = std::env::temp_dir().join(format!(
-            "apollo-queue-ui-{}-{}",
-            std::process::id(),
-            NEXT_QUEUE_UI_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        let jobs = names
-            .iter()
-            .enumerate()
-            .map(|(index, name)| {
-                let source = directory.join(name);
-                fs::write(&source, b"media").unwrap();
-                let identity = SourceIdentity::read(&source).unwrap();
-                let output = directory.join(format!(
-                    "{}-remuxed-with-an-output-name-that-varies-{index}.mkv",
-                    name.trim_end_matches(".mp4")
-                ));
-                let media = MediaFile {
-                    path: source.clone(),
-                    duration: None,
-                    streams: vec![],
-                    video_streams: vec![],
-                    audio_streams: vec![],
-                };
-                QueuedJob::new(
-                    JobId::new(index as u64 + 1),
-                    identity,
-                    media,
-                    QueuedOperation::Remux(RemuxRequest {
-                        input: source,
-                        output,
-                        container: MediaContainer::Matroska,
-                    }),
-                )
-            })
-            .collect();
-        (directory, jobs)
-    }
-
-    fn shape_text_rect(shape: &egui::Shape, text: &str) -> Option<egui::Rect> {
-        let mut pending = vec![shape];
-        while let Some(shape) = pending.pop() {
-            match shape {
-                egui::Shape::Text(shape) if shape.galley.job.text == text => {
-                    return Some(egui::Rect::from_min_size(shape.pos, shape.galley.size()));
-                }
-                egui::Shape::Vec(shapes) => pending.extend(shapes.iter().rev()),
-                _ => {}
-            }
-        }
-        None
-    }
-
-    fn output_text_rect(output: &egui::FullOutput, text: &str) -> Option<egui::Rect> {
-        output
-            .shapes
-            .iter()
-            .find_map(|shape| shape_text_rect(&shape.shape, text))
-    }
-
-    fn output_text_rects(output: &egui::FullOutput, text: &str) -> Vec<egui::Rect> {
-        let mut matches = Vec::new();
-        for clipped in &output.shapes {
-            let mut pending = vec![&clipped.shape];
-            while let Some(shape) = pending.pop() {
-                match shape {
-                    egui::Shape::Text(shape) if shape.galley.job.text == text => {
-                        matches.push(egui::Rect::from_min_size(shape.pos, shape.galley.size()))
-                    }
-                    egui::Shape::Vec(shapes) => pending.extend(shapes.iter().rev()),
-                    _ => {}
-                }
-            }
-        }
-        matches.sort_by(|left, right| left.top().total_cmp(&right.top()));
-        matches
-    }
-
-    fn output_visual_text_rects(output: &egui::FullOutput, text: &str) -> Vec<egui::Rect> {
-        let mut matches = Vec::new();
-        for clipped in &output.shapes {
-            let mut pending = vec![&clipped.shape];
-            while let Some(shape) = pending.pop() {
-                match shape {
-                    egui::Shape::Text(shape) if shape.galley.job.text == text => {
-                        matches.push(shape.visual_bounding_rect())
-                    }
-                    egui::Shape::Vec(shapes) => pending.extend(shapes.iter().rev()),
-                    _ => {}
-                }
-            }
-        }
-        matches.sort_by(|left, right| left.top().total_cmp(&right.top()));
-        matches
-    }
-
-    fn output_text_baselines(output: &egui::FullOutput, text: &str) -> Vec<f32> {
-        let mut matches = Vec::new();
-        for clipped in &output.shapes {
-            let mut pending = vec![&clipped.shape];
-            while let Some(shape) = pending.pop() {
-                match shape {
-                    egui::Shape::Text(shape) if shape.galley.job.text == text => {
-                        let row = shape.galley.rows.first().unwrap();
-                        let glyph = row.glyphs.first().unwrap();
-                        matches.push(shape.pos.y + row.pos.y + glyph.pos.y);
-                    }
-                    egui::Shape::Vec(shapes) => pending.extend(shapes.iter().rev()),
-                    _ => {}
-                }
-            }
-        }
-        matches.sort_by(f32::total_cmp);
-        matches
-    }
-
-    fn assert_near(actual: f32, expected: f32) {
-        assert!(
-            (actual - expected).abs() <= 1.0,
-            "expected {actual} to be within one pixel of {expected}"
+    fn job(id: u64, source: &Path, output: &Path, state: QueueJobState) -> QueuedJob {
+        let mut job = QueuedJob::new(
+            JobId::new(id),
+            SourceIdentity::read(source).unwrap(),
+            MediaFile {
+                path: source.to_owned(),
+                duration: None,
+                streams: vec![],
+                video_streams: vec![],
+                audio_streams: vec![],
+            },
+            QueuedOperation::Remux(RemuxRequest {
+                input: source.to_owned(),
+                output: output.to_owned(),
+                container: MediaContainer::Matroska,
+            }),
         );
+        job.set_state(state);
+        job
     }
-
     #[test]
-    fn active_progress_binds_only_to_the_running_job_id() {
-        let progress = MediaProgress {
-            processed: Some(Duration::from_secs(2)),
-            total: Some(Duration::from_secs(4)),
-            fraction: Some(0.5),
-            frame: None,
-        };
-        let first = JobId::new(1);
-        let second = JobId::new(2);
-        let running = QueueJobState::Running {
-            output: PathBuf::from("output.mkv"),
-        };
-
-        assert_eq!(
-            bound_active_progress(first, &running, Some(first), Some(&progress)),
-            Some(Some(&progress))
-        );
-        assert_eq!(
-            bound_active_progress(first, &running, Some(first), None),
-            Some(None)
-        );
-        assert_eq!(
-            bound_active_progress(second, &running, Some(first), Some(&progress)),
-            None
-        );
-        assert_eq!(
-            bound_active_progress(
-                first,
-                &QueueJobState::Cancelled,
-                Some(first),
-                Some(&progress)
+    fn groups_preserve_job_identity_and_scheduler_order_across_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("a long source filename with spaces.mkv");
+        std::fs::write(&source, b"media").unwrap();
+        let requested = dir.path().join("output.mkv");
+        let actual = dir.path().join("output (1).mkv");
+        let mut jobs = [
+            job(
+                1,
+                &source,
+                &requested,
+                QueueJobState::Completed {
+                    output: actual.clone(),
+                },
             ),
-            None
-        );
-    }
-
-    #[test]
-    fn queue_summary_classifies_each_job_state_without_a_finished_bucket() {
-        let (directory, mut jobs) = waiting_jobs(5);
-        jobs[0].set_state(QueueJobState::Running {
-            output: directory.join("active (1).mkv"),
-        });
-        jobs[1].set_state(QueueJobState::Completed {
-            output: directory.join("nice portal-2.mkv"),
-        });
-        jobs[2].set_state(QueueJobState::Failed(QueueJobFailure::SourceChanged));
-        jobs[3].set_state(QueueJobState::Cancelled);
-
-        assert_eq!(
-            QueueSummary::from_jobs(&jobs).copy(),
-            "1 running · 1 waiting · 1 completed · 1 failed · 1 cancelled"
-        );
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn row_filenames_do_not_expand_to_full_paths() {
-        assert_eq!(
-            file_name(&PathBuf::from("folder/source file.mkv")),
-            "source file.mkv"
-        );
-    }
-
-    #[test]
-    fn row_actions_are_available_for_waiting_and_terminal_jobs() {
-        assert!(has_row_actions(&QueueJobState::Waiting));
-        assert!(has_row_actions(&QueueJobState::Completed {
-            output: PathBuf::from("output.mkv")
+            job(4, &source, &requested, QueueJobState::Waiting),
+            job(
+                2,
+                &source,
+                &requested,
+                QueueJobState::Running {
+                    output: actual.clone(),
+                },
+            ),
+            job(3, &source, &requested, QueueJobState::Waiting),
+            job(
+                5,
+                &source,
+                &requested,
+                QueueJobState::Failed(QueueJobFailure::SourceChanged),
+            ),
+            job(6, &source, &requested, QueueJobState::Cancelled),
+        ];
+        let audio_output = dir.path().join("output.m4a");
+        jobs[3].replace_operation(QueuedOperation::AudioExtract(AudioExtractRequest {
+            input: source.clone(),
+            output: audio_output.clone(),
+            audio_stream_index: 1,
+            format: AudioExtractFormat::Aac,
         }));
-        assert!(!has_row_actions(&QueueJobState::Running {
-            output: PathBuf::from("output.mkv")
-        }));
-        assert!(has_row_actions(&QueueJobState::Failed(
-            QueueJobFailure::SourceChanged
-        )));
-        assert!(has_row_actions(&QueueJobState::Cancelled));
-    }
-
-    #[test]
-    fn waiting_move_capabilities_are_prepared_once_in_job_order() {
-        let (directory, mut jobs) = waiting_jobs(5);
-        let completed_output = jobs[1].operation().output().to_path_buf();
-        jobs[1].set_state(QueueJobState::Completed {
-            output: completed_output,
-        });
-        jobs[3].set_state(QueueJobState::Cancelled);
-
-        let capabilities = waiting_move_capabilities(&jobs);
-        assert_eq!(capabilities.len(), jobs.len());
-        assert!(!capabilities[0].earlier && capabilities[0].later);
-        assert_eq!(capabilities[1], Default::default());
-        assert!(capabilities[2].earlier && capabilities[2].later);
-        assert_eq!(capabilities[3], Default::default());
-        assert!(capabilities[4].earlier && !capabilities[4].later);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn failed_details_preserve_the_queue_failure_diagnostic() {
-        let failed = QueueJobState::Failed(QueueJobFailure::SourceChanged);
+        let ids = |section: Section| {
+            section
+                .jobs(&jobs)
+                .map(|job| job.id().get())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(Section::Processing), [2]);
+        assert_eq!(ids(Section::Waiting), [4, 3]);
+        assert_eq!(ids(Section::Finished), [1, 5, 6]);
+        assert_eq!(summary(&jobs), "1 processing · 2 waiting · 3 finished");
+        assert_eq!(summary(&[]), "0 processing · 0 waiting · 0 finished");
         assert_eq!(
-            failure_details(&failed).as_deref(),
-            Some("source changed after it was queued")
+            summary(&jobs[0..1]),
+            "0 processing · 0 waiting · 1 finished"
         );
-        assert_eq!(failure_details(&QueueJobState::Waiting), None);
-    }
-
-    #[test]
-    fn failure_details_stay_beside_status_at_wide_and_compact_widths() {
-        let (directory, mut jobs) = waiting_jobs(2);
-        jobs[0].set_state(QueueJobState::Failed(QueueJobFailure::SourceChanged));
-        for width in [
-            727.0,
-            crate::ui::layout::MINIMUM_CONTENT_SIZE.x
-                - 2.0 * f32::from(crate::ui::layout::CONTENT_PADDING),
-        ] {
-            let context = egui::Context::default();
-            fonts::install(&context);
-            theme::install(&context);
-            let mut output = context.run_ui(Default::default(), |ui| {
-                ui.set_width(width);
-                let _ = show(
-                    ui,
-                    &jobs,
-                    None,
-                    None,
-                    QueueRunState::Stopped,
-                    QueueAvailability {
-                        can_start: true,
-                        waiting_for_encoder_discovery: false,
-                        can_add_files: true,
-                        can_edit: true,
-                        action_error: None,
-                    },
-                    false,
-                );
-            });
-            output.textures_delta.clear();
-            let status = output_text_rect(&output, "Failed").unwrap();
-            let details = output_text_rect(&output, DETAILS_LABEL).unwrap();
-            let retry = output_text_rect(&output, RETRY_LABEL).unwrap();
-            assert!(retry.center().y >= status.top());
-            assert!(output.shapes.iter().any(|shape| {
-                shape_text_rect(&shape.shape, RETRY_LABEL)
-                    .is_some_and(|rect| shape.clip_rect.expand(1.0).contains_rect(rect))
-            }));
-            assert!(
-                details.left() >= status.right(),
-                "width {width}: status {status:?}, details {details:?}"
-            );
-            assert_near(
-                output_text_baselines(&output, "Failed")[0],
-                output_text_baselines(&output, DETAILS_LABEL)[0],
-            );
-            assert!(output.shapes.iter().any(|shape| {
-                shape_text_rect(&shape.shape, DETAILS_LABEL)
-                    .is_some_and(|rect| shape.clip_rect.expand(1.0).contains_rect(rect))
-            }));
-        }
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn wide_queue_aligns_header_and_exposes_column_guide_and_compact_reorder_controls() {
-        let (directory, jobs) = waiting_jobs(2);
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let mut output = context.run_ui(Default::default(), |ui| {
-            ui.set_width(760.0);
-            let _ = show(
-                ui,
-                &jobs,
-                None,
-                None,
-                QueueRunState::Stopped,
-                QueueAvailability {
-                    can_start: true,
-                    waiting_for_encoder_discovery: false,
-                    can_add_files: true,
-                    can_edit: true,
-                    action_error: None,
-                },
-                false,
-            );
-        });
-
-        let title_baseline = output_text_baselines(&output, "Queue")[0];
-        let summary_baseline = output_text_baselines(&output, "2 waiting")[0];
-        assert!(output_text_rect(&output, ADD_FILES_LABEL).is_some());
-        let identity_guide = output_text_rect(&output, "Source / output").unwrap();
-        let operation_guide = output_text_rect(&output, "Operation").unwrap();
-        let status_guide = output_text_rect(&output, "Status").unwrap();
-        let actions_guide = output_visual_text_rects(&output, "Actions")
-            .into_iter()
-            .next()
-            .unwrap();
-        output.textures_delta.clear();
-
-        assert!(
-            (title_baseline - summary_baseline).abs() <= 1.0,
-            "title baseline={title_baseline}, summary baseline={summary_baseline}"
+        assert_eq!(
+            summary(&jobs[1..2]),
+            "0 processing · 1 waiting · 0 finished"
         );
-        assert!(identity_guide.left() < operation_guide.left());
-        assert!(operation_guide.left() < status_guide.left());
-        assert!(status_guide.left() < actions_guide.left());
-        assert!(output_text_rect(&output, MOVE_EARLIER_LABEL).is_some());
-        assert!(output_text_rect(&output, MOVE_LATER_LABEL).is_some());
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn default_width_queue_rows_align_and_truncate_long_identity() {
-        let long_source =
-            "an-extraordinarily-long-source-filename-that-must-not-move-later-columns.mp4";
-        let long_output = format!(
-            "→ {}-remuxed-with-an-output-name-that-varies-2.mkv",
-            long_source.trim_end_matches(".mp4")
+        assert_eq!(
+            summary(&jobs[2..3]),
+            "1 processing · 0 waiting · 0 finished"
         );
-        let (directory, jobs) =
-            waiting_jobs_with_names(&["a.mp4", "a-medium-length-source-filename.mp4", long_source]);
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let mut full_source_width = 0.0;
-        let mut output = context.run_ui(Default::default(), |ui| {
-            ui.set_width(727.0);
-            full_source_width = ui
-                .painter()
-                .layout_no_wrap(
-                    long_source.to_owned(),
-                    egui::TextStyle::Body.resolve(ui.style()),
-                    theme::FOREGROUND,
-                )
-                .size()
-                .x;
-            let _ = show(
-                ui,
-                &jobs,
-                None,
-                None,
-                QueueRunState::Stopped,
-                QueueAvailability {
-                    can_start: true,
-                    waiting_for_encoder_discovery: false,
-                    can_add_files: true,
-                    can_edit: true,
-                    action_error: None,
-                },
-                false,
-            );
-        });
-
-        let operation_guide = output_text_rect(&output, "Operation").unwrap();
-        let status_guide = output_text_rect(&output, "Status").unwrap();
-        let actions_guide = output_text_rect(&output, "Actions").unwrap();
-        let operation_cells = output_text_rects(&output, "Remux");
-        let status_cells = output_text_rects(&output, "Waiting");
-        let action_cells = output_visual_text_rects(&output, REMOVE_LABEL);
-        let source = output_text_rect(&output, long_source).unwrap();
-        let output_identity = output_text_rect(&output, &long_output).unwrap();
-        output.textures_delta.clear();
-
-        assert_eq!(operation_cells.len(), jobs.len());
-        assert_eq!(status_cells.len(), jobs.len());
-        assert_eq!(action_cells.len(), jobs.len());
-        for operation in operation_cells {
-            assert_near(operation.left(), operation_guide.left());
-        }
-        for status in status_cells {
-            assert_near(status.left(), status_guide.left());
-        }
-        let action_anchor = action_cells[0].right();
-        for actions in action_cells {
-            assert_near(actions.right(), action_anchor);
-        }
-        assert!(actions_guide.left() > status_guide.right());
-        assert!(action_anchor > status_guide.right());
-        assert!(source.right() < operation_guide.left());
-        assert!(output_identity.right() < operation_guide.left());
-        assert!(source.width() < full_source_width);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn narrow_queue_keeps_stacked_rows_without_a_column_guide() {
-        let (directory, jobs) = waiting_jobs(1);
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let mut output = context.run_ui(Default::default(), |ui| {
-            ui.set_width(400.0);
-            let _ = show(
-                ui,
-                &jobs,
-                None,
-                None,
-                QueueRunState::Stopped,
-                QueueAvailability {
-                    can_start: true,
-                    waiting_for_encoder_discovery: false,
-                    can_add_files: true,
-                    can_edit: true,
-                    action_error: None,
-                },
-                false,
-            );
-        });
-
-        assert!(output_text_rect(&output, "Source / output").is_none());
-        let source = output_text_rect(&output, "nice portal.mp4").unwrap();
-        let operation = output_text_rect(&output, "Remux").unwrap();
-        let status = output_text_rect(&output, "Waiting").unwrap();
-        let remove = output_text_rect(&output, REMOVE_LABEL).unwrap();
-        output.textures_delta.clear();
-
-        assert!(operation.top() > source.top());
-        assert_near(operation.center().y, status.center().y);
-        assert!(remove.top() - operation.bottom() < theme::COMPACT_CONTROL_HEIGHT);
-
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn wide_queue_footer_separates_back_from_right_owned_process_controls() {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let mut output = context.run_ui(Default::default(), |ui| {
-            ui.set_width(760.0);
-            let _ = show(
-                ui,
-                &[],
-                Some(JobId::new(1)),
-                None,
-                QueueRunState::Running,
-                QueueAvailability {
-                    can_start: true,
-                    waiting_for_encoder_discovery: false,
-                    can_add_files: true,
-                    can_edit: true,
-                    action_error: None,
-                },
-                false,
-            );
-        });
-        let back = output_text_rect(&output, BACK_LABEL).unwrap();
-        let cancel_current = output_text_rect(&output, CANCEL_LABEL).unwrap();
-        let stop = output_text_rect(&output, STOP_AFTER_CURRENT_LABEL).unwrap();
-        let cancel_queue = output_text_rect(&output, CANCEL_QUEUE_LABEL).unwrap();
-        output.textures_delta.clear();
-
-        assert_eq!(back.top(), cancel_current.top());
-        assert_eq!(cancel_current.top(), stop.top());
-        assert_eq!(stop.top(), cancel_queue.top());
-        assert!(back.left() < cancel_current.left());
-        assert!(cancel_current.left() < stop.left());
-        assert!(stop.left() < cancel_queue.left());
-    }
-
-    #[test]
-    fn populated_running_queue_retains_back_beside_process_controls() {
-        let (directory, mut jobs) = waiting_jobs(6);
-        jobs[0].set_state(QueueJobState::Running {
-            output: directory.join("active (1).mkv"),
-        });
-        let completed_output = directory.join("result (1).mkv");
-        jobs[3].set_state(QueueJobState::Completed {
-            output: completed_output,
-        });
-        jobs[4].set_state(QueueJobState::Cancelled);
-        jobs[5].set_state(QueueJobState::Failed(QueueJobFailure::SourceChanged));
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let mut output = context.run_ui(Default::default(), |ui| {
-            ui.set_width(760.0);
-            ui.set_height(600.0);
-            let _ = show(
-                ui,
-                &jobs,
-                Some(JobId::new(1)),
-                None,
-                QueueRunState::Running,
-                QueueAvailability {
-                    can_start: true,
-                    waiting_for_encoder_discovery: false,
-                    can_add_files: true,
-                    can_edit: true,
-                    action_error: None,
-                },
-                false,
-            );
-        });
-
-        let back = output_text_rect(&output, BACK_LABEL).unwrap();
-        let cancel_current = output_text_rect(&output, CANCEL_LABEL).unwrap();
-        let stop = output_text_rect(&output, STOP_AFTER_CURRENT_LABEL).unwrap();
-        let cancel_queue = output_text_rect(&output, CANCEL_QUEUE_LABEL).unwrap();
-        let running_name_visible = output_text_rect(&output, "→ active (1).mkv").is_some();
-        let published_name_visible = output_text_rect(&output, "→ result (1).mkv").is_some();
-        let requested_name_visible = output_text_rect(&output, "→ nice portal-4.mkv").is_some();
-        output.textures_delta.clear();
-
-        assert!(running_name_visible);
-        assert!(published_name_visible);
-        assert!(!requested_name_visible);
-        assert_eq!(back.top(), cancel_current.top());
-        assert_eq!(cancel_current.top(), stop.top());
-        assert_eq!(stop.top(), cancel_queue.top());
-        assert!(back.right() < cancel_current.left());
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn compact_running_controls_reflow_without_renaming_destructive_actions() {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let mut output = context.run_ui(Default::default(), |ui| {
-            ui.set_width(400.0);
-            let _ = show(
-                ui,
-                &[],
-                Some(JobId::new(1)),
-                None,
-                QueueRunState::Running,
-                QueueAvailability {
-                    can_start: true,
-                    waiting_for_encoder_discovery: false,
-                    can_add_files: true,
-                    can_edit: true,
-                    action_error: None,
-                },
-                false,
-            );
-        });
-
-        let cancel_current = output_text_rect(&output, CANCEL_LABEL).unwrap();
-        let cancel_queue = output_text_rect(&output, CANCEL_QUEUE_LABEL).unwrap();
-        let stop = output_text_rect(&output, STOP_AFTER_CURRENT_LABEL).unwrap();
-        let back = output_text_rect(&output, BACK_LABEL).unwrap();
-        output.textures_delta.clear();
-        assert!(cancel_current.top() > back.top());
-        assert_eq!(cancel_queue.top(), cancel_current.top());
-        assert_eq!(stop.top(), cancel_current.top());
-    }
-
-    #[test]
-    fn stopping_controls_replace_stop_action_with_explicit_state_copy() {
-        let context = egui::Context::default();
-        fonts::install(&context);
-        theme::install(&context);
-        let mut output = context.run_ui(Default::default(), |ui| {
-            ui.set_width(620.0);
-            let _ = show(
-                ui,
-                &[],
-                Some(JobId::new(1)),
-                None,
-                QueueRunState::StoppingAfterCurrent,
-                QueueAvailability {
-                    can_start: true,
-                    waiting_for_encoder_discovery: false,
-                    can_add_files: true,
-                    can_edit: true,
-                    action_error: None,
-                },
-                false,
-            );
-        });
-
-        assert!(output_text_rect(&output, STOPPING_LABEL).is_some());
-        assert!(output_text_rect(&output, STOP_AFTER_CURRENT_LABEL).is_none());
-        assert!(output_text_rect(&output, CANCEL_LABEL).is_some());
-        assert!(output_text_rect(&output, CANCEL_QUEUE_LABEL).is_some());
-        output.textures_delta.clear();
+        assert_eq!(Section::Waiting.title(2), "Waiting (2)");
+        assert_eq!(destination(&jobs[0]), actual);
+        assert_eq!(destination(&jobs[2]), actual);
+        assert_eq!(destination(&jobs[1]), requested);
+        assert_eq!(destination(&jobs[3]), audio_output);
+        assert_eq!(jobs[3].operation().display_name(), "Audio Extract");
+        assert_eq!(destination(&jobs[4]), requested);
+        assert_eq!(status(&jobs[2], true), "Cancelling");
+        assert_eq!(status(&jobs[2], false), "Processing");
+        assert_eq!(status(&jobs[0], true), "Completed");
+        assert_eq!(status(&jobs[4], false), "Failed");
+        assert_eq!(status(&jobs[5], false), "Cancelled");
+        assert_eq!(file_name(&source), "a long source filename with spaces.mkv");
     }
 }

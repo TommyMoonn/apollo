@@ -1,27 +1,8 @@
 use std::time::Duration;
 
-use egui::{Align, Label, Layout, RichText, ScrollArea, Sides, TextStyle, Ui};
+use egui::{Align, Label, Layout, RichText, ScrollArea, TextStyle, Ui};
 
-use crate::media::progress::MediaProgress;
-
-use super::{fonts, layout, theme, widgets};
-
-const PROCESSING_LABEL: &str = "Processing";
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct ProgressPresentation {
-    pub fraction: f32,
-    pub percent: Option<String>,
-    pub time: Option<String>,
-    pub frame: Option<String>,
-}
-
-pub(super) fn show_progress(ui: &mut Ui, presentation: &ProgressPresentation) {
-    progress_header(ui, presentation);
-    ui.add_space(theme::SPACING.compact);
-    let _ = widgets::progress_bar(ui, presentation.fraction);
-    ui.add_space(theme::SPACING.compact);
-    progress_metadata(ui, presentation);
-}
+use super::{fonts, layout, theme};
 
 pub(super) fn heading(ui: &mut Ui, text: &str) {
     ui.add(
@@ -76,40 +57,6 @@ pub(super) fn right_aligned_actions<R>(ui: &mut Ui, add_contents: impl FnOnce(&m
     .inner
 }
 
-pub(super) fn progress_presentation(progress: Option<&MediaProgress>) -> ProgressPresentation {
-    let fraction = progress
-        .and_then(|progress| progress.fraction)
-        .filter(|fraction| fraction.is_finite())
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-    let percent = progress
-        .and_then(|progress| progress.fraction)
-        .filter(|fraction| fraction.is_finite())
-        .map(|fraction| format!("{:.0}%", fraction.clamp(0.0, 1.0) * 100.0));
-
-    let time = progress.and_then(|progress| match (progress.processed, progress.total) {
-        (Some(processed), Some(total)) => Some(format!(
-            "{} / {}",
-            format_duration(processed),
-            format_duration(total)
-        )),
-        (Some(processed), None) => Some(format!("{} elapsed", format_duration(processed))),
-        (None, Some(total)) => Some(format!("-- / {}", format_duration(total))),
-        (None, None) => None,
-    });
-
-    let frame = progress
-        .and_then(|progress| progress.frame)
-        .map(|frame| format!("Frame {}", format_integer(frame)));
-
-    ProgressPresentation {
-        fraction,
-        percent,
-        time,
-        frame,
-    }
-}
-
 pub(super) fn format_duration(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
     let hours = total_seconds / 3_600;
@@ -123,24 +70,6 @@ pub(super) fn format_duration(duration: Duration) -> String {
     }
 }
 
-pub(super) fn format_integer(value: u64) -> String {
-    let digits = value.to_string();
-    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
-    let first_group = digits.len() % 3;
-
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0
-            && (index == first_group
-                || (index > first_group && (index - first_group).is_multiple_of(3)))
-        {
-            formatted.push(',');
-        }
-        formatted.push(character);
-    }
-
-    formatted
-}
-
 fn diagnostic_text(ui: &mut Ui, text: &str) {
     ui.add(
         Label::new(
@@ -151,38 +80,4 @@ fn diagnostic_text(ui: &mut Ui, text: &str) {
         .selectable(true)
         .wrap(),
     );
-}
-
-fn progress_header(ui: &mut Ui, presentation: &ProgressPresentation) {
-    Sides::new()
-        .spacing(theme::INLINE_ACTION_GAP)
-        .truncate()
-        .show(
-            ui,
-            |ui| secondary_copy(ui, PROCESSING_LABEL),
-            |ui| {
-                if let Some(percent) = &presentation.percent {
-                    technical_faint(ui, percent);
-                }
-            },
-        );
-}
-
-fn progress_metadata(ui: &mut Ui, presentation: &ProgressPresentation) {
-    Sides::new()
-        .spacing(theme::INLINE_ACTION_GAP)
-        .truncate()
-        .show(
-            ui,
-            |ui| {
-                if let Some(time) = &presentation.time {
-                    technical_faint(ui, time);
-                }
-            },
-            |ui| {
-                if let Some(frame) = &presentation.frame {
-                    technical_faint(ui, frame);
-                }
-            },
-        );
 }

@@ -401,3 +401,42 @@ fn source_completion_updates_the_return_origin_without_leaving_temporary_routes(
         }
     }
 }
+
+#[test]
+fn queue_add_files_reusing_source_keeps_queue_and_original_operation() {
+    use crate::app::{
+        NavigationState, Operation, QueueAction, ShellOrigin, dialogs::InputDialogOrigin,
+        queue::QueueEffect,
+    };
+    let fixture = Fixture::new();
+    let source = fixture.file("retained.mkv");
+    let mut app = ready_application(&fixture);
+    accept(&mut app.source, &source);
+    app.enter_workspace(Operation::Remux);
+    let session = app.source.session_id();
+    assert!(app.enter_queue());
+    assert!(app.can_accept_source_paths());
+    assert!(matches!(
+        app.queue_action(QueueAction::AddFiles, || panic!(
+            "Add files must not launch queue work"
+        )),
+        QueueEffect::AddFiles
+    ));
+    let origin = InputDialogOrigin::capture(&app);
+    app.accept_source_paths(origin, vec![source.clone()], || {
+        panic!("unchanged source must not probe")
+    });
+    assert_eq!(
+        app.navigation(),
+        NavigationState::Queue {
+            origin: ShellOrigin::SourceWorkspace {
+                active_operation: Operation::Remux
+            }
+        }
+    );
+    assert_eq!(app.source.session_id(), session);
+    assert!(!app.source.is_inspecting());
+    app.return_from_queue();
+    assert_eq!(app.active_operation(), Some(Operation::Remux));
+    assert_eq!(app.source.current().unwrap().path, source);
+}

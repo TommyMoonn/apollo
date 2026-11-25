@@ -49,13 +49,7 @@ pub const OUTPUT_FILENAME_MIN_INLINE_WIDTH: f32 = 180.0;
 /// Minimum title/metadata width retained beside an inline Audio Mix gain control.
 pub const TRACK_TEXT_MIN_INLINE_WIDTH: f32 = 240.0;
 
-/// Minimum useful width retained for the flexible source/output identity region.
-pub const QUEUE_IDENTITY_MIN_WIDTH: f32 = 180.0;
-
-/// Shared wide-row height vertically centers bounded cells while identity uses two lines.
-pub const QUEUE_ROW_HEIGHT: f32 = 44.0;
-
-/// Batch rows share Queue's two-line identity rhythm while reserving stable status and actions.
+/// Batch row identity and height bounds.
 pub const BATCH_IDENTITY_MIN_WIDTH: f32 = 180.0;
 pub const BATCH_ROW_HEIGHT: f32 = 44.0;
 
@@ -143,12 +137,10 @@ pub enum TrackRowLayout {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueRowLayout {
+pub enum BatchRowLayout {
     Inline,
     Stacked,
 }
-
-pub type BatchRowLayout = QueueRowLayout;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BatchRowPlan {
@@ -182,59 +174,6 @@ impl BatchRowPlan {
         debug_assert!((actions.right() - row.right()).abs() <= 0.5);
         BatchRowColumns {
             identity,
-            state,
-            actions,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct QueueRowPlan {
-    pub layout: QueueRowLayout,
-    pub row_height: f32,
-    pub identity_width: f32,
-    pub operation_width: f32,
-    pub state_width: f32,
-    pub action_width: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct QueueRowColumns {
-    pub identity: Rect,
-    pub operation: Rect,
-    pub state: Rect,
-    pub actions: Option<Rect>,
-}
-
-impl QueueRowPlan {
-    /// Resolve the shared wide-row plan into exact cells. Callers allocate the row once and render
-    /// each cell inside these rectangles so child content cannot move a later column.
-    pub fn columns(self, row: Rect) -> QueueRowColumns {
-        debug_assert_eq!(self.layout, QueueRowLayout::Inline);
-        let height = row.height();
-        let gap = theme::SPACING.related;
-        let identity = Rect::from_min_size(row.min, vec2(self.identity_width, height));
-        let operation = Rect::from_min_size(
-            identity.right_top() + vec2(gap, 0.0),
-            vec2(self.operation_width, height),
-        );
-        let state = Rect::from_min_size(
-            operation.right_top() + vec2(gap, 0.0),
-            vec2(self.state_width, height),
-        );
-        let actions = (self.action_width > 0.0).then(|| {
-            Rect::from_min_size(
-                state.right_top() + vec2(gap, 0.0),
-                vec2(self.action_width, height),
-            )
-        });
-
-        debug_assert!(
-            (actions.map_or(state.right(), |actions| actions.right()) - row.right()).abs() <= 0.5
-        );
-        QueueRowColumns {
-            identity,
-            operation,
             state,
             actions,
         }
@@ -715,35 +654,6 @@ pub fn field_pair_layout(available_width: f32) -> FieldPairLayout {
     }
 }
 
-pub fn queue_row_plan(
-    available_width: f32,
-    operation_width: f32,
-    state_width: f32,
-    action_width: f32,
-    row_height: f32,
-) -> QueueRowPlan {
-    let available_width = safe_dimension(available_width);
-    let action_width = safe_dimension(action_width);
-    let gap_count = if action_width > 0.0 { 3.0 } else { 2.0 };
-    let fixed_width =
-        operation_width + state_width + action_width + gap_count * theme::SPACING.related;
-    let identity_width = (available_width - fixed_width).max(0.0);
-    let layout = if identity_width >= QUEUE_IDENTITY_MIN_WIDTH {
-        QueueRowLayout::Inline
-    } else {
-        QueueRowLayout::Stacked
-    };
-
-    QueueRowPlan {
-        layout,
-        row_height: row_height.max(QUEUE_ROW_HEIGHT),
-        identity_width,
-        operation_width,
-        state_width,
-        action_width,
-    }
-}
-
 pub fn batch_row_plan(
     available_width: f32,
     action_width: f32,
@@ -919,10 +829,10 @@ mod tests {
         ACTION_BAR_VERTICAL_PADDING, ActionLayout, BATCH_IDENTITY_MIN_WIDTH, BATCH_ROW_HEIGHT,
         BatchRowLayout, CONTENT_PADDING, FOCUS_CONTENT_MAX_WIDTH, FOCUS_CONTENT_MIN_HEIGHT,
         FieldPairLayout, LIVE_PREVIEW_MAX_HEIGHT, LIVE_PREVIEW_MAX_WIDTH, MAX_CONTENT_WIDTH,
-        MINIMUM_CONTENT_SIZE, OutputRowLayout, QUEUE_IDENTITY_MIN_WIDTH, QueueRowLayout,
-        action_layout, batch_row_plan, bounded_content_width, centered_action_group,
-        field_pair_layout, focus_content, live_preview_size, operation_surface, output_row_plan,
-        queue_row_plan, surface_fade, workspace_switcher_fits_one_line,
+        MINIMUM_CONTENT_SIZE, OutputRowLayout, action_layout, batch_row_plan,
+        bounded_content_width, centered_action_group, field_pair_layout, focus_content,
+        live_preview_size, operation_surface, output_row_plan, surface_fade,
+        workspace_switcher_fits_one_line,
     };
     use crate::ui::theme;
 
@@ -958,23 +868,6 @@ mod tests {
     }
 
     #[test]
-    fn queue_rows_keep_bounded_cells_and_reflow_before_identity_becomes_unreadable() {
-        let action_width = 72.0;
-        let wide = queue_row_plan(620.0, 104.0, 110.0, action_width, 44.0);
-        assert_eq!(wide.layout, QueueRowLayout::Inline);
-        assert_eq!(wide.action_width, action_width);
-        assert!(wide.identity_width >= QUEUE_IDENTITY_MIN_WIDTH);
-
-        let narrow = queue_row_plan(420.0, 104.0, 110.0, action_width, 44.0);
-        assert_eq!(narrow.layout, QueueRowLayout::Stacked);
-        assert!(narrow.identity_width < QUEUE_IDENTITY_MIN_WIDTH);
-        assert_eq!(
-            queue_row_plan(f32::NAN, 104.0, 110.0, action_width, 44.0).layout,
-            QueueRowLayout::Stacked
-        );
-    }
-
-    #[test]
     fn batch_rows_keep_shared_bounded_cells_and_stack_at_narrow_width() {
         let action_width = 128.0;
         let wide = batch_row_plan(620.0, action_width, 150.0, BATCH_ROW_HEIGHT);
@@ -999,32 +892,6 @@ mod tests {
         assert_eq!(
             batch_row_plan(420.0, action_width, 150.0, BATCH_ROW_HEIGHT).layout,
             BatchRowLayout::Stacked
-        );
-    }
-
-    #[test]
-    fn inline_queue_columns_stay_ordered_and_inside_row() {
-        let row = Rect::from_min_size(
-            pos2(17.0, 23.0),
-            Vec2::new(
-                620.0,
-                queue_row_plan(620.0, 104.0, 110.0, 144.0, 44.0).row_height,
-            ),
-        );
-        let plan = queue_row_plan(row.width(), 104.0, 110.0, 144.0, 44.0);
-        assert_eq!(plan.layout, QueueRowLayout::Inline);
-        let columns = plan.columns(row);
-        let actions = columns.actions.unwrap();
-        let cells = [columns.identity, columns.operation, columns.state, actions];
-        assert!(
-            cells
-                .iter()
-                .all(|cell| cell.is_positive() && row.contains_rect(*cell))
-        );
-        assert!(
-            cells
-                .windows(2)
-                .all(|pair| pair[0].right() <= pair[1].left())
         );
     }
 

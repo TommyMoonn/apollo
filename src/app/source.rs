@@ -228,12 +228,7 @@ impl super::Application {
         self.queue_confirmation = None;
         self.operation_action_error = None;
         match self.source.begin_load(path) {
-            Some(MediaLoadStart::Reused) => {
-                self.enter_workspace(
-                    self.active_operation()
-                        .unwrap_or(super::Operation::AudioMix),
-                );
-            }
+            Some(MediaLoadStart::Reused) => self.source_published(),
             Some(MediaLoadStart::Probe(request)) => {
                 self.source.start_inspection(tools, request, wake)
             }

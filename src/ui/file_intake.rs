@@ -60,8 +60,13 @@ pub fn summary(
                         .truncate()
                         .child(presentation.file_name.clone())
                         .tooltip(move |_, cx| {
-                            cx.new(|_| SourcePath(presentation.file_name.clone(), palette))
-                                .into()
+                            cx.new(|_| {
+                                super::components::PathTooltip(
+                                    presentation.file_name.clone(),
+                                    palette,
+                                )
+                            })
+                            .into()
                         }),
                 )
                 .child(actions.flex_shrink_0()),
@@ -83,27 +88,9 @@ pub fn summary(
                 .overflow_hidden()
                 .text_color(rgba(palette.secondary()))
                 .child(path.clone())
-                .tooltip(move |_, cx| cx.new(|_| SourcePath(path.clone(), palette)).into()),
+                .tooltip(move |_, cx| {
+                    cx.new(|_| super::components::PathTooltip(path.clone(), palette))
+                        .into()
+                }),
         )
-}
-
-struct SourcePath(String, Palette);
-
-impl gpui::Render for SourcePath {
-    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        div()
-            .max_w(px(340.))
-            .p(px(M.compact))
-            .rounded(px(M.radius))
-            .bg(rgba(self.1.background))
-            .border(px(M.rule))
-            .border_color(rgba(self.1.border()))
-            .child(
-                TextRole::Secondary
-                    .apply(div())
-                    .text_color(rgba(self.1.secondary()))
-                    .whitespace_normal()
-                    .child(self.0.clone()),
-            )
-    }
 }

@@ -23,7 +23,7 @@ use super::{
     MINIMUM_CONTENT_DIMENSIONS, REFERENCE_CONTENT_DIMENSIONS,
     components::{self, ActionState, Button, ProgressState, Tone},
     design::{FONT_FAMILY, METRICS as M, Palette, TextRole, WORDMARK_FAMILY},
-    file_intake, shell,
+    file_intake, queue, shell,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -189,6 +189,34 @@ impl ApolloRoot {
                 NavigationState::NoSource | NavigationState::SourceWorkspace { .. }
             )
             && self.core.can_accept_source_paths()
+    }
+
+    fn can_add_queue_files(&self) -> bool {
+        self.can_navigate()
+            && self.core.queue_origin().is_some()
+            && self.core.can_accept_source_paths()
+    }
+
+    fn add_queue_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_add_queue_files() {
+            return;
+        }
+        let progress = &mut self.progress_wake;
+        if matches!(
+            self.core
+                .queue_action(crate::app::QueueAction::AddFiles, || progress.begin()),
+            crate::app::queue::QueueEffect::AddFiles
+        ) {
+            window.focus(&self.open_focus, cx);
+            self.start_file_dialog(
+                FileDialogRequest::OpenSources {
+                    initial_directory: None,
+                    target: DialogTarget::BatchInput,
+                },
+                window,
+                cx,
+            );
+        }
     }
 
     fn accept_drop(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
@@ -358,7 +386,7 @@ impl ApolloRoot {
         if let Some(focus) = self.picker_focus.take() {
             if self.exit == ExitState::Open {
                 // Restore the initiating control when still actionable; otherwise use the root.
-                if self.can_open_files() || focus != self.open_focus {
+                if self.can_open_files() || self.can_add_queue_files() || focus != self.open_focus {
                     window.focus(&focus, cx);
                 } else {
                     window.focus(&self.focus, cx);
@@ -419,7 +447,7 @@ impl ApolloRoot {
         // The retry action may have disappeared while background discovery settled.
         if (focus == self.retry_focus
             && !matches!(self.core.discovery.state(), MediaToolsState::Unavailable(_)))
-            || (focus == self.open_focus && !self.can_open_files())
+            || (focus == self.open_focus && !self.can_open_files() && !self.can_add_queue_files())
         {
             window.focus(&self.focus, cx);
         } else {
@@ -720,24 +748,38 @@ impl Render for ApolloRoot {
                     footer,
                 )
             }
-            NavigationState::Queue { .. } | NavigationState::Settings { .. } => {
-                let (title, message) = if matches!(route, NavigationState::Queue { .. }) {
-                    (
-                        "Queue",
-                        "Queue controls are unavailable during the UI migration.",
-                    )
+            NavigationState::Queue { .. } => {
+                let mut add = Button::new("queue-add-files", "Add files", Tone::Standard);
+                if self.file_dialog.is_pending() || self.core.source.is_inspecting() {
+                    add.state = ActionState::Busy;
+                } else if self.can_add_queue_files() {
+                    add.state =
+                        ActionState::Enabled(Box::new(cx.listener(|root, _, window, cx| {
+                            root.add_queue_files(window, cx);
+                        })));
+                }
+                let add_width = add.measured_width(window);
+                let add = add.render(palette, window).w(add_width);
+                let add = if self.can_add_queue_files() {
+                    add.track_focus(&self.open_focus)
                 } else {
-                    (
-                        "Settings",
-                        "Appearance and settings controls are unavailable during the UI migration.",
-                    )
+                    add
                 };
+                let scheduler = self.core.queue.scheduler();
                 (
-                    components::page_title(title),
-                    components::inline_message(message, palette),
-                    components::action_bar(palette, [back.render(palette, window)]),
+                    queue::header(scheduler, back.render(palette, window), add, palette),
+                    queue::body(scheduler, palette, window),
+                    div(),
                 )
             }
+            NavigationState::Settings { .. } => (
+                components::page_title("Settings"),
+                components::inline_message(
+                    "Appearance and settings controls are unavailable during the UI migration.",
+                    palette,
+                ),
+                components::action_bar(palette, [back.render(palette, window)]),
+            ),
             NavigationState::QueueEdit { .. } | NavigationState::BatchEdit => (
                 components::page_title("Editor"),
                 components::inline_message(
@@ -782,7 +824,7 @@ impl Render for ApolloRoot {
                 )
                 .child(surface)
                 .children(
-                    (landing || has_source)
+                    (landing || has_source || matches!(route, NavigationState::Queue { .. }))
                         .then(|| self.core.source.error())
                         .flatten()
                         .map(|error| {

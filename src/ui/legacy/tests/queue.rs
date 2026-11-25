@@ -41,37 +41,6 @@ fn queue_edit_reuses_workspace_without_source_or_execution_actions() {
 }
 
 #[test]
-fn stopped_queue_surface_exposes_edit_remove_and_bounded_reorder_controls() {
-    let (directory, path) = temp_file("queue-controls-surface");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::Remux);
-    app.enqueue_current_operation(Operation::Remux)
-        .unwrap()
-        .unwrap();
-    app.enter_queue();
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-
-    let mut output = context.run_ui(Default::default(), |ui| app.show_navigation(ui));
-
-    for label in [
-        "Edit settings",
-        "Remove",
-        "↑",
-        "↓",
-        "Start queue",
-        "Cancel queue",
-        "Back",
-    ] {
-        assert!(output_contains_text(&output, label), "missing {label:?}");
-    }
-    output.textures_delta.clear();
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn queue_cancel_requires_confirmation_and_dismissal_keeps_waiting_jobs() {
     let (directory, path) = temp_file("queue-cancel-confirmation");
     let mut app = app();

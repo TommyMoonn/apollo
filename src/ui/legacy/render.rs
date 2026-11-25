@@ -18,8 +18,8 @@ use crate::ui::remux::RemuxSelectionAction;
 use crate::ui::upscale::UpscaleSelectionAction;
 use crate::ui::{
     OperationSurfaceMode, audio_extract as audio_extract_ui, audio_mix as audio_mix_ui,
-    frame_capture as frame_capture_ui, layout, media_error, queue as queue_ui, remux as remux_ui,
-    theme, upscale as upscale_ui, widgets, workspace,
+    frame_capture as frame_capture_ui, layout, media_error, remux as remux_ui, theme,
+    upscale as upscale_ui, widgets, workspace,
 };
 
 use super::ApolloApp;
@@ -196,40 +196,15 @@ impl ApolloApp {
     }
 
     pub(super) fn show_queue(&mut self, ui: &mut Ui) {
-        let scheduler = self.core.queue.scheduler();
-        let capabilities_ready = self.core.discovery.settled_capabilities().is_some();
-        let waiting_for_encoder_discovery = self.ready_media_tools().is_some()
-            && !capabilities_ready
-            && scheduler.waiting_jobs().next().is_some()
-            && !scheduler.next_job_ready(false);
-        let action = queue_ui::show(
-            ui,
-            self.core.queue.scheduler().jobs(),
-            self.core.queue.scheduler().active_job(),
-            self.core.queue.scheduler().active_progress(),
-            self.core.queue.scheduler().run_state(),
-            queue_ui::QueueAvailability {
-                can_start: self.core.queue_start_allowed()
-                    && scheduler.next_job_ready(capabilities_ready),
-                waiting_for_encoder_discovery,
-                can_add_files: self.file_intake_enabled() && self.ready_media_tools().is_some(),
-                can_edit: self.ready_media_tools().is_some(),
-                action_error: self.core.queue_action_error.as_deref(),
-            },
-            self.core.queue.scheduler().cancellation_pending(),
-        );
-        self.handle_queue_view_action(action);
-        self.show_queue_frame_preview(ui);
-        if self.confirm_cancel_queue {
-            if self.core.queue.scheduler().pending_count() == 0 {
-                self.resolve_queue_cancellation(false);
-                return;
-            }
-            let (confirm, dismiss) = queue_ui::confirm_cancel(ui);
-            if confirm || dismiss {
-                self.resolve_queue_cancellation(confirm);
-            }
+        // The executable uses the GPUI queue. Keep only the legacy route bridge
+        // for the remaining adapter's editor and navigation regression coverage.
+        if let Some(error) = &self.core.queue_action_error {
+            ui.label(error);
         }
+        if widgets::secondary_button(ui, "Back").clicked() {
+            self.handle_queue_view_action(crate::app::QueueAction::Back);
+        }
+        self.show_queue_frame_preview(ui);
     }
 
     fn show_queue_edit(&mut self, ui: &mut Ui) {
