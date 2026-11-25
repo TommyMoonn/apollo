@@ -10,15 +10,14 @@ use crate::{
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error, show_queue_confirmation,
-    theme, widgets,
+    OperationSurfaceMode, fonts, layout, media_error, show_queued_submission_actions, theme,
+    widgets,
 };
 
 const AUDIO_TRACK_LABEL: &str = "Audio track";
 const OUTPUT_LABEL: &str = "Output";
 const FORMAT_LABEL: &str = "Output format";
 const BROWSE_LABEL: &str = "Browse";
-const EXTRACT_LABEL: &str = "Extract";
 const FORMAT_OPTIONS: [&str; 3] = ["Original (copy)", "AAC", "FLAC"];
 const NO_AUDIO_FEEDBACK: &str = "This source has no audio tracks to extract.";
 
@@ -145,25 +144,20 @@ pub fn show<'a>(
                 queue_confirmation,
                 ..
             } => {
-                if widgets::primary_button_enabled(
+                match show_queued_submission_actions(
                     ui,
-                    EXTRACT_LABEL,
-                    validation.is_ok() && start_allowed,
-                )
-                .clicked()
-                {
-                    action.set(AudioExtractSelectionAction::ExtractRequested);
+                    start_allowed,
+                    validation.is_ok(),
+                    queue_confirmation,
+                ) {
+                    Some(crate::app::queue::QueueSubmission::ProcessNow) => {
+                        action.set(AudioExtractSelectionAction::ExtractRequested)
+                    }
+                    Some(crate::app::queue::QueueSubmission::AddToQueue) => {
+                        action.set(AudioExtractSelectionAction::QueueRequested)
+                    }
+                    None => {}
                 }
-                if ui
-                    .add_enabled_ui(validation.is_ok(), |ui| {
-                        widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
-                    })
-                    .inner
-                    .clicked()
-                {
-                    action.set(AudioExtractSelectionAction::QueueRequested);
-                }
-                show_queue_confirmation(ui, queue_confirmation);
             }
             edit_mode => {
                 let (save_label, cancel_label) = edit_mode

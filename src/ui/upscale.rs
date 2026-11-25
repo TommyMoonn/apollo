@@ -1,4 +1,4 @@
-use crate::upscale::draft::{UpscaleDraft, UpscaleEncoderCapabilities, capability_for_codec};
+use crate::upscale::draft::{UpscaleDraft, UpscaleEncoderCapabilities};
 
 use std::{borrow::Cow, cell::Cell, ffi::OsString};
 
@@ -9,15 +9,15 @@ use crate::{
     upscale::{
         model::{
             CpuQuality, NvencQuality, UpscaleTarget, VideoCodec, VideoEncoderBackend,
-            VideoEncoderSelection,
+            VideoEncoderSelection, capability_for_codec,
         },
         validation::UpscaleValidationError,
     },
 };
 
 use super::{
-    ADD_TO_QUEUE_LABEL, OperationSurfaceMode, fonts, layout, media_error, show_queue_confirmation,
-    theme, widgets,
+    OperationSurfaceMode, fonts, layout, media_error, show_queued_submission_actions, theme,
+    widgets,
 };
 
 const PRESET_TARGETS: [UpscaleTarget; 3] = [
@@ -29,7 +29,6 @@ const PRESET_TARGETS: [UpscaleTarget; 3] = [
 const UPSCALE_TO_LABEL: &str = "Upscale to";
 const OUTPUT_LABEL: &str = "Output";
 const BROWSE_LABEL: &str = "Browse";
-const UPSCALE_LABEL: &str = "Upscale";
 const CODEC_OPTIONS: [&str; 2] = ["H.264", "H.265"];
 const ENCODER_OPTIONS: [&str; 3] = ["Auto", "NVIDIA NVENC", "CPU"];
 const ENCODING_LABEL: &str = "Encoding";
@@ -141,21 +140,20 @@ pub fn show<'a>(
                     queue_confirmation,
                     ..
                 } => {
-                    if widgets::primary_button_enabled(ui, UPSCALE_LABEL, runnable && start_allowed)
-                        .clicked()
-                    {
-                        action.set(UpscaleSelectionAction::UpscaleRequested);
+                    match show_queued_submission_actions(
+                        ui,
+                        start_allowed,
+                        runnable,
+                        queue_confirmation,
+                    ) {
+                        Some(crate::app::queue::QueueSubmission::ProcessNow) => {
+                            action.set(UpscaleSelectionAction::UpscaleRequested)
+                        }
+                        Some(crate::app::queue::QueueSubmission::AddToQueue) => {
+                            action.set(UpscaleSelectionAction::QueueRequested)
+                        }
+                        None => {}
                     }
-                    if ui
-                        .add_enabled_ui(runnable, |ui| {
-                            widgets::secondary_button(ui, ADD_TO_QUEUE_LABEL)
-                        })
-                        .inner
-                        .clicked()
-                    {
-                        action.set(UpscaleSelectionAction::QueueRequested);
-                    }
-                    show_queue_confirmation(ui, queue_confirmation);
                 }
                 edit_mode => {
                     let (save_label, cancel_label) = edit_mode

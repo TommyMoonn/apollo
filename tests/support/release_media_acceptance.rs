@@ -8,10 +8,7 @@ use std::{
 };
 
 use apollo::{
-    audio_extract::{
-        execution::AudioExtractExecutor,
-        model::{AudioExtractFormat, AudioExtractRequest},
-    },
+    audio_extract::model::{AudioExtractFormat, AudioExtractRequest},
     audio_mix::model::{
         AudioMixRequest, LoudnessNormalization, LoudnessTargets, OutputContainer,
         SelectedAudioTrack, TrackGain,
@@ -31,17 +28,17 @@ use apollo::{
     },
     queue::{MediaQueue, QueueJobState, QueuedOperation},
     remux::model::RemuxRequest,
-    upscale::{
-        execution::UpscaleExecutor,
-        model::{
-            EncoderQuality, NvencQuality, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget,
-            VideoCodec, VideoEncoderBackend, VideoEncoderSelection,
-        },
+    upscale::model::{
+        EncoderQuality, NvencQuality, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget,
+        VideoCodec, VideoEncoderBackend, VideoEncoderSelection,
     },
 };
 
 pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &str) {
     assert_eq!(env::var_os("PATH").unwrap_or_default(), "");
+    let mut tools = tools.clone();
+    tools.video_encoders = capabilities.clone();
+    let tools = &tools;
     let output =
         env::var_os("APOLLO_RELEASE_OUTPUT_DIRECTORY").expect("acceptance output directory");
     let directory = Path::new(&output);
@@ -70,10 +67,11 @@ pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &s
         "cpu" => {
             audio_mix(tools, identity, media, directory);
             remux(tools, identity, media, directory);
-            audio_extract(tools, media, directory);
+            audio_extract(tools, identity, media, directory);
             frame_capture(tools, media, directory);
             upscale(
                 tools,
+                identity,
                 media,
                 directory,
                 capabilities,
@@ -85,6 +83,7 @@ pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &s
             assert_eq!(capabilities.h265_nvenc, VideoEncoderCapability::Available);
             upscale(
                 tools,
+                identity,
                 media,
                 directory,
                 capabilities,
@@ -92,6 +91,7 @@ pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &s
             );
             upscale(
                 tools,
+                identity,
                 media,
                 directory,
                 capabilities,
@@ -109,6 +109,7 @@ pub fn run(tools: &MediaTools, capabilities: &VideoEncoderCapabilities, mode: &s
             }
             upscale(
                 tools,
+                identity,
                 media,
                 directory,
                 capabilities,
@@ -207,10 +208,10 @@ fn settle_queued(
     let output = operation.output().to_path_buf();
     let mut queue = MediaQueue::new();
     let job_id = queue.enqueue(identity, media, operation).unwrap();
-    assert!(queue.start(tools, |_| MediaProcessWake::default()));
+    assert!(queue.start(tools, true, |_| MediaProcessWake::default()));
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        queue.poll(Some(tools), |_| MediaProcessWake::default());
+        queue.poll(Some(tools), true, |_| MediaProcessWake::default());
         let job = &queue.jobs()[0];
         assert_eq!(job.id(), job_id);
         match job.state() {
@@ -307,7 +308,12 @@ fn remux(tools: &MediaTools, identity: &SourceIdentity, media: &MediaFile, direc
     println!("PASS Remux");
 }
 
-fn audio_extract(tools: &MediaTools, media: &MediaFile, directory: &Path) {
+fn audio_extract(
+    tools: &MediaTools,
+    identity: &SourceIdentity,
+    media: &MediaFile,
+    directory: &Path,
+) {
     for (format, codec) in [
         (AudioExtractFormat::Original, "aac"),
         (AudioExtractFormat::Aac, "aac"),
@@ -319,9 +325,12 @@ fn audio_extract(tools: &MediaTools, media: &MediaFile, directory: &Path) {
             audio_stream_index: media.audio_streams[1].stream_index,
             format,
         };
-        let mut executor = AudioExtractExecutor::new();
-        executor.start(tools, media, &request).unwrap();
-        settle(|| executor.poll().clone(), &request.output);
+        settle_queued(
+            tools,
+            identity,
+            media,
+            QueuedOperation::AudioExtract(request.clone()),
+        );
         let result = probe_media(tools, &request.output).unwrap();
         assert!(result.video_streams.is_empty());
         assert_eq!(result.audio_streams.len(), 1);
@@ -353,6 +362,7 @@ fn frame_capture(tools: &MediaTools, media: &MediaFile, directory: &Path) {
 
 fn upscale(
     tools: &MediaTools,
+    identity: &SourceIdentity,
     media: &MediaFile,
     directory: &Path,
     capabilities: &VideoEncoderCapabilities,
@@ -390,23 +400,38 @@ fn upscale(
                 EncoderQuality::NvidiaNvenc(NvencQuality::new(16).unwrap())
             );
         }
-        if let VideoEncoderCapability::RuntimeUnavailable { reason } = capability {
+        if let Some(reason) = capability.unavailable_reason() {
             let mut explicit = request.clone();
             explicit
                 .encoder_settings
                 .set_selection(VideoEncoderSelection::NvidiaNvenc);
-            let error = UpscaleExecutor::new()
-                .start(tools, media, &explicit)
-                .unwrap_err();
+            // A previously available encoder may become unavailable before this job starts.
+            explicit.nvenc_capability = VideoEncoderCapability::Available;
+            let mut queue = MediaQueue::new();
+            queue
+                .enqueue(identity, media, QueuedOperation::Upscale(explicit.clone()))
+                .unwrap();
+            assert!(queue.start(tools, true, |_| MediaProcessWake::default()));
+            let QueueJobState::Failed(apollo::queue::QueueJobFailure::Preparation(error)) =
+                queue.jobs()[0].state()
+            else {
+                panic!(
+                    "expected NVENC preparation failure, got {:?}",
+                    queue.jobs()[0].state()
+                );
+            };
             assert!(error.to_string().contains(reason));
             assert!(!explicit.output.exists());
             println!(
                 "PASS explicit {name} NVENC rejects real probe failure with retained diagnostic"
             );
         }
-        let mut executor = UpscaleExecutor::new();
-        executor.start(tools, media, &request).unwrap();
-        settle(|| executor.poll().clone(), &request.output);
+        settle_queued(
+            tools,
+            identity,
+            media,
+            QueuedOperation::Upscale(request.clone()),
+        );
         let result = probe_media(tools, &request.output).unwrap();
         assert_video(&result, name, 640, 360);
         assert_eq!(result.video_streams[0].format.bit_depth, Some(8));

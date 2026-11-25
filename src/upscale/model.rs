@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::media::tools::VideoEncoderCapability;
+use crate::media::tools::{VideoEncoderCapabilities, VideoEncoderCapability};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UpscaleTarget {
@@ -208,5 +208,15 @@ impl UpscaleRequest {
         };
 
         Ok(ResolvedVideoEncoder { backend, quality })
+    }
+}
+
+pub(crate) fn capability_for_codec(
+    capabilities: &VideoEncoderCapabilities,
+    codec: VideoCodec,
+) -> &VideoEncoderCapability {
+    match codec {
+        VideoCodec::H264 => &capabilities.h264_nvenc,
+        VideoCodec::H265 => &capabilities.h265_nvenc,
     }
 }

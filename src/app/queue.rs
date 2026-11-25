@@ -99,9 +99,14 @@ impl QueueWorkflow {
         self.scheduler.cancel_queue()
     }
 
-    fn start(&mut self, tools: &MediaTools, mut wake: impl FnMut() -> MediaProcessWake) -> bool {
+    fn start(
+        &mut self,
+        tools: &MediaTools,
+        capabilities_ready: bool,
+        mut wake: impl FnMut() -> MediaProcessWake,
+    ) -> bool {
         let sender = self.sender.clone();
-        self.scheduler.start(tools, |job_id| {
+        self.scheduler.start(tools, capabilities_ready, |job_id| {
             queue_execution_wake(job_id, sender.clone(), wake())
         })
     }
@@ -115,16 +120,23 @@ impl QueueWorkflow {
         received
     }
 
-    fn poll(&mut self, tools: Option<&MediaTools>, mut wake: impl FnMut() -> MediaProcessWake) {
+    fn poll(
+        &mut self,
+        tools: Option<&MediaTools>,
+        capabilities_ready: bool,
+        mut wake: impl FnMut() -> MediaProcessWake,
+    ) {
         let received = self.drain_current_events(self.scheduler.active_job());
         // Readiness loss stops advancement even if the active process has not notified us yet.
         let readiness_lost =
             tools.is_none() && self.scheduler.run_state() == QueueRunState::Running;
-        if !received && !readiness_lost {
+        let awaiting_launch = self.scheduler.run_state() == QueueRunState::Running
+            && self.scheduler.active_job().is_none();
+        if !received && !readiness_lost && !awaiting_launch {
             return;
         }
         let sender = self.sender.clone();
-        self.scheduler.poll(tools, |job_id| {
+        self.scheduler.poll(tools, capabilities_ready, |job_id| {
             queue_execution_wake(job_id, sender.clone(), wake())
         });
     }
@@ -189,7 +201,11 @@ impl Application {
     }
 
     pub(crate) fn poll_media_queue(&mut self, wake: impl FnMut() -> MediaProcessWake) {
-        self.queue.poll(self.discovery.ready(), wake);
+        self.queue.poll(
+            self.discovery.ready(),
+            self.discovery.settled_capabilities().is_some(),
+            wake,
+        );
     }
 
     pub(crate) fn queue_action(
@@ -212,7 +228,11 @@ impl Application {
                 let Some(tools) = self.discovery.ready() else {
                     return Handled(false);
                 };
-                Handled(self.queue.start(tools, wake))
+                Handled(self.queue.start(
+                    tools,
+                    self.discovery.settled_capabilities().is_some(),
+                    wake,
+                ))
             }
             QueueAction::CancelCurrent => Handled(self.queue.scheduler.cancel_current()),
             QueueAction::StopAfterCurrent => Handled(self.queue.scheduler.stop_after_current()),

@@ -2,7 +2,7 @@ use std::{fmt, path::Path};
 
 use crate::{
     audio_extract::{
-        execution::{AudioExtractStartError, prepare_audio_extract_operation},
+        execution::{AudioExtractPreparationError, prepare_audio_extract_operation},
         model::AudioExtractRequest,
         validation::validate_audio_extract_request,
     },
@@ -32,8 +32,8 @@ use crate::{
         validation::validate_remux_request,
     },
     upscale::{
-        execution::{UpscaleStartError, prepare_upscale_operation},
-        model::UpscaleRequest,
+        execution::{UpscalePreparationError, prepare_upscale_operation},
+        model::{UpscaleRequest, VideoEncoderSelection},
         validation::validate_upscale_request,
     },
 };
@@ -107,14 +107,16 @@ impl QueuedOperation {
             }
             Self::AudioExtract(request) => {
                 validate_audio_extract_request(request, media).map_err(|error| {
-                    QueuePreparationError::AudioExtract(AudioExtractStartError::Validation(error))
+                    QueuePreparationError::AudioExtract(AudioExtractPreparationError::Validation(
+                        error,
+                    ))
                 })
             }
             Self::Remux(request) => validate_remux_request(request, media).map_err(|error| {
                 QueuePreparationError::Remux(RemuxPreparationError::Validation(error))
             }),
             Self::Upscale(request) => validate_upscale_request(request, media).map_err(|error| {
-                QueuePreparationError::Upscale(UpscaleStartError::Validation(error))
+                QueuePreparationError::Upscale(UpscalePreparationError::Validation(error))
             }),
             Self::FrameCapture(request) => {
                 validate_frame_capture_request(request, media).map_err(|error| {
@@ -122,6 +124,10 @@ impl QueuedOperation {
                 })
             }
         }
+    }
+
+    pub(crate) fn requires_encoder_capabilities(&self) -> bool {
+        matches!(self, Self::Upscale(request) if request.encoder_settings.selection() != VideoEncoderSelection::Cpu)
     }
 
     pub(crate) fn prepare(
@@ -148,9 +154,9 @@ impl QueuedOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueuePreparationError {
     AudioMix(AudioMixPreparationError),
-    Upscale(UpscaleStartError),
+    Upscale(UpscalePreparationError),
     Remux(RemuxPreparationError),
-    AudioExtract(AudioExtractStartError),
+    AudioExtract(AudioExtractPreparationError),
     FrameCapture(FrameCaptureStartError),
 }
 

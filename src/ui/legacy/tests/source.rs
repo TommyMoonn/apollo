@@ -275,11 +275,7 @@ fn open_valid_file_routes_audio_mix_to_ready_state() {
 fn dropped_valid_file_enters_default_workspace() {
     let (directory, path) = temp_file("drop");
     let mut app = app();
-    assert!(file_intake_enabled(
-        app.core.upscale_executor.state(),
-        app.core.audio_extract_executor.state(),
-        app.core.frame_capture_executor.state(),
-    ));
+    assert!(file_intake_enabled(app.core.frame_capture_executor.state(),));
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
 
     assert_workspace(&app.core, Operation::AudioMix);

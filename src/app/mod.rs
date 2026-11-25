@@ -13,10 +13,8 @@ pub(crate) mod source;
 pub use navigation::{BatchOrigin, NavigationState, Operation, QueueEditOrigin, QueueOrigin};
 
 use crate::{
-    audio_extract::execution::AudioExtractExecutor,
     frame_capture::execution::FrameCaptureExecutor,
     media::{error::MediaError, execution::MediaExecutionState},
-    upscale::execution::UpscaleExecutor,
 };
 
 #[derive(Default)]
@@ -27,8 +25,6 @@ pub struct Application {
     pub(crate) discovery: discovery::MediaToolsDiscovery,
     pub(crate) source: source::SourceSession,
     pub(crate) frame_work: frame_capture::FrameCaptureWork,
-    pub(crate) upscale_executor: UpscaleExecutor,
-    pub(crate) audio_extract_executor: AudioExtractExecutor,
     pub(crate) frame_capture_executor: FrameCaptureExecutor,
     pub(crate) queue: queue::QueueWorkflow,
     queue_edit: Option<queue::QueueEditState>,
@@ -48,36 +44,24 @@ impl Application {
     }
 
     pub(crate) fn media_operation_running(&self) -> bool {
-        self.upscale_executor.is_running()
-            || self.audio_extract_executor.is_running()
-            || self.frame_capture_executor.is_running()
+        self.frame_capture_executor.is_running()
     }
 
     pub(crate) fn executors_idle(&self) -> bool {
-        file_intake_enabled(
-            self.upscale_executor.state(),
-            self.audio_extract_executor.state(),
-            self.frame_capture_executor.state(),
-        )
+        file_intake_enabled(self.frame_capture_executor.state())
     }
 
     pub(crate) fn execution_arbitration(&self) -> ProcessExecutionArbitration {
         ProcessExecutionArbitration::new(
             self.media_operation_running() || self.frame_work.copy_active(),
-            self.queue.scheduler().is_running(),
+            self.queue.scheduler().is_running() || self.queue.scheduler().is_started(),
         )
     }
 }
 
-pub(crate) fn file_intake_enabled(
-    upscale_state: &MediaExecutionState,
-    audio_extract_state: &MediaExecutionState,
-    frame_capture_state: &MediaExecutionState,
-) -> bool {
+pub(crate) fn file_intake_enabled(frame_capture_state: &MediaExecutionState) -> bool {
     // Done/Back owns terminal settlement. Intake resumes only after every executor returns to Idle.
-    matches!(upscale_state, MediaExecutionState::Idle)
-        && matches!(audio_extract_state, MediaExecutionState::Idle)
-        && matches!(frame_capture_state, MediaExecutionState::Idle)
+    matches!(frame_capture_state, MediaExecutionState::Idle)
 }
 
 pub(crate) fn operation_workspace_visible(

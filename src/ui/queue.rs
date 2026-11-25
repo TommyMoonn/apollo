@@ -15,6 +15,7 @@ const ADD_FILES_LABEL: &str = "Add files";
 const START_LABEL: &str = "Start queue";
 const CANCEL_LABEL: &str = "Cancel job";
 const STOP_AFTER_CURRENT_LABEL: &str = "Stop after current";
+const STOP_QUEUE_LABEL: &str = "Stop queue";
 const CANCEL_QUEUE_LABEL: &str = "Cancel queue";
 const STOPPING_LABEL: &str = "Stopping after current";
 const EDIT_LABEL: &str = "Edit";
@@ -31,6 +32,7 @@ const DETAILS_LABEL: &str = "Details";
 #[derive(Debug, Clone, Copy)]
 pub struct QueueAvailability {
     pub can_start: bool,
+    pub waiting_for_encoder_discovery: bool,
     pub can_add_files: bool,
     pub can_edit: bool,
 }
@@ -131,7 +133,7 @@ pub fn show(
     let action = Cell::new(QueueAction::None);
     let capabilities = QueueCapabilities::from_jobs(jobs);
     let summary = QueueSummary::from_jobs(jobs);
-    let action_rows = queue_action_rows(ui, active_job, capabilities.has_waiting);
+    let action_rows = queue_action_rows(ui, active_job, capabilities.has_waiting, run_state);
     let waiting_mutation_allowed = run_state == QueueRunState::Stopped && active_job.is_none();
     let action_width = row_action_width(ui);
     let operation_width = crate::app::Operation::ALL
@@ -158,6 +160,10 @@ pub fn show(
                 &action,
             );
             ui.add_space(theme::SPACING.related);
+            if active_job.is_none() && availability.waiting_for_encoder_discovery {
+                ui.label("Checking NVIDIA NVENC…");
+                ui.add_space(theme::SPACING.compact);
+            }
 
             if !jobs.is_empty() {
                 let row_plan = layout::queue_row_plan(
@@ -233,9 +239,16 @@ pub fn show(
     action.get()
 }
 
-fn queue_action_rows(ui: &Ui, active_job: Option<JobId>, has_waiting: bool) -> usize {
+fn queue_action_rows(
+    ui: &Ui,
+    active_job: Option<JobId>,
+    has_waiting: bool,
+    run_state: QueueRunState,
+) -> usize {
     let labels: &[&str] = if active_job.is_some() {
         &[CANCEL_LABEL, STOPPING_LABEL, CANCEL_QUEUE_LABEL, BACK_LABEL]
+    } else if has_waiting && run_state == QueueRunState::Running {
+        &[STOP_QUEUE_LABEL, CANCEL_QUEUE_LABEL, BACK_LABEL]
     } else if has_waiting {
         &[START_LABEL, CANCEL_QUEUE_LABEL, BACK_LABEL]
     } else {
@@ -320,6 +333,13 @@ fn show_queue_controls(
         .clicked()
         {
             action.set(QueueAction::CancelCurrent);
+        }
+    } else if capabilities.has_waiting && run_state == QueueRunState::Running {
+        if widgets::destructive_button(ui, CANCEL_QUEUE_LABEL).clicked() {
+            action.set(QueueAction::CancelQueue);
+        }
+        if widgets::secondary_button(ui, STOP_QUEUE_LABEL).clicked() {
+            action.set(QueueAction::StopAfterCurrent);
         }
     } else if capabilities.has_waiting && run_state == QueueRunState::Stopped {
         if widgets::destructive_button(ui, CANCEL_QUEUE_LABEL).clicked() {
@@ -1052,6 +1072,7 @@ mod tests {
                     QueueRunState::Stopped,
                     QueueAvailability {
                         can_start: true,
+                        waiting_for_encoder_discovery: false,
                         can_add_files: true,
                         can_edit: true,
                     },
@@ -1093,6 +1114,7 @@ mod tests {
                 QueueRunState::Stopped,
                 QueueAvailability {
                     can_start: true,
+                    waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
                 },
@@ -1157,6 +1179,7 @@ mod tests {
                 QueueRunState::Stopped,
                 QueueAvailability {
                     can_start: true,
+                    waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
                 },
@@ -1211,6 +1234,7 @@ mod tests {
                 QueueRunState::Stopped,
                 QueueAvailability {
                     can_start: true,
+                    waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
                 },
@@ -1247,6 +1271,7 @@ mod tests {
                 QueueRunState::Running,
                 QueueAvailability {
                     can_start: true,
+                    waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
                 },
@@ -1293,6 +1318,7 @@ mod tests {
                 QueueRunState::Running,
                 QueueAvailability {
                     can_start: true,
+                    waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
                 },
@@ -1334,6 +1360,7 @@ mod tests {
                 QueueRunState::Running,
                 QueueAvailability {
                     can_start: true,
+                    waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
                 },
@@ -1366,6 +1393,7 @@ mod tests {
                 QueueRunState::StoppingAfterCurrent,
                 QueueAvailability {
                     can_start: true,
+                    waiting_for_encoder_discovery: false,
                     can_add_files: true,
                     can_edit: true,
                 },

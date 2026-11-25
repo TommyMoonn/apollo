@@ -142,23 +142,38 @@ impl MediaQueue {
         Ok(ids)
     }
 
-    /// Returns whether a start request changed queue state, even if all launches failed.
-    pub fn start<F>(&mut self, tools: &MediaTools, mut wake_for_job: F) -> bool
-    where
-        F: FnMut(JobId) -> MediaProcessWake,
-    {
-        let mut launcher =
-            |job_id, command| MediaProcess::start_with_wake(command, wake_for_job(job_id));
-        self.start_with_launcher(tools, &mut launcher)
+    pub(crate) fn next_job_ready(&self, capabilities_ready: bool) -> bool {
+        self.waiting_jobs().next().is_some_and(|job| {
+            capabilities_ready || !job.operation().requires_encoder_capabilities()
+        })
     }
 
-    pub fn poll<F>(&mut self, tools: Option<&MediaTools>, mut wake_for_job: F)
+    /// Returns whether a start request changed queue state, even if all launches failed.
+    pub fn start<F>(
+        &mut self,
+        tools: &MediaTools,
+        capabilities_ready: bool,
+        mut wake_for_job: F,
+    ) -> bool
     where
         F: FnMut(JobId) -> MediaProcessWake,
     {
         let mut launcher =
             |job_id, command| MediaProcess::start_with_wake(command, wake_for_job(job_id));
-        self.poll_with_launcher(tools, &mut launcher);
+        self.start_with_launcher(tools, capabilities_ready, &mut launcher)
+    }
+
+    pub fn poll<F>(
+        &mut self,
+        tools: Option<&MediaTools>,
+        capabilities_ready: bool,
+        mut wake_for_job: F,
+    ) where
+        F: FnMut(JobId) -> MediaProcessWake,
+    {
+        let mut launcher =
+            |job_id, command| MediaProcess::start_with_wake(command, wake_for_job(job_id));
+        self.poll_with_launcher(tools, capabilities_ready, &mut launcher);
     }
 
     pub fn cancel_current(&mut self) -> bool {
@@ -255,6 +270,9 @@ impl MediaQueue {
             return false;
         };
         self.jobs.remove(index);
+        if self.active_job.is_none() && self.waiting_jobs().next().is_none() {
+            self.run_state = QueueRunState::Stopped;
+        }
         true
     }
 
@@ -264,26 +282,35 @@ impl MediaQueue {
         previous_len - self.jobs.len()
     }
 
-    fn start_with_launcher<F, P>(&mut self, tools: &MediaTools, launcher: &mut F) -> bool
+    fn start_with_launcher<F, P>(
+        &mut self,
+        tools: &MediaTools,
+        capabilities_ready: bool,
+        launcher: &mut F,
+    ) -> bool
     where
         F: FnMut(JobId, MediaProcessCommand) -> Result<P, MediaProcessStartError>,
         P: ProcessControl + 'static,
     {
         if self.run_state != QueueRunState::Stopped
             || self.active_job.is_some()
-            || self.waiting_jobs().next().is_none()
+            || !self.next_job_ready(capabilities_ready)
         {
             return false;
         }
 
         self.run_state = QueueRunState::Running;
-        self.advance_with_launcher(tools, launcher);
+        self.advance_with_launcher(tools, capabilities_ready, launcher);
         // Even if every launch fails, the waiting jobs have changed state.
         true
     }
 
-    fn poll_with_launcher<F, P>(&mut self, tools: Option<&MediaTools>, launcher: &mut F)
-    where
+    fn poll_with_launcher<F, P>(
+        &mut self,
+        tools: Option<&MediaTools>,
+        capabilities_ready: bool,
+        launcher: &mut F,
+    ) where
         F: FnMut(JobId, MediaProcessCommand) -> Result<P, MediaProcessStartError>,
         P: ProcessControl + 'static,
     {
@@ -291,6 +318,9 @@ impl MediaQueue {
             self.stop_after_current();
         }
         let Some(active_job) = self.active_job else {
+            if let (QueueRunState::Running, Some(tools)) = (self.run_state, tools) {
+                self.advance_with_launcher(tools, capabilities_ready, launcher);
+            }
             return;
         };
 
@@ -318,14 +348,18 @@ impl MediaQueue {
         );
 
         if let (QueueRunState::Running, Some(tools)) = (self.run_state, tools) {
-            self.advance_with_launcher(tools, launcher);
+            self.advance_with_launcher(tools, capabilities_ready, launcher);
         } else {
             self.run_state = QueueRunState::Stopped;
         }
     }
 
-    fn advance_with_launcher<F, P>(&mut self, tools: &MediaTools, launcher: &mut F)
-    where
+    fn advance_with_launcher<F, P>(
+        &mut self,
+        tools: &MediaTools,
+        capabilities_ready: bool,
+        launcher: &mut F,
+    ) where
         F: FnMut(JobId, MediaProcessCommand) -> Result<P, MediaProcessStartError>,
         P: ProcessControl + 'static,
     {
@@ -335,6 +369,10 @@ impl MediaQueue {
             .position(|job| matches!(job.state(), QueueJobState::Waiting))
         {
             let job = &self.jobs[index];
+            if !capabilities_ready && job.operation().requires_encoder_capabilities() {
+                // Discovery will wake the application when this FIFO head can launch.
+                return;
+            }
             let job_id = job.id();
             let current_identity = match SourceIdentity::read(job.operation().input()) {
                 Ok(identity) => identity,
@@ -464,18 +502,22 @@ mod tests {
             container::MediaContainer,
             execution::{MediaExecutionFailure, ProcessControl},
             intake::SourceIdentity,
-            model::{AudioStream, MediaFile, MediaStream, StreamKind},
+            model::{AudioStream, MediaFile, MediaStream, StreamKind, VideoStream},
             process::{
                 MediaProcess, MediaProcessCommand, MediaProcessEvent, MediaProcessFailure,
                 MediaProcessStartError, MediaProcessState, MediaProcessWake, ProcessProgressSource,
             },
-            tools::MediaTools,
+            tools::{MediaTools, VideoEncoderCapability},
         },
         queue::model::{
-            QueueEnqueueError, QueueJobFailure, QueueJobState, QueueMutationError, QueueRunState,
-            QueuedOperation, WaitingJobMove,
+            JobId, QueueEnqueueError, QueueJobFailure, QueueJobState, QueueMutationError,
+            QueueRunState, QueuedOperation, WaitingJobMove,
         },
         remux::model::RemuxRequest,
+        upscale::model::{
+            UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget, VideoCodec,
+            VideoEncoderSelection,
+        },
     };
 
     use super::MediaQueue;
@@ -972,7 +1014,7 @@ mod tests {
                 Ok(FakeProcessControl::running())
             };
 
-            assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+            assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
             assert_eq!(queue.active_job(), Some(second));
             assert_eq!(launches.load(Ordering::Relaxed), 1);
             assert!(
@@ -1035,7 +1077,7 @@ mod tests {
             launches.push(id);
             Ok(FakeProcessControl::running())
         };
-        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
         assert_eq!(launches, vec![valid]);
         assert_eq!(queue.active_job(), Some(valid));
         assert!(matches!(
@@ -1068,7 +1110,7 @@ mod tests {
         let second_process = FakeProcessControl::running();
         let mut processes = VecDeque::from([first_process.clone(), second_process.clone()]);
         let mut launcher = |_, _| Ok(processes.pop_front().unwrap());
-        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
         for (id, process, bytes, suffix) in [
             (first, first_process, b"first".as_slice(), 1),
             (ids[0], second_process, b"second".as_slice(), 2),
@@ -1085,7 +1127,7 @@ mod tests {
             assert!(!actual.exists());
             fs::write(queue.temporary_output_path().unwrap(), bytes).unwrap();
             process.set_state(MediaProcessState::Completed);
-            queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
+            queue.poll_with_launcher(Some(&tools(&directory)), true, &mut launcher);
             assert_eq!(
                 queue
                     .jobs()
@@ -1141,9 +1183,9 @@ mod tests {
                 Ok(processes.pop_front().expect("one fake per queued start"))
             };
 
-            assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+            assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
             assert_eq!(queue.active_job(), Some(first));
-            assert!(!queue.start_with_launcher(&tools(&directory), &mut launcher));
+            assert!(!queue.start_with_launcher(&tools(&directory), true, &mut launcher));
             assert_eq!(launches.load(Ordering::Relaxed), 1);
             match outcome {
                 Outcome::Success => {
@@ -1167,7 +1209,7 @@ mod tests {
                 }
             }
 
-            queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
+            queue.poll_with_launcher(Some(&tools(&directory)), true, &mut launcher);
 
             assert_eq!(queue.active_job(), Some(second));
             assert_eq!(launches.load(Ordering::Relaxed), 2);
@@ -1216,7 +1258,7 @@ mod tests {
             )
             .unwrap();
         let mut launcher = |_, _| Ok(FakeProcessControl::running());
-        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
 
         let appended = queue
             .enqueue(
@@ -1251,7 +1293,7 @@ mod tests {
         );
 
         assert!(queue.cancel_queue());
-        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
+        queue.poll_with_launcher(Some(&tools(&directory)), true, &mut launcher);
         assert_eq!(
             queue.replace_waiting_operation(
                 running,
@@ -1296,7 +1338,7 @@ mod tests {
             Ok(processes.pop_front().expect("one fake per queued start"))
         };
 
-        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
         assert_eq!(queue.run_state(), QueueRunState::Running);
         assert!(queue.stop_after_current());
         assert_eq!(queue.run_state(), QueueRunState::StoppingAfterCurrent);
@@ -1304,7 +1346,7 @@ mod tests {
         fs::write(queue.temporary_output_path().unwrap(), b"complete").unwrap();
         first_handle.set_state(MediaProcessState::Completed);
 
-        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
+        queue.poll_with_launcher(Some(&tools(&directory)), true, &mut launcher);
 
         assert_eq!(queue.run_state(), QueueRunState::Stopped);
         assert_eq!(queue.active_job(), None);
@@ -1315,7 +1357,7 @@ mod tests {
         ));
         assert!(matches!(queue.jobs()[1].state(), QueueJobState::Waiting));
 
-        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
         assert_eq!(queue.active_job(), Some(second));
         assert_eq!(launches.load(Ordering::Relaxed), 2);
         assert_eq!(queue.jobs()[0].id(), first);
@@ -1371,10 +1413,10 @@ mod tests {
             )
             .unwrap();
         let mut launcher = |_, _| Ok(FakeProcessControl::running());
-        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
 
         assert!(queue.cancel_queue());
-        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
+        queue.poll_with_launcher(Some(&tools(&directory)), true, &mut launcher);
 
         assert_eq!(queue.run_state(), QueueRunState::Stopped);
         assert_eq!(queue.jobs()[0].id(), terminal);
@@ -1417,7 +1459,7 @@ mod tests {
             }
         };
 
-        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
         assert_eq!(queue.active_job(), Some(second));
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
         assert!(matches!(
@@ -1451,15 +1493,15 @@ mod tests {
         let mut process = Some(process);
         let mut launcher = move |_, _| Ok(process.take().expect("only one launch"));
 
-        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
         let active = queue.active_job().unwrap();
         assert!(queue.cancel_queue());
         assert!(!queue.cancel_queue());
         assert!(queue.cancellation_pending());
         assert_eq!(queue.run_state(), QueueRunState::Stopped);
         assert_eq!(queue.jobs()[1].state(), &QueueJobState::Cancelled);
-        assert!(!queue.start_with_launcher(&tools(&directory), &mut launcher));
-        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
+        assert!(!queue.start_with_launcher(&tools(&directory), true, &mut launcher));
+        queue.poll_with_launcher(Some(&tools(&directory)), true, &mut launcher);
         assert_eq!(queue.active_job(), Some(active));
         assert!(matches!(
             queue.jobs()[0].state(),
@@ -1467,7 +1509,7 @@ mod tests {
         ));
 
         handle.set_state(MediaProcessState::Cancelled);
-        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
+        queue.poll_with_launcher(Some(&tools(&directory)), true, &mut launcher);
 
         assert!(!queue.cancellation_pending());
         assert!(!queue.is_started());
@@ -1493,7 +1535,7 @@ mod tests {
                 std::io::ErrorKind::NotFound,
             ))
         };
-        assert!(!queue.start_with_launcher(&tools, &mut launcher));
+        assert!(!queue.start_with_launcher(&tools, true, &mut launcher));
         for name in ["first.mkv", "second.mkv"] {
             queue
                 .enqueue(
@@ -1503,8 +1545,8 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(queue.start_with_launcher(&tools, &mut launcher));
-        assert!(!queue.start_with_launcher(&tools, &mut launcher));
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
+        assert!(!queue.start_with_launcher(&tools, true, &mut launcher));
         assert_eq!(attempts, 2);
         assert_eq!(queue.run_state(), QueueRunState::Stopped);
         assert!(queue.active_job().is_none());
@@ -1533,21 +1575,21 @@ mod tests {
         let mut processes = VecDeque::from([first, FakeProcessControl::running()]);
         let mut launcher = |_, _| Ok(processes.pop_front().expect("one process per job"));
         let tools = tools(&directory);
-        assert!(queue.start_with_launcher(&tools, &mut launcher));
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
         let active = queue.active_job();
         assert!(queue.stop_after_current());
         assert!(queue.cancel_current());
         assert!(!queue.cancel_current());
         assert!(queue.cancellation_pending());
-        queue.poll_with_launcher(Some(&tools), &mut launcher);
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
         assert_eq!(queue.active_job(), active);
-        assert!(!queue.start_with_launcher(&tools, &mut launcher));
+        assert!(!queue.start_with_launcher(&tools, true, &mut launcher));
         handle.set_state(MediaProcessState::Cancelled);
-        queue.poll_with_launcher(Some(&tools), &mut launcher);
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
         assert_eq!(queue.run_state(), QueueRunState::Stopped);
         assert_eq!(queue.jobs()[0].state(), &QueueJobState::Cancelled);
         assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
-        assert!(queue.start_with_launcher(&tools, &mut launcher));
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
         assert_eq!(queue.active_job(), Some(queue.jobs()[1].id()));
         assert!(!queue.cancellation_pending());
     }
@@ -1573,15 +1615,15 @@ mod tests {
         let mut process = Some(process);
         let mut launcher = |_, _| Ok(process.take().expect("must not advance"));
         let tools = tools(&directory);
-        assert!(queue.start_with_launcher(&tools, &mut launcher));
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
         let active = queue.active_job();
-        queue.poll_with_launcher(None, &mut launcher);
+        queue.poll_with_launcher(None, true, &mut launcher);
         assert_eq!(queue.active_job(), active);
         assert_eq!(queue.run_state(), QueueRunState::StoppingAfterCurrent);
         assert!(!queue.cancellation_pending());
         fs::write(queue.temporary_output_path().unwrap(), b"complete").unwrap();
         handle.set_state(MediaProcessState::Completed);
-        queue.poll_with_launcher(Some(&tools), &mut launcher);
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
         assert_eq!(queue.run_state(), QueueRunState::Stopped);
         assert_eq!(queue.active_job(), None);
         assert_eq!(
@@ -1608,7 +1650,7 @@ mod tests {
         let mut process = Some(process);
         let mut launcher = |_, _| Ok(process.take().expect("only one launch"));
         let tools = tools(&directory);
-        assert!(queue.start_with_launcher(&tools, &mut launcher));
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
         fs::write(queue.temporary_output_path().unwrap(), b"complete").unwrap();
         handle.set_state(MediaProcessState::Completed);
         assert!(!queue.cancel_current());
@@ -1616,7 +1658,7 @@ mod tests {
         assert!(queue.cancel_queue());
         assert!(!queue.cancel_queue());
         assert!(!queue.cancellation_pending());
-        queue.poll_with_launcher(None, &mut launcher);
+        queue.poll_with_launcher(None, true, &mut launcher);
         assert_eq!(
             queue.jobs()[0].state(),
             &QueueJobState::Completed {
@@ -1661,7 +1703,7 @@ mod tests {
             )
         };
         let tools = tools(&directory);
-        assert!(queue.start_with_launcher(&tools, &mut launcher));
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
         assert_eq!(
             receiver.recv_timeout(Duration::from_secs(10)).unwrap(),
             MediaProcessEvent::Progress
@@ -1676,7 +1718,7 @@ mod tests {
         );
         assert!(temporary.exists());
         assert!(queue.cancellation_pending());
-        queue.poll_with_launcher(Some(&tools), &mut launcher);
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
         assert_eq!(queue.jobs()[0].state(), &QueueJobState::Cancelled);
         assert_eq!(queue.run_state(), QueueRunState::Stopped);
         assert!(!staging.exists());
@@ -1686,23 +1728,22 @@ mod tests {
 
     #[test]
     fn migrated_operations_share_publication_and_cancellation_settlement() {
-        use crate::{audio_mix::draft::AudioMixDraft, media::model::VideoStream};
+        use crate::audio_mix::draft::AudioMixDraft;
 
         let directory = TestDirectory::new("migrated-settlement");
-        let (identity, mut media) = media(&directory, "source.mkv");
-        media.video_streams.push(VideoStream {
-            stream_index: 0,
-            codec: Some("h264".to_owned()),
-            width: Some(320),
-            height: Some(180),
-            frame_rate: None,
-            format: Default::default(),
-        });
+        let (identity, media) = video_media(&directory);
         let mut audio = AudioMixDraft::new(&media);
         audio.set_custom_output_path(directory.path().join("mix.mp4"));
         for operation in [
             QueuedOperation::AudioMix(audio.request(&media)),
             remux(&media, directory.path().join("remux.mkv")),
+            audio_extract(&media, directory.path().join("extract.m4a")),
+            upscale(
+                &media,
+                directory.path().join("upscale.mp4"),
+                VideoEncoderSelection::Cpu,
+                VideoEncoderCapability::EncoderNotCompiled,
+            ),
         ] {
             let output = operation.output().to_path_buf();
             let mut queue = MediaQueue::new();
@@ -1713,10 +1754,10 @@ mod tests {
             let mut processes = VecDeque::from([first.clone(), second.clone()]);
             let mut launch = |_, _| Ok(processes.pop_front().expect("one launch per job"));
             let tools = tools(&directory);
-            assert!(queue.start_with_launcher(&tools, &mut launch));
+            assert!(queue.start_with_launcher(&tools, true, &mut launch));
             fs::write(queue.temporary_output_path().unwrap(), b"published").unwrap();
             first.set_state(MediaProcessState::Completed);
-            queue.poll_with_launcher(Some(&tools), &mut launch);
+            queue.poll_with_launcher(Some(&tools), true, &mut launch);
             assert_eq!(
                 queue.jobs()[0].state(),
                 &QueueJobState::Completed {
@@ -1726,15 +1767,241 @@ mod tests {
             let temporary = queue.temporary_output_path().unwrap().to_path_buf();
             fs::write(&temporary, b"partial").unwrap();
             assert!(queue.cancel_current());
-            queue.poll_with_launcher(Some(&tools), &mut launch);
+            queue.poll_with_launcher(Some(&tools), true, &mut launch);
             assert!(temporary.exists());
             assert!(queue.cancellation_pending());
             second.set_state(MediaProcessState::Cancelled);
-            queue.poll_with_launcher(Some(&tools), &mut launch);
+            queue.poll_with_launcher(Some(&tools), true, &mut launch);
             assert_eq!(queue.jobs()[1].state(), &QueueJobState::Cancelled);
             assert_eq!(queue.run_state(), QueueRunState::Stopped);
             assert!(!temporary.exists());
             assert_eq!(fs::read(output).unwrap(), b"published");
+        }
+    }
+
+    #[test]
+    fn mixed_fifo_waits_for_encoder_discovery_and_preserves_extraction_formats() {
+        use crate::audio_mix::draft::AudioMixDraft;
+        let directory = TestDirectory::new("mixed-fifo-capabilities");
+        let (identity, mut media) = video_media(&directory);
+        media.audio_streams[0].title = Some("Program".to_owned());
+        media.audio_streams[0].language = Some("eng".to_owned());
+        let mut mix = AudioMixDraft::new(&media);
+        mix.set_custom_output_path(directory.path().join("mix.mp4"));
+        let mut operations = vec![
+            upscale(
+                &media,
+                directory.path().join("cpu.mp4"),
+                VideoEncoderSelection::Cpu,
+                VideoEncoderCapability::Available,
+            ),
+            upscale(
+                &media,
+                directory.path().join("auto.mp4"),
+                VideoEncoderSelection::Auto,
+                VideoEncoderCapability::EncoderNotCompiled,
+            ),
+            QueuedOperation::AudioMix(mix.request(&media)),
+            remux(&media, directory.path().join("remux.mkv")),
+        ];
+        for format in [
+            AudioExtractFormat::Original,
+            AudioExtractFormat::Aac,
+            AudioExtractFormat::Flac,
+        ] {
+            operations.push(QueuedOperation::AudioExtract(AudioExtractRequest {
+                input: media.path.clone(),
+                output: directory
+                    .path()
+                    .join(format!("extract.{}", format.extension())),
+                audio_stream_index: 1,
+                format,
+            }));
+        }
+        let mut queue = MediaQueue::new();
+        let ids: Vec<_> = operations
+            .iter()
+            .map(|operation| queue.enqueue(&identity, &media, operation.clone()).unwrap())
+            .collect();
+        let processes: Vec<_> = ids.iter().map(|_| FakeProcessControl::running()).collect();
+        let mut launches = Vec::new();
+        let mut launcher = |id, command: MediaProcessCommand| {
+            let index = launches.len();
+            assert_eq!(id, ids[index]);
+            launches.push(command.arguments().to_vec());
+            Ok(processes[index].clone())
+        };
+        let mut tools = tools(&directory);
+        // CPU launches before optional encoder discovery settles, regardless of retained NVENC data.
+        assert!(queue.start_with_launcher(&tools, false, &mut launcher));
+        assert_eq!(queue.active_job(), Some(ids[0]));
+        fs::write(queue.temporary_output_path().unwrap(), b"cpu").unwrap();
+        processes[0].set_state(MediaProcessState::Completed);
+        queue.poll_with_launcher(Some(&tools), false, &mut launcher);
+        assert_eq!(queue.active_job(), None);
+        assert_eq!(queue.run_state(), QueueRunState::Running);
+        assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
+        assert!(!queue.start_with_launcher(&tools, false, &mut launcher));
+        queue.poll_with_launcher(Some(&tools), false, &mut launcher);
+        assert_eq!(queue.active_job(), None);
+
+        // Settlement wakes the queue; Auto resolves against the new capability, not its admission snapshot.
+        tools.video_encoders.h264_nvenc = VideoEncoderCapability::Available;
+        queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+        for (index, operation) in operations.iter().enumerate().skip(1) {
+            assert_eq!(queue.active_job(), Some(ids[index]));
+            assert_eq!(queue.jobs()[index].operation(), operation);
+            fs::write(queue.temporary_output_path().unwrap(), b"published").unwrap();
+            processes[index].set_state(MediaProcessState::Completed);
+            queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+            assert_eq!(
+                queue.jobs()[index].state(),
+                &QueueJobState::Completed {
+                    output: operation.output().to_path_buf()
+                }
+            );
+            assert_eq!(fs::read(operation.output()).unwrap(), b"published");
+        }
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(queue.active_job(), None);
+        assert_eq!(launches.len(), ids.len());
+        assert!(
+            launches[0]
+                .windows(2)
+                .any(|pair| pair == ["-c:v", "libx264"])
+        );
+        assert!(
+            launches[1]
+                .windows(2)
+                .any(|pair| pair == ["-c:v", "h264_nvenc"])
+        );
+        for (args, (codec, title_flag, language_flag)) in launches[4..].iter().zip([
+            ("copy", "-metadata:s:a:0", "-metadata:s:a:0"),
+            ("aac", "-metadata", "-metadata:s:a:0"),
+            ("flac", "-metadata", "-metadata"),
+        ]) {
+            assert!(args.windows(2).any(|pair| pair == ["-map", "0:1"]));
+            assert!(args.windows(2).any(|pair| pair == ["-c:a", codec]));
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == [title_flag, "title=Program"])
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == [language_flag, "language=eng"])
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_nvenc_revalidates_at_launch_and_auto_falls_back_to_current_cpu() {
+        let directory = TestDirectory::new("upscale-capability-revalidation");
+        let (identity, media) = video_media(&directory);
+        let mut queue = MediaQueue::new();
+        for (file, selection) in [
+            ("explicit.mp4", VideoEncoderSelection::NvidiaNvenc),
+            ("auto.mp4", VideoEncoderSelection::Auto),
+        ] {
+            queue
+                .enqueue(
+                    &identity,
+                    &media,
+                    upscale(
+                        &media,
+                        directory.path().join(file),
+                        selection,
+                        VideoEncoderCapability::Available,
+                    ),
+                )
+                .unwrap();
+        }
+        let mut tools = tools(&directory);
+        let reason = "new tool identity cannot access the NVENC driver";
+        tools.video_encoders.h264_nvenc = VideoEncoderCapability::RuntimeUnavailable {
+            reason: reason.to_owned(),
+        };
+        let mut launcher = |id: JobId, command: MediaProcessCommand| {
+            assert_eq!(id.get(), 2, "unavailable explicit encoder must not launch");
+            assert!(
+                command
+                    .arguments()
+                    .windows(2)
+                    .any(|pair| pair == ["-c:v", "libx264"])
+            );
+            Ok(FakeProcessControl::running())
+        };
+        assert!(!queue.start_with_launcher(&tools, false, &mut launcher));
+        assert_eq!(queue.run_state(), QueueRunState::Stopped);
+        assert_eq!(queue.jobs()[0].state(), &QueueJobState::Waiting);
+        assert!(queue.start_with_launcher(&tools, true, &mut launcher));
+        let QueueJobState::Failed(QueueJobFailure::Preparation(error)) = queue.jobs()[0].state()
+        else {
+            panic!(
+                "explicit encoder should fail preparation: {:?}",
+                queue.jobs()[0].state()
+            );
+        };
+        assert!(error.to_string().contains(reason));
+        assert!(!directory.path().join("explicit.mp4").exists());
+        assert_eq!(queue.active_job(), Some(queue.jobs()[1].id()));
+    }
+
+    #[test]
+    fn stop_or_cancel_while_waiting_for_capabilities_never_launches_after_discovery() {
+        for cancel in [false, true] {
+            let directory = TestDirectory::new("pending-capabilities-stop");
+            let (identity, media) = video_media(&directory);
+            let mut queue = MediaQueue::new();
+            let first = queue
+                .enqueue(
+                    &identity,
+                    &media,
+                    remux(&media, directory.path().join("remux.mkv")),
+                )
+                .unwrap();
+            let second = queue
+                .enqueue(
+                    &identity,
+                    &media,
+                    upscale(
+                        &media,
+                        directory.path().join("auto.mp4"),
+                        VideoEncoderSelection::Auto,
+                        VideoEncoderCapability::Available,
+                    ),
+                )
+                .unwrap();
+            let process = FakeProcessControl::running();
+            let mut launcher = |id, _| {
+                assert_eq!(
+                    id, first,
+                    "stopped or cancelled queue must not launch again"
+                );
+                Ok(process.clone())
+            };
+            let tools = tools(&directory);
+            assert!(queue.start_with_launcher(&tools, false, &mut launcher));
+            fs::write(queue.temporary_output_path().unwrap(), b"remux").unwrap();
+            process.set_state(MediaProcessState::Completed);
+            queue.poll_with_launcher(Some(&tools), false, &mut launcher);
+            assert!(queue.is_started());
+            assert!(queue.active_job().is_none());
+            if cancel {
+                assert!(queue.cancel_queue());
+            } else {
+                assert!(queue.stop_after_current());
+            }
+            queue.poll_with_launcher(Some(&tools), true, &mut launcher);
+            assert_eq!(queue.run_state(), QueueRunState::Stopped);
+            assert_eq!(queue.jobs()[1].id(), second);
+            assert_eq!(
+                queue.jobs()[1].state(),
+                &if cancel {
+                    QueueJobState::Cancelled
+                } else {
+                    QueueJobState::Waiting
+                }
+            );
         }
     }
 
@@ -1751,12 +2018,12 @@ mod tests {
         let handle = process.clone();
         let mut process = Some(process);
         let mut launcher = move |_, _| Ok(process.take().expect("one process launch"));
-        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
         fs::write(queue.temporary_output_path().unwrap(), b"published").unwrap();
         handle.set_state(MediaProcessState::Completed);
 
-        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
-        queue.poll_with_launcher(Some(&tools(&directory)), &mut launcher);
+        queue.poll_with_launcher(Some(&tools(&directory)), true, &mut launcher);
+        queue.poll_with_launcher(Some(&tools(&directory)), true, &mut launcher);
 
         assert_eq!(fs::read(&output).unwrap(), b"published");
         assert_eq!(queue.jobs().len(), 1);
@@ -1822,7 +2089,7 @@ mod tests {
         let handle = process.clone();
         let mut process = Some(process);
         let mut launcher = move |_, _| Ok(process.take().expect("one process launch"));
-        assert!(queue.start_with_launcher(&tools(&directory), &mut launcher));
+        assert!(queue.start_with_launcher(&tools(&directory), true, &mut launcher));
 
         drop(queue);
 
@@ -1861,6 +2128,40 @@ mod tests {
                 }],
             },
         )
+    }
+
+    fn video_media(directory: &TestDirectory) -> (SourceIdentity, MediaFile) {
+        let (identity, mut media) = media(directory, "source.mkv");
+        media.video_streams.push(VideoStream {
+            stream_index: 0,
+            codec: Some("h264".to_owned()),
+            width: Some(320),
+            height: Some(180),
+            frame_rate: None,
+            format: Default::default(),
+        });
+        (identity, media)
+    }
+
+    fn upscale(
+        media: &MediaFile,
+        output: PathBuf,
+        selection: VideoEncoderSelection,
+        capability: VideoEncoderCapability,
+    ) -> QueuedOperation {
+        let mut encoder_settings = UpscaleEncoderSettings::default();
+        encoder_settings.set_selection(selection);
+        QueuedOperation::Upscale(UpscaleRequest {
+            input: media.path.clone(),
+            output,
+            target: UpscaleTarget::Custom {
+                max_width: 640,
+                max_height: 360,
+            },
+            codec: VideoCodec::H264,
+            encoder_settings,
+            nvenc_capability: capability,
+        })
     }
 
     fn remux(media: &MediaFile, output: PathBuf) -> QueuedOperation {

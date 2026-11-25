@@ -437,35 +437,14 @@ fn switching_operations_does_not_revalidate_or_clear_the_source() {
 }
 
 #[test]
-fn file_drop_policy_disables_replacement_while_any_operation_runs() {
-    assert!(file_intake_enabled(
-        &UpscaleExecutionState::Idle,
-        &AudioExtractExecutionState::Idle,
-        &FrameCaptureExecutionState::Idle,
-    ));
-
-    assert!(!file_intake_enabled(
-        &UpscaleExecutionState::Running {
-            output: PathBuf::from("output.mp4")
-        },
-        &AudioExtractExecutionState::Idle,
-        &FrameCaptureExecutionState::Idle,
-    ));
-
-    assert!(!file_intake_enabled(
-        &UpscaleExecutionState::Idle,
-        &AudioExtractExecutionState::Running {
-            output: PathBuf::from("output.mp4")
-        },
-        &FrameCaptureExecutionState::Idle,
-    ));
-    assert!(!file_intake_enabled(
-        &UpscaleExecutionState::Idle,
-        &AudioExtractExecutionState::Idle,
-        &FrameCaptureExecutionState::Running {
-            output: PathBuf::from("output.mp4")
-        },
-    ));
+fn frame_capture_execution_blocks_replacement_until_idle() {
+    assert!(file_intake_enabled(&FrameCaptureExecutionState::Idle));
+    assert!(!file_intake_enabled(&FrameCaptureExecutionState::Running {
+        output: PathBuf::from("output.png")
+    }));
+    for state in terminal_execution_states() {
+        assert!(!file_intake_enabled(&state));
+    }
 }
 
 #[test]
@@ -482,35 +461,6 @@ fn drag_hover_accepts_single_and_multiple_files_when_intake_is_available() {
 
     fs::remove_dir_all(first_directory).unwrap();
     fs::remove_dir_all(second_directory).unwrap();
-}
-
-#[test]
-fn upscale_terminal_states_reject_source_replacement() {
-    for state in terminal_execution_states() {
-        assert!(!file_intake_enabled(
-            &state,
-            &AudioExtractExecutionState::Idle,
-            &FrameCaptureExecutionState::Idle,
-        ));
-    }
-}
-
-#[test]
-fn terminal_reset_to_idle_reenables_file_intake() {
-    let completed = MediaExecutionState::Completed {
-        output: PathBuf::from("finished.mp4"),
-    };
-    assert!(!file_intake_enabled(
-        &completed,
-        &AudioExtractExecutionState::Idle,
-        &FrameCaptureExecutionState::Idle,
-    ));
-
-    assert!(file_intake_enabled(
-        &UpscaleExecutionState::Idle,
-        &AudioExtractExecutionState::Idle,
-        &FrameCaptureExecutionState::Idle,
-    ));
 }
 
 #[test]

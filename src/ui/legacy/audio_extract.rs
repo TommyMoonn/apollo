@@ -1,23 +1,12 @@
 //! AudioExtract integration for the legacy renderer. The operation domain owns the editable draft.
 
 use super::ApolloApp;
-use super::workflows::shows_audio_extract_lifecycle;
-use crate::app::Operation;
 use crate::app::dialogs::OutputDraft;
-use crate::audio_extract::{draft::AudioExtractDraft, execution::AudioExtractStartError};
-use crate::media::{
-    error::{MediaError, MediaErrorKind},
-    model::MediaFile,
-};
-use crate::native::open_folder;
+use crate::app::{Operation, queue::QueueSubmission};
+use crate::audio_extract::draft::AudioExtractDraft;
+use crate::media::{error::MediaError, model::MediaFile};
 use crate::ui::audio_extract::AudioExtractSelectionAction;
-use crate::ui::audio_extract_progress::{
-    AudioExtractLifecycleAction, AudioExtractLifecycleUiState,
-};
-use crate::ui::{
-    OperationSurfaceMode, audio_extract as audio_extract_ui, audio_extract_progress, layout,
-    media_error,
-};
+use crate::ui::{OperationSurfaceMode, audio_extract as audio_extract_ui, layout, media_error};
 use egui::Ui;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,9 +14,8 @@ pub(super) struct AudioExtractToolState {
     pub(super) session_id: u64,
     pub(super) media: MediaFile,
     pub(super) selection: AudioExtractDraft,
-    pub(super) lifecycle_ui: AudioExtractLifecycleUiState,
-    pub(super) start_error: Option<MediaError>,
-    pub(super) start_error_details_open: bool,
+    pub(super) picker_error: Option<MediaError>,
+    pub(super) picker_error_details_open: bool,
 }
 
 impl AudioExtractToolState {
@@ -36,38 +24,15 @@ impl AudioExtractToolState {
             session_id,
             media: media.clone(),
             selection: AudioExtractDraft::new(media),
-            lifecycle_ui: AudioExtractLifecycleUiState::default(),
-            start_error: None,
-            start_error_details_open: false,
+            picker_error: None,
+            picker_error_details_open: false,
         }
     }
 }
 
 impl ApolloApp {
     pub(super) fn show_audio_extract_tool(&mut self, ui: &mut Ui) {
-        if shows_audio_extract_lifecycle(self.core.audio_extract_executor.state()) {
-            let action = {
-                let session = self
-                    .state
-                    .audio_extract
-                    .as_mut()
-                    .expect("audio extract source exists while lifecycle surface is shown");
-                let request = session
-                    .selection
-                    .request(&session.media)
-                    .expect("running audio extract session owns a selected audio stream");
-                audio_extract_progress::show(
-                    ui,
-                    &request,
-                    &mut self.core.audio_extract_executor,
-                    &mut session.lifecycle_ui,
-                )
-            };
-            self.handle_audio_extract_lifecycle_action(action);
-            return;
-        }
-
-        if self.show_audio_extract_start_error(ui) {
+        if self.show_audio_extract_picker_error(ui) {
             return;
         }
 
@@ -77,7 +42,7 @@ impl ApolloApp {
             .as_ref()
             .expect("source presentation exists while workspace is shown")
             .clone();
-        let immediate_start_allowed = self.core.execution_arbitration().immediate_start_allowed();
+        let process_now_allowed = self.core.process_now_allowed();
         let queue_confirmation = self.core.queue_confirmation == Some(Operation::AudioExtract);
         let action_error = self
             .core
@@ -86,121 +51,83 @@ impl ApolloApp {
             .filter(|(tool, _)| *tool == Operation::AudioExtract)
             .map(|(_, error)| error.clone());
         let action = ui
-            .add_enabled_ui(self.workspace_interaction_enabled(), |ui| {
-                let session = self
-                    .state
-                    .audio_extract
-                    .as_mut()
-                    .expect("audio extract source exists while ready surface is shown");
-                audio_extract_ui::show(
-                    ui,
-                    &session.media,
-                    &presentation.audio_extract,
-                    &mut session.selection,
-                    OperationSurfaceMode::Immediate {
-                        start_allowed: immediate_start_allowed,
-                        queue_confirmation,
-                        action_error: action_error.as_ref(),
-                    },
-                )
-            })
+            .add_enabled_ui(
+                self.file_intake_enabled() && self.ready_media_tools().is_some(),
+                |ui| {
+                    let session = self
+                        .state
+                        .audio_extract
+                        .as_mut()
+                        .expect("audio extract source exists while ready surface is shown");
+                    audio_extract_ui::show(
+                        ui,
+                        &session.media,
+                        &presentation.audio_extract,
+                        &mut session.selection,
+                        OperationSurfaceMode::Immediate {
+                            start_allowed: process_now_allowed,
+                            queue_confirmation,
+                            action_error: action_error.as_ref(),
+                        },
+                    )
+                },
+            )
             .inner;
-        if let Err(error) = self.handle_audio_extract_action(action)
-            && let Some(session) = self.state.audio_extract.as_mut()
-        {
-            session.start_error = Some(error.user_error());
-            session.start_error_details_open = false;
-        }
+        self.handle_audio_extract_action(action);
     }
 
-    fn show_audio_extract_start_error(&mut self, ui: &mut Ui) -> bool {
+    fn show_audio_extract_picker_error(&mut self, ui: &mut Ui) -> bool {
         let Some(session) = self.state.audio_extract.as_mut() else {
             return false;
         };
-        let Some(error) = session.start_error.as_ref() else {
+        let Some(error) = session.picker_error.as_ref() else {
             return false;
         };
 
-        let title = if error.kind() == MediaErrorKind::OutputPickerUnavailable {
-            "Output picker unavailable"
-        } else {
-            "Audio extraction could not start"
-        };
+        let title = "Output picker unavailable";
         let response = layout::focus_content(ui, |ui| {
-            let mut sizing_details_open = session.start_error_details_open;
+            let mut sizing_details_open = session.picker_error_details_open;
             let details_open = if ui.is_sizing_pass() {
                 &mut sizing_details_open
             } else {
-                &mut session.start_error_details_open
+                &mut session.picker_error_details_open
             };
             media_error::show_failure_content(ui, title, error, details_open, "Back")
         });
         if response.inner.clicked() {
-            session.start_error = None;
-            session.start_error_details_open = false;
+            session.picker_error = None;
+            session.picker_error_details_open = false;
         }
         true
     }
 
-    pub(super) fn handle_audio_extract_action(
-        &mut self,
-        action: AudioExtractSelectionAction,
-    ) -> Result<(), AudioExtractStartError> {
-        if self.file_dialog.is_pending() {
-            return Ok(());
-        }
-        if action != AudioExtractSelectionAction::None {
-            self.core.queue_confirmation = None;
-            self.core.operation_action_error = None;
-        }
+    pub(super) fn handle_audio_extract_action(&mut self, action: AudioExtractSelectionAction) {
         match action {
             AudioExtractSelectionAction::BrowseOutput => {
+                if !self.file_intake_enabled()
+                    || self.core.active_operation() != Some(Operation::AudioExtract)
+                    || self.ready_media_tools().is_none()
+                {
+                    return;
+                }
+                self.core.queue_confirmation = None;
+                self.core.operation_action_error = None;
                 let Some(session) = self.state.audio_extract.as_ref() else {
-                    return Ok(());
+                    return;
                 };
-                self.start_file_dialog(
-                    OutputDraft::AudioExtract(&session.selection).request(session.session_id),
-                );
+                let request =
+                    OutputDraft::AudioExtract(&session.selection).request(session.session_id);
+                self.start_file_dialog(request);
             }
             AudioExtractSelectionAction::QueueRequested => {
-                self.enqueue_from_ready_surface(Operation::AudioExtract);
+                self.submit_queued_operation(Operation::AudioExtract, QueueSubmission::AddToQueue);
             }
             AudioExtractSelectionAction::ExtractRequested => {
-                if !self.core.execution_arbitration().immediate_start_allowed() {
-                    return Ok(());
-                }
-                let Some(session) = self.state.audio_extract.as_ref() else {
-                    return Ok(());
-                };
-                let Some(request) = session.selection.request(&session.media) else {
-                    return Ok(());
-                };
-                let Some(tools) = self.ready_media_tools().cloned() else {
-                    return Ok(());
-                };
-                let wake = self.progress_repaint.begin();
-                self.core.audio_extract_executor.start_with_wake(
-                    &tools,
-                    &session.media,
-                    &request,
-                    wake,
-                )?;
+                self.submit_queued_operation(Operation::AudioExtract, QueueSubmission::ProcessNow);
             }
             AudioExtractSelectionAction::SaveQueueChanges
             | AudioExtractSelectionAction::CancelQueueEdit
             | AudioExtractSelectionAction::None => {}
-        }
-        Ok(())
-    }
-
-    pub(super) fn handle_audio_extract_lifecycle_action(
-        &self,
-        action: AudioExtractLifecycleAction,
-    ) {
-        if let AudioExtractLifecycleAction::OpenFolder(path) = action
-            && let Err(error) = open_folder(&path)
-        {
-            eprintln!("Audio Extract output folder could not be opened: {error}");
         }
     }
 }

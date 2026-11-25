@@ -118,25 +118,21 @@ impl ApolloApp {
                 .audio_mix
                 .as_ref()
                 .is_some_and(|session| session.picker_error.is_none()),
-            Operation::VideoUpscale => operation_workspace_visible(
-                self.core.upscale_executor.state(),
-                self.state
-                    .upscale
-                    .as_ref()
-                    .is_some_and(|session| session.start_error.is_none()),
-            ),
+            Operation::VideoUpscale => self
+                .state
+                .upscale
+                .as_ref()
+                .is_some_and(|session| session.picker_error.is_none()),
             Operation::Remux => self
                 .state
                 .remux
                 .as_ref()
                 .is_some_and(|session| session.picker_error.is_none()),
-            Operation::AudioExtract => operation_workspace_visible(
-                self.core.audio_extract_executor.state(),
-                self.state
-                    .audio_extract
-                    .as_ref()
-                    .is_some_and(|session| session.start_error.is_none()),
-            ),
+            Operation::AudioExtract => self
+                .state
+                .audio_extract
+                .as_ref()
+                .is_some_and(|session| session.picker_error.is_none()),
             Operation::FrameCapture => operation_workspace_visible(
                 self.core.frame_capture_executor.state(),
                 self.state
@@ -265,6 +261,12 @@ impl ApolloApp {
 
     pub(super) fn show_queue(&mut self, ui: &mut Ui) {
         let arbitration = self.core.execution_arbitration();
+        let scheduler = self.core.queue.scheduler();
+        let capabilities_ready = self.core.discovery.settled_capabilities().is_some();
+        let waiting_for_encoder_discovery = self.ready_media_tools().is_some()
+            && !capabilities_ready
+            && scheduler.waiting_jobs().next().is_some()
+            && !scheduler.next_job_ready(false);
         let action = queue_ui::show(
             ui,
             self.core.queue.scheduler().jobs(),
@@ -272,7 +274,10 @@ impl ApolloApp {
             self.core.queue.scheduler().active_progress(),
             self.core.queue.scheduler().run_state(),
             queue_ui::QueueAvailability {
-                can_start: arbitration.queue_start_allowed() && self.ready_media_tools().is_some(),
+                can_start: arbitration.queue_start_allowed()
+                    && self.ready_media_tools().is_some()
+                    && scheduler.next_job_ready(capabilities_ready),
+                waiting_for_encoder_discovery,
                 can_add_files: self.file_intake_enabled() && self.ready_media_tools().is_some(),
                 can_edit: self.ready_media_tools().is_some(),
             },

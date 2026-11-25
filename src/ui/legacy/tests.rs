@@ -20,9 +20,7 @@ use std::{
 };
 
 use super::state::FrameCaptureToolState;
-use super::workflows::{
-    shows_audio_extract_lifecycle, shows_frame_capture_lifecycle, shows_upscale_lifecycle,
-};
+use super::workflows::shows_frame_capture_lifecycle;
 use super::{ApolloApp, completion_wake};
 use crate::app::batch::{
     BatchDefaults, BatchEditTarget, BatchItem, BatchItemId, BatchReadiness, BatchSetupState,
@@ -44,7 +42,7 @@ use crate::app::dialogs::{DialogOutcome, DialogTarget, FileDialogCompletion, Fil
 use crate::app::{QueueOrigin, file_intake_enabled};
 use crate::file_dialog::FileDialogOwner;
 use crate::{
-    audio_extract::{execution::AudioExtractExecutionState, model::AudioExtractFormat},
+    audio_extract::model::AudioExtractFormat,
     audio_mix::model::{LoudnessNormalization, LoudnessTargets, OutputContainer, TrackGain},
     frame_capture::{
         execution::FrameCaptureExecutionState,
@@ -72,13 +70,80 @@ use crate::{
         frame_capture_progress::FrameCaptureThumbnailState, layout, remux::RemuxSelectionAction,
         theme, upscale::UpscaleSelectionAction,
     },
-    upscale::{
-        execution::UpscaleExecutionState,
-        model::{UpscaleTarget, VideoCodec},
-    },
+    upscale::model::{UpscaleTarget, VideoCodec},
 };
 
 static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+
+#[test]
+fn running_queue_resumes_on_discovery_completion_without_process_notification() {
+    use crate::media::tools::{VideoEncoderCapabilities, VideoEncoderCapability};
+    use crate::upscale::model::VideoEncoderSelection;
+
+    let (directory, path) = temp_file("queue-capability-resume");
+    let mut app = app();
+    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
+    app.select_tool(Operation::VideoUpscale);
+    let selection = &mut app.state.upscale.as_mut().unwrap().selection;
+    selection.set_encoder_selection(VideoEncoderSelection::Cpu);
+    let cpu = app
+        .enqueue_current_operation(Operation::VideoUpscale)
+        .unwrap()
+        .unwrap();
+    let selection = &mut app.state.upscale.as_mut().unwrap().selection;
+    selection.set_encoder_selection(VideoEncoderSelection::Auto);
+    selection.set_output_filename_stem("auto".into());
+    let auto = app
+        .enqueue_current_operation(Operation::VideoUpscale)
+        .unwrap()
+        .unwrap();
+
+    let (wake_tx, wake_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    assert!(app.core.discovery.start_with(
+        move || {
+            let _ = wake_tx.send(());
+        },
+        || Ok(MediaTools::new("missing-ffmpeg", "missing-ffprobe")),
+        move |_| {
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            VideoEncoderCapabilities {
+                h264_nvenc: VideoEncoderCapability::Available,
+                h265_nvenc: VideoEncoderCapability::Available,
+            }
+        },
+    ));
+    wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    app.poll_background_work();
+    assert!(app.core.discovery.is_pending());
+    app.enter_queue();
+    assert!(app.handle_queue_action(QueueAction::Start));
+    let queue = app.core.queue.scheduler();
+    assert_eq!(queue.jobs()[0].id(), cpu);
+    assert!(matches!(
+        queue.jobs()[0].state(),
+        QueueJobState::Failed(QueueJobFailure::ProcessStart(_))
+    ));
+    assert_eq!(queue.jobs()[1].id(), auto);
+    assert_eq!(queue.jobs()[1].state(), &QueueJobState::Waiting);
+    assert_eq!(queue.run_state(), QueueRunState::Running);
+    assert!(queue.active_job().is_none());
+    assert!(!app.core.execution_arbitration().immediate_start_allowed());
+    assert!(!app.handle_queue_action(QueueAction::Start));
+
+    release_tx.send(()).unwrap();
+    wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    app.poll_background_work();
+    assert!(!app.core.discovery.is_pending());
+    let queue = app.core.queue.scheduler();
+    assert!(matches!(
+        queue.jobs()[1].state(),
+        QueueJobState::Failed(QueueJobFailure::ProcessStart(_))
+    ));
+    assert_eq!(queue.run_state(), QueueRunState::Stopped);
+    assert!(app.core.execution_arbitration().immediate_start_allowed());
+    fs::remove_dir_all(directory).unwrap();
+}
 
 #[test]
 fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_reset() {
@@ -140,14 +205,9 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
             .unwrap()
             .is_none()
     );
-    assert!(
-        app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested)
-            .is_ok()
-    );
-    assert!(matches!(
-        app.core.upscale_executor.state(),
-        UpscaleExecutionState::Idle
-    ));
+    app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested);
+    assert!(app.core.queue.scheduler().jobs().is_empty());
+    assert_workspace(&app.core, Operation::VideoUpscale);
     app.state
         .upscale
         .as_mut()
@@ -161,14 +221,9 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
             .unwrap()
             .is_none()
     );
-    assert!(
-        app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested)
-            .is_ok()
-    );
-    assert!(matches!(
-        app.core.upscale_executor.state(),
-        UpscaleExecutionState::Idle
-    ));
+    app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested);
+    assert!(app.core.queue.scheduler().jobs().is_empty());
+    assert_workspace(&app.core, Operation::VideoUpscale);
     app.state
         .upscale
         .as_mut()
@@ -187,11 +242,14 @@ fn pending_capabilities_render_in_the_existing_workspace_and_settle_without_rese
         .set_encoder_selection(VideoEncoderSelection::Auto);
     assert!(!app.save_queue_edit());
     assert!(app.finish_queue_edit());
-    // The missing executable produces a start error only after CPU passes ready validation.
+    // CPU remains launchable with optional discovery pending; launch errors belong to history.
+    assert!(app.handle_queue_action(QueueAction::Remove(job_id)));
+    app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested);
     assert!(matches!(
-        app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested),
-        Err(crate::upscale::execution::UpscaleStartError::Process(_))
+        app.core.queue.scheduler().jobs()[0].state(),
+        QueueJobState::Failed(QueueJobFailure::ProcessStart(_))
     ));
+    assert!(app.handle_queue_action(QueueAction::Back));
     let session = app.state.upscale.as_mut().unwrap();
     session
         .selection
@@ -666,7 +724,7 @@ fn opening_audio_extract_source_renders_ready_surface() {
         "no re-encode · MKA",
         "Output",
         "Browse",
-        "Extract",
+        "Process now",
     ] {
         assert!(output_contains_text(&output, text), "missing {text:?}");
     }
@@ -815,9 +873,9 @@ fn every_ready_operation_keeps_its_primary_action_bottom_owned_at_all_heights() 
 
     for (operation, label) in [
         (Operation::AudioMix, "Process now"),
-        (Operation::VideoUpscale, "Upscale"),
+        (Operation::VideoUpscale, "Process now"),
         (Operation::Remux, "Process now"),
-        (Operation::AudioExtract, "Extract"),
+        (Operation::AudioExtract, "Process now"),
         (Operation::FrameCapture, "Capture frame"),
     ] {
         for (width, height) in [
@@ -880,28 +938,6 @@ fn upscale_ready_selection_survives_same_source_navigation() {
         .expect("upscale session should persist");
     assert_eq!(ready.selection.target(), UpscaleTarget::Uhd8k);
     assert_eq!(ready.selection.codec(), VideoCodec::H265);
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn upscale_intent_reaches_executor() {
-    let (directory, path) = temp_file("execute");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::VideoUpscale);
-
-    let error = app
-        .handle_upscale_action(UpscaleSelectionAction::UpscaleRequested)
-        .expect_err("missing test FFmpeg should prove the execution path was attempted");
-
-    assert!(matches!(
-        error,
-        crate::upscale::execution::UpscaleStartError::Process(
-            crate::media::process::MediaProcessStartError::ProcessLaunchFailed(
-                std::io::ErrorKind::NotFound
-            )
-        )
-    ));
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -975,13 +1011,13 @@ fn every_ready_enqueue_action_remains_in_the_workspace_without_launching() {
             Operation::AudioMix => {
                 app.handle_audio_mix_action(AudioMixSelectionAction::QueueRequested)
             }
-            Operation::VideoUpscale => app
-                .handle_upscale_action(UpscaleSelectionAction::QueueRequested)
-                .unwrap(),
+            Operation::VideoUpscale => {
+                app.handle_upscale_action(UpscaleSelectionAction::QueueRequested)
+            }
             Operation::Remux => app.handle_remux_action(RemuxSelectionAction::QueueRequested),
-            Operation::AudioExtract => app
-                .handle_audio_extract_action(AudioExtractSelectionAction::QueueRequested)
-                .unwrap(),
+            Operation::AudioExtract => {
+                app.handle_audio_extract_action(AudioExtractSelectionAction::QueueRequested)
+            }
             Operation::FrameCapture => app
                 .handle_frame_capture_action(FrameCaptureSelectionAction::QueueRequested)
                 .unwrap(),
@@ -1290,28 +1326,7 @@ fn normal_queue_and_batch_drafts_round_trip_each_operation_without_mutating_othe
 }
 
 #[test]
-fn audio_extract_intent_reaches_executor() {
-    let (directory, path) = temp_file("audio-extract-execute");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::AudioExtract);
-
-    let error = app
-        .handle_audio_extract_action(AudioExtractSelectionAction::ExtractRequested)
-        .expect_err("missing test FFmpeg should prove the execution path was attempted");
-    assert!(matches!(
-        error,
-        crate::audio_extract::execution::AudioExtractStartError::Process(
-            crate::media::process::MediaProcessStartError::ProcessLaunchFailed(
-                std::io::ErrorKind::NotFound
-            )
-        )
-    ));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn each_operation_routes_only_non_idle_execution_to_lifecycle_ui() {
+fn frame_capture_routes_only_non_idle_execution_to_lifecycle_ui() {
     let states = [
         (MediaExecutionState::Idle, false),
         (
@@ -1336,16 +1351,7 @@ fn each_operation_routes_only_non_idle_execution_to_lifecycle_ui() {
         (MediaExecutionState::Cancelled, true),
     ];
     for (state, visible) in states {
-        for (name, route) in [
-            (
-                "upscale",
-                shows_upscale_lifecycle as fn(&MediaExecutionState) -> bool,
-            ),
-            ("audio extract", shows_audio_extract_lifecycle),
-            ("frame capture", shows_frame_capture_lifecycle),
-        ] {
-            assert_eq!(route(&state), visible, "{name}: {state:?}");
-        }
+        assert_eq!(shows_frame_capture_lifecycle(&state), visible);
     }
 }
 

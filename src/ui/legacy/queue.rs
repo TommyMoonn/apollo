@@ -161,8 +161,7 @@ impl ApolloApp {
                 self.state.upscale.as_ref().and_then(|session| {
                     session
                         .selection
-                        .validated_request(&session.media, capabilities)?
-                        .ok()
+                        .request_for_capabilities(&session.media, capabilities)
                         .map(|request| (&session.media, QueuedOperation::Upscale(request)))
                 })
             }
@@ -180,8 +179,7 @@ impl ApolloApp {
             Operation::AudioExtract => self.state.audio_extract.as_ref().and_then(|session| {
                 session
                     .selection
-                    .validated_request(&session.media)
-                    .ok()
+                    .request(&session.media)
                     .map(|request| (&session.media, QueuedOperation::AudioExtract(request)))
             }),
             Operation::FrameCapture => self.state.frame_capture.as_ref().and_then(|session| {

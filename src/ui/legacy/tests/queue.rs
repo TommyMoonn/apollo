@@ -424,13 +424,30 @@ fn dispatch_submission(app: &mut ApolloApp, operation: Operation, process_now: b
         }
         (Operation::Remux, true) => app.handle_remux_action(RemuxSelectionAction::RemuxRequested),
         (Operation::Remux, false) => app.handle_remux_action(RemuxSelectionAction::QueueRequested),
+        (Operation::VideoUpscale, true) => {
+            app.handle_upscale_action(UpscaleSelectionAction::UpscaleRequested)
+        }
+        (Operation::VideoUpscale, false) => {
+            app.handle_upscale_action(UpscaleSelectionAction::QueueRequested)
+        }
+        (Operation::AudioExtract, true) => {
+            app.handle_audio_extract_action(AudioExtractSelectionAction::ExtractRequested)
+        }
+        (Operation::AudioExtract, false) => {
+            app.handle_audio_extract_action(AudioExtractSelectionAction::QueueRequested)
+        }
         _ => unreachable!("test covers migrated forms"),
     }
 }
 
 #[test]
 fn migrated_form_actions_admit_equivalent_requests_and_keep_terminal_history() {
-    for operation in [Operation::AudioMix, Operation::Remux] {
+    for operation in [
+        Operation::AudioMix,
+        Operation::Remux,
+        Operation::AudioExtract,
+        Operation::VideoUpscale,
+    ] {
         let (directory, path) = temp_file("migrated-form-submission");
         let mut app = app();
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
@@ -453,6 +470,26 @@ fn migrated_form_actions_admit_equivalent_requests_and_keep_terminal_history() {
                 .unwrap()
                 .selection
                 .set_custom_output_path(directory.join("custom.mkv")),
+            Operation::AudioExtract => {
+                let session = app.state.audio_extract.as_mut().unwrap();
+                session.selection.set_format(AudioExtractFormat::Flac);
+                session
+                    .selection
+                    .set_custom_output_path(directory.join("custom.flac"));
+            }
+            Operation::VideoUpscale => {
+                let session = app.state.upscale.as_mut().unwrap();
+                session
+                    .selection
+                    .set_target(&session.media, UpscaleTarget::Uhd8k);
+                session.selection.set_codec(VideoCodec::H265);
+                session
+                    .selection
+                    .set_encoder_selection(crate::upscale::model::VideoEncoderSelection::Cpu);
+                session
+                    .selection
+                    .set_custom_output_path(directory.join("custom.mp4"));
+            }
             _ => unreachable!(),
         }
         assert!(app.core.process_now_allowed());
@@ -510,15 +547,28 @@ fn migrated_form_actions_admit_equivalent_requests_and_keep_terminal_history() {
 
 #[test]
 fn migrated_form_admission_errors_preserve_draft_route_and_job_id() {
-    for operation in [Operation::AudioMix, Operation::Remux] {
+    for operation in [
+        Operation::AudioMix,
+        Operation::Remux,
+        Operation::AudioExtract,
+        Operation::VideoUpscale,
+    ] {
         let (directory, path) = temp_file("migrated-form-rejection");
         let mut app = app();
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));
         app.select_tool(operation);
-        let extension = if operation == Operation::AudioMix {
-            "mp4"
-        } else {
-            "mkv"
+        let extension = match operation {
+            Operation::AudioMix | Operation::VideoUpscale => "mp4",
+            Operation::AudioExtract => app
+                .state
+                .audio_extract
+                .as_ref()
+                .unwrap()
+                .selection
+                .format()
+                .extension(),
+            Operation::Remux => "mkv",
+            _ => unreachable!(),
         };
         let output = directory
             .join("missing")
@@ -534,6 +584,20 @@ fn migrated_form_admission_errors_preserve_draft_route_and_job_id() {
             Operation::Remux => app
                 .state
                 .remux
+                .as_mut()
+                .unwrap()
+                .selection
+                .set_custom_output_path(output.clone()),
+            Operation::AudioExtract => app
+                .state
+                .audio_extract
+                .as_mut()
+                .unwrap()
+                .selection
+                .set_custom_output_path(output.clone()),
+            Operation::VideoUpscale => app
+                .state
+                .upscale
                 .as_mut()
                 .unwrap()
                 .selection
@@ -563,7 +627,12 @@ fn migrated_form_admission_errors_preserve_draft_route_and_job_id() {
 
 #[test]
 fn migrated_forms_append_to_running_queue_without_competing_launch() {
-    for operation in [Operation::AudioMix, Operation::Remux] {
+    for operation in [
+        Operation::AudioMix,
+        Operation::Remux,
+        Operation::AudioExtract,
+        Operation::VideoUpscale,
+    ] {
         let (directory, path) = temp_file("migrated-form-running");
         let mut app = app();
         app.load_media_path_with_probe(&path, |path| Ok(media(path)));

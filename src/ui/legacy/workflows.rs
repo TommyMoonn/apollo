@@ -2,10 +2,8 @@
 
 use super::{ApolloApp, completion_wake};
 use crate::app::NavigationState;
-use crate::audio_extract::execution::AudioExtractExecutionState;
 use crate::frame_capture::execution::FrameCaptureExecutionState;
 use crate::media::tools::MediaTools;
-use crate::upscale::execution::UpscaleExecutionState;
 
 impl ApolloApp {
     pub(super) fn resolve_navigation(&mut self) -> Option<NavigationState> {
@@ -46,14 +44,6 @@ impl ApolloApp {
                 .start(completion_wake(&self.egui_context));
         }
     }
-}
-
-pub(super) fn shows_upscale_lifecycle(state: &UpscaleExecutionState) -> bool {
-    !matches!(state, UpscaleExecutionState::Idle)
-}
-
-pub(super) fn shows_audio_extract_lifecycle(state: &AudioExtractExecutionState) -> bool {
-    !matches!(state, AudioExtractExecutionState::Idle)
 }
 
 pub(super) fn shows_frame_capture_lifecycle(state: &FrameCaptureExecutionState) -> bool {

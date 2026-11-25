@@ -12,13 +12,13 @@ use crate::{
         },
         editor::OperationEditorState,
     },
-    audio_extract::{draft::AudioExtractDraft, execution::AudioExtractExecutionState},
+    audio_extract::draft::AudioExtractDraft,
     audio_mix::draft::AudioMixDraft,
     file_dialog::FileDialogStartError,
     frame_capture::{draft::FrameCaptureDraft, execution::FrameCaptureExecutionState},
     media::error::MediaError,
     remux::draft::RemuxDraft,
-    upscale::{draft::UpscaleDraft, execution::UpscaleExecutionState},
+    upscale::draft::UpscaleDraft,
 };
 
 impl ApolloApp {
@@ -72,11 +72,7 @@ impl ApolloApp {
             } else {
                 settle_output_file_dialog(
                     &mut self.state,
-                    ToolExecutionStates {
-                        upscale: self.core.upscale_executor.state(),
-                        audio_extract: self.core.audio_extract_executor.state(),
-                        frame_capture: self.core.frame_capture_executor.state(),
-                    },
+                    self.core.frame_capture_executor.state(),
                     target,
                     &outcome,
                 )
@@ -165,16 +161,10 @@ fn settle_editor_output(
     }
 }
 
-pub(super) struct ToolExecutionStates<'a> {
-    pub(super) upscale: &'a UpscaleExecutionState,
-    pub(super) audio_extract: &'a AudioExtractExecutionState,
-    pub(super) frame_capture: &'a FrameCaptureExecutionState,
-}
-
 /// Returns true only when a selected path was applied to the original editable draft.
 pub(super) fn settle_output_file_dialog(
     state: &mut LegacyEditorState,
-    execution: ToolExecutionStates<'_>,
+    frame_capture_state: &FrameCaptureExecutionState,
     target: DialogTarget,
     outcome: &DialogOutcome,
 ) -> bool {
@@ -198,7 +188,7 @@ pub(super) fn settle_output_file_dialog(
                 AudioMixDraft::set_custom_output_path,
             )
         }
-        Operation::VideoUpscale if matches!(execution.upscale, UpscaleExecutionState::Idle) => {
+        Operation::VideoUpscale => {
             let Some(session) = state
                 .upscale
                 .as_mut()
@@ -208,8 +198,8 @@ pub(super) fn settle_output_file_dialog(
             };
             settle_normal_output(
                 &mut session.selection,
-                &mut session.start_error,
-                &mut session.start_error_details_open,
+                &mut session.picker_error,
+                &mut session.picker_error_details_open,
                 outcome,
                 UpscaleDraft::set_custom_output_path,
             )
@@ -230,9 +220,7 @@ pub(super) fn settle_output_file_dialog(
                 RemuxDraft::set_custom_output_path,
             )
         }
-        Operation::AudioExtract
-            if matches!(execution.audio_extract, AudioExtractExecutionState::Idle) =>
-        {
+        Operation::AudioExtract => {
             let Some(session) = state
                 .audio_extract
                 .as_mut()
@@ -242,14 +230,14 @@ pub(super) fn settle_output_file_dialog(
             };
             settle_normal_output(
                 &mut session.selection,
-                &mut session.start_error,
-                &mut session.start_error_details_open,
+                &mut session.picker_error,
+                &mut session.picker_error_details_open,
                 outcome,
                 AudioExtractDraft::set_custom_output_path,
             )
         }
         Operation::FrameCapture
-            if matches!(execution.frame_capture, FrameCaptureExecutionState::Idle) =>
+            if matches!(frame_capture_state, FrameCaptureExecutionState::Idle) =>
         {
             let Some(session) = state
                 .frame_capture

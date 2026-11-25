@@ -1,6 +1,4 @@
-use super::super::dialogs::{
-    ToolExecutionStates, editor_output_dialog_request, settle_output_file_dialog,
-};
+use super::super::dialogs::{editor_output_dialog_request, settle_output_file_dialog};
 use super::*;
 use crate::app::dialogs::OutputDraft;
 use crate::file_dialog::FileDialogStartError;
@@ -427,65 +425,10 @@ fn stale_output_completions_cannot_mutate_replacement_sessions() {
 }
 
 #[test]
-fn output_completion_cannot_mutate_selection_after_execution_starts() {
+fn frame_capture_output_completion_cannot_mutate_selection_after_execution_starts() {
     let (directory, path) = temp_file("dialog-after-execution");
     let mut app = app();
     app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::VideoUpscale);
-    let upscale_id = app.state.upscale.as_ref().unwrap().session_id;
-    let upscale_output = app.state.upscale.as_ref().unwrap().selection.output_path();
-    settle_output_file_dialog(
-        &mut app.state,
-        ToolExecutionStates {
-            upscale: &UpscaleExecutionState::Running {
-                output: PathBuf::from("output.mp4"),
-            },
-            audio_extract: &AudioExtractExecutionState::Idle,
-            frame_capture: &FrameCaptureExecutionState::Idle,
-        },
-        DialogTarget::UpscaleOutput {
-            session_id: upscale_id,
-        },
-        &DialogOutcome::Selected(directory.join("late-upscale.mp4")),
-    );
-    assert_eq!(
-        app.state.upscale.as_ref().unwrap().selection.output_path(),
-        upscale_output
-    );
-
-    app.select_tool(Operation::AudioExtract);
-    let extract_id = app.state.audio_extract.as_ref().unwrap().session_id;
-    let extract_output = app
-        .state
-        .audio_extract
-        .as_ref()
-        .unwrap()
-        .selection
-        .output_path();
-    settle_output_file_dialog(
-        &mut app.state,
-        ToolExecutionStates {
-            upscale: &UpscaleExecutionState::Idle,
-            audio_extract: &AudioExtractExecutionState::Running {
-                output: PathBuf::from("output.mp4"),
-            },
-            frame_capture: &FrameCaptureExecutionState::Idle,
-        },
-        DialogTarget::AudioExtractOutput {
-            session_id: extract_id,
-        },
-        &DialogOutcome::Selected(directory.join("late-audio.mka")),
-    );
-    assert_eq!(
-        app.state
-            .audio_extract
-            .as_ref()
-            .unwrap()
-            .selection
-            .output_path(),
-        extract_output
-    );
-
     app.select_tool(Operation::FrameCapture);
     let capture_id = app.state.frame_capture.as_ref().unwrap().session_id;
     let capture_output = app
@@ -497,12 +440,8 @@ fn output_completion_cannot_mutate_selection_after_execution_starts() {
         .output_path();
     settle_output_file_dialog(
         &mut app.state,
-        ToolExecutionStates {
-            upscale: &UpscaleExecutionState::Idle,
-            audio_extract: &AudioExtractExecutionState::Idle,
-            frame_capture: &FrameCaptureExecutionState::Running {
-                output: PathBuf::from("output.mp4"),
-            },
+        &FrameCaptureExecutionState::Running {
+            output: PathBuf::from("output.mp4"),
         },
         DialogTarget::FrameCaptureOutput {
             session_id: capture_id,
@@ -548,7 +487,7 @@ fn output_picker_failure_surfaces_bounded_user_feedback() {
         .upscale
         .as_ref()
         .unwrap()
-        .start_error
+        .picker_error
         .as_ref()
         .expect("picker failure should become user-facing state");
     assert_eq!(error.kind(), MediaErrorKind::OutputPickerUnavailable);
@@ -562,7 +501,7 @@ fn output_picker_failure_surfaces_bounded_user_feedback() {
     fonts::install(&context);
     theme::install(&context);
     let mut rendered = context.run_ui(Default::default(), |ui| {
-        assert!(app.show_upscale_start_error(ui));
+        assert!(app.show_upscale_picker_error(ui));
     });
     assert!(output_contains_text(&rendered, "Output picker unavailable"));
     assert!(output_contains_text(

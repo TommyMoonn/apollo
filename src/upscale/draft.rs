@@ -3,7 +3,7 @@
 use super::{
     model::{
         CpuQuality, NvencQuality, UpscaleEncoderSettings, UpscaleRequest, UpscaleTarget,
-        VideoCodec, VideoEncoderSelection,
+        VideoCodec, VideoEncoderSelection, capability_for_codec,
     },
     sizing::{OutputDimensions, calculate_output_dimensions, resolve_target_boundary},
     validation::{UpscaleValidationError, validate_upscale_request},
@@ -265,16 +265,6 @@ impl UpscaleDraft {
 pub enum UpscaleEncoderCapabilities<'a> {
     Checking,
     Ready(&'a VideoEncoderCapabilities),
-}
-
-pub(crate) fn capability_for_codec(
-    capabilities: &VideoEncoderCapabilities,
-    codec: VideoCodec,
-) -> &VideoEncoderCapability {
-    match codec {
-        VideoCodec::H264 => &capabilities.h264_nvenc,
-        VideoCodec::H265 => &capabilities.h265_nvenc,
-    }
 }
 
 fn source_dimensions(media: &MediaFile) -> Option<(u32, u32)> {

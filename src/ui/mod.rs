@@ -1,5 +1,4 @@
 pub mod audio_extract;
-pub mod audio_extract_progress;
 pub mod audio_mix;
 pub mod batch;
 pub mod file_intake;
@@ -16,7 +15,6 @@ pub mod remux;
 pub mod source_presentation;
 pub mod theme;
 pub mod upscale;
-pub mod upscale_progress;
 pub mod widgets;
 pub mod workspace;
 
