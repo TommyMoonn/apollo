@@ -1,5 +1,4 @@
-//! Renderer-independent application state. Native adapters coordinate the existing
-//! feature workflows until their dedicated owners are extracted.
+//! Renderer-independent application composition and workflow state.
 
 pub(crate) mod batch;
 pub use batch::{BatchAction, BatchAvailability, BatchItemId, BatchReadiness};

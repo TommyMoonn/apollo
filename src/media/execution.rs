@@ -99,36 +99,23 @@ impl MediaExecution {
     }
 
     pub(crate) fn poll(&mut self) -> &MediaExecutionState {
-        if let Some(operation) = self.operation.as_mut() {
-            operation.refresh_progress();
-        }
-
-        let Some(process_state) = self
-            .operation
-            .as_ref()
-            .map(|operation| operation.process.state())
-        else {
+        let Some(operation) = self.operation.as_mut() else {
             return &self.state;
         };
-
+        let process_state = operation.process.state();
         if process_state == MediaProcessState::Running {
+            operation.refresh_progress();
             return &self.state;
         }
 
-        let mut operation = self
-            .operation
-            .take()
-            .expect("operation exists while its terminal state is being settled");
-        let diagnostic = operation.process.diagnostic_stderr();
-        let settlement = operation.output.settle(&process_state);
-
-        self.state = match settlement {
-            Err(reason) => {
-                MediaExecutionState::Failed(MediaExecutionFailure::Output { reason, diagnostic })
-            }
-            Ok(disposition) => terminal_state(process_state, disposition, diagnostic),
+        let mut operation = self.operation.take().expect("terminal operation exists");
+        self.state = match operation.output.settle(&process_state) {
+            Err(reason) => MediaExecutionState::Failed(MediaExecutionFailure::Output {
+                reason,
+                diagnostic: operation.process.diagnostic_stderr(),
+            }),
+            Ok(disposition) => terminal_state(process_state, disposition, &*operation.process),
         };
-
         &self.state
     }
 
@@ -170,14 +157,17 @@ impl MediaExecution {
 fn terminal_state(
     process_state: MediaProcessState,
     disposition: MediaOutputDisposition,
-    diagnostic: String,
+    process: &dyn ProcessControl,
 ) -> MediaExecutionState {
     match (process_state, disposition) {
         (MediaProcessState::Completed, MediaOutputDisposition::Published(output)) => {
             MediaExecutionState::Completed { output }
         }
         (MediaProcessState::Failed(reason), MediaOutputDisposition::Discarded) => {
-            MediaExecutionState::Failed(MediaExecutionFailure::Process { reason, diagnostic })
+            MediaExecutionState::Failed(MediaExecutionFailure::Process {
+                reason,
+                diagnostic: process.diagnostic_stderr(),
+            })
         }
         (MediaProcessState::Cancelled, MediaOutputDisposition::Discarded) => {
             MediaExecutionState::Cancelled
@@ -210,11 +200,24 @@ impl RunningMediaOperation {
     }
 }
 
+impl Drop for RunningMediaOperation {
+    fn drop(&mut self) {
+        if self.process.state() == MediaProcessState::Running {
+            self.process.stop_and_wait();
+        }
+        // MediaOutput drops only after the child has stopped writing.
+    }
+}
+
 pub(crate) trait ProcessControl {
     fn state(&self) -> MediaProcessState;
     fn cancel(&self) -> bool;
     fn diagnostic_stderr(&self) -> String;
     fn drain_progress(&self) -> Vec<String>;
+    // Simulated processes settle synchronously on cancellation. The real owner joins its worker.
+    fn stop_and_wait(&mut self) {
+        self.cancel();
+    }
 }
 
 impl ProcessControl for MediaProcess {
@@ -232,5 +235,79 @@ impl ProcessControl for MediaProcess {
 
     fn drain_progress(&self) -> Vec<String> {
         self.progress_channel().try_iter().collect()
+    }
+
+    fn stop_and_wait(&mut self) {
+        MediaProcess::stop_and_wait(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::{
+        process::{MediaProcessEvent, MediaProcessWake},
+        tools::MediaTools,
+    };
+    use std::{ffi::OsString, fs, sync::mpsc, time::Duration};
+
+    #[test]
+    fn dropping_active_file_execution_releases_child_before_staging_cleanup() {
+        let directory =
+            std::env::temp_dir().join(format!("apollo-execution-drop-{}", std::process::id()));
+        // This test owns a unique directory for its process; refuse to reuse an existing one.
+        fs::create_dir(&directory).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(directory.clone());
+        let destination = directory.join("result.mp4");
+        fs::write(&destination, b"existing").unwrap();
+        let output = MediaOutput::prepare(&destination).unwrap();
+        let temporary = output.temporary_path().to_path_buf();
+        let staging = temporary.parent().unwrap().to_path_buf();
+        fs::write(&temporary, b"partial").unwrap();
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd.exe",
+            vec![
+                "/D",
+                "/S",
+                "/C",
+                "echo ready& for /L %i in (1,1,2147483647) do @rem",
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, args) = ("sh", vec!["-c", "printf 'ready\\n'; exec sleep 60"]);
+        let tools = MediaTools::new(program, program);
+        let operation = PreparedMediaOperation::new(
+            output,
+            &tools,
+            args.into_iter().map(OsString::from).collect(),
+            None,
+        );
+        let (tx, rx) = mpsc::channel();
+        let staged = temporary.clone();
+        let wake = MediaProcessWake::new(move |event| {
+            let _ = tx.send((event, staged.exists()));
+        });
+        let mut execution = MediaExecution::new();
+        execution
+            .start_prepared_with_launcher(operation, |command| {
+                MediaProcess::start_with_wake(command, wake)
+            })
+            .unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10)).unwrap().0,
+            MediaProcessEvent::Progress
+        );
+        drop(execution);
+        assert_eq!(rx.try_recv().unwrap(), (MediaProcessEvent::Terminal, true));
+        assert!(!staging.exists());
+        assert_eq!(fs::read(&destination).unwrap(), b"existing");
+        assert!(!directory.join("result (1).mp4").exists());
     }
 }

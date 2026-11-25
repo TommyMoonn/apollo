@@ -1,6 +1,6 @@
 use std::{
-    env, fmt, fs, io,
-    path::{Component, Path, PathBuf},
+    fmt, fs, io,
+    path::{Path, PathBuf},
     process,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -99,7 +99,14 @@ pub struct MediaOutput {
     final_path: PathBuf,
     temporary_path: PathBuf,
     staging_directory: PathBuf,
-    settled: bool,
+    state: OutputState,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OutputState {
+    Pending,
+    CleanupPending,
+    Settled,
 }
 
 struct ValidatedOutputDestination {
@@ -112,7 +119,7 @@ struct ValidatedOutputDestination {
 pub fn validate_output_path(output: &Path) -> Result<(), MediaOutputError> {
     output
         .file_name()
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && !name.as_encoded_bytes().contains(&0))
         .map(|_| ())
         .ok_or_else(|| MediaOutputError::InvalidOutputPath(output.to_path_buf()))
 }
@@ -153,7 +160,7 @@ fn validated_output_destination(
         return Err(MediaOutputError::OutputParentNotDirectory(requested_parent));
     }
 
-    let parent = absolute_lexical(&requested_parent).map_err(|error| {
+    let parent = std::path::absolute(&requested_parent).map_err(|error| {
         MediaOutputError::OutputParentUnavailable {
             path: requested_parent.clone(),
             kind: error.kind(),
@@ -188,7 +195,7 @@ impl MediaOutput {
             final_path,
             temporary_path,
             staging_directory,
-            settled: false,
+            state: OutputState::Pending,
         })
     }
 
@@ -204,14 +211,39 @@ impl MediaOutput {
         &mut self,
         process_state: &MediaProcessState,
     ) -> Result<MediaOutputDisposition, MediaOutputError> {
-        if self.settled {
+        if self.state != OutputState::Pending {
             return Err(MediaOutputError::AlreadySettled);
         }
+        if *process_state == MediaProcessState::Running {
+            return Err(MediaOutputError::ProcessStillRunning);
+        }
 
+        // A terminal settlement is never retried as publication, even on failure.
+        self.state = OutputState::CleanupPending;
         match process_state {
-            MediaProcessState::Running => Err(MediaOutputError::ProcessStillRunning),
-            MediaProcessState::Completed => self.publish(),
-            MediaProcessState::Failed(_) | MediaProcessState::Cancelled => self.discard(),
+            MediaProcessState::Completed => {
+                let result = self.publish();
+                if result.is_ok() {
+                    // Successful publication relinquishes the staged name.
+                    self.state = OutputState::Settled;
+                    let _ = remove_empty_staging_directory(&self.staging_directory);
+                } else {
+                    self.finish_cleanup();
+                }
+                result
+            }
+            MediaProcessState::Failed(_) | MediaProcessState::Cancelled => {
+                self.cleanup_owned_temporary_output()?;
+                self.state = OutputState::Settled;
+                Ok(MediaOutputDisposition::Discarded)
+            }
+            MediaProcessState::Running => unreachable!("running state rejected before settlement"),
+        }
+    }
+
+    fn finish_cleanup(&mut self) {
+        if self.cleanup_owned_temporary_output().is_ok() {
+            self.state = OutputState::Settled;
         }
     }
 
@@ -257,15 +289,7 @@ impl MediaOutput {
         }
         self.final_path = candidate;
 
-        self.settled = true;
-        let _ = remove_empty_staging_directory(&self.staging_directory);
         Ok(MediaOutputDisposition::Published(self.final_path.clone()))
-    }
-
-    fn discard(&mut self) -> Result<MediaOutputDisposition, MediaOutputError> {
-        self.cleanup_owned_temporary_output()?;
-        self.settled = true;
-        Ok(MediaOutputDisposition::Discarded)
     }
 
     fn cleanup_owned_temporary_output(&self) -> Result<(), MediaOutputError> {
@@ -296,7 +320,7 @@ impl MediaOutput {
 
 impl Drop for MediaOutput {
     fn drop(&mut self) {
-        if !self.settled {
+        if self.state != OutputState::Settled {
             let _ = self.cleanup_owned_temporary_output();
         }
     }
@@ -307,26 +331,6 @@ fn output_parent(output: &Path) -> PathBuf {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
     }
-}
-
-fn absolute_lexical(path: &Path) -> io::Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        env::current_dir()?.join(path)
-    };
-
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    Ok(normalized)
 }
 
 fn numbered_output_path(path: &Path, index: u64) -> PathBuf {
@@ -450,8 +454,8 @@ fn publish_file_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     match fs::remove_file(from) {
         Ok(()) => Ok(()),
         Err(error) => {
-            // The final path is already a complete hard link at this point. Publication
-            // succeeded; leave best-effort temporary cleanup to the MediaOutput owner.
+            // The final path is already a complete hard link. An unlink failure cannot
+            // undo publication or justify replacing the destination.
             let _ = error;
             Ok(())
         }
@@ -601,6 +605,51 @@ mod tests {
         assert_eq!(fs::read(prepared.final_path()).unwrap(), b"complete-output");
         assert!(!temporary.exists());
         assert!(!staging.exists());
+        assert_eq!(
+            prepared.settle(&MediaProcessState::Completed),
+            Err(MediaOutputError::AlreadySettled)
+        );
+    }
+
+    #[test]
+    fn failed_publication_is_terminal_and_cleans_owned_staging() {
+        let directory = TestDirectory::new("publication-failure");
+        let output = directory.path().join("result.mp4");
+        let mut prepared = MediaOutput::prepare(&output).unwrap();
+        let temporary = prepared.temporary_path().to_path_buf();
+        let staging = temporary.parent().unwrap();
+        assert_eq!(
+            prepared.settle(&MediaProcessState::Completed),
+            Err(MediaOutputError::TemporaryOutputMissing(temporary.clone()))
+        );
+        assert!(!staging.exists());
+        assert!(!output.exists());
+        assert_eq!(
+            prepared.settle(&MediaProcessState::Completed),
+            Err(MediaOutputError::AlreadySettled)
+        );
+        assert_eq!(
+            prepared.settle(&MediaProcessState::Cancelled),
+            Err(MediaOutputError::AlreadySettled)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_parent_preserves_symlink_parent_traversal() {
+        use std::os::unix::fs::symlink;
+        let directory = TestDirectory::new("symlink-parent");
+        let parent = directory.path().join("actual");
+        let nested = parent.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let link = directory.path().join("link");
+        symlink(&nested, &link).unwrap();
+        let output = link.join("..").join("result.mp4");
+        let mut prepared = MediaOutput::prepare(&output).unwrap();
+        fs::write(prepared.temporary_path(), b"complete").unwrap();
+        prepared.settle(&MediaProcessState::Completed).unwrap();
+        assert_eq!(fs::read(parent.join("result.mp4")).unwrap(), b"complete");
+        assert!(!directory.path().join("result.mp4").exists());
     }
 
     #[test]

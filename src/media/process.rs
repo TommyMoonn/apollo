@@ -185,6 +185,7 @@ impl std::error::Error for MediaProcessStartError {}
 
 pub struct MediaProcess {
     lifecycle: Arc<ProcessLifecycle>,
+    worker: Option<JoinHandle<()>>,
     captured_stdout: Arc<Mutex<BoundedDiagnostic>>,
     diagnostics: Arc<Mutex<BoundedDiagnostic>>,
     stdout_rx: Receiver<String>,
@@ -217,7 +218,7 @@ impl MediaProcess {
         let worker_lifecycle = Arc::clone(&lifecycle);
         let worker_captured_stdout = Arc::clone(&captured_stdout);
         let worker_diagnostics = Arc::clone(&diagnostics);
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("apollo-media-process".to_owned())
             .spawn(move || {
                 run_worker(
@@ -239,14 +240,21 @@ impl MediaProcess {
         match startup_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 lifecycle,
+                worker: Some(worker),
                 captured_stdout,
                 diagnostics,
                 stdout_rx,
                 stderr_rx,
                 progress_rx,
             }),
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(MediaProcessStartError::WorkerTerminatedBeforeStart),
+            failure => {
+                let _ = worker.join();
+                Err(match failure {
+                    Ok(Err(error)) => error,
+                    Err(_) => MediaProcessStartError::WorkerTerminatedBeforeStart,
+                    Ok(Ok(())) => unreachable!(),
+                })
+            }
         }
     }
 
@@ -256,6 +264,15 @@ impl MediaProcess {
 
     pub fn cancel(&self) -> bool {
         self.lifecycle.request_cancel()
+    }
+
+    // File-producing executions release the child before cleaning its staging files.
+    // Interactive callers retain nonblocking cancellation on drop.
+    pub(super) fn stop_and_wait(&mut self) {
+        self.cancel();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 
     pub fn stdout_channel(&self) -> &Receiver<String> {
@@ -291,113 +308,125 @@ impl Drop for MediaProcess {
 
 #[derive(Debug)]
 struct ProcessLifecycle {
-    inner: Mutex<ProcessLifecycleInner>,
+    inner: Mutex<ProcessPhase>,
     changed: Condvar,
 }
 
 #[derive(Debug)]
-struct ProcessLifecycleInner {
-    state: MediaProcessState,
-    cancel_requested: bool,
-    // Claimed as soon as the worker observes termination, before readers finish draining.
-    // Once claimed, cancellation is rejected and cannot rewrite the outcome.
-    terminal_claim: Option<MediaProcessState>,
+enum ProcessPhase {
+    Running,
+    CancelRequested,
+    // The worker has observed termination; readers still own the pipes.
+    Draining(MediaProcessState),
+    Terminal(MediaProcessState),
 }
 
 impl ProcessLifecycle {
     fn new() -> Self {
         Self {
-            inner: Mutex::new(ProcessLifecycleInner {
-                state: MediaProcessState::Running,
-                cancel_requested: false,
-                terminal_claim: None,
-            }),
+            inner: Mutex::new(ProcessPhase::Running),
             changed: Condvar::new(),
         }
     }
 
     fn state(&self) -> MediaProcessState {
-        lock_unpoisoned(&self.inner).state.clone()
+        match &*lock_unpoisoned(&self.inner) {
+            ProcessPhase::Terminal(state) => state.clone(),
+            _ => MediaProcessState::Running,
+        }
     }
 
     fn request_cancel(&self) -> bool {
-        let mut inner = lock_unpoisoned(&self.inner);
-        if inner.state.is_terminal() || inner.terminal_claim.is_some() || inner.cancel_requested {
+        let mut phase = lock_unpoisoned(&self.inner);
+        if !matches!(*phase, ProcessPhase::Running) {
             return false;
         }
-
-        inner.cancel_requested = true;
+        *phase = ProcessPhase::CancelRequested;
         self.changed.notify_all();
         true
     }
 
-    fn poll_owned_child(&self, child: &mut Child) -> ChildPoll {
-        let mut inner = lock_unpoisoned(&self.inner);
-
-        if inner.terminal_claim.is_some() {
-            return ChildPoll::TerminalClaimed;
-        }
-
-        if inner.cancel_requested {
-            inner.terminal_claim = Some(MediaProcessState::Cancelled);
-            self.changed.notify_all();
-            return ChildPoll::CancelClaimed;
-        }
-
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                inner.terminal_claim = Some(if status.success() {
-                    MediaProcessState::Completed
-                } else {
-                    MediaProcessState::Failed(MediaProcessFailure::Exit(status.code()))
-                });
-                self.changed.notify_all();
-                ChildPoll::TerminalClaimed
-            }
-            Ok(None) => ChildPoll::Running,
-            Err(error) => {
-                inner.terminal_claim = Some(MediaProcessState::Failed(MediaProcessFailure::Io(
-                    error.kind(),
-                )));
-                self.changed.notify_all();
-                ChildPoll::IoFailureClaimed
-            }
-        }
+    fn wait_for_poll(&self) {
+        let phase = lock_unpoisoned(&self.inner);
+        let _ = self
+            .changed
+            .wait_timeout_while(phase, PROCESS_POLL_INTERVAL, |phase| {
+                matches!(phase, ProcessPhase::Running)
+            });
     }
 
-    fn publish_terminal_claim(&self) -> bool {
-        let mut inner = lock_unpoisoned(&self.inner);
-        if inner.state.is_terminal() {
-            return false;
-        }
+    fn poll_owned_child(&self, child: &mut Child) -> ChildPoll {
+        let mut phase = lock_unpoisoned(&self.inner);
+        let (state, poll) = match *phase {
+            ProcessPhase::CancelRequested => {
+                (MediaProcessState::Cancelled, ChildPoll::CancelClaimed)
+            }
+            ProcessPhase::Running => match child.try_wait() {
+                Ok(Some(status)) => (
+                    if status.success() {
+                        MediaProcessState::Completed
+                    } else {
+                        MediaProcessState::Failed(MediaProcessFailure::Exit(status.code()))
+                    },
+                    ChildPoll::TerminalClaimed,
+                ),
+                Ok(None) => return ChildPoll::Running,
+                Err(error) => (
+                    MediaProcessState::Failed(MediaProcessFailure::Io(error.kind())),
+                    ChildPoll::IoFailureClaimed,
+                ),
+            },
+            _ => return ChildPoll::TerminalClaimed,
+        };
+        *phase = ProcessPhase::Draining(state);
+        self.changed.notify_all();
+        poll
+    }
 
-        let Some(claimed) = inner.terminal_claim.clone() else {
+    fn publish_terminal_claim(&self, reader_error: Option<io::ErrorKind>) -> bool {
+        let mut phase = lock_unpoisoned(&self.inner);
+        let ProcessPhase::Draining(state) = &*phase else {
             return false;
         };
-
-        inner.state = claimed;
+        let state = match (state, reader_error) {
+            (MediaProcessState::Completed, Some(kind)) => {
+                MediaProcessState::Failed(MediaProcessFailure::Io(kind))
+            }
+            _ => state.clone(),
+        };
+        *phase = ProcessPhase::Terminal(state);
         self.changed.notify_all();
         true
     }
 
     #[cfg(test)]
     fn wait_for_terminal_claim(&self, timeout: Duration) -> Option<MediaProcessState> {
-        let inner = lock_unpoisoned(&self.inner);
-        let (inner, _) = self
+        let phase = lock_unpoisoned(&self.inner);
+        let (phase, _) = self
             .changed
-            .wait_timeout_while(inner, timeout, |inner| inner.terminal_claim.is_none())
+            .wait_timeout_while(phase, timeout, |phase| {
+                matches!(phase, ProcessPhase::Running | ProcessPhase::CancelRequested)
+            })
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inner.terminal_claim.clone()
+        match &*phase {
+            ProcessPhase::Draining(state) | ProcessPhase::Terminal(state) => Some(state.clone()),
+            _ => None,
+        }
     }
 
     #[cfg(test)]
     fn wait_for_terminal(&self, timeout: Duration) -> MediaProcessState {
-        let inner = lock_unpoisoned(&self.inner);
-        let (inner, _) = self
+        let phase = lock_unpoisoned(&self.inner);
+        let (phase, _) = self
             .changed
-            .wait_timeout_while(inner, timeout, |inner| !inner.state.is_terminal())
+            .wait_timeout_while(phase, timeout, |phase| {
+                !matches!(phase, ProcessPhase::Terminal(_))
+            })
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inner.state.clone()
+        match &*phase {
+            ProcessPhase::Terminal(state) => state.clone(),
+            _ => MediaProcessState::Running,
+        }
     }
 }
 
@@ -444,7 +473,12 @@ impl BoundedDiagnostic {
     }
 
     fn as_lossy_string(&self) -> String {
-        String::from_utf8_lossy(&self.bytes).into_owned()
+        let text = String::from_utf8_lossy(&self.bytes);
+        let mut start = text.len().saturating_sub(self.limit);
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        text[start..].to_owned()
     }
 }
 
@@ -535,9 +569,9 @@ fn run_worker(
 
     run_owned_child(&mut child, &lifecycle);
 
-    let _ = stdout_reader.join();
-    let _ = stderr_reader.join();
-    if lifecycle.publish_terminal_claim() {
+    let stdout_error = reader_error(stdout_reader);
+    let stderr_error = reader_error(stderr_reader);
+    if lifecycle.publish_terminal_claim(stdout_error.or(stderr_error)) {
         wake.notify(MediaProcessEvent::Terminal);
     }
 }
@@ -554,7 +588,7 @@ fn spawn_child(command: &MediaProcessCommand) -> io::Result<Child> {
 fn run_owned_child(child: &mut Child, lifecycle: &ProcessLifecycle) {
     loop {
         match lifecycle.poll_owned_child(child) {
-            ChildPoll::Running => thread::sleep(PROCESS_POLL_INTERVAL),
+            ChildPoll::Running => lifecycle.wait_for_poll(),
             ChildPoll::CancelClaimed | ChildPoll::IoFailureClaimed => {
                 stop_owned_child(child);
                 return;
@@ -575,7 +609,7 @@ fn spawn_stream_reader<R>(
     output_tx: SyncSender<String>,
     progress: Option<(SyncSender<String>, MediaProcessWake)>,
     diagnostics: Option<Arc<Mutex<BoundedDiagnostic>>>,
-) -> io::Result<JoinHandle<()>>
+) -> io::Result<JoinHandle<io::Result<()>>>
 where
     R: Read + Send + 'static,
 {
@@ -584,12 +618,20 @@ where
         .spawn(move || read_stream(stream, output_tx, progress, diagnostics))
 }
 
+fn reader_error(reader: JoinHandle<io::Result<()>>) -> Option<io::ErrorKind> {
+    match reader.join() {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error.kind()),
+        Err(_) => Some(io::ErrorKind::Other),
+    }
+}
+
 fn read_stream<R: Read>(
     mut stream: R,
     output_tx: SyncSender<String>,
     progress: Option<(SyncSender<String>, MediaProcessWake)>,
     diagnostics: Option<Arc<Mutex<BoundedDiagnostic>>>,
-) {
+) -> io::Result<()> {
     let mut chunk = [0_u8; STREAM_READ_CHUNK_BYTES];
     let mut line = Vec::with_capacity(LIVE_OUTPUT_MESSAGE_LIMIT_BYTES.min(STREAM_READ_CHUNK_BYTES));
     let mut fragmented = false;
@@ -598,7 +640,7 @@ fn read_stream<R: Read>(
         match stream.read(&mut chunk) {
             Ok(0) => {
                 emit_stream_eof(&mut line, &output_tx, progress.as_ref());
-                break;
+                return Ok(());
             }
             Ok(read) => {
                 let bytes = &chunk[..read];
@@ -614,7 +656,8 @@ fn read_stream<R: Read>(
                     progress.as_ref(),
                 );
             }
-            Err(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
         }
     }
 }
@@ -691,11 +734,13 @@ fn emit_stream_message(
     progress: Option<&(SyncSender<String>, MediaProcessWake)>,
 ) {
     let text = String::from_utf8_lossy(bytes).into_owned();
-    let _ = try_send_bounded(output_tx, text.clone());
-    if let Some((progress_tx, wake)) = progress
-        && try_send_bounded(progress_tx, text)
-    {
-        wake.notify(MediaProcessEvent::Progress);
+    if let Some((progress_tx, wake)) = progress {
+        let _ = try_send_bounded(output_tx, text.clone());
+        if try_send_bounded(progress_tx, text) {
+            wake.notify(MediaProcessEvent::Progress);
+        }
+    } else {
+        let _ = try_send_bounded(output_tx, text);
     }
 }
 
@@ -805,7 +850,7 @@ mod tests {
         assert!(!process.cancel());
         assert_eq!(wait_for_process(&process), MediaProcessState::Cancelled);
         assert!(!process.cancel());
-        assert!(!process.lifecycle.publish_terminal_claim());
+        assert!(!process.lifecycle.publish_terminal_claim(None));
     }
 
     #[test]
@@ -847,7 +892,8 @@ mod tests {
             stderr_tx,
             Some((progress_tx, MediaProcessWake::default())),
             Some(Arc::clone(&diagnostics)),
-        );
+        )
+        .unwrap();
 
         assert!(max_read_request.load(Ordering::Relaxed) <= STREAM_READ_CHUNK_BYTES);
 
@@ -870,6 +916,38 @@ mod tests {
         let diagnostic = lock_unpoisoned(&diagnostics).as_lossy_string();
         assert_eq!(diagnostic.len(), 64);
         assert!(diagnostic.ends_with("TAIL-MARKER"));
+    }
+
+    #[test]
+    fn reader_failure_cannot_report_successful_process_completion() {
+        let (terminal_tx, terminal_rx) = std::sync::mpsc::channel();
+        let wake = MediaProcessWake::new(move |event| match event {
+            MediaProcessEvent::Progress => panic!("simulated stream reader failure"),
+            MediaProcessEvent::Terminal => {
+                let _ = terminal_tx.send(());
+            }
+        });
+        let process = MediaProcess::start_with_wake(
+            shell_command(success_script()).progress_source(ProcessProgressSource::Stdout),
+            wake,
+        )
+        .unwrap();
+        terminal_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+        assert_eq!(
+            process.state(),
+            MediaProcessState::Failed(MediaProcessFailure::Io(io::ErrorKind::Other))
+        );
+        assert!(!process.cancel());
+    }
+
+    #[test]
+    fn malformed_utf8_does_not_expand_retained_diagnostic_past_limit() {
+        let mut diagnostic = BoundedDiagnostic::new(16);
+        diagnostic.push(&[0xff; 32]);
+        diagnostic.push(b"tail");
+        let text = diagnostic.as_lossy_string();
+        assert!(text.len() <= 16);
+        assert!(text.ends_with("tail"));
     }
 
     #[test]
@@ -930,7 +1008,7 @@ mod tests {
             release_tx.send(()).unwrap();
             assert_eq!(wait_for_process(&process), expected);
             assert!(!process.cancel());
-            assert!(!process.lifecycle.publish_terminal_claim());
+            assert!(!process.lifecycle.publish_terminal_claim(None));
         }
     }
 

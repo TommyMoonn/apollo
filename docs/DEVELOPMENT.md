@@ -17,7 +17,7 @@ Required development tools:
 
 Rustup is the recommended way to install the pinned Rust toolchain. From the repository root, the toolchain file should select the required version automatically.
 
-FFmpeg and FFprobe run as separate processes. The Windows release packages include the pinned pair; `cargo build` does not download or copy media tools. Apollo discovers and validates them through one shared application owner rather than feature-specific checks.
+FFmpeg and FFprobe run as separate processes. The Windows release packages include the pinned pair; `cargo build` does not download or copy media tools. Apollo discovers and validates them through one shared application owner rather than feature-specific checks. Immediate executors and the queue share the media preparation and settlement code; see [Architecture](ARCHITECTURE.md#source-intake-and-execution) for the execution boundaries.
 
 ### Pinned media tools for development
 
