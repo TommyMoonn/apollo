@@ -231,6 +231,12 @@ impl Application {
                 .audio_mix
                 .as_ref()
                 .map(|draft| QueuedOperation::AudioMix(draft.request(media))),
+            Operation::AudioExtract => self
+                .source
+                .audio_extract
+                .as_ref()
+                .and_then(|draft| draft.request(media))
+                .map(QueuedOperation::AudioExtract),
             _ => None,
         };
         let Some(request) = request else {

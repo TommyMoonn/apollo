@@ -163,6 +163,7 @@ impl OutputDraft<'_> {
         let directory = match &self {
             Self::Remux(draft) => Some(draft.output_directory().to_path_buf()),
             Self::AudioMix(draft) => Some(draft.output_directory().to_path_buf()),
+            Self::AudioExtract(draft) => Some(draft.output_directory().to_path_buf()),
             _ => None,
         };
         let (target, output, format): (DialogTarget, PathBuf, OutputFormat) = match self {
@@ -246,6 +247,27 @@ impl Application {
             if (if matches!(self.navigation(), NavigationState::SourceWorkspace { .. }) {
                 match operation {
                     Operation::Remux => self.settle_source_remux_output(session_id, &outcome),
+                    Operation::AudioExtract
+                        if self.audio_extract_context().map(|context| context.0)
+                            == Some(session_id) =>
+                    {
+                        match &outcome {
+                            DialogOutcome::Selected(path) => self
+                                .audio_extract_draft_mut(session_id)
+                                .is_some_and(|(_, draft)| {
+                                    draft.set_custom_output_path(path.clone());
+                                    true
+                                }),
+                            DialogOutcome::Failed(diagnostic) => {
+                                self.operation_action_error = Some((
+                                    operation,
+                                    MediaError::output_picker_unavailable(diagnostic.clone()),
+                                ));
+                                false
+                            }
+                            _ => false,
+                        }
+                    }
                     Operation::AudioMix
                         if self.audio_mix_context().map(|context| context.0)
                             == Some(session_id) =>

@@ -1,6 +1,8 @@
 //! Renderer-independent application composition and workflow state.
 
 #[cfg(any(windows, test))]
+pub(crate) mod audio_extract;
+#[cfg(any(windows, test))]
 pub(crate) mod audio_mix;
 #[cfg(any(windows, test))]
 pub(crate) mod background;

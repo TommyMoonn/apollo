@@ -22,6 +22,7 @@ pub(crate) struct SourceSession {
     error: Option<MediaError>,
     session_id: Option<u64>,
     next_session_id: u64,
+    pub(crate) audio_extract: Option<crate::audio_extract::draft::AudioExtractDraft>,
     pub(crate) remux: Option<crate::remux::draft::RemuxDraft>,
     pub(crate) audio_mix: Option<crate::audio_mix::draft::AudioMixDraft>,
 }
@@ -36,6 +37,15 @@ pub(crate) enum SourceSettlement {
 impl SourceSession {
     pub(crate) fn current(&self) -> Option<&MediaFile> {
         self.intake.current()
+    }
+    #[cfg(any(windows, test))]
+    pub(crate) fn audio_extract_mut(
+        &mut self,
+    ) -> Option<(
+        &MediaFile,
+        &mut crate::audio_extract::draft::AudioExtractDraft,
+    )> {
+        Some((self.intake.current()?, self.audio_extract.as_mut()?))
     }
     #[cfg(any(windows, test))]
     pub(crate) fn audio_mix_mut(
@@ -168,6 +178,9 @@ impl SourceSession {
 
     fn publish(&mut self) {
         self.session_id = Some(self.allocate_session_id());
+        self.audio_extract = self
+            .current()
+            .map(crate::audio_extract::draft::AudioExtractDraft::new);
         self.remux = self.current().map(crate::remux::draft::RemuxDraft::new);
         self.audio_mix = self
             .current()
@@ -185,6 +198,7 @@ impl SourceSession {
         self.inspection = None;
         self.intake.close_source();
         self.session_id = None;
+        self.audio_extract = None;
         self.remux = None;
         self.audio_mix = None;
         self.clear_error();

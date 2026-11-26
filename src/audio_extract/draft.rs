@@ -87,6 +87,10 @@ impl AudioExtractDraft {
         self.output_name.path(self.format.extension())
     }
 
+    pub fn output_directory(&self) -> &Path {
+        self.output_name.directory()
+    }
+
     pub fn output_filename_stem(&self) -> &OsStr {
         self.output_name.stem()
     }

@@ -928,10 +928,110 @@ impl ApolloRoot {
             .child(footer)
     }
 
+    fn extract_tracks(&mut self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let Some((session, media, draft)) = self.core.audio_extract_context() else {
+            return div();
+        };
+        let enabled = self.can_navigate()
+            && !self.core.source.is_inspecting()
+            && !self.output_composing(session, cx);
+        let selected = draft.selected_stream_index();
+        let presentation = super::audio_extract::AudioExtractPresentation::new(media);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(M.compact))
+            .w_full()
+            .min_w_0()
+            .child(components::heading("Audio track"))
+            .children(presentation.tracks.into_iter().map(|track| {
+                let id = track.stream_index;
+                let checked = selected == Some(id);
+                let accessible = format!("{}, {}", track.title, track.metadata);
+                let marker = div()
+                    .size(px(16.))
+                    .flex_shrink_0()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(rgba(if checked {
+                        palette.foreground
+                    } else {
+                        palette.border()
+                    }))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(checked, |marker| {
+                        marker.child(
+                            div()
+                                .size(px(8.))
+                                .rounded(px(4.))
+                                .bg(rgba(palette.foreground)),
+                        )
+                    });
+                let row = div()
+                    .id(("extract-track", id as usize))
+                    .role(gpui::Role::RadioButton)
+                    .aria_label(accessible.clone())
+                    .aria_toggled(if checked {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .flex()
+                    .items_center()
+                    .gap(px(M.compact))
+                    .min_w_0()
+                    .w_full()
+                    .rounded(px(M.radius))
+                    .border_1()
+                    .border_color(rgba(0))
+                    .p(px(M.compact))
+                    .when(checked, |row| row.bg(rgba(palette.hover())))
+                    .when(enabled, |row| {
+                        row.tab_index(0)
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(rgba(palette.hover())))
+                            .focus_visible(move |style| {
+                                style.border_color(rgba(palette.foreground))
+                            })
+                            .on_click(cx.listener(move |root, _, _, cx| {
+                                if !root.can_navigate() || root.output_composing(session, cx) {
+                                    return;
+                                }
+                                if let Some((media, draft)) =
+                                    root.core.audio_extract_draft_mut(session)
+                                    && draft.select_stream(media, id)
+                                {
+                                    cx.notify();
+                                }
+                            }))
+                    })
+                    .child(marker)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(TextRole::Body.apply(div()).truncate().child(track.title))
+                            .child(
+                                TextRole::Secondary
+                                    .apply(div())
+                                    .text_color(rgba(palette.secondary()))
+                                    .truncate()
+                                    .child(track.metadata),
+                            ),
+                    );
+                components::with_tooltip(row, accessible, palette)
+            }))
+    }
+
     fn operation_session(&self, operation: Operation) -> Option<u64> {
         match operation {
             Operation::Remux => self.core.remux_context().map(|context| context.0),
             Operation::AudioMix => self.core.audio_mix_context().map(|context| context.0),
+            Operation::AudioExtract => self.core.audio_extract_context().map(|context| context.0),
             _ => None,
         }
     }
@@ -1060,6 +1160,12 @@ impl ApolloRoot {
         } else {
             None
         };
+        let extract_sections = (operation == Operation::AudioExtract).then(|| {
+            [
+                self.extract_tracks(palette, cx),
+                components::separator(palette),
+            ]
+        });
         let mixer_validation = if operation == Operation::AudioMix {
             self.core.audio_mix_validation()
         } else {
@@ -1095,6 +1201,25 @@ impl ApolloRoot {
                     feedback,
                 )
             }),
+            Operation::AudioExtract => self.core.audio_extract_context().map(|(session, media, draft)| {
+                let feedback = draft.validation(media).err().map(|error| {
+                    super::audio_extract::ready_feedback(&error)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| match error {
+                            crate::audio_extract::draft::AudioExtractReadyError::Request(error) => error.to_string(),
+                            crate::audio_extract::draft::AudioExtractReadyError::NoAudioStreams => super::audio_extract::NO_AUDIO_FEEDBACK.to_owned(),
+                        })
+                });
+                let format = super::audio_extract::FORMATS.iter().position(|format| *format == draft.format()).expect("supported format");
+                (
+                    session,
+                    format,
+                    draft.output_directory().to_path_buf(),
+                    draft.output_filename_stem().to_string_lossy().into_owned(),
+                    draft.output_filename_stem().to_str().is_some(),
+                    feedback,
+                )
+            }),
             _ => None,
         };
         let Some((session, format_index, directory, stem, editable_name, feedback)) = snapshot
@@ -1105,7 +1230,16 @@ impl ApolloRoot {
             );
         };
         let valid = feedback.is_none();
-        let current_container = REMUX_FORMATS[format_index];
+        let extract = operation == Operation::AudioExtract;
+        let extract_extensions = super::audio_extract::FORMATS
+            .map(crate::audio_extract::model::AudioExtractFormat::extension);
+        let video_extensions = REMUX_FORMATS.map(MediaContainer::extension);
+        let (labels, extensions): (&'static [&'static str], &[&str]) = if extract {
+            (&super::audio_extract::FORMAT_OPTIONS, &extract_extensions)
+        } else {
+            (&["MP4", "MKV"], &video_extensions)
+        };
+        let extension = extensions[format_index];
         let enabled = self.can_navigate()
             && !self.core.source.is_inspecting()
             && self.core.discovery.ready().is_some();
@@ -1130,16 +1264,30 @@ impl ApolloRoot {
                             draft.set_output_filename_stem(change.0.clone().into());
                         }
                     }
+                    Operation::AudioExtract => {
+                        if let Some((_, draft)) = root.core.audio_extract_draft_mut(session) {
+                            draft.set_output_filename_stem(change.0.clone().into());
+                        }
+                    }
                     _ => return,
                 }
                 cx.notify();
             });
             // Composition can change action readiness even before the typed value changes.
             let observation = cx.observe(&input, |_, _, cx| cx.notify());
-            let format = cx.new(|cx| Dropdown::new(&["MP4", "MKV"], format_index, cx));
+            let format = cx.new(|cx| Dropdown::new(labels, format_index, cx));
             let format_subscription =
                 cx.subscribe(&format, move |root, _, change: &Selected, cx| {
                     if !root.can_navigate() || root.output_composing(session, cx) {
+                        return;
+                    }
+                    if operation == Operation::AudioExtract {
+                        if let Some(&format) = super::audio_extract::FORMATS.get(change.0)
+                            && let Some((_, draft)) = root.core.audio_extract_draft_mut(session)
+                        {
+                            draft.set_format(format);
+                            cx.notify();
+                        }
                         return;
                     }
                     let Some(&container) = REMUX_FORMATS.get(change.0) else {
@@ -1219,6 +1367,11 @@ impl ApolloRoot {
                             .audio_mix_context()
                             .filter(|context| context.0 == session)
                             .map(|(id, _, draft)| OutputDraft::AudioMix(draft).request(id)),
+                        Operation::AudioExtract => root
+                            .core
+                            .audio_extract_context()
+                            .filter(|context| context.0 == session)
+                            .map(|(id, _, draft)| OutputDraft::AudioExtract(draft).request(id)),
                         _ => None,
                     };
                     let Some(request) = request else {
@@ -1257,12 +1410,13 @@ impl ApolloRoot {
             .w_full()
             .min_w_0()
             .children(mixer_sections.into_iter().flatten())
+            .children(extract_sections.into_iter().flatten())
             .child(
                 output::OutputRow {
                     format: div().flex_shrink_0().child(format),
                     filename: input,
-                    extension: current_container.extension(),
-                    extensions: &REMUX_FORMATS.map(MediaContainer::extension),
+                    extension,
+                    extensions,
                     directory: &directory,
                     browse,
                 }
@@ -1826,8 +1980,10 @@ impl Render for ApolloRoot {
                     }))
                     .child(selector)
                     .child(components::separator(palette));
-                if matches!(active_operation, Operation::Remux | Operation::AudioMix)
-                    && self.core.discovery.ready().is_some()
+                if matches!(
+                    active_operation,
+                    Operation::Remux | Operation::AudioMix | Operation::AudioExtract
+                ) && self.core.discovery.ready().is_some()
                 {
                     let (body, actions) =
                         self.operation_form(active_operation, palette, window, cx);
@@ -2102,9 +2258,13 @@ impl Render for ApolloRoot {
                         .child(components::heading(edit.active_operation.label()))
                     }))
                     .child(components::separator(palette));
-                if let Some(operation) = edit
-                    .map(|edit| edit.active_operation)
-                    .filter(|operation| matches!(operation, Operation::Remux | Operation::AudioMix))
+                if let Some(operation) =
+                    edit.map(|edit| edit.active_operation).filter(|operation| {
+                        matches!(
+                            operation,
+                            Operation::Remux | Operation::AudioMix | Operation::AudioExtract
+                        )
+                    })
                 {
                     let (body, actions) = self.operation_form(operation, palette, window, cx);
                     (header, body, actions)

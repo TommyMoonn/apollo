@@ -2,28 +2,30 @@ use crate::audio_extract::draft::{AudioExtractDraft, AudioExtractReadyError};
 
 use std::{cell::Cell, ffi::OsString};
 
-use egui::{Label, RichText, Ui};
+use egui::Ui;
 
 use crate::{
     audio_extract::{model::AudioExtractFormat, validation::AudioExtractValidationError},
     media::{model::MediaFile, output::MediaOutputError},
 };
 
-use super::{
-    OperationSurfaceMode, fonts, layout, media_error, show_queued_submission_actions, theme,
-    widgets,
-};
+use super::{OperationSurfaceMode, layout, media_error, theme, widgets};
 
 const AUDIO_TRACK_LABEL: &str = "Audio track";
 const OUTPUT_LABEL: &str = "Output";
 const FORMAT_LABEL: &str = "Output format";
 const BROWSE_LABEL: &str = "Browse";
-const FORMAT_OPTIONS: [&str; 3] = ["Original (copy)", "AAC", "FLAC"];
-const NO_AUDIO_FEEDBACK: &str = "This source has no audio tracks to extract.";
+pub(super) const FORMATS: [AudioExtractFormat; 3] = [
+    AudioExtractFormat::Original,
+    AudioExtractFormat::Aac,
+    AudioExtractFormat::Flac,
+];
+pub(super) const FORMAT_OPTIONS: [&str; 3] = ["Original (copy)", "AAC", "FLAC"];
+pub(super) const NO_AUDIO_FEEDBACK: &str = "This source has no audio tracks to extract.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioExtractPresentation {
-    tracks: Vec<AudioTrackPresentation>,
+    pub(super) tracks: Vec<AudioTrackPresentation>,
 }
 
 impl AudioExtractPresentation {
@@ -49,10 +51,10 @@ impl AudioExtractPresentation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AudioTrackPresentation {
-    stream_index: u32,
-    title: String,
-    metadata: String,
+pub(super) struct AudioTrackPresentation {
+    pub(super) stream_index: u32,
+    pub(super) title: String,
+    pub(super) metadata: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -119,16 +121,6 @@ pub fn show<'a>(
                     action.set(AudioExtractSelectionAction::BrowseOutput);
                 }
             }
-            ui.add_space(theme::SPACING.tight);
-            ui.add(
-                Label::new(
-                    RichText::new(format_detail(state.format()))
-                        .text_style(fonts::technical_text_style())
-                        .color(theme::SECONDARY_FAINT),
-                )
-                .selectable(false),
-            );
-
             if let Some(feedback) = feedback {
                 ui.add_space(theme::SPACING.tight);
                 let _ = widgets::inline_status(ui, feedback, widgets::InlineStatusKind::Error);
@@ -139,27 +131,7 @@ pub fn show<'a>(
             }
         },
         |ui| match mode {
-            OperationSurfaceMode::Normal {
-                process_now_allowed,
-                queue_confirmation,
-                ..
-            } => {
-                match show_queued_submission_actions(
-                    ui,
-                    super::PROCESS_NOW_LABEL,
-                    process_now_allowed,
-                    validation.is_ok(),
-                    queue_confirmation,
-                ) {
-                    Some(crate::app::queue::QueueSubmission::ProcessNow) => {
-                        action.set(AudioExtractSelectionAction::ExtractRequested)
-                    }
-                    Some(crate::app::queue::QueueSubmission::AddToQueue) => {
-                        action.set(AudioExtractSelectionAction::QueueRequested)
-                    }
-                    None => {}
-                }
-            }
+            OperationSurfaceMode::Normal { .. } => {}
             edit_mode => {
                 let (save_label, cancel_label) = edit_mode
                     .edit_labels()
@@ -242,11 +214,7 @@ fn track_metadata(stream: &crate::media::model::AudioStream) -> String {
 fn show_format_selector(ui: &mut Ui, state: &mut AudioExtractDraft) {
     let mut requested = None;
     widgets::select_menu(ui, format_label(state.format()), &FORMAT_OPTIONS, |ui| {
-        for format in [
-            AudioExtractFormat::Original,
-            AudioExtractFormat::Aac,
-            AudioExtractFormat::Flac,
-        ] {
+        for format in FORMATS {
             if widgets::select_menu_option(ui, format_label(format), state.format() == format)
                 .clicked()
             {
@@ -260,7 +228,7 @@ fn show_format_selector(ui: &mut Ui, state: &mut AudioExtractDraft) {
     }
 }
 
-fn ready_feedback(error: &AudioExtractReadyError) -> Option<&'static str> {
+pub(super) fn ready_feedback(error: &AudioExtractReadyError) -> Option<&'static str> {
     match error {
         AudioExtractReadyError::NoAudioStreams => Some(NO_AUDIO_FEEDBACK),
         AudioExtractReadyError::Request(AudioExtractValidationError::OutputExtensionMismatch {
@@ -289,14 +257,6 @@ pub(super) fn format_label(format: AudioExtractFormat) -> &'static str {
     }
 }
 
-fn format_detail(format: AudioExtractFormat) -> &'static str {
-    match format {
-        AudioExtractFormat::Original => "no re-encode · MKA",
-        AudioExtractFormat::Aac => "256 kbps · M4A",
-        AudioExtractFormat::Flac => "lossless · FLAC",
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -305,6 +265,28 @@ mod tests {
     use super::{AudioExtractDraft, NO_AUDIO_FEEDBACK, ready_feedback};
 
     use crate::audio_extract::draft::tests::media;
+
+    #[test]
+    fn duplicate_titles_keep_distinct_absolute_stream_metadata() {
+        let mut media = media();
+        media.audio_streams[1].title = media.audio_streams[0].title.clone();
+        let presentation = super::AudioExtractPresentation::new(&media);
+        assert_eq!(
+            presentation
+                .tracks
+                .iter()
+                .map(|track| track.stream_index)
+                .collect::<Vec<_>>(),
+            [3, 7]
+        );
+        assert_eq!(presentation.tracks[0].title, presentation.tracks[1].title);
+        assert_ne!(
+            presentation.tracks[0].metadata,
+            presentation.tracks[1].metadata
+        );
+        assert!(presentation.tracks[1].metadata.contains("eng"));
+        assert!(presentation.tracks[1].metadata.contains("OPUS"));
+    }
 
     #[test]
     fn no_audio_source_is_non_runnable_with_clear_feedback() {

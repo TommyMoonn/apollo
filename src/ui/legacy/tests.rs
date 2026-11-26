@@ -609,36 +609,6 @@ fn opening_remux_source_renders_ready_surface() {
 }
 
 #[test]
-fn opening_audio_extract_source_renders_ready_surface() {
-    let (directory, path) = temp_file("audio-extract-ready-render");
-    let mut app = app();
-    app.load_media_path_with_probe(&path, |path| Ok(media(path)));
-    app.select_tool(Operation::AudioExtract);
-    let context = egui::Context::default();
-    fonts::install(&context);
-    theme::install(&context);
-
-    let mut output = context.run_ui(Default::default(), |ui| {
-        show_tool(&mut app, ui, Operation::AudioExtract);
-    });
-    output.textures_delta.clear();
-    for text in [
-        "Audio track",
-        "Desktop Audio",
-        "stream 1",
-        "Original (copy)",
-        "no re-encode · MKA",
-        "Output",
-        "Browse",
-        "Process now",
-    ] {
-        assert!(output_contains_text(&output, text), "missing {text:?}");
-    }
-    assert!(!output_contains_text(&output, "Format"));
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn opening_audio_mix_source_renders_ready_surface() {
     let (directory, path) = temp_file("audio-ready-render");
     let mut app = app();
@@ -741,7 +711,6 @@ fn every_ready_operation_keeps_its_primary_action_bottom_owned_at_all_heights() 
         (Operation::AudioMix, "Process now"),
         (Operation::VideoUpscale, "Process now"),
         (Operation::Remux, "Process now"),
-        (Operation::AudioExtract, "Process now"),
         (Operation::FrameCapture, "Save frame"),
     ] {
         for (width, height) in [

@@ -178,9 +178,6 @@ impl ApolloApp {
             Operation::AudioMix if app.state.audio_mix.is_some() => app.show_audio_mix_tool(ui),
             Operation::VideoUpscale if app.state.upscale.is_some() => app.show_upscale_tool(ui),
             Operation::Remux if app.state.remux.is_some() => app.show_remux_tool(ui),
-            Operation::AudioExtract if app.state.audio_extract.is_some() => {
-                app.show_audio_extract_tool(ui)
-            }
             Operation::FrameCapture if app.state.frame_capture.is_some() => {
                 app.show_frame_capture_tool(ui)
             }
