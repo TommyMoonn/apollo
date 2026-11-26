@@ -269,25 +269,91 @@ pub(super) fn stepped_track_gain(tenths_db: i16) -> TrackGain {
     TrackGain::from_tenths_db(tenths_db)
 }
 
-/// Match the legacy half-decibel interaction step and clamping contract.
+/// Shared fixed-precision numeric field contract for mixer controls.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy)]
+pub(super) struct NumberSpec {
+    pub minimum: i16,
+    pub maximum: i16,
+    pub step: i16,
+    pub unit: &'static str,
+}
+#[cfg(any(windows, test))]
+impl NumberSpec {
+    pub fn step_value(self, tenths: i16) -> i16 {
+        stepped_tenths(tenths, self.step, self.minimum, self.maximum)
+    }
+    pub fn parse(self, text: &str) -> Option<i16> {
+        let text = text.trim();
+        let value = text
+            .strip_suffix(self.unit)
+            .unwrap_or(text)
+            .trim()
+            .parse::<f64>()
+            .ok()?;
+        if !value.is_finite() {
+            return None;
+        }
+        Some(
+            self.step_value(
+                (value * 10.)
+                    .clamp(f64::from(self.minimum), f64::from(self.maximum))
+                    .round() as i16,
+            ),
+        )
+    }
+}
+#[cfg(any(windows, test))]
+pub(super) const GAIN_SPEC: NumberSpec = NumberSpec {
+    minimum: TrackGain::MIN.tenths_db(),
+    maximum: TrackGain::MAX.tenths_db(),
+    step: 5,
+    unit: "dB",
+};
 #[cfg(any(windows, test))]
 pub(super) fn parse_track_gain(text: &str) -> Option<TrackGain> {
-    let text = text.trim();
-    let value = text
-        .strip_suffix("dB")
-        .unwrap_or(text)
-        .trim()
-        .parse::<f64>()
-        .ok()?;
-    if !value.is_finite() {
-        return None;
-    }
-    let tenths = (value * 10.).clamp(
-        f64::from(TrackGain::MIN.tenths_db()),
-        f64::from(TrackGain::MAX.tenths_db()),
-    );
-    Some(stepped_track_gain(tenths.round() as i16))
+    GAIN_SPEC.parse(text).map(TrackGain::from_tenths_db)
 }
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy)]
+pub(super) struct TargetField {
+    pub label: &'static str,
+    pub spec: NumberSpec,
+    pub value: fn(LoudnessTargets) -> i16,
+}
+#[cfg(any(windows, test))]
+pub(super) const TARGET_FIELDS: [TargetField; 3] = [
+    TargetField {
+        label: INTEGRATED_LOUDNESS_LABEL,
+        spec: NumberSpec {
+            minimum: LoudnessTargets::MIN_INTEGRATED_LOUDNESS_TENTHS,
+            maximum: LoudnessTargets::MAX_INTEGRATED_LOUDNESS_TENTHS,
+            step: 5,
+            unit: "LUFS",
+        },
+        value: LoudnessTargets::integrated_loudness_tenths,
+    },
+    TargetField {
+        label: MAXIMUM_TRUE_PEAK_LABEL,
+        spec: NumberSpec {
+            minimum: LoudnessTargets::MIN_MAXIMUM_TRUE_PEAK_TENTHS,
+            maximum: LoudnessTargets::MAX_MAXIMUM_TRUE_PEAK_TENTHS,
+            step: 1,
+            unit: "dBTP",
+        },
+        value: LoudnessTargets::maximum_true_peak_tenths,
+    },
+    TargetField {
+        label: LOUDNESS_RANGE_LABEL,
+        spec: NumberSpec {
+            minimum: LoudnessTargets::MIN_LOUDNESS_RANGE_TENTHS,
+            maximum: LoudnessTargets::MAX_LOUDNESS_RANGE_TENTHS,
+            step: 5,
+            unit: "LU",
+        },
+        value: LoudnessTargets::loudness_range_tenths,
+    },
+];
 
 fn show_track_header(ui: &mut Ui, media: &MediaFile, state: &mut AudioMixDraft) {
     Sides::new().height(theme::COMPACT_CONTROL_HEIGHT).show(
@@ -441,7 +507,7 @@ fn stepped_tenths(value: i16, step: i16, minimum: i16, maximum: i16) -> i16 {
     ((f64::from(value) / f64::from(step)).round() as i16 * step).clamp(minimum, maximum)
 }
 
-fn audio_mix_ready_feedback(error: &AudioMixValidationError) -> Option<&'static str> {
+pub(super) fn audio_mix_ready_feedback(error: &AudioMixValidationError) -> Option<&'static str> {
     match error {
         AudioMixValidationError::OutputExtensionMismatch { actual: None, .. }
         | AudioMixValidationError::Output(MediaOutputError::InvalidOutputPath(_)) => {
@@ -677,10 +743,36 @@ mod tests {
         AudioMixDraft, AudioMixPresentation, AudioMixSelectionAction, UNTITLED_AUDIO,
         audio_mix_ready_feedback, stepped_tenths, stepped_track_gain, track_presentations,
     };
-    use crate::audio_mix::model::TrackGain;
+    use crate::audio_mix::model::{LoudnessTargets, TrackGain};
     use crate::audio_mix::validation::AudioMixValidationError;
 
     use crate::audio_mix::draft::tests::media;
+
+    #[test]
+    fn normalization_fields_use_domain_bounds_steps_and_units() {
+        use super::TARGET_FIELDS;
+        let defaults = LoudnessTargets::default();
+        for (field, (label, value, step, unit)) in TARGET_FIELDS.iter().zip([
+            ("Integrated loudness", -160, 5, "LUFS"),
+            ("Maximum true peak", -15, 1, "dBTP"),
+            ("Loudness range", 110, 5, "LU"),
+        ]) {
+            assert_eq!(field.label, label);
+            assert_eq!((field.value)(defaults), value);
+            assert_eq!(field.spec.step, step);
+            assert_eq!(field.spec.unit, unit);
+            assert_eq!(field.spec.parse("NaN"), None);
+            assert_eq!(field.spec.parse("-9999"), Some(field.spec.minimum));
+            assert_eq!(field.spec.parse("9999"), Some(field.spec.maximum));
+            assert_eq!(
+                field
+                    .spec
+                    .parse(&format!("{} {unit}", f64::from(value) / 10.)),
+                Some(value)
+            );
+            assert_eq!(field.spec.step_value(value + step), value + step);
+        }
+    }
 
     #[test]
     fn unchanged_ready_repaints_reuse_cached_validation() {

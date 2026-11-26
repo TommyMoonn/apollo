@@ -100,7 +100,8 @@ fn queue_progress_state(
 
 const REMUX_FORMATS: [MediaContainer; 2] = [MediaContainer::Mp4, MediaContainer::Matroska];
 
-struct RemuxControls {
+struct OutputControls {
+    operation: Operation,
     session: u64,
     input: gpui::Entity<super::text_input::TextInput>,
     format: gpui::Entity<super::dropdown::Dropdown>,
@@ -118,6 +119,10 @@ struct MixerTrackControl {
 struct MixerControls {
     session: u64,
     tracks: Vec<MixerTrackControl>,
+    targets: Vec<(
+        gpui::Entity<super::text_input::TextInput>,
+        gpui::Subscription,
+    )>,
 }
 struct ApolloRoot {
     core: Application,
@@ -136,7 +141,7 @@ struct ApolloRoot {
     open_focus: FocusHandle,
     picker_focus: Option<FocusHandle>,
     drag_origin: Option<DropContext>,
-    remux_controls: Option<RemuxControls>,
+    output_controls: Option<OutputControls>,
     mixer_controls: Option<MixerControls>,
     browse_focus: FocusHandle,
     browse_pending: bool,
@@ -186,7 +191,7 @@ impl ApolloRoot {
             open_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             picker_focus: None,
             drag_origin: None,
-            remux_controls: None,
+            output_controls: None,
             mixer_controls: None,
             browse_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             browse_pending: false,
@@ -647,7 +652,7 @@ impl ApolloRoot {
             audio_mix::{AudioMixPresentation, parse_track_gain},
             text_input::{Changed, TextInput},
         };
-        use crate::app::audio_mix::TrackAction;
+        use crate::app::audio_mix::MixerAction;
         let Some((session, media, draft)) = self.core.audio_mix_context() else {
             return components::inline_message("The source is no longer available.", palette);
         };
@@ -676,7 +681,7 @@ impl ApolloRoot {
                             && let Some(value) = parse_track_gain(&change.0)
                             && root
                                 .core
-                                .edit_audio_mix_tracks(session, TrackAction::Gain(id, value))
+                                .edit_audio_mix(session, MixerAction::Gain(id, value))
                         {
                             cx.notify();
                         }
@@ -693,7 +698,50 @@ impl ApolloRoot {
                     }
                 })
                 .collect();
-            self.mixer_controls = Some(MixerControls { session, tracks });
+            let targets = super::audio_mix::TARGET_FIELDS
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, field)| {
+                    let value = (field.value)(draft.normalization_targets());
+                    let input = cx.new(|cx| {
+                        TextInput::new_number(value, field.label.to_owned(), field.spec, window, cx)
+                    });
+                    let subscription =
+                        cx.subscribe(&input, move |root, _, change: &Changed, cx| {
+                            if !root.can_navigate() {
+                                return;
+                            }
+                            let Some((id, _, draft)) = root.core.audio_mix_context() else {
+                                return;
+                            };
+                            if id != session || !draft.normalization_enabled() {
+                                return;
+                            }
+                            if let Some(value) = field.spec.parse(&change.0) {
+                                let mut values = super::audio_mix::TARGET_FIELDS
+                                    .map(|field| (field.value)(draft.normalization_targets()));
+                                values[index] = value;
+                                if root.core.edit_audio_mix(
+                                    session,
+                                    MixerAction::Targets(
+                                        crate::audio_mix::model::LoudnessTargets::from_tenths(
+                                            values[0], values[1], values[2],
+                                        ),
+                                    ),
+                                ) {
+                                    cx.notify();
+                                }
+                            }
+                        });
+                    (input, subscription)
+                })
+                .collect();
+            self.mixer_controls = Some(MixerControls {
+                session,
+                tracks,
+                targets,
+            });
         }
         let controls = self
             .mixer_controls
@@ -704,7 +752,7 @@ impl ApolloRoot {
             if enabled && allowed {
                 button.state =
                     ActionState::Enabled(Box::new(cx.listener(move |root, _, _, cx| {
-                        if root.can_navigate() && root.core.edit_audio_mix_tracks(session, action) {
+                        if root.can_navigate() && root.core.edit_audio_mix(session, action) {
                             cx.notify();
                         }
                     })));
@@ -726,13 +774,13 @@ impl ApolloRoot {
                     .child(action(
                         "select-all-tracks",
                         "Select all",
-                        TrackAction::SelectAll,
+                        MixerAction::SelectAll,
                         selected_count < controls.tracks.len(),
                     ))
                     .child(action(
                         "clear-tracks",
                         "Clear",
-                        TrackAction::Clear,
+                        MixerAction::Clear,
                         selected_count > 0,
                     )),
             );
@@ -751,7 +799,7 @@ impl ApolloRoot {
             .child(action(
                 "reset-track-gains",
                 "Reset gains",
-                TrackAction::ResetGains,
+                MixerAction::ResetGains,
                 !controls.tracks.is_empty(),
             ));
         let narrow = window.viewport_size().width < px(480.);
@@ -819,9 +867,7 @@ impl ApolloRoot {
                             })
                             .on_click(cx.listener(move |root, _, _, cx| {
                                 if root.can_navigate()
-                                    && root
-                                        .core
-                                        .edit_audio_mix_tracks(session, TrackAction::Toggle(id))
+                                    && root.core.edit_audio_mix(session, MixerAction::Toggle(id))
                                 {
                                     cx.notify();
                                 }
@@ -884,68 +930,260 @@ impl ApolloRoot {
             .child(footer)
     }
 
-    fn remux_form(
+    fn operation_session(&self, operation: Operation) -> Option<u64> {
+        match operation {
+            Operation::Remux => self.core.remux_context().map(|context| context.0),
+            Operation::AudioMix => self.core.audio_mix_context().map(|context| context.0),
+            _ => None,
+        }
+    }
+
+    fn mixer_normalization(
         &mut self,
+        palette: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        use crate::app::audio_mix::MixerAction;
+        let Some((session, _, draft)) = self.core.audio_mix_context() else {
+            return div();
+        };
+        let enabled = self.can_navigate() && !self.core.source.is_inspecting();
+        let on = draft.normalization_enabled();
+        let targets = draft.normalization_targets();
+        let mut toggle = Button::new(
+            "normalize-output",
+            if on { "On" } else { "Off" },
+            Tone::Standard,
+        );
+        toggle.alternate_labels = &["On", "Off"];
+        if enabled {
+            toggle.state = ActionState::Enabled(Box::new(cx.listener(move |root, _, _, cx| {
+                if root.can_navigate()
+                    && root
+                        .core
+                        .edit_audio_mix(session, MixerAction::Normalize(!on))
+                {
+                    cx.notify();
+                }
+            })));
+        }
+        let mut reset = Button::new("reset-normalization", "Reset targets", Tone::Quiet);
+        if enabled && on {
+            reset.state = ActionState::Enabled(Box::new(cx.listener(move |root, _, _, cx| {
+                if root.can_navigate()
+                    && root.core.edit_audio_mix(session, MixerAction::ResetTargets)
+                {
+                    cx.notify();
+                }
+            })));
+        }
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(px(M.compact))
+            .w_full()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(M.compact))
+                    .child(components::heading("Loudness normalization"))
+                    .child(
+                        toggle
+                            .render(palette, window)
+                            .aria_label("Normalize output loudness")
+                            .aria_toggled(if on {
+                                gpui::Toggled::True
+                            } else {
+                                gpui::Toggled::False
+                            }),
+                    ),
+            )
+            .child(components::separator(palette));
+        let controls = self
+            .mixer_controls
+            .as_ref()
+            .expect("mixer controls initialized");
+        for (field, (input, _)) in super::audio_mix::TARGET_FIELDS
+            .iter()
+            .zip(&controls.targets)
+        {
+            input.update(cx, |input, _| {
+                input.sync_number((field.value)(targets), enabled && on, palette, window)
+            });
+            if on {
+                body = body.child(
+                    div()
+                        .id(field.label)
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(M.compact))
+                        .child(TextRole::Control.apply(div()).child(field.label))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(M.tight))
+                                .child(div().w(px(70.)).child(input.clone()))
+                                .child(
+                                    TextRole::Control
+                                        .apply(div())
+                                        .w(px(38.))
+                                        .child(field.spec.unit),
+                                ),
+                        ),
+                );
+            }
+        }
+        if on {
+            body = body
+                .child(
+                    TextRole::Secondary
+                        .apply(div())
+                        .text_color(rgba(palette.secondary()))
+                        .child("Adjust output loudness and limit peaks."),
+                )
+                .child(reset.render(palette, window));
+        }
+        body
+    }
+
+    fn operation_form(
+        &mut self,
+        operation: Operation,
         palette: Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (gpui::Div, gpui::Div) {
         use super::{
+            audio_mix::audio_mix_ready_feedback,
             dropdown::{Dropdown, Selected},
             output,
             remux::{RemuxPresentation, remux_ready_feedback},
             text_input::{Changed, TextInput},
         };
         use crate::app::{dialogs::OutputDraft, queue::QueueSubmission};
-        let Some((session, media, draft)) = self.core.remux_context() else {
+        let editing = matches!(self.core.navigation(), NavigationState::QueueEdit { .. });
+        let mixer = if operation == Operation::AudioMix {
+            Some(self.mixer_tracks(palette, window, cx))
+        } else {
+            None
+        };
+        let normalization = if operation == Operation::AudioMix {
+            Some(self.mixer_normalization(palette, window, cx))
+        } else {
+            None
+        };
+        let mixer_validation = if operation == Operation::AudioMix {
+            self.core.audio_mix_validation()
+        } else {
+            None
+        };
+        let snapshot = match operation {
+            Operation::Remux => self.core.remux_context().map(|(session, media, draft)| {
+                let feedback = draft.validation(media).err().map(|error| {
+                    remux_ready_feedback(&error, &RemuxPresentation::new(media))
+                        .unwrap_or_else(|| error.to_string())
+                });
+                (
+                    session,
+                    usize::from(draft.container() == MediaContainer::Matroska),
+                    draft.output_directory().to_path_buf(),
+                    draft.output_filename_stem().to_string_lossy().into_owned(),
+                    draft.output_filename_stem().to_str().is_some(),
+                    feedback,
+                )
+            }),
+            Operation::AudioMix => self.core.audio_mix_context().map(|(session, _, draft)| {
+                let feedback = mixer_validation.and_then(Result::err).map(|error| {
+                    audio_mix_ready_feedback(&error)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| error.to_string())
+                });
+                (
+                    session,
+                    usize::from(draft.container() == crate::audio_mix::model::OutputContainer::Mkv),
+                    draft.output_directory().to_path_buf(),
+                    draft.output_filename_stem().to_string_lossy().into_owned(),
+                    draft.output_filename_stem().to_str().is_some(),
+                    feedback,
+                )
+            }),
+            _ => None,
+        };
+        let Some((session, format_index, directory, stem, editable_name, feedback)) = snapshot
+        else {
             return (
                 components::inline_message("The source is no longer available.", palette),
                 div(),
             );
         };
-        let editing = matches!(self.core.navigation(), NavigationState::QueueEdit { .. });
-        let validation = draft.validation(media);
-        let feedback = validation.as_ref().err().map(|error| {
-            remux_ready_feedback(error, &RemuxPresentation::new(media))
-                .unwrap_or_else(|| error.to_string())
-        });
-        let current_container = draft.container();
-        let format_index = usize::from(current_container == MediaContainer::Matroska);
-        let directory = draft.output_directory().to_path_buf();
-        let stem = draft.output_filename_stem().to_string_lossy().into_owned();
-        let editable_name = draft.output_filename_stem().to_str().is_some();
+        let valid = feedback.is_none();
+        let current_container = REMUX_FORMATS[format_index];
         let enabled = self.can_navigate()
             && !self.core.source.is_inspecting()
             && self.core.discovery.ready().is_some();
         if self
-            .remux_controls
+            .output_controls
             .as_ref()
-            .is_none_or(|field| field.session != session)
+            .is_none_or(|field| field.session != session || field.operation != operation)
         {
             let input = cx.new(|cx| TextInput::new(stem.clone(), cx));
             let subscription = cx.subscribe(&input, move |root, _, change: &Changed, cx| {
-                if root.can_navigate()
-                    && let Some(draft) = root.core.remux_draft_mut(session)
-                {
-                    draft.set_output_filename_stem(change.0.clone().into());
-                    cx.notify();
+                if !root.can_navigate() {
+                    return;
                 }
+                match operation {
+                    Operation::Remux => {
+                        if let Some(draft) = root.core.remux_draft_mut(session) {
+                            draft.set_output_filename_stem(change.0.clone().into());
+                        }
+                    }
+                    Operation::AudioMix => {
+                        if let Some((_, draft)) = root.core.audio_mix_draft_mut(session) {
+                            draft.set_output_filename_stem(change.0.clone().into());
+                        }
+                    }
+                    _ => return,
+                }
+                cx.notify();
             });
             // Composition can change action readiness even before the typed value changes.
             let observation = cx.observe(&input, |_, _, cx| cx.notify());
             let format = cx.new(|cx| Dropdown::new(&["MP4", "MKV"], format_index, cx));
             let format_subscription =
                 cx.subscribe(&format, move |root, _, change: &Selected, cx| {
-                    if root.can_navigate()
-                        && !root.remux_composing(session, cx)
-                        && let Some(&container) = REMUX_FORMATS.get(change.0)
-                        && let Some(draft) = root.core.remux_draft_mut(session)
-                    {
-                        draft.set_container(container);
-                        cx.notify();
+                    if !root.can_navigate() || root.output_composing(session, cx) {
+                        return;
                     }
+                    let Some(&container) = REMUX_FORMATS.get(change.0) else {
+                        return;
+                    };
+                    match operation {
+                        Operation::Remux => {
+                            if let Some(draft) = root.core.remux_draft_mut(session) {
+                                draft.set_container(container);
+                            }
+                        }
+                        Operation::AudioMix => {
+                            root.core.edit_audio_mix(
+                                session,
+                                crate::app::audio_mix::MixerAction::Container(if change.0 == 0 {
+                                    crate::audio_mix::model::OutputContainer::Mp4
+                                } else {
+                                    crate::audio_mix::model::OutputContainer::Mkv
+                                }),
+                            );
+                        }
+                        _ => return,
+                    }
+                    cx.notify();
                 });
-            self.remux_controls = Some(RemuxControls {
+            self.output_controls = Some(OutputControls {
+                operation,
                 session,
                 input,
                 format,
@@ -955,7 +1193,7 @@ impl ApolloRoot {
             });
         }
         let input = self
-            .remux_controls
+            .output_controls
             .as_ref()
             .expect("filename for current session")
             .input
@@ -966,7 +1204,7 @@ impl ApolloRoot {
         let composing = input.read(cx).composing();
         let actions_enabled = enabled && !composing;
         let format = self
-            .remux_controls
+            .output_controls
             .as_ref()
             .expect("controls for current session")
             .format
@@ -984,13 +1222,25 @@ impl ApolloRoot {
                     if !root.can_navigate() || root.core.source.is_inspecting() {
                         return;
                     }
-                    let Some((id, _, draft)) = root.core.remux_context() else {
-                        return;
-                    };
-                    if id != session || root.remux_composing(session, cx) {
+                    if root.output_composing(session, cx) {
                         return;
                     }
-                    let request = OutputDraft::Remux(draft).request(id);
+                    let request = match operation {
+                        Operation::Remux => root
+                            .core
+                            .remux_context()
+                            .filter(|context| context.0 == session)
+                            .map(|(id, _, draft)| OutputDraft::Remux(draft).request(id)),
+                        Operation::AudioMix => root
+                            .core
+                            .audio_mix_context()
+                            .filter(|context| context.0 == session)
+                            .map(|(id, _, draft)| OutputDraft::AudioMix(draft).request(id)),
+                        _ => None,
+                    };
+                    let Some(request) = request else {
+                        return;
+                    };
                     // Keep keyboard traversal intact, but do not restore a mouse
                     // activation to a focused Browse button after the native dialog.
                     let focus = if matches!(event, gpui::ClickEvent::Keyboard(_)) {
@@ -1014,7 +1264,7 @@ impl ApolloRoot {
             self.core
                 .operation_action_error
                 .as_ref()
-                .filter(|(operation, _)| *operation == Operation::Remux)
+                .filter(|(owner, _)| *owner == operation)
                 .map(|(_, error)| error)
         };
         let body = div()
@@ -1023,6 +1273,8 @@ impl ApolloRoot {
             .gap(px(M.related))
             .w_full()
             .min_w_0()
+            .children(mixer)
+            .children(normalization)
             .child(
                 output::OutputRow {
                     format: div().flex_shrink_0().child(format),
@@ -1052,7 +1304,7 @@ impl ApolloRoot {
                     palette,
                 )
             }));
-        let ready = actions_enabled && validation.is_ok();
+        let ready = actions_enabled && valid;
         let mut actions = Vec::new();
         if editing {
             let mut cancel = Button::new(
@@ -1074,8 +1326,8 @@ impl ApolloRoot {
             if ready && self.core.queue.scheduler().can_edit() {
                 save.state =
                     ActionState::Enabled(Box::new(cx.listener(move |root, _, window, cx| {
-                        if root.core.remux_context().map(|context| context.0) == Some(session)
-                            && !root.remux_composing(session, cx)
+                        if root.operation_session(operation) == Some(session)
+                            && !root.output_composing(session, cx)
                         {
                             root.finish_queue_edit(true, window, cx);
                         }
@@ -1086,7 +1338,7 @@ impl ApolloRoot {
             let process_now = self.core.process_now_allowed();
             let mut add = Button::new(
                 "add-to-queue",
-                if self.core.queue_confirmation == Some(Operation::Remux) {
+                if self.core.queue_confirmation == Some(operation) {
                     super::ADDED_TO_QUEUE_LABEL
                 } else {
                     super::ADD_TO_QUEUE_LABEL
@@ -1101,7 +1353,13 @@ impl ApolloRoot {
             if ready {
                 add.state =
                     ActionState::Enabled(Box::new(cx.listener(move |root, _, window, cx| {
-                        root.submit_remux(session, QueueSubmission::AddToQueue, window, cx)
+                        root.submit_operation(
+                            operation,
+                            session,
+                            QueueSubmission::AddToQueue,
+                            window,
+                            cx,
+                        )
                     })));
             }
             if process_now {
@@ -1110,7 +1368,13 @@ impl ApolloRoot {
                 if ready {
                     process.state =
                         ActionState::Enabled(Box::new(cx.listener(move |root, _, window, cx| {
-                            root.submit_remux(session, QueueSubmission::ProcessNow, window, cx)
+                            root.submit_operation(
+                                operation,
+                                session,
+                                QueueSubmission::ProcessNow,
+                                window,
+                                cx,
+                            )
                         })));
                 }
                 actions.push(process.render(palette, window));
@@ -1120,26 +1384,27 @@ impl ApolloRoot {
         (body, components::action_bar(palette, actions))
     }
 
-    fn remux_composing(&self, session: u64, cx: &App) -> bool {
-        self.remux_controls
+    fn output_composing(&self, session: u64, cx: &App) -> bool {
+        self.output_controls
             .as_ref()
             .is_some_and(|field| field.session == session && field.input.read(cx).composing())
     }
 
-    fn submit_remux(
+    fn submit_operation(
         &mut self,
+        operation: Operation,
         session: u64,
         submission: crate::app::queue::QueueSubmission,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.can_navigate() || self.remux_composing(session, cx) {
+        if !self.can_navigate() || self.output_composing(session, cx) {
             return;
         }
         let progress = &mut self.progress_wake;
         if self
             .core
-            .submit_remux(session, submission, || progress.begin())
+            .submit_operation(operation, session, submission, || progress.begin())
             && submission == crate::app::queue::QueueSubmission::ProcessNow
         {
             self.invalidate_drag();
@@ -1442,10 +1707,12 @@ impl ApolloRoot {
 impl Render for ApolloRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::DARK;
-        if self.remux_controls.as_ref().is_some_and(|field| {
-            self.core.remux_context().map(|context| context.0) != Some(field.session)
-        }) {
-            self.remux_controls = None;
+        if self
+            .output_controls
+            .as_ref()
+            .is_some_and(|field| self.operation_session(field.operation) != Some(field.session))
+        {
+            self.output_controls = None;
         }
         if self.mixer_controls.as_ref().is_some_and(|controls| {
             self.core.audio_mix_context().map(|context| context.0) != Some(controls.session)
@@ -1577,13 +1844,12 @@ impl Render for ApolloRoot {
                     }))
                     .child(selector)
                     .child(components::separator(palette));
-                if active_operation == Operation::Remux && self.core.discovery.ready().is_some() {
-                    let (body, actions) = self.remux_form(palette, window, cx);
-                    (header, body, actions)
-                } else if active_operation == Operation::AudioMix
+                if matches!(active_operation, Operation::Remux | Operation::AudioMix)
                     && self.core.discovery.ready().is_some()
                 {
-                    (header, self.mixer_tracks(palette, window, cx), div())
+                    let (body, actions) =
+                        self.operation_form(active_operation, palette, window, cx);
+                    (header, body, actions)
                 } else {
                     let surface = if self.core.discovery.ready().is_none() {
                         self.discovery_view(palette, window, cx)
@@ -1854,8 +2120,11 @@ impl Render for ApolloRoot {
                         .child(components::heading(edit.active_operation.label()))
                     }))
                     .child(components::separator(palette));
-                if edit.is_some_and(|edit| edit.active_operation == Operation::Remux) {
-                    let (body, actions) = self.remux_form(palette, window, cx);
+                if let Some(operation) = edit
+                    .map(|edit| edit.active_operation)
+                    .filter(|operation| matches!(operation, Operation::Remux | Operation::AudioMix))
+                {
+                    let (body, actions) = self.operation_form(operation, palette, window, cx);
                     (header, body, actions)
                 } else {
                     let mut cancel = Button::new(

@@ -196,6 +196,56 @@ pub(crate) enum QueueEditReturn {
 }
 
 impl Application {
+    /// Admit the current typed operation draft through the existing scheduler.
+    #[cfg(any(windows, test))]
+    pub(crate) fn submit_operation(
+        &mut self,
+        operation: Operation,
+        session: u64,
+        submission: QueueSubmission,
+        wake: impl FnMut() -> MediaProcessWake,
+    ) -> bool {
+        if self.is_closing()
+            || self.navigation()
+                != (NavigationState::SourceWorkspace {
+                    active_operation: operation,
+                })
+            || self.source.is_inspecting()
+            || self.discovery.ready().is_none()
+            || self.source.session_id() != Some(session)
+            || (submission == QueueSubmission::ProcessNow && !self.process_now_allowed())
+        {
+            return false;
+        }
+        let Some((identity, media)) = self.source.current_with_identity() else {
+            return false;
+        };
+        let request = match operation {
+            Operation::Remux => self
+                .source
+                .remux
+                .as_ref()
+                .map(|draft| QueuedOperation::Remux(draft.request(media))),
+            Operation::AudioMix => self
+                .source
+                .audio_mix
+                .as_ref()
+                .map(|draft| QueuedOperation::AudioMix(draft.request(media))),
+            _ => None,
+        };
+        let Some(request) = request else {
+            return false;
+        };
+        let result = self.queue.enqueue(identity, media, request).map(Some);
+        let admitted = result.is_ok();
+        self.record_queue_submission(operation, result);
+        if admitted && submission == QueueSubmission::ProcessNow {
+            self.enter_queue();
+            self.queue_action(QueueAction::Start, wake);
+        }
+        admitted
+    }
+
     pub(crate) fn process_now_allowed(&self) -> bool {
         self.queue.scheduler().pending_count() == 0
             && !self.queue.scheduler().is_started()

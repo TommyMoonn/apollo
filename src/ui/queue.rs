@@ -170,11 +170,8 @@ impl Controls {
 #[cfg(any(windows, test))]
 pub(crate) const fn editor_migrated(operation: Operation) -> bool {
     match operation {
-        Operation::Remux => true,
-        Operation::AudioMix
-        | Operation::AudioExtract
-        | Operation::VideoUpscale
-        | Operation::FrameCapture => false,
+        Operation::Remux | Operation::AudioMix => true,
+        Operation::AudioExtract | Operation::VideoUpscale | Operation::FrameCapture => false,
     }
 }
 

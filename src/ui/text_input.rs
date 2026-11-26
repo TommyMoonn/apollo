@@ -1,6 +1,6 @@
 //! Single-line native text input for operation filenames and mixer gains. GPUI owns IME delivery.
 use super::{
-    audio_mix::{parse_track_gain, stepped_track_gain},
+    audio_mix::{GAIN_SPEC, NumberSpec},
     design::{METRICS as M, Palette, TextRole},
 };
 use crate::audio_mix::model::TrackGain;
@@ -18,8 +18,8 @@ pub(super) struct Changed(pub String);
 pub(super) struct TextInput {
     focus: FocusHandle,
     label: String,
-    gain: Option<TrackGain>,
-    _gain_blur: Option<gpui::Subscription>,
+    number: Option<(i16, NumberSpec)>,
+    _number_blur: Option<gpui::Subscription>,
     content: SharedString,
     committed: SharedString,
     anchor: usize,
@@ -40,8 +40,8 @@ impl TextInput {
         Self {
             focus: cx.focus_handle().tab_stop(true).tab_index(0),
             label: "Filename stem".to_owned(),
-            gain: None,
-            _gain_blur: None,
+            number: None,
+            _number_blur: None,
             committed: content.clone(),
             content,
             anchor: end,
@@ -60,12 +60,21 @@ impl TextInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut input = Self::new(gain_text(gain), cx);
+        Self::new_number(gain.tenths_db(), label, GAIN_SPEC, window, cx)
+    }
+    pub(super) fn new_number(
+        value: i16,
+        label: String,
+        spec: NumberSpec,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut input = Self::new(number_text(value), cx);
         input.label = label;
-        input.gain = Some(gain);
-        input._gain_blur = Some(cx.on_blur(&input.focus, window, |input, window, cx| {
+        input.number = Some((value, spec));
+        input._number_blur = Some(cx.on_blur(&input.focus, window, |input, window, cx| {
             input.selecting = false;
-            input.restore_gain();
+            input.restore_number();
             window.notify_text_input_changed(&input.focus);
             cx.notify();
         }));
@@ -78,16 +87,27 @@ impl TextInput {
         palette: Palette,
         window: &Window,
     ) {
+        self.sync_number(gain.tenths_db(), enabled, palette, window);
+    }
+    pub(super) fn sync_number(
+        &mut self,
+        value: i16,
+        enabled: bool,
+        palette: Palette,
+        window: &Window,
+    ) {
         self.enabled = enabled;
         self.palette = palette;
-        if self.gain != Some(gain) || !enabled || !self.focus.is_focused(window) {
-            self.gain = Some(gain);
-            self.restore_gain();
+        if let Some((previous, spec)) = self.number
+            && (previous != value || !enabled || !self.focus.is_focused(window))
+        {
+            self.number = Some((value, spec));
+            self.restore_number();
         }
     }
-    fn restore_gain(&mut self) {
-        if let Some(gain) = self.gain {
-            let value = gain_text(gain);
+    fn restore_number(&mut self) {
+        if let Some((number, _)) = self.number {
+            let value = number_text(number);
             if self.content.as_ref() != value || self.marked.is_some() {
                 self.content = value.into();
                 self.cursor = self.content.len();
@@ -164,12 +184,12 @@ impl TextInput {
         cx.notify();
     }
     fn publish(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if let Some(previous) = self.gain {
-            if let Some(gain) = parse_track_gain(&self.content)
-                && gain != previous
+        if let Some((previous, spec)) = self.number {
+            if let Some(value) = spec.parse(&self.content)
+                && value != previous
             {
-                self.gain = Some(gain);
-                cx.emit(Changed(gain_text(gain)));
+                self.number = Some((value, spec));
+                cx.emit(Changed(number_text(value)));
             }
         } else if self.content != self.committed {
             self.committed = self.content.clone();
@@ -224,20 +244,24 @@ impl TextInput {
             }
         } else if !modifiers.control && !modifiers.alt && !modifiers.platform {
             match key.key.as_str() {
-                "up" | "down" if self.gain.is_some() => {
-                    let gain = self.gain.expect("gain input");
-                    let step = if key.key == "up" { 5 } else { -5 };
-                    let next = stepped_track_gain(gain.tenths_db() + step);
-                    if next != gain {
-                        self.gain = Some(next);
-                        cx.emit(Changed(gain_text(next)));
+                "up" | "down" if self.number.is_some() => {
+                    let (value, spec) = self.number.expect("numeric input");
+                    let step = if key.key == "up" {
+                        spec.step
+                    } else {
+                        -spec.step
+                    };
+                    let next = spec.step_value(value + step);
+                    if next != value {
+                        self.number = Some((next, spec));
+                        cx.emit(Changed(number_text(next)));
                     }
-                    self.restore_gain();
+                    self.restore_number();
                     window.notify_text_input_changed(&self.focus);
                     cx.notify();
                 }
-                "enter" | "escape" if self.gain.is_some() => {
-                    self.restore_gain();
+                "enter" | "escape" if self.number.is_some() => {
+                    self.restore_number();
                     window.notify_text_input_changed(&self.focus);
                     cx.notify();
                 }
@@ -559,31 +583,33 @@ impl Element for InputLine {
         });
     }
 }
-fn gain_text(gain: TrackGain) -> String {
-    format!("{:.1}", f64::from(gain.tenths_db()) / 10.)
+fn number_text(value: i16) -> String {
+    format!("{:.1}", f64::from(value) / 10.)
 }
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.gain.is_some() && !self.focus.is_focused(window) {
-            self.restore_gain();
+        if self.number.is_some() && !self.focus.is_focused(window) {
+            self.restore_number();
         }
         let palette = self.palette;
         TextRole::Control
             .apply(div())
-            .id(if self.gain.is_some() {
-                "track-gain"
+            .id(if self.number.is_some() {
+                "numeric-input"
             } else {
                 "filename-stem"
             })
             .role(Role::TextInput)
             .aria_label(self.label.clone())
-            .when_some(self.gain, |element, _| {
-                element.aria_description(if parse_track_gain(&self.content).is_some() {
-                    "Gain in dB. Use Up and Down to adjust by 0.5 dB, or type a value."
-                } else {
-                    "Invalid gain. Enter a number between -60 and 12 dB."
-                })
+            .when_some(self.number, |element, (_, spec)| {
+                element.aria_description(format!(
+                    "{} to {} {}. Use Up and Down to adjust by {} or type a value.",
+                    number_text(spec.minimum),
+                    number_text(spec.maximum),
+                    spec.unit,
+                    number_text(spec.step)
+                ))
             })
             .aria_value(self.content.clone())
             .flex()
@@ -598,7 +624,9 @@ impl Render for TextInput {
             .border_color(rgba(palette.border()))
             .text_color(rgba(
                 if self.enabled
-                    && (self.gain.is_none() || parse_track_gain(&self.content).is_some())
+                    && self
+                        .number
+                        .is_none_or(|(_, spec)| spec.parse(&self.content).is_some())
                 {
                     palette.foreground
                 } else {

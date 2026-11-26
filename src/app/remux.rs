@@ -1,11 +1,7 @@
 //! Remux form routing. The accepted source and fixed queue editor own their drafts.
-use super::{
-    Application, NavigationState, Operation, QueueAction, dialogs::DialogOutcome,
-    queue::QueueSubmission,
-};
+use super::{Application, NavigationState, Operation, dialogs::DialogOutcome};
 use crate::{
-    media::{error::MediaError, model::MediaFile, process::MediaProcessWake},
-    queue::QueuedOperation,
+    media::{error::MediaError, model::MediaFile},
     remux::draft::RemuxDraft,
 };
 
@@ -78,50 +74,14 @@ impl Application {
             _ => false,
         }
     }
-
-    pub(crate) fn submit_remux(
-        &mut self,
-        session: u64,
-        submission: QueueSubmission,
-        wake: impl FnMut() -> MediaProcessWake,
-    ) -> bool {
-        if self.is_closing()
-            || self.active_operation() != Some(Operation::Remux)
-            || self.source.is_inspecting()
-            || self.discovery.ready().is_none()
-            || self.source.session_id() != Some(session)
-            || (submission == QueueSubmission::ProcessNow && !self.process_now_allowed())
-        {
-            return false;
-        }
-        let Some((identity, media)) = self.source.current_with_identity() else {
-            return false;
-        };
-        let Some(draft) = self.source.remux.as_ref() else {
-            return false;
-        };
-        // Queue admission revalidates the request and destination, including source identity.
-        let result = self
-            .queue
-            .enqueue(
-                identity,
-                media,
-                QueuedOperation::Remux(draft.request(media)),
-            )
-            .map(Some);
-        let admitted = result.is_ok();
-        self.record_queue_submission(Operation::Remux, result);
-        if admitted && submission == QueueSubmission::ProcessNow {
-            self.enter_queue();
-            self.queue_action(QueueAction::Start, wake);
-        }
-        admitted
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        app::queue::QueueSubmission, media::process::MediaProcessWake, queue::QueuedOperation,
+    };
     use crate::{
         app::{
             QueueEditOrigin,
@@ -225,20 +185,40 @@ mod tests {
             .unwrap()
             .set_custom_output_path(output.clone());
         let never_launch = || panic!("stopped queue must not launch");
-        assert!(app.submit_remux(session, QueueSubmission::AddToQueue, never_launch));
+        assert!(app.submit_operation(
+            Operation::Remux,
+            session,
+            QueueSubmission::AddToQueue,
+            never_launch
+        ));
         assert_eq!(app.queue.scheduler().run_state(), QueueRunState::Stopped);
         let job = &app.queue.scheduler().jobs()[0];
         let id = job.id();
         let request = job.operation().clone();
         assert!(matches!(job.state(), QueueJobState::Waiting));
-        assert!(!app.submit_remux(session, QueueSubmission::ProcessNow, never_launch));
+        assert!(!app.submit_operation(
+            Operation::Remux,
+            session,
+            QueueSubmission::ProcessNow,
+            never_launch
+        ));
         // Numbered normal submissions deliberately permit the same requested destination.
-        assert!(app.submit_remux(session, QueueSubmission::AddToQueue, never_launch));
+        assert!(app.submit_operation(
+            Operation::Remux,
+            session,
+            QueueSubmission::AddToQueue,
+            never_launch
+        ));
         assert_eq!(app.queue.scheduler().jobs().len(), 2);
         app.remux_draft_mut(session)
             .unwrap()
             .set_output_filename_stem("CON".into());
-        assert!(!app.submit_remux(session, QueueSubmission::AddToQueue, never_launch));
+        assert!(!app.submit_operation(
+            Operation::Remux,
+            session,
+            QueueSubmission::AddToQueue,
+            never_launch
+        ));
         assert!(app.operation_action_error.is_some());
         app.remux_draft_mut(session)
             .unwrap()
@@ -291,7 +271,8 @@ mod tests {
     #[test]
     fn immediate_submission_enters_queue_even_with_finished_history() {
         let (_root, mut app, session) = ready_source();
-        assert!(app.submit_remux(
+        assert!(app.submit_operation(
+            Operation::Remux,
             session,
             QueueSubmission::ProcessNow,
             MediaProcessWake::default
@@ -305,7 +286,8 @@ mod tests {
         ));
         app.return_from_queue();
         assert!(app.process_now_allowed());
-        assert!(app.submit_remux(
+        assert!(app.submit_operation(
+            Operation::Remux,
             session,
             QueueSubmission::ProcessNow,
             MediaProcessWake::default

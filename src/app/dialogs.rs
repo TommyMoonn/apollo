@@ -162,6 +162,7 @@ impl OutputDraft<'_> {
     pub(crate) fn request(self, session_id: u64) -> FileDialogRequest {
         let directory = match &self {
             Self::Remux(draft) => Some(draft.output_directory().to_path_buf()),
+            Self::AudioMix(draft) => Some(draft.output_directory().to_path_buf()),
             _ => None,
         };
         let (target, output, format): (DialogTarget, PathBuf, OutputFormat) = match self {
@@ -242,10 +243,35 @@ impl Application {
             if !origin.is_current(self) {
                 return;
             }
-            if ((operation == Operation::Remux
-                && self.settle_source_remux_output(session_id, &outcome))
-                || self.settle_independent_output(operation, session_id, &outcome))
-                && let DialogOutcome::Selected(path) = outcome
+            if (if matches!(self.navigation(), NavigationState::SourceWorkspace { .. }) {
+                match operation {
+                    Operation::Remux => self.settle_source_remux_output(session_id, &outcome),
+                    Operation::AudioMix
+                        if self.audio_mix_context().map(|context| context.0)
+                            == Some(session_id) =>
+                    {
+                        match &outcome {
+                            DialogOutcome::Selected(path) => self
+                                .audio_mix_draft_mut(session_id)
+                                .is_some_and(|(_, draft)| {
+                                    draft.set_custom_output_path(path.clone());
+                                    true
+                                }),
+                            DialogOutcome::Failed(diagnostic) => {
+                                self.operation_action_error = Some((
+                                    operation,
+                                    MediaError::output_picker_unavailable(diagnostic.clone()),
+                                ));
+                                false
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                }
+            } else {
+                self.settle_independent_output(operation, session_id, &outcome)
+            }) && let DialogOutcome::Selected(path) = outcome
             {
                 self.settings.remember_output(&path);
             }
