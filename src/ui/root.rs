@@ -921,12 +921,10 @@ impl ApolloRoot {
             .w_full()
             .min_w_0()
             .child(header)
-            .child(components::separator(palette))
             .when(rows.is_empty(), |body| {
                 body.child(components::inline_message("No audio tracks.", palette))
             })
             .children(rows)
-            .child(components::separator(palette))
             .child(footer)
     }
 
@@ -978,30 +976,24 @@ impl ApolloRoot {
                 }
             })));
         }
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .gap(px(M.compact))
-            .w_full()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(M.compact))
-                    .child(components::heading("Loudness normalization"))
-                    .child(
-                        toggle
-                            .render(palette, window)
-                            .aria_label("Normalize output loudness")
-                            .aria_toggled(if on {
-                                gpui::Toggled::True
-                            } else {
-                                gpui::Toggled::False
-                            }),
-                    ),
-            )
-            .child(components::separator(palette));
+        let mut body = div().flex().flex_col().gap(px(M.compact)).w_full().child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(M.compact))
+                .child(components::heading("Loudness normalization"))
+                .child(
+                    toggle
+                        .render(palette, window)
+                        .aria_label("Normalize output loudness")
+                        .aria_toggled(if on {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        }),
+                ),
+        );
         let controls = self
             .mixer_controls
             .as_ref()
@@ -1039,14 +1031,12 @@ impl ApolloRoot {
             }
         }
         if on {
-            body = body
-                .child(
-                    TextRole::Secondary
-                        .apply(div())
-                        .text_color(rgba(palette.secondary()))
-                        .child("Adjust output loudness and limit peaks."),
-                )
-                .child(reset.render(palette, window));
+            body = body.child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .child(reset.render(palette, window)),
+            );
         }
         body
     }
@@ -1067,13 +1057,13 @@ impl ApolloRoot {
         };
         use crate::app::{dialogs::OutputDraft, queue::QueueSubmission};
         let editing = matches!(self.core.navigation(), NavigationState::QueueEdit { .. });
-        let mixer = if operation == Operation::AudioMix {
-            Some(self.mixer_tracks(palette, window, cx))
-        } else {
-            None
-        };
-        let normalization = if operation == Operation::AudioMix {
-            Some(self.mixer_normalization(palette, window, cx))
+        let mixer_sections = if operation == Operation::AudioMix {
+            Some([
+                self.mixer_tracks(palette, window, cx),
+                components::separator(palette),
+                self.mixer_normalization(palette, window, cx),
+                components::separator(palette),
+            ])
         } else {
             None
         };
@@ -1273,8 +1263,7 @@ impl ApolloRoot {
             .gap(px(M.related))
             .w_full()
             .min_w_0()
-            .children(mixer)
-            .children(normalization)
+            .children(mixer_sections.into_iter().flatten())
             .child(
                 output::OutputRow {
                     format: div().flex_shrink_0().child(format),

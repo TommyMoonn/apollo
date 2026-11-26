@@ -271,12 +271,7 @@ impl<'a> Button<'a> {
                     palette.foreground
                 }))
         };
-        let element = if icon.is_some() {
-            element.focus_visible(focus_style)
-        } else {
-            element.focus(focus_style)
-        };
-        element.on_click(click)
+        element.focus_visible(focus_style).on_click(click)
     }
 }
 
