@@ -55,14 +55,15 @@ pub fn summary(
                 .flex_1()
                 .min_w_0()
                 .gap(px(M.tight))
-                .child(
+                .child(super::components::with_tooltip(
                     TextRole::SectionHeading
                         .apply(div())
                         .id("source-name")
                         .truncate()
-                        .child(name.clone())
-                        .tooltip(super::components::tooltip(name, palette)),
-                )
+                        .child(name.clone()),
+                    name,
+                    palette,
+                ))
                 .children(presentation.metadata.map(|metadata| {
                     TextRole::Secondary
                         .apply(div())

@@ -888,8 +888,8 @@ impl ApolloRoot {
                                     .truncate()
                                     .child(metadata),
                             ),
-                    )
-                    .tooltip(components::tooltip(accessible, palette));
+                    );
+                let identity = components::with_tooltip(identity, accessible, palette);
                 let gain = div()
                     .flex()
                     .items_center()
@@ -949,23 +949,25 @@ impl ApolloRoot {
         let enabled = self.can_navigate() && !self.core.source.is_inspecting();
         let on = draft.normalization_enabled();
         let targets = draft.normalization_targets();
-        let mut toggle = Button::new(
+        let toggle = components::toggle_switch(
             "normalize-output",
-            if on { "On" } else { "Off" },
-            Tone::Standard,
+            "Loudness normalization",
+            on,
+            if enabled {
+                Some(Box::new(cx.listener(move |root, _, _, cx| {
+                    if root.can_navigate()
+                        && root
+                            .core
+                            .edit_audio_mix(session, MixerAction::Normalize(!on))
+                    {
+                        cx.notify();
+                    }
+                })))
+            } else {
+                None
+            },
+            palette,
         );
-        toggle.alternate_labels = &["On", "Off"];
-        if enabled {
-            toggle.state = ActionState::Enabled(Box::new(cx.listener(move |root, _, _, cx| {
-                if root.can_navigate()
-                    && root
-                        .core
-                        .edit_audio_mix(session, MixerAction::Normalize(!on))
-                {
-                    cx.notify();
-                }
-            })));
-        }
         let mut reset = Button::new("reset-normalization", "Reset targets", Tone::Quiet);
         if enabled && on {
             reset.state = ActionState::Enabled(Box::new(cx.listener(move |root, _, _, cx| {
@@ -983,16 +985,7 @@ impl ApolloRoot {
                 .justify_between()
                 .gap(px(M.compact))
                 .child(components::heading("Loudness normalization"))
-                .child(
-                    toggle
-                        .render(palette, window)
-                        .aria_label("Normalize output loudness")
-                        .aria_toggled(if on {
-                            gpui::Toggled::True
-                        } else {
-                            gpui::Toggled::False
-                        }),
-                ),
+                .child(toggle),
         );
         let controls = self
             .mixer_controls

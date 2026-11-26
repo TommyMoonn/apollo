@@ -858,15 +858,16 @@ mod view {
                     .gap(px(M.tight))
                     .when(widths.stacked, |identity| identity.w_full())
                     .when(!widths.stacked, |identity| identity.flex_1())
-                    .child(
+                    .child(components::with_tooltip(
                         TextRole::Body
                             .apply(div())
                             .id("source-name")
                             .truncate()
-                            .child(source_name.clone())
-                            .tooltip(components::tooltip(source_name, palette)),
-                    )
-                    .child(
+                            .child(source_name.clone()),
+                        source_name,
+                        palette,
+                    ))
+                    .child(components::with_tooltip(
                         TextRole::Secondary
                             .apply(div())
                             .id("destination")
@@ -874,9 +875,10 @@ mod view {
                             .text_ellipsis_middle()
                             .whitespace_nowrap()
                             .overflow_hidden()
-                            .child(destination_label)
-                            .tooltip(components::tooltip(output_path, palette)),
-                    ),
+                            .child(destination_label),
+                        output_path,
+                        palette,
+                    )),
             )
             .child(
                 div()

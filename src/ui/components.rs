@@ -1,10 +1,10 @@
 //! Shared stateless GPUI controls. Callbacks belong to the consuming view.
-use std::{borrow::Cow, time::Duration};
+use std::{borrow::Cow, cell::RefCell, rc::Rc, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt, App, AssetSource, ClickEvent, Div, ElementId, Pixels, Role,
-    SharedString, Stateful, TextRun, Transformation, Window, WindowTextSystem, div, percentage,
-    prelude::*, px, rgba, svg,
+    Anchor, Animation, AnimationExt, App, AssetSource, Bounds, ClickEvent, Div, ElementId, Pixels,
+    Role, SharedString, Stateful, TextRun, Toggled, Transformation, Window, WindowTextSystem,
+    anchored, canvas, div, percentage, point, prelude::*, px, rgba, svg,
 };
 
 use super::design::{DESTRUCTIVE_BORDER, METRICS as M, Palette, SPINNER_CYCLE_MS, TextRole};
@@ -112,8 +112,11 @@ impl<'a> Button<'a> {
     /// Icon-only actions retain the same semantics and focus treatment as text buttons.
     pub fn render_icon(self, icon: ActionIcon, palette: Palette, window: &Window) -> Stateful<Div> {
         let label = self.label.to_owned();
-        self.render_with_icon(palette, window, None, Some(icon))
-            .tooltip(tooltip(label, palette))
+        with_tooltip(
+            self.render_with_icon(palette, window, None, Some(icon)),
+            label,
+            palette,
+        )
     }
 
     fn render_with_icon(
@@ -586,33 +589,164 @@ pub fn action_bar(palette: Palette, actions: impl IntoIterator<Item = Stateful<D
         )
 }
 
-/// Shared GPUI tooltip builder for concise action labels and truncated content.
-pub(super) fn tooltip(
-    text: impl Into<String>,
+/// A compact binary control. The caller owns its value and activation permission.
+pub fn toggle_switch(
+    id: impl Into<ElementId>,
+    label: &str,
+    on: bool,
+    click: Option<Click>,
     palette: Palette,
-) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
-    let text = text.into();
-    move |_, cx| cx.new(|_| Tooltip(text.clone(), palette)).into()
+) -> Stateful<Div> {
+    let enabled = click.is_some();
+    let ink = if enabled {
+        palette.foreground
+    } else {
+        palette.disabled()
+    };
+    let off_ink = if enabled {
+        palette.secondary()
+    } else {
+        palette.disabled()
+    };
+    let track = div()
+        .w(px(40.))
+        .h(px(22.))
+        .flex_shrink_0()
+        .rounded_full()
+        .border_1()
+        .border_color(rgba(if on { ink } else { off_ink }))
+        .bg(rgba(if on { ink } else { palette.background }))
+        .flex()
+        .items_center()
+        .when(on, |track| track.justify_end())
+        .when(!on, |track| track.justify_start())
+        .px(px(3.))
+        .child(div().size(px(14.)).rounded_full().bg(rgba(if on {
+            palette.background
+        } else {
+            off_ink
+        })));
+    let mut control = div()
+        .id(id)
+        .role(Role::Switch)
+        .aria_label(label.to_owned())
+        .aria_toggled(if on { Toggled::True } else { Toggled::False })
+        .w(px(48.))
+        .h(px(M.compact_height))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(M.radius))
+        // Reserve focus geometry so neither the track nor the thumb moves on focus.
+        .border(px(M.focus_width))
+        .border_color(rgba(0))
+        .child(track);
+    if let Some(click) = click {
+        control = control
+            .tab_index(0)
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgba(palette.hover())))
+            .active(move |style| style.bg(rgba(palette.pressed())))
+            .focus_visible(move |style| style.border_color(rgba(palette.foreground)))
+            .on_click(click);
+    }
+    with_tooltip(
+        control,
+        format!("{}: {}", label, if on { "On" } else { "Off" }),
+        palette,
+    )
 }
 
-struct Tooltip(String, Palette);
+// Keep GPUI's native hover delay and dismissal. Its tooltip API places views at the
+// pointer, so the view itself uses a window-space anchor measured during prepaint.
+struct TooltipContent {
+    bounds: Option<Bounds<Pixels>>,
+    text: String,
+    palette: Palette,
+}
+
+type TooltipState = Rc<RefCell<TooltipContent>>;
+
+pub(super) fn with_tooltip(
+    trigger: Stateful<Div>,
+    text: impl Into<String>,
+    palette: Palette,
+) -> Stateful<Div> {
+    let text = text.into();
+    let current = Rc::new(RefCell::new(Rc::new(RefCell::new(TooltipContent {
+        bounds: None,
+        text: text.clone(),
+        palette,
+    }))));
+    trigger
+        .relative()
+        .child(
+            canvas(
+                {
+                    let current = Rc::clone(&current);
+                    move |bounds, window, _| {
+                        // The trigger's element state survives relayout and updates the
+                        // content of a tooltip that is already visible.
+                        let state = window.with_global_id("tooltip-anchor".into(), |id, window| {
+                            window.with_element_state(id, |state: Option<TooltipState>, _| {
+                                let content = TooltipContent {
+                                    bounds: Some(bounds),
+                                    text,
+                                    palette,
+                                };
+                                let state = if let Some(state) = state {
+                                    *state.borrow_mut() = content;
+                                    state
+                                } else {
+                                    Rc::new(RefCell::new(content))
+                                };
+                                (Rc::clone(&state), state)
+                            })
+                        });
+                        *current.borrow_mut() = state;
+                    }
+                },
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left_0()
+            .right_0(),
+        )
+        .tooltip(move |_, cx| cx.new(|_| Tooltip(Rc::clone(&current.borrow()))).into())
+}
+
+struct Tooltip(TooltipState);
 
 impl gpui::Render for Tooltip {
-    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        div()
-            .max_w(px(340.))
+    fn render(&mut self, window: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        let content = self.0.borrow();
+        let surface = div()
+            .max_w(px(340.).min(window.viewport_size().width))
             .p(px(M.compact))
             .rounded(px(M.radius))
-            .bg(rgba(self.1.background))
+            .bg(rgba(content.palette.background))
             .border(px(M.rule))
-            .border_color(rgba(self.1.border()))
+            .border_color(rgba(content.palette.border()))
             .child(
                 TextRole::Secondary
                     .apply(div())
-                    .text_color(rgba(self.1.foreground))
+                    .text_color(rgba(content.palette.foreground))
                     .whitespace_normal()
-                    .child(self.0.clone()),
-            )
+                    .child(content.text.clone()),
+            );
+        if let Some(bounds) = content.bounds {
+            anchored()
+                .anchor(Anchor::TopCenter)
+                .attach(bounds, Anchor::BottomCenter)
+                .offset(point(px(0.), px(M.tight)))
+                .child(surface)
+                .into_any_element()
+        } else {
+            surface.into_any_element()
+        }
     }
 }
 

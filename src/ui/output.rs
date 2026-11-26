@@ -24,10 +24,11 @@ impl OutputRow<'_> {
             self.directory
         };
         let destination = format!("Destination: {}", directory.to_string_lossy());
-        let browse = self
-            .browse
-            .aria_description(destination.clone())
-            .tooltip(components::tooltip(destination, palette));
+        let browse = components::with_tooltip(
+            self.browse.aria_description(destination.clone()),
+            destination,
+            palette,
+        );
         let extension_width = self
             .extensions
             .iter()
